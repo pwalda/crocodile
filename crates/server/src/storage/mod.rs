@@ -9,6 +9,8 @@
 
 pub mod accounts;
 pub mod devices;
+pub mod history_heads;
+pub mod rooms;
 pub mod sessions;
 
 use sqlx::PgPool;

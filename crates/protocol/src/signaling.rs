@@ -20,8 +20,9 @@
 use serde::{Deserialize, Serialize};
 
 use crate::history::HistoryHead;
-use crate::ids::{DeviceId, RoomId, UserId};
+use crate::ids::{DeviceId, RoomId, ServerId, UserId};
 use crate::keys::{DevicePublicKey, IdentityPublicKey, Signature};
+use crate::time::UnixSeconds;
 
 /// Client → server requests.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -180,6 +181,62 @@ pub struct SocketAddrBytes {
     pub addr: Vec<u8>,
     /// UDP port.
     pub port: u16,
+}
+
+/// Frames a client sends over the signaling WebSocket. Postcard-encoded
+/// as binary WS frames.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub enum SignalingClientFrame {
+    /// First frame after connect: claim which of the caller's devices
+    /// this connection represents. Subsequent relays use this device
+    /// as the `from` field.
+    Identify {
+        /// The device this connection represents.
+        device_id: DeviceId,
+    },
+    /// Relay an opaque payload to another device. The server forwards
+    /// the bytes unchanged.
+    Relay {
+        /// Recipient device.
+        to: DeviceId,
+        /// Opaque payload.
+        payload: Vec<u8>,
+    },
+}
+
+/// Frames the signaling server sends back. Postcard-encoded.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub enum SignalingServerFrame {
+    /// First frame the server sends after accepting an Identify. The
+    /// `server_id` lets the client cross-check that the WS endpoint
+    /// belongs to the expected coordination server (TOFU on first
+    /// contact).
+    Welcome {
+        /// Identity of the coordination server.
+        server_id: ServerId,
+        /// Wall-clock when the welcome was issued. Clients use this to
+        /// detect grossly skewed servers.
+        server_time: UnixSeconds,
+    },
+    /// A relayed payload from another device.
+    Delivered {
+        /// Sending device.
+        from: DeviceId,
+        /// Opaque payload.
+        payload: Vec<u8>,
+    },
+    /// Recipient was not reachable; the relay was dropped.
+    UnreachableRecipient {
+        /// Device that could not be reached.
+        target: DeviceId,
+    },
+    /// Server-side error scoped to this connection.
+    Error {
+        /// Diagnostic message; not for programmatic decisions.
+        message: String,
+    },
 }
 
 #[cfg(test)]

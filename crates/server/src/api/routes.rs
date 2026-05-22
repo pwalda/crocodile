@@ -10,11 +10,32 @@ use crate::AppState;
 pub fn router(_state: AppState) -> Router<AppState> {
     Router::new()
         .route("/health", get(health))
+        // Discovery
+        .route("/v1/server/info", get(super::server_info::server_info))
+        // Accounts / sessions
         .route("/v1/accounts", post(super::accounts::create_account))
         .route("/v1/sessions", post(super::sessions::login))
         .route("/v1/sessions/current", delete(super::sessions::logout))
+        // Keystore
         .route("/v1/devices", post(super::keys::publish_device_key))
         .route("/v1/users/{user_id}/keys", get(super::keys::get_user_keys))
+        // Rooms
+        .route("/v1/rooms", post(super::rooms::create_room))
+        .route("/v1/rooms/{room_id}", get(super::rooms::get_room_state))
+        .route(
+            "/v1/rooms/{room_id}/members",
+            post(super::rooms::add_member),
+        )
+        .route(
+            "/v1/rooms/{room_id}/members/{user_id}",
+            delete(super::rooms::remove_member),
+        )
+        .route(
+            "/v1/rooms/{room_id}/history-head",
+            post(super::rooms::post_history_head),
+        )
+        // Signaling (WebSocket)
+        .route("/v1/signaling", get(super::signaling_ws::signaling))
 }
 
 async fn health() -> &'static str {

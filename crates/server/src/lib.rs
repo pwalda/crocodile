@@ -16,6 +16,7 @@ pub mod config;
 pub mod domain;
 pub mod error;
 pub mod server_identity;
+pub mod signaling;
 pub mod storage;
 
 use std::sync::Arc;
@@ -25,6 +26,7 @@ use sqlx::PgPool;
 
 use crate::config::Config;
 use crate::server_identity::ServerIdentity;
+use crate::signaling::SignalingHub;
 use crate::storage::Storage;
 
 /// Shared application state passed to all handlers.
@@ -36,6 +38,9 @@ pub struct AppState {
     pub identity: Arc<ServerIdentity>,
     /// Loaded config (mostly immutable).
     pub config: Arc<Config>,
+    /// In-process signaling hub. Process-local for v1; horizontal
+    /// scaling will replace this with a Redis-backed implementation.
+    pub signaling: Arc<SignalingHub>,
 }
 
 impl std::fmt::Debug for AppState {
@@ -67,5 +72,6 @@ pub async fn build_state(config: Config, pool: PgPool) -> anyhow::Result<AppStat
         storage: Arc::new(storage),
         identity: Arc::new(identity),
         config: Arc::new(config),
+        signaling: Arc::new(SignalingHub::new()),
     })
 }
