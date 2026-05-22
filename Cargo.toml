@@ -1,0 +1,23 @@
+[workspace]
+resolver = "2"
+members = ["crates/protocol"]
+
+[workspace.package]
+edition = "2021"
+rust-version = "1.95"
+license = "Apache-2.0 OR MIT"
+publish = false
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+postcard = { version = "1", features = ["use-std"] }
+ed25519-dalek = { version = "2", features = ["rand_core", "serde"] }
+blake3 = { version = "1", features = ["serde"] }
+thiserror = "2"
+hex = "0.4"
+rand_core = "0.6"
+rand = "0.8"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
