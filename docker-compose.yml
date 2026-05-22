@@ -1,0 +1,21 @@
+services:
+  postgres:
+    image: postgres:17-alpine
+    container_name: crocodile-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: crocodile
+      POSTGRES_PASSWORD: crocodile_dev
+      POSTGRES_DB: crocodile
+    ports:
+      - "5432:5432"
+    volumes:
+      - crocodile_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U crocodile -d crocodile"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  crocodile_pgdata:

@@ -16,7 +16,7 @@ use rand_core::{CryptoRng, RngCore};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::error::{Error, Result};
-use crate::ids::{DeviceId, UserId};
+use crate::ids::{DeviceId, ServerId, UserId};
 
 /// Public half of an identity key.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -76,6 +76,14 @@ pub fn user_id_from_public_key(pk: &IdentityPublicKey) -> UserId {
 pub fn device_id_from_public_key(pk: &DevicePublicKey) -> DeviceId {
     let hash = blake3::hash(&pk.0);
     DeviceId::from_bytes(*hash.as_bytes())
+}
+
+/// Convenience: derives a [`ServerId`] from a server's [`IdentityPublicKey`].
+/// `ServerId = BLAKE3(identity_public_key_bytes)` — same derivation as
+/// [`UserId`], differing only in the wrapper newtype.
+pub fn server_id_from_public_key(pk: &IdentityPublicKey) -> ServerId {
+    let hash = blake3::hash(&pk.0);
+    ServerId::from_bytes(*hash.as_bytes())
 }
 
 /// A keypair used as an identity key. Wraps an ed25519 signing key.

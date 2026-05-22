@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/protocol"]
+members = ["crates/protocol", "crates/server"]
 
 [workspace.package]
 edition = "2021"
@@ -10,13 +10,29 @@ publish = false
 
 [workspace.dependencies]
 serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 postcard = { version = "1", features = ["use-std"] }
 ed25519-dalek = { version = "2", features = ["rand_core", "serde"] }
 blake3 = { version = "1", features = ["serde"] }
 thiserror = "2"
+anyhow = "1"
 hex = "0.4"
 rand_core = "0.6"
 rand = "0.8"
+tokio = { version = "1", features = ["full"] }
+axum = { version = "0.8", features = ["ws", "macros"] }
+tower = "0.5"
+tower-http = { version = "0.6", features = ["trace", "cors"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio-rustls", "postgres", "uuid", "time", "macros", "migrate"] }
+argon2 = "0.5"
+uuid = { version = "1", features = ["v4", "serde"] }
+base64 = "0.22"
+time = { version = "0.3", features = ["serde"] }
+sha2 = "0.10"
+
+crocodile-protocol = { path = "crates/protocol" }
 
 [profile.release]
 lto = "thin"
