@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/protocol", "crates/server", "crates/client"]
+members = ["crates/protocol", "crates/server", "crates/client", "crates/mls"]
 
 [workspace.package]
 edition = "2021"
@@ -32,6 +32,11 @@ quinn = { version = "0.11", default-features = false, features = ["runtime-tokio
 rustls = { version = "0.23", default-features = false, features = ["std", "ring"] }
 rcgen = { version = "0.13", default-features = false, features = ["pem", "ring"] }
 futures-util = "0.3"
+openmls = "0.6"
+openmls_rust_crypto = "0.3"
+openmls_basic_credential = "0.3"
+openmls_traits = "0.3"
+tls_codec = "0.4"
 argon2 = "0.5"
 uuid = { version = "1", features = ["v4", "serde"] }
 base64 = "0.22"

@@ -1,0 +1,20 @@
+[package]
+name = "crocodile-mls"
+version = "0.1.0"
+description = "Crocodile MLS integration: thin wrapper over openmls for group create/join + encrypt/decrypt."
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+crocodile-protocol.workspace = true
+openmls.workspace = true
+openmls_rust_crypto.workspace = true
+openmls_basic_credential.workspace = true
+openmls_traits.workspace = true
+tls_codec.workspace = true
+thiserror.workspace = true
+rand.workspace = true
+rand_core.workspace = true
+tracing.workspace = true
