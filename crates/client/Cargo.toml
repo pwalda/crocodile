@@ -1,0 +1,38 @@
+[package]
+name = "crocodile-client"
+version = "0.1.0"
+description = "Crocodile client networking foundation: signed-cache, HTTP/WS to the coordination server, QUIC peer transport."
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+crocodile-protocol.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+postcard.workspace = true
+thiserror.workspace = true
+anyhow.workspace = true
+hex.workspace = true
+rand.workspace = true
+rand_core.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+sqlx = { workspace = true }
+reqwest.workspace = true
+tokio-tungstenite.workspace = true
+quinn.workspace = true
+rustls.workspace = true
+rcgen.workspace = true
+futures-util.workspace = true
+ed25519-dalek.workspace = true
+time.workspace = true
+
+[dev-dependencies]
+tempfile = "3"
+tracing-subscriber.workspace = true
+# Used by the integration test to spin up a real server in-process.
+crocodile-server = { path = "../server" }
+axum.workspace = true
+sqlx.workspace = true
