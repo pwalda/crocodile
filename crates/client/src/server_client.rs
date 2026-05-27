@@ -47,6 +47,16 @@ impl CoordinationClient {
         }
     }
 
+    /// Returns the coordination server's base URL.
+    pub fn base_url(&self) -> &str {
+        &self.base_url
+    }
+
+    /// Returns the server's pinned identity public key.
+    pub fn pinned_pubkey(&self) -> &IdentityPublicKey {
+        &self.server_pubkey
+    }
+
     /// Fetch `/v1/server/info`. Not cached (it's metadata about caching).
     pub async fn server_info(base_url: &str) -> Result<ServerInfo> {
         let resp = reqwest::Client::new()

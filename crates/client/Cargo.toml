@@ -28,6 +28,9 @@ rcgen.workspace = true
 futures-util.workspace = true
 ed25519-dalek.workspace = true
 time.workspace = true
+cpal.workspace = true
+opus.workspace = true
+crocodile-mls = { path = "../mls" }
 
 [dev-dependencies]
 tempfile = "3"
@@ -36,3 +39,9 @@ tracing-subscriber.workspace = true
 crocodile-server = { path = "../server" }
 axum.workspace = true
 sqlx.workspace = true
+# Examples need the openmls provider directly to construct Identity / Group.
+openmls_rust_crypto.workspace = true
+
+[[example]]
+name = "two_peer_call"
+path = "examples/two_peer_call.rs"

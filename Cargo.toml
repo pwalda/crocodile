@@ -37,6 +37,8 @@ openmls_rust_crypto = "0.3"
 openmls_basic_credential = "0.3"
 openmls_traits = "0.3"
 tls_codec = "0.4"
+cpal = "0.15"
+opus = "0.3"
 argon2 = "0.5"
 uuid = { version = "1", features = ["v4", "serde"] }
 base64 = "0.22"

@@ -1,0 +1,9 @@
+# Workspace-wide cargo config.
+
+[env]
+# audiopus_sys (transitive dep of `opus`) bundles an old libopus whose
+# CMakeLists.txt uses cmake_minimum_required < 3.5, which modern CMake
+# refuses. This env var tells CMake to apply the 3.5 policy and let
+# the build proceed. Can be removed once audiopus_sys ships with a
+# refreshed bundled libopus.
+CMAKE_POLICY_VERSION_MINIMUM = "3.5"
