@@ -11,10 +11,12 @@
 pub mod election;
 pub mod failover;
 pub mod quality;
+pub mod runtime;
 
 pub use election::{ChangeReason, ElectionEvent, ElectionState};
 pub use failover::{ComplaintTracker, FailoverDetector, FailoverTrigger};
 pub use quality::{QualityBuilder, QualityConfig};
+pub use runtime::{CallRuntime, RuntimeAction, RuntimeConfig};
 
 #[cfg(test)]
 mod integration_tests {

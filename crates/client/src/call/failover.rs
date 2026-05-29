@@ -156,6 +156,12 @@ impl FailoverDetector {
         &self.complaints
     }
 
+    /// Returns the current host's logical clock as tracked here.
+    /// Module-internal helper for the runtime layer.
+    pub(crate) fn clock_snapshot(&self) -> Option<u64> {
+        self.current_host_clock
+    }
+
     /// Update the currently-tracked host (called when the runtime
     /// applies an election event).
     pub fn host_changed(&mut self, new_host: DeviceId, new_clock: u64, now: UnixSeconds) {
