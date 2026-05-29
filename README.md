@@ -9,8 +9,9 @@ This README covers how to actually run the **two-peer voice call demo** — the 
 ## What works today
 
 - One coordination server hosting accounts, room metadata, signed keystore responses (48 h TTL), and a WebSocket signaling relay.
-- Two desktop clients can sign up / log in, exchange MLS key packages over the signaling relay, establish a direct QUIC connection (pubkey-pinned TLS, no web PKI), and exchange MLS-encrypted Opus voice frames.
+- Two desktop clients can sign up / log in, exchange MLS key packages over the signaling relay, establish a direct QUIC connection (pubkey-pinned TLS, no web PKI), and exchange both MLS-encrypted Opus voice frames *and* MLS-encrypted text messages.
 - Audio: 48 kHz mono, Opus at 32 kbps, 20 ms frames, 100 ms jitter buffer.
+- Text: bidirectional QUIC stream, length-prefixed postcard-encoded MLS-encrypted frames, persisted locally to a SQLite history per peer.
 
 ## What does not work yet
 
@@ -73,10 +74,26 @@ Each peer runs `cargo run --release --example two_peer_call` with their own stat
 
 You'll exchange two short hex strings with your friend (paste over chat, email, whatever):
 
-1. Each of you starts the binary once in **either** mode to learn your `user_id`. The binary prints it before doing any real work. Hit Ctrl-C after copying.
+1. Both run `print-id` to learn their `user_id`. This subcommand needs only `--state-dir` — no server, username, or password. (It generates and persists the identity keypair on first run.)
 2. The **host** peer (whoever creates the room) needs the **joiner's `user_id`**.
 3. The **host** runs in `host` mode, which creates the room and adds the joiner. It prints the `ROOM_ID`.
 4. The **joiner** uses that `ROOM_ID` and runs in `join` mode.
+
+### Learning your user_id
+
+```bash
+cargo run --release --example two_peer_call -- \
+    --state-dir ./state-alice print-id
+```
+
+Output:
+
+```
+My user_id:   aa5132cb670d…
+My device_id: 56beb7180a7f…
+```
+
+Send the `user_id` to your peer however you usually share short text (chat, email, etc.).
 
 ### Host side
 
@@ -114,9 +131,9 @@ cargo run --release --example two_peer_call -- \
     join --room-id <room-id-hex-from-alice>
 ```
 
-Within a second or two both binaries should print `QUIC connected. Voice flowing. Press Ctrl-C to hang up.` and you'll hear each other.
+Within a second or two both binaries should print `QUIC connected. Voice flowing. Press Ctrl-C to hang up.` and `Type messages and press Enter.` You'll hear each other, and lines you type get sent as text. Received text shows up as `[<short-device-id>]: message`.
 
-Ctrl-C on either side ends the call. Either peer can restart and re-do the dance.
+Ctrl-C on either side ends the call. Either peer can restart and re-do the dance — the text history persists across restarts under `--state-dir/history.sqlite`.
 
 ---
 

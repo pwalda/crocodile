@@ -55,6 +55,7 @@ use crocodile_client::audio::opus::{f32_to_i16, i16_to_f32, OpusDecoder, OpusEnc
 use crocodile_client::audio::playback::{self, PlaybackQueue};
 use crocodile_client::audio::{capture, jitter::JitterBuffer, SAMPLES_PER_FRAME};
 use crocodile_client::cache::Cache;
+use crocodile_client::history::{TextHistory, TextReceiver, TextSender};
 use crocodile_client::server_client::{CoordinationClient, ServerInfo};
 use crocodile_client::signaling_client::SignalingChannel;
 use crocodile_client::transport::quic::PeerEndpoint;
@@ -99,8 +100,13 @@ struct Args {
 
 #[derive(Debug)]
 enum Mode {
+    /// Create a room, add the invitee, wait for them.
     Host { invite_user_id: UserId },
+    /// Join an existing room you've already been added to.
     Join { room_id: RoomId },
+    /// Just print our user_id / device_id and exit. Useful for the
+    /// out-of-band exchange before the host adds you to a room.
+    PrintId,
 }
 
 fn parse_args() -> Result<Args> {
@@ -171,7 +177,7 @@ fn parse_args() -> Result<Args> {
                 room_id = Some(RoomId::from_bytes(bytes));
                 i += 2;
             }
-            "host" | "join" => {
+            "host" | "join" | "print-id" => {
                 subcommand = Some(arg.clone());
                 i += 1;
             }
@@ -191,13 +197,30 @@ fn parse_args() -> Result<Args> {
         Some("join") => Mode::Join {
             room_id: room_id.context("join mode requires --room-id")?,
         },
-        _ => bail!("must specify a subcommand: host or join"),
+        Some("print-id") => Mode::PrintId,
+        _ => bail!("must specify a subcommand: host, join, or print-id"),
+    };
+
+    // print-id is the only subcommand that does not need server /
+    // username / password — the identity comes purely from
+    // --state-dir. Defaulting them keeps the constructor honest.
+    let server = match &mode {
+        Mode::PrintId => server.unwrap_or_default(),
+        _ => server.context("--server required")?,
+    };
+    let username = match &mode {
+        Mode::PrintId => username.unwrap_or_default(),
+        _ => username.context("--username required")?,
+    };
+    let password = match &mode {
+        Mode::PrintId => password.unwrap_or_default(),
+        _ => password.context("--password required")?,
     };
 
     Ok(Args {
-        server: server.context("--server required")?,
-        username: username.context("--username required")?,
-        password: password.context("--password required")?,
+        server,
+        username,
+        password,
         state_dir: state_dir.context("--state-dir required")?,
         bind_addr,
         advertise_addr,
@@ -206,7 +229,10 @@ fn parse_args() -> Result<Args> {
 }
 
 fn print_help() {
-    eprintln!("usage: two_peer_call --server URL --username U --password P --state-dir D [--bind-addr ADDR] [--advertise-addr ADDR] {{host --invite-user-id HEX | join --room-id HEX}}");
+    eprintln!("usage:");
+    eprintln!("  two_peer_call --state-dir D print-id");
+    eprintln!("  two_peer_call --server URL --username U --password P --state-dir D [--bind-addr ADDR] [--advertise-addr ADDR] host --invite-user-id HEX");
+    eprintln!("  two_peer_call --server URL --username U --password P --state-dir D [--bind-addr ADDR] [--advertise-addr ADDR] join --room-id HEX");
 }
 
 // ---------- Persisted state ----------
@@ -366,11 +392,20 @@ async fn peer_user_devices(
 
 // ---------- Voice loop ----------
 
-async fn run_voice_loop(
+// The demo passes plenty of state; clippy's complaint is fair in the
+// general case but we'd rather keep this binary readable as a single
+// straight-line function than introduce a packed struct just for the
+// signature.
+#[allow(clippy::too_many_arguments)]
+async fn run_call(
     conn: quinn::Connection,
     group: Group,
     provider: std::sync::Arc<OpenMlsRustCrypto>,
     mls_identity: std::sync::Arc<Identity>,
+    role: Role,
+    room_id: crocodile_protocol::ids::RoomId,
+    my_device_id: DeviceId,
+    history: TextHistory,
 ) -> Result<()> {
     let (capture_tx, mut capture_rx) = mpsc::unbounded_channel::<Vec<f32>>();
     let (encoded_tx, mut encoded_rx) = mpsc::unbounded_channel::<(u32, Vec<u8>)>();
@@ -517,6 +552,168 @@ async fn run_voice_loop(
         }
     });
 
+    // ---- Text channel ----
+    //
+    // Reliable bi-directional QUIC stream. Joiner opens; host accepts.
+    let (mut text_send, mut text_recv) = match role {
+        Role::Joiner => conn
+            .open_bi()
+            .await
+            .map_err(|e| anyhow!("open_bi: {e}"))?,
+        Role::Host => conn
+            .accept_bi()
+            .await
+            .map_err(|e| anyhow!("accept_bi: {e}"))?,
+    };
+    tracing::info!("text stream established");
+
+    // The first thing we send on the stream is a 1-byte sentinel so
+    // accept_bi returns on the host. Without an initial write, quinn
+    // won't surface the stream to accept_bi.
+    text_send
+        .write_all(&[0u8])
+        .await
+        .map_err(|e| anyhow!("text send init: {e}"))?;
+    // Drain the matching sentinel from the peer.
+    {
+        let mut hello = [0u8; 1];
+        text_recv
+            .read_exact(&mut hello)
+            .await
+            .map_err(|e| anyhow!("text recv init: {e}"))?;
+    }
+
+    // Start sender state from the latest stored head for this room.
+    let local_head = history
+        .most_recent(room_id)
+        .await
+        .ok()
+        .flatten()
+        .map(|m| m.own_hash);
+    let mut text_sender = TextSender::new(room_id, my_device_id, local_head);
+    let text_receiver = TextReceiver::new(room_id);
+
+    let group_for_text_send = group_handle.clone();
+    let provider_for_text_send = provider.clone();
+    let identity_for_text_send = mls_identity.clone();
+    let history_for_send = history.clone();
+    let text_send_handle = tokio::spawn(async move {
+        use tokio::io::{AsyncBufReadExt, BufReader};
+        let stdin = tokio::io::stdin();
+        let mut reader = BufReader::new(stdin).lines();
+        println!("Type messages and press Enter. Ctrl-C to hang up.");
+        while let Ok(Some(line)) = reader.next_line().await {
+            if line.is_empty() {
+                continue;
+            }
+            let now = UnixSeconds::now();
+            let payload_bytes = match text_sender.encode_payload(&line, now, None) {
+                Ok(b) => b,
+                Err(e) => {
+                    tracing::warn!(error = %e, "encode text failed");
+                    continue;
+                }
+            };
+            let (wire, stored) = {
+                let mut g = group_for_text_send.lock().await;
+                let epoch = g.epoch();
+                let ct = match g.encrypt(&provider_for_text_send, &identity_for_text_send, &payload_bytes) {
+                    Ok(c) => c,
+                    Err(e) => {
+                        tracing::warn!(error = %e, "MLS encrypt text failed");
+                        continue;
+                    }
+                };
+                text_sender.finalize(epoch, ct, now, None, line.clone())
+            };
+            let bytes = match postcard::to_stdvec(&wire) {
+                Ok(b) => b,
+                Err(e) => {
+                    tracing::warn!(error = %e, "postcard text encode failed");
+                    continue;
+                }
+            };
+            // Length-prefix framing: 4-byte big-endian length, then payload.
+            let len = bytes.len() as u32;
+            if text_send.write_all(&len.to_be_bytes()).await.is_err() {
+                break;
+            }
+            if text_send.write_all(&bytes).await.is_err() {
+                break;
+            }
+            // Local echo via history; no stdout echo to avoid double-display.
+            if let Err(e) = history_for_send.store(&stored).await {
+                tracing::warn!(error = %e, "store sent text failed");
+            }
+        }
+    });
+
+    let group_for_text_recv = group_handle.clone();
+    let provider_for_text_recv = provider.clone();
+    let history_for_recv = history.clone();
+    let recv_room = room_id;
+    let text_recv_handle = tokio::spawn(async move {
+        loop {
+            let mut len_buf = [0u8; 4];
+            if text_recv.read_exact(&mut len_buf).await.is_err() {
+                break;
+            }
+            let len = u32::from_be_bytes(len_buf) as usize;
+            if len > 1024 * 1024 {
+                tracing::warn!(len, "text frame too large; closing");
+                break;
+            }
+            let mut payload = vec![0u8; len];
+            if text_recv.read_exact(&mut payload).await.is_err() {
+                break;
+            }
+            let wire: crocodile_protocol::text::TextMessage =
+                match postcard::from_bytes(&payload) {
+                    Ok(w) => w,
+                    Err(e) => {
+                        tracing::warn!(error = %e, "text wire decode failed");
+                        continue;
+                    }
+                };
+            let plaintext = {
+                let mut g = group_for_text_recv.lock().await;
+                match g.decrypt(&provider_for_text_recv, &wire.ciphertext) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        tracing::warn!(error = %e, "MLS decrypt text failed");
+                        continue;
+                    }
+                }
+            };
+            // Receiver-side sequence: count what we have from this
+            // sender already and use that as the seq. Not ideal long-term
+            // (race on concurrent receives) but fine for two-peer demo.
+            // Receiver-side sequence is just "total messages stored in
+            // this room so far" — fine for the 2-peer demo since
+            // there's only one remote sender; M9 will replace this
+            // with proper per-sender counters tracked locally.
+            let sender_seq = history_for_recv
+                .count_for_room(recv_room)
+                .await
+                .unwrap_or(0);
+            let stored = match text_receiver.decode(&wire, &plaintext, sender_seq, UnixSeconds::now()) {
+                Ok(s) => s,
+                Err(e) => {
+                    tracing::warn!(error = %e, "text decode failed");
+                    continue;
+                }
+            };
+            println!(
+                "[{}]: {}",
+                hex::encode(&stored.sender_device.as_bytes()[..4]),
+                stored.body
+            );
+            if let Err(e) = history_for_recv.store(&stored).await {
+                tracing::warn!(error = %e, "store recv text failed");
+            }
+        }
+    });
+
     // Wait for any task to exit (e.g. on Ctrl-C the QUIC connection is
     // dropped and the receiver task ends, which cascades).
     tokio::select! {
@@ -527,6 +724,8 @@ async fn run_voice_loop(
         _ = send_handle => {}
         _ = recv_handle => {}
         _ = decode_handle => {}
+        _ = text_send_handle => {}
+        _ = text_recv_handle => {}
     }
 
     conn.close(0u32.into(), b"hangup");
@@ -548,6 +747,12 @@ async fn main() -> Result<()> {
     let my_device_id = device_id_from_public_key(&device_pk);
     println!("My user_id:   {}", hex::encode(my_user_id.as_bytes()));
     println!("My device_id: {}", hex::encode(my_device_id.as_bytes()));
+
+    if matches!(args.mode, Mode::PrintId) {
+        // Identity bytes were the only thing the caller wanted; we are
+        // done.
+        return Ok(());
+    }
 
     // Server pubkey via /v1/server/info (TOFU).
     let info: ServerInfo = CoordinationClient::server_info(&args.server).await?;
@@ -617,6 +822,9 @@ async fn main() -> Result<()> {
             };
             (*room_id, peer, Role::Joiner)
         }
+        // PrintId is handled earlier with an early return; the
+        // compiler can't see that, hence this unreachable arm.
+        Mode::PrintId => unreachable!("print-id exits before this point"),
     };
 
     println!("Waiting for peer to come online...");
@@ -690,7 +898,20 @@ async fn main() -> Result<()> {
     };
     println!("QUIC connected. Voice flowing. Press Ctrl-C to hang up.");
 
-    run_voice_loop(conn, group, provider, mls_identity).await?;
+    // Open local text history (SQLite-backed) under the state dir.
+    let history = TextHistory::open(&args.state_dir.join("history.sqlite")).await?;
+
+    run_call(
+        conn,
+        group,
+        provider,
+        mls_identity,
+        role,
+        room_id,
+        my_device_id,
+        history,
+    )
+    .await?;
 
     Ok(())
 }
