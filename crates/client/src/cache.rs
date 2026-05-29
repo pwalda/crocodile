@@ -1,5 +1,7 @@
 //! Persistent, TTL-enforced cache for `SignedServerStatement<T>` values.
 //!
+//! The in-memory peer-hints registry lives at [`peer_hints`].
+//!
 //! Stores the postcard-encoded bytes of each statement so the
 //! verification path is identical between cache hits and live server
 //! responses: decode, then `verify` against the pinned server pubkey
@@ -14,6 +16,8 @@
 //!    [`Cache::sweep_expired`] to physically delete rows.
 //!
 //! This split avoids surprising read latency from cleanup work.
+
+pub mod peer_hints;
 
 use std::path::Path;
 use std::str::FromStr;

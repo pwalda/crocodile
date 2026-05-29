@@ -171,6 +171,39 @@ pub struct PeerHint {
     pub last_seen: crate::time::UnixSeconds,
 }
 
+/// Peer-to-peer signed hint. Lets devices gossip "I am reachable at
+/// X" claims to other members of a room without trusting an
+/// intermediary. The signature is over `signing_input()` and made by
+/// the device key listed in `hint.device`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SignedPeerHint {
+    /// Room this hint is scoped to. Hints are room-scoped so peers
+    /// don't leak their endpoints to rooms they aren't members of.
+    pub room: RoomId,
+    /// The hint payload.
+    pub hint: PeerHint,
+    /// Device-key signature over `signing_input()`.
+    pub signature: crate::keys::Signature,
+}
+
+impl SignedPeerHint {
+    /// Canonical signing input (postcard-encoded `(room, hint)`).
+    pub fn signing_input(&self) -> Result<Vec<u8>, postcard::Error> {
+        postcard::to_stdvec(&(&self.room, &self.hint))
+    }
+
+    /// Verify the signature against the device's public key.
+    pub fn verify(
+        &self,
+        device_pk: &crate::keys::DevicePublicKey,
+    ) -> crate::error::Result<()> {
+        let input = self
+            .signing_input()
+            .map_err(crate::error::Error::from)?;
+        crate::keys::verify_device_signature(device_pk, &input, &self.signature)
+    }
+}
+
 /// A socket address on the wire: `(is_v6, bytes, port)`.
 /// `bytes` is 4 or 16 bytes.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
