@@ -22,6 +22,7 @@
 
 pub mod audio;
 pub mod cache;
+pub mod call;
 pub mod error;
 pub mod server_client;
 pub mod signaling_client;

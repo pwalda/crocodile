@@ -5,3 +5,17 @@ Cargo.lock.bak
 .DS_Store
 .idea/
 .vscode/
+
+# Server identity key — long-lived ed25519 secret. Must never be committed.
+.server_identity.key
+*.identity.key
+
+# Client per-account state directories created by the two_peer_call demo.
+/.crocodile-state-*/
+/state-*/
+
+# SQLite cache files used by the client cache module.
+*.sqlite
+*.sqlite-journal
+*.sqlite-wal
+*.sqlite-shm
