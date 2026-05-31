@@ -40,7 +40,7 @@
 //! ```
 
 use std::collections::HashMap;
-use std::net::SocketAddr;
+use std::net::{SocketAddr, ToSocketAddrs};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -369,8 +369,15 @@ async fn main() -> Result<()> {
     // Bind QUIC endpoint and figure out our advertised address.
     let endpoint = PeerEndpoint::bind(args.bind_addr, &device_pk)?;
     let local_addr = endpoint.local_addr();
-    let advertise = args.advertise_addr.unwrap_or(local_addr);
+    let advertise = args
+        .advertise_addr
+        .unwrap_or_else(|| best_advertise_addr(&args.server, local_addr));
     println!("QUIC bound on {local_addr}; advertising {advertise}");
+    if args.advertise_addr.is_none() && local_addr.ip().is_unspecified() {
+        println!(
+            "  (auto-detected; pass --advertise-addr ADDR if this isn't reachable from your peer)"
+        );
+    }
 
     let history = TextHistory::open(&args.state_dir.join("history.sqlite")).await?;
 
@@ -1297,6 +1304,50 @@ async fn add_member_api(
         .await?
         .error_for_status()?;
     Ok(())
+}
+
+/// Best-effort guess at a locally-reachable address to advertise to
+/// peers when the user didn't pass --advertise-addr.
+///
+/// Strategy:
+/// 1. If `local_addr` is already a concrete IP, use it.
+/// 2. Otherwise (bound to 0.0.0.0 or [::]), open an unconnected UDP
+///    socket and "connect" it to the server URL's host. The OS
+///    populates the local address based on the route it would use —
+///    that's almost always the LAN / Tailscale IP we want.
+/// 3. If all that fails, fall back to the unspecified local address;
+///    the user will need to pass --advertise-addr.
+fn best_advertise_addr(server_url: &str, local_addr: SocketAddr) -> SocketAddr {
+    if !local_addr.ip().is_unspecified() {
+        return local_addr;
+    }
+    // Strip scheme and path from server URL to get a host:port to
+    // probe. We tolerate failures here because this is best-effort.
+    let host_port = server_url
+        .trim_start_matches("https://")
+        .trim_start_matches("http://")
+        .split('/')
+        .next()
+        .unwrap_or("8.8.8.8:80");
+    let server_target: Option<SocketAddr> = host_port
+        .to_socket_addrs()
+        .ok()
+        .and_then(|mut a| a.next());
+    let Some(target) = server_target else {
+        return local_addr;
+    };
+
+    let bind = if target.is_ipv6() { "[::]:0" } else { "0.0.0.0:0" };
+    let Ok(probe) = std::net::UdpSocket::bind(bind) else {
+        return local_addr;
+    };
+    if probe.connect(target).is_err() {
+        return local_addr;
+    }
+    match probe.local_addr() {
+        Ok(picked) => SocketAddr::new(picked.ip(), local_addr.port()),
+        Err(_) => local_addr,
+    }
 }
 
 fn init_tracing() {

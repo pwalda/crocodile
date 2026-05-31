@@ -26,7 +26,7 @@
 //! The two binaries each print their user id on startup so the other
 //! side can paste it. After the call connects, Ctrl-C to hang up.
 
-use std::net::SocketAddr;
+use std::net::{SocketAddr, ToSocketAddrs};
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -873,8 +873,15 @@ async fn main() -> Result<()> {
     // Bind the QUIC endpoint and figure out our advertised address.
     let endpoint = PeerEndpoint::bind(args.bind_addr, &device_pk)?;
     let local_addr = endpoint.local_addr();
-    let advertise = args.advertise_addr.unwrap_or(local_addr);
+    let advertise = args
+        .advertise_addr
+        .unwrap_or_else(|| best_advertise_addr(&args.server, local_addr));
     println!("QUIC bound on {local_addr}; advertising {advertise}");
+    if args.advertise_addr.is_none() && local_addr.ip().is_unspecified() {
+        println!(
+            "  (auto-detected; pass --advertise-addr ADDR if this isn't reachable from your peer)"
+        );
+    }
 
     // Fetch peer's device public key — needed for the QUIC TLS
     // verifier — from their keystore.
@@ -1096,6 +1103,35 @@ async fn add_member(server: &str, token: &str, room_id: RoomId, user_id: UserId)
         .await?
         .error_for_status()?;
     Ok(())
+}
+
+/// Best-effort local-IP detection for advertising. Same logic as in
+/// the group_call example — keeping these inline (rather than in a
+/// shared module) until we settle on a stable demo helpers API.
+fn best_advertise_addr(server_url: &str, local_addr: SocketAddr) -> SocketAddr {
+    if !local_addr.ip().is_unspecified() {
+        return local_addr;
+    }
+    let host_port = server_url
+        .trim_start_matches("https://")
+        .trim_start_matches("http://")
+        .split('/')
+        .next()
+        .unwrap_or("8.8.8.8:80");
+    let Some(target) = host_port.to_socket_addrs().ok().and_then(|mut a| a.next()) else {
+        return local_addr;
+    };
+    let bind = if target.is_ipv6() { "[::]:0" } else { "0.0.0.0:0" };
+    let Ok(probe) = std::net::UdpSocket::bind(bind) else {
+        return local_addr;
+    };
+    if probe.connect(target).is_err() {
+        return local_addr;
+    }
+    match probe.local_addr() {
+        Ok(picked) => SocketAddr::new(picked.ip(), local_addr.port()),
+        Err(_) => local_addr,
+    }
 }
 
 fn init_tracing() {
