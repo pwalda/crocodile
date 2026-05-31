@@ -2,7 +2,7 @@
 
 Working name for a federated, peer-meshed voice + text communication platform. See [`ARCHITECTURE.md`](./ARCHITECTURE.md) for the design.
 
-This README covers how to actually run the **two-peer voice call demo** — the milestone-4 deliverable. It's a runnable proof that the protocol crate, the coordination server, the client networking foundation, and MLS all compose end-to-end through real audio capture, encryption, QUIC transport, decryption, and playback.
+This README covers how to actually run the demo binaries — there are two now, `two_peer_call` (the milestone-4 reference for two participants) and `group_call` (N participants via the architecture's host-as-relay model). Both demonstrate end-to-end voice + text with MLS-encrypted payloads, QUIC peer transport with pubkey-pinned TLS, and a coordination server that never sees content.
 
 ---
 
@@ -44,9 +44,22 @@ cargo build --release
 
 ### 2. Run the coordination server
 
+Either directly:
+
 ```bash
 DATABASE_URL=postgres://crocodile:crocodile_dev@localhost:5432/crocodile \
     cargo run --release --bin crocodile-server
+```
+
+…or via Docker if you'd rather not have a Rust toolchain on the server host:
+
+```bash
+docker build -f crates/server/Dockerfile -t crocodile-server .
+docker run --rm --network host \
+  -e DATABASE_URL=postgres://crocodile:crocodile_dev@localhost:5432/crocodile \
+  -e BIND_ADDR=0.0.0.0:8080 \
+  -v $PWD/.server_identity.key:/data/.server_identity.key \
+  crocodile-server
 ```
 
 It listens on `127.0.0.1:8080` by default. Override with `BIND_ADDR=0.0.0.0:8080` to accept connections from other machines.
