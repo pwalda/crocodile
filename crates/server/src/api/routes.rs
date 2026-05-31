@@ -19,6 +19,14 @@ pub fn router(_state: AppState) -> Router<AppState> {
         // Keystore
         .route("/v1/devices", post(super::keys::publish_device_key))
         .route("/v1/users/{user_id}/keys", get(super::keys::get_user_keys))
+        // Username lookup (unauthenticated). Lets a peer share a
+        // short username instead of a 32-byte hex user id. Enables
+        // username enumeration; that's an accepted tradeoff for the
+        // out-of-band introduction flow.
+        .route(
+            "/v1/users/by-username/{username}",
+            get(super::keys::lookup_by_username),
+        )
         // Rooms
         .route("/v1/rooms", post(super::rooms::create_room))
         .route("/v1/rooms/{room_id}", get(super::rooms::get_room_state))

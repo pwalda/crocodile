@@ -104,6 +104,30 @@ pub async fn get_user_keys(
     Ok(bytes)
 }
 
+/// GET /v1/users/by-username/{name}
+///
+/// Returns the hex-encoded user id for a username, or 404 if not
+/// found. Intentionally unauthenticated so peers can resolve
+/// usernames as part of the out-of-band introduction flow.
+pub async fn lookup_by_username(
+    State(state): State<AppState>,
+    axum::extract::Path(username): axum::extract::Path<String>,
+) -> ApiResult<axum::Json<UsernameLookupResponse>> {
+    let row = accounts::by_username(state.storage.pool(), &username)
+        .await?
+        .ok_or(ApiError::NotFound)?;
+    Ok(axum::Json(UsernameLookupResponse {
+        user_id_hex: hex::encode(row.user_id),
+    }))
+}
+
+/// Response shape for `lookup_by_username`.
+#[derive(Debug, Serialize)]
+pub struct UsernameLookupResponse {
+    /// Hex-encoded user id.
+    pub user_id_hex: String,
+}
+
 /// Canonical byte string a user's identity key signs to bind a device
 /// public key to that user.
 ///

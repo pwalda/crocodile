@@ -100,8 +100,13 @@ struct Args {
 
 #[derive(Debug)]
 enum Mode {
-    /// Create a room, add the invitee, wait for them.
-    Host { invite_user_id: UserId },
+    /// Create a room, add the invitee, wait for them. Either
+    /// invite_user_id or invite_username must be set; if username,
+    /// we resolve it server-side at startup.
+    Host {
+        invite_user_id: Option<UserId>,
+        invite_username: Option<String>,
+    },
     /// Join an existing room you've already been added to.
     Join { room_id: RoomId },
     /// Just print our user_id / device_id and exit. Useful for the
@@ -119,6 +124,7 @@ fn parse_args() -> Result<Args> {
     let mut advertise_addr: Option<SocketAddr> = None;
     let mut subcommand: Option<String> = None;
     let mut invite_user_id: Option<UserId> = None;
+    let mut invite_username: Option<String> = None;
     let mut room_id: Option<RoomId> = None;
 
     let mut i = 0;
@@ -168,6 +174,12 @@ fn parse_args() -> Result<Args> {
                 invite_user_id = Some(UserId::from_bytes(bytes));
                 i += 2;
             }
+            "--invite-username" => {
+                invite_username = Some(
+                    raw.get(i + 1).cloned().context("missing --invite-username value")?,
+                );
+                i += 2;
+            }
             "--room-id" => {
                 let s = raw.get(i + 1).context("missing --room-id value")?;
                 let bytes: [u8; 32] = hex::decode(s)
@@ -190,10 +202,15 @@ fn parse_args() -> Result<Args> {
     }
 
     let mode = match subcommand.as_deref() {
-        Some("host") => Mode::Host {
-            invite_user_id: invite_user_id
-                .context("host mode requires --invite-user-id")?,
-        },
+        Some("host") => {
+            if invite_user_id.is_none() && invite_username.is_none() {
+                bail!("host mode requires --invite-user-id or --invite-username");
+            }
+            Mode::Host {
+                invite_user_id,
+                invite_username,
+            }
+        }
         Some("join") => Mode::Join {
             room_id: room_id.context("join mode requires --room-id")?,
         },
@@ -231,7 +248,7 @@ fn parse_args() -> Result<Args> {
 fn print_help() {
     eprintln!("usage:");
     eprintln!("  two_peer_call --state-dir D print-id");
-    eprintln!("  two_peer_call --server URL --username U --password P --state-dir D [--bind-addr ADDR] [--advertise-addr ADDR] host --invite-user-id HEX");
+    eprintln!("  two_peer_call --server URL --username U --password P --state-dir D [--bind-addr ADDR] [--advertise-addr ADDR] host (--invite-user-id HEX | --invite-username NAME)");
     eprintln!("  two_peer_call --server URL --username U --password P --state-dir D [--bind-addr ADDR] [--advertise-addr ADDR] join --room-id HEX");
 }
 
@@ -795,14 +812,35 @@ async fn main() -> Result<()> {
 
     // Resolve room + peer user.
     let (room_id, peer_user, role) = match &args.mode {
-        Mode::Host { invite_user_id } => {
+        Mode::Host {
+            invite_user_id,
+            invite_username,
+        } => {
+            // Resolve invitee user_id. Prefer the explicit hex form if
+            // both happen to be set.
+            let invitee: UserId = if let Some(uid) = invite_user_id {
+                *uid
+            } else if let Some(name) = invite_username {
+                let hex = client.lookup_username(name).await
+                    .with_context(|| format!("looking up username {name:?}"))?;
+                let bytes: [u8; 32] = hex::decode(&hex)
+                    .context("server returned bad user_id hex")?
+                    .try_into()
+                    .map_err(|_| anyhow!("server returned non-32-byte user_id"))?;
+                UserId::from_bytes(bytes)
+            } else {
+                // parse_args enforces that one is set; this arm is for the
+                // compiler.
+                bail!("host mode requires --invite-user-id or --invite-username")
+            };
+
             let room_id = create_room(&args.server, &token, &args.username).await?;
-            add_member(&args.server, &token, room_id, *invite_user_id).await?;
+            add_member(&args.server, &token, room_id, invitee).await?;
             println!(
                 "Created room. Share this id with the peer:\n  ROOM_ID: {}",
                 hex::encode(room_id.as_bytes())
             );
-            (room_id, *invite_user_id, Role::Host)
+            (room_id, invitee, Role::Host)
         }
         Mode::Join { room_id } => {
             // Joiner doesn't know peer_user yet; resolve from RoomState

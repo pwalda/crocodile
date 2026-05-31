@@ -93,6 +93,27 @@ impl CoordinationClient {
         Ok(body.user_id_hex)
     }
 
+    /// Look up a username → user_id mapping. Used by the demo binary's
+    /// `--invite-username` flow so peers don't have to swap 64-char hex
+    /// strings out of band.
+    pub async fn lookup_username(&self, username: &str) -> Result<String> {
+        let resp = self
+            .http
+            .get(format!(
+                "{}/v1/users/by-username/{username}",
+                self.base_url
+            ))
+            .send()
+            .await?;
+        ensure_success(&resp).await?;
+        #[derive(Deserialize)]
+        struct R {
+            user_id_hex: String,
+        }
+        let body: R = resp.json().await?;
+        Ok(body.user_id_hex)
+    }
+
     /// Log in. Returns the session token and the derived user id (hex).
     pub async fn login(&self, username: &str, password: &str) -> Result<LoginOutput> {
         let resp = self
