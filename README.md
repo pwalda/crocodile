@@ -16,10 +16,10 @@ This README covers how to actually run the **two-peer voice call demo** — the 
 ## What does not work yet
 
 - **General-internet NAT traversal.** No TURN fallback, no ICE candidate prioritisation. If both peers are behind symmetric NATs, the call will fail. UDP hole punching works between two open / moderate NATs. Use Tailscale or a LAN if internet doesn't cooperate (see below).
-- **Three or more peers in a call.** Host election + fan-out lands in milestone 5.
+- **Host election + failover.** The election state machine and quality measurement layers are tested in-process, but the runtime data plane uses a fixed host (the room creator). If the host disconnects, the call ends.
 - **Audio device selection.** Defaults to the OS default input/output. Adjust those in your OS sound settings before launching.
 - **Reconnection.** If the QUIC link drops, the call ends. Restart both binaries.
-- **History, text chat, persistent MLS state.** Coming in milestones 7–9.
+- **Federation across coordination servers.** One server per deployment for now.
 
 ---
 
@@ -66,7 +66,16 @@ The QUIC voice link is peer-to-peer over UDP. The default `--bind-addr 0.0.0.0:0
 
 ---
 
-## Running the two-peer call
+## Running the call
+
+Two binaries depending on how many peers:
+
+- **`two_peer_call`** — exactly two participants, simpler topology, what milestone 4 ships.
+- **`group_call`** — N participants in a single room, host-as-relay (host = room creator). The headline binary for the group MVP.
+
+The flow is the same for both; only the CLI shape differs.
+
+### two_peer_call — same as before
 
 Each peer runs `cargo run --release --example two_peer_call` with their own state directory, username, and password.
 
@@ -134,6 +143,33 @@ cargo run --release --example two_peer_call -- \
 Within a second or two both binaries should print `QUIC connected. Voice flowing. Press Ctrl-C to hang up.` and `Type messages and press Enter.` You'll hear each other, and lines you type get sent as text. Received text shows up as `[<short-device-id>]: message`.
 
 Ctrl-C on either side ends the call. Either peer can restart and re-do the dance — the text history persists across restarts under `--state-dir/history.sqlite`.
+
+### group_call — three or more participants
+
+Same args, except the host can pass `--invite-username` (or `--invite-user-id`) **multiple times**:
+
+```bash
+# alice creates the room and invites bob + carol:
+cargo run --release --example group_call -- \
+    --server http://1.2.3.4:8080 --username alice \
+    --password somethinglongerthan8 --state-dir ./state-alice \
+    host --invite-username bob --invite-username carol
+
+# bob and carol each join with the room id alice printed:
+cargo run --release --example group_call -- \
+    --server http://1.2.3.4:8080 --username bob \
+    --password somethinglongerthan8 --state-dir ./state-bob \
+    join --room-id <ROOM_ID>
+```
+
+The host accepts joiners as they come online, adds them to the MLS group one at a time, and from then on fans out voice ciphertext to all members. Each non-host peer has exactly one QUIC connection (to the host).
+
+**Important caveats:**
+
+- The host is *fixed* at the room creator. No election or failover in this binary yet. If alice disconnects, the call ends for everyone.
+- Voice scales fine for ~10 peers on a residential uplink (host fans out N-1 copies of each 32 kbps stream).
+- Text fan-out for `group_call` is currently host→joiner only; joiner→joiner text via the host is a TODO marked in the source.
+- Each joiner does the print-id dance first; the host needs everyone's user_id or username in advance.
 
 ---
 

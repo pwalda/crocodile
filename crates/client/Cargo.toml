@@ -45,3 +45,7 @@ openmls_rust_crypto.workspace = true
 [[example]]
 name = "two_peer_call"
 path = "examples/two_peer_call.rs"
+
+[[example]]
+name = "group_call"
+path = "examples/group_call.rs"
