@@ -799,19 +799,21 @@ async fn run_host(
                 );
                 let _ = history_for_text.store(&stored).await;
 
-                // Fan-out text to other joiners (re-encode each frame
-                // and write into their stream). Skip the original sender.
-                let guard = links_for_text.lock().await;
-                for (other_dev, _link) in guard.iter() {
+                // Fan-out text to other joiners. Re-uses the bytes
+                // we already received (they're already MLS-encrypted
+                // under the group epoch, so all other members can
+                // decrypt them). Length-prefix the same way we did
+                // on send.
+                let len = (payload.len() as u32).to_be_bytes();
+                let mut guard = links_for_text.lock().await;
+                for (other_dev, link) in guard.iter_mut() {
                     if *other_dev == from_device_for_text {
                         continue;
                     }
-                    // We can't easily push into another peer's stream
-                    // from here without holding their SendStream;
-                    // simplified: skip fan-out for text. Per-peer text
-                    // streams currently host pair-only; revisit when
-                    // we move to a proper text router.
-                    let _ = other_dev;
+                    if link.text_send.write_all(&len).await.is_err() {
+                        continue;
+                    }
+                    let _ = link.text_send.write_all(&payload).await;
                 }
             }
         });
