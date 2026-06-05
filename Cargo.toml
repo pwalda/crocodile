@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/protocol", "crates/server", "crates/client", "crates/mls"]
+members = ["crates/protocol", "crates/server", "crates/client", "crates/mls", "crates/gui"]
 
 [workspace.package]
 edition = "2021"
@@ -39,6 +39,8 @@ openmls_traits = "0.3"
 tls_codec = "0.4"
 cpal = "0.15"
 opus = "0.3"
+eframe = { version = "0.31", default-features = false, features = ["default_fonts", "glow"] }
+egui = "0.31"
 argon2 = "0.5"
 uuid = { version = "1", features = ["v4", "serde"] }
 base64 = "0.22"
@@ -46,6 +48,7 @@ time = { version = "0.3", features = ["serde"] }
 sha2 = "0.10"
 
 crocodile-protocol = { path = "crates/protocol" }
+crocodile-client = { path = "crates/client" }
 
 [profile.release]
 lto = "thin"

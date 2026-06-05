@@ -81,12 +81,38 @@ The QUIC voice link is peer-to-peer over UDP. The default `--bind-addr 0.0.0.0:0
 
 ## Running the call
 
-Two binaries depending on how many peers:
+Three options depending on how you want to use it:
 
-- **`two_peer_call`** — exactly two participants, simpler topology, what milestone 4 ships.
-- **`group_call`** — N participants in a single room, host-as-relay (host = room creator). The headline binary for the group MVP.
+- **`crocodile-gui`** — desktop window (egui). The functional-MVP UI: settings, host/join buttons, in-call chat, ROOM_ID copy field. Recommended for actual use.
+- **`two_peer_call`** — CLI, exactly two participants. The milestone-4 reference.
+- **`group_call`** — CLI, N participants via host-as-relay.
 
-The flow is the same for both; only the CLI shape differs.
+### crocodile-gui — the desktop UI
+
+```bash
+cargo run --release --bin crocodile-gui
+```
+
+On first launch you see the Settings pane. Fill in:
+
+- **Server URL** — `http://<your-server>:8080`.
+- **Username** + **Password** — picks an existing account or creates one.
+- **State dir** — where your identity key, MLS state, and text history live. Defaults to `./crocodile-state`.
+
+Click **Save settings**, then **Show my user_id** if your peer needs your id to invite you. The full id appears in a copyable text field.
+
+Switch to the **Call** tab to host or join:
+
+- **Host:** type the peer's *username* (not user_id) into "Invite username" and click **Host call**. The UI prints the new `ROOM_ID` at the top of the call view — share it with the joiner.
+- **Join:** paste the host's `ROOM_ID` into the field and click **Join call**.
+
+Once the status chip reads **in call**, voice flows automatically and the chat box at the bottom sends text. Settings persist to `~/.config/crocodile/settings.json` between launches.
+
+### CLI binaries
+
+The CLI binaries (`two_peer_call`, `group_call`) follow the same conceptual flow as the GUI but with explicit command-line arguments. They're documented further below — useful for debugging or for running on a headless server.
+
+The flow shape is identical across all three binaries:
 
 ### two_peer_call — same as before
 
