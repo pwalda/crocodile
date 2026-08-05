@@ -36,6 +36,12 @@ use crate::error::{ClientError, Result};
 pub struct PeerEndpoint {
     endpoint: Endpoint,
     local_addr: SocketAddr,
+    /// Our own self-signed cert + key. Retained because outbound
+    /// connections must present them too: the accept side runs with a
+    /// client-certificate verifier (mutual TLS), so a dialer that sent
+    /// no certificate is rejected with "peer sent no certificates".
+    cert: CertificateDer<'static>,
+    key: Arc<PrivateKeyDer<'static>>,
 }
 
 impl PeerEndpoint {
@@ -56,12 +62,15 @@ impl PeerEndpoint {
 
         let server_config = build_server_config(cert_der.clone(), key_der.clone_key())?;
         let mut endpoint = Endpoint::server(server_config, bind_addr).map_err(map_io)?;
-        endpoint.set_default_client_config(build_client_config()?);
+        endpoint
+            .set_default_client_config(build_client_config(cert_der.clone(), key_der.clone_key())?);
 
         let local_addr = endpoint.local_addr().map_err(map_io)?;
         Ok(Self {
             endpoint,
             local_addr,
+            cert: cert_der,
+            key: Arc::new(key_der),
         })
     }
 
@@ -83,8 +92,10 @@ impl PeerEndpoint {
         expected_peer_pk: DevicePublicKey,
     ) -> Result<quinn::Connection> {
         // Build a per-connection client config carrying a verifier
-        // closed over the expected pubkey.
-        let client_config = build_client_config_for(expected_peer_pk)?;
+        // closed over the expected pubkey, plus our own certificate so
+        // the accept side's client-cert verifier is satisfied.
+        let client_config =
+            build_client_config_for(expected_peer_pk, self.cert.clone(), self.key.clone_key())?;
         let connecting = self
             .endpoint
             .connect_with(client_config, addr, "crocodile")
@@ -147,26 +158,41 @@ fn build_server_config(
     Ok(ServerConfig::with_crypto(Arc::new(quic_server)))
 }
 
-fn build_client_config() -> Result<ClientConfig> {
+fn build_client_config(
+    cert: CertificateDer<'static>,
+    key: PrivateKeyDer<'static>,
+) -> Result<ClientConfig> {
     // Default client config used when the caller hasn't supplied a
     // verifier — accepts any cert. Real dials use
     // [`build_client_config_for`] which checks the embedded pubkey.
     let mut crypto = rustls::ClientConfig::builder()
         .dangerous()
         .with_custom_certificate_verifier(Arc::new(AcceptAnyServer))
-        .with_no_client_auth();
+        .with_client_auth_cert(vec![cert], key)
+        .map_err(|e| ClientError::Quic(format!("rustls client auth cert: {e}")))?;
     crypto.alpn_protocols = vec![b"crocodile/1".to_vec()];
     let quic_client = quinn::crypto::rustls::QuicClientConfig::try_from(crypto)
         .map_err(|e| ClientError::Quic(format!("quic client config: {e}")))?;
     Ok(ClientConfig::new(Arc::new(quic_client)))
 }
 
-fn build_client_config_for(expected: DevicePublicKey) -> Result<ClientConfig> {
+/// Client config that pins the expected peer pubkey **and** presents our
+/// own certificate.
+///
+/// Both halves matter: the cert we send carries our device pubkey in its
+/// SAN so the accept side can identify us, and without it the accept
+/// side's client-certificate verifier aborts the handshake.
+fn build_client_config_for(
+    expected: DevicePublicKey,
+    cert: CertificateDer<'static>,
+    key: PrivateKeyDer<'static>,
+) -> Result<ClientConfig> {
     let verifier = Arc::new(PubkeyMatchingVerifier { expected });
     let mut crypto = rustls::ClientConfig::builder()
         .dangerous()
         .with_custom_certificate_verifier(verifier)
-        .with_no_client_auth();
+        .with_client_auth_cert(vec![cert], key)
+        .map_err(|e| ClientError::Quic(format!("rustls client auth cert: {e}")))?;
     crypto.alpn_protocols = vec![b"crocodile/1".to_vec()];
     let quic_client = quinn::crypto::rustls::QuicClientConfig::try_from(crypto)
         .map_err(|e| ClientError::Quic(format!("quic client config: {e}")))?;
@@ -377,11 +403,14 @@ mod tests {
 
         let bob_addr = bob.local_addr();
 
-        // Bob accepts in the background.
+        // Bob accepts in the background and reports whether the
+        // handshake completed on HIS side.
         let bob_accept = tokio::spawn(async move {
             let incoming = bob.accept().await.expect("incoming");
-            let conn = incoming.await.expect("accept");
-            conn.closed().await;
+            // Return the result instead of unwrapping: the accept-side
+            // outcome is the whole point of this test and must be
+            // asserted by the test body, not swallowed in a task.
+            incoming.await.map(|_conn| ()).map_err(|e| e.to_string())
         });
 
         // Alice dials Bob with the right pubkey.
@@ -389,10 +418,25 @@ mod tests {
             .connect(bob_addr, bob_pk)
             .await
             .expect("connect ok with right pubkey");
-        conn.close(0u32.into(), b"bye");
 
-        // Wait for bob's accept task to complete.
-        let _ = tokio::time::timeout(std::time::Duration::from_secs(2), bob_accept).await;
+        // A QUIC client can consider the handshake done before the
+        // server does, so "alice connected" alone does NOT prove the
+        // link works. Assert Bob's side too — an earlier version of
+        // this test discarded the accept result with `let _ = ...`,
+        // which hid a real mutual-TLS misconfiguration (the dialer sent
+        // no client certificate and every accept failed with "peer sent
+        // no certificates") until it showed up in manual testing.
+        let bob_result = tokio::time::timeout(std::time::Duration::from_secs(5), bob_accept)
+            .await
+            .expect("bob's accept task should finish")
+            .expect("bob's accept task should not panic");
+        assert!(
+            bob_result.is_ok(),
+            "accept side must complete the handshake, got: {:?}",
+            bob_result.unwrap_err()
+        );
+
+        conn.close(0u32.into(), b"bye");
     }
 
     #[tokio::test]
