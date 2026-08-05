@@ -85,9 +85,12 @@ pub enum ProbeEvent {
 pub fn spawn_probe(runtime: &Runtime, settings: Settings) -> mpsc::UnboundedReceiver<ProbeEvent> {
     let (tx, rx) = mpsc::unbounded_channel();
     runtime.spawn(async move {
+        // `{:#}` renders the full anyhow context chain (e.g.
+        // "fetching /v1/server/info: connection refused") instead of
+        // just the outermost message.
         let ev = match probe(&settings).await {
             Ok(ev) => ev,
-            Err(e) => ProbeEvent::Err(e.to_string()),
+            Err(e) => ProbeEvent::Err(format!("{e:#}")),
         };
         let _ = tx.send(ev);
     });
@@ -271,7 +274,21 @@ async fn connect(
 
     let info: ServerInfo = CoordinationClient::server_info(&settings.server)
         .await
-        .context("fetching /v1/server/info")?;
+        .map_err(|e| {
+            let hint =
+                if settings.server.contains("127.0.0.1") || settings.server.contains("localhost") {
+                    " — on a machine that is NOT running the server, the Server URL must be \
+                 the server machine's LAN IP (e.g. http://192.168.0.253:8080), not \
+                 127.0.0.1/localhost (which points at this machine)."
+                } else {
+                    " — check the server is running, reachable on this network, and its \
+                 firewall allows inbound TCP on that port."
+                };
+            anyhow!(
+                "could not reach the server at {}{hint} (cause: {e})",
+                settings.server
+            )
+        })?;
     let server_ipk_bytes: [u8; 32] = hex::decode(&info.identity_public_key_hex)?
         .try_into()
         .map_err(|_| anyhow!("server identity_public_key must be 32 bytes"))?;
