@@ -367,10 +367,34 @@ async fn connect(
         .await
     {
         Ok(_) => {}
+        // A 409 has two very different meanings and only one of them is
+        // benign. "Username taken" is the normal returning-user path:
+        // fall through and log in. "This device is already registered
+        // as <other>" means our identity key belongs to a different
+        // account, so logging in under this username would 401 with no
+        // explanation — surface the server's guidance instead.
+        Err(crocodile_client::ClientError::ServerStatus { status: 409, body })
+            if body.contains("already registered as") =>
+        {
+            bail!("{body}");
+        }
         Err(crocodile_client::ClientError::ServerStatus { status: 409, .. }) => {}
         Err(e) => return Err(anyhow!("signup/login: {e}")),
     }
-    let login = client.login(&settings.username, &settings.password).await?;
+    let login = client
+        .login(&settings.username, &settings.password)
+        .await
+        .map_err(|e| match &e {
+            crocodile_client::ClientError::ServerStatus { status: 401, .. } => anyhow!(
+                "sign-in rejected for '{}'. The server returns the same answer for a wrong \
+                 password and an unknown user, so either the password doesn't match the one \
+                 this account was created with, or the account doesn't exist on this server \
+                 (e.g. its database was reset). Try a different password, or a different \
+                 username to register fresh.",
+                settings.username
+            ),
+            _ => anyhow!("sign-in failed: {e}"),
+        })?;
 
     // Publish device key.
     let mut binding_input = Vec::with_capacity(64);
@@ -1053,13 +1077,18 @@ async fn publish_device_key(
     // wiped) since the account was created, or the server database was
     // reset while the client kept its old identity. Explain the fix.
     if body.contains("identity_signature does not verify") {
+        // NB: "just pick a new username" does NOT work here — the
+        // account id is derived from the identity key in the state dir,
+        // so a rename with the same state dir is rejected as a duplicate
+        // identity. The fix has to change the state dir or the server's
+        // record, not just the name.
         bail!(
-            "this username is already registered with a different identity key. \
-             That happens when your local state dir changed since the account was \
-             created, or the server's database was reset. Fix: pick a NEW username \
-             in Settings (simplest), or restore the original state dir. If you \
-             control the server and want to reuse the name, stop it and delete its \
-             crocodile-server.sqlite file to clear old accounts."
+            "this username is registered with a different identity key than this device \
+             holds. That happens when the State dir changed since the account was created, \
+             or the server's database was reset. Fixes: point State dir back at the \
+             original directory; or set a NEW State dir *and* a new username to register \
+             a fresh identity; or, if you run the server, stop it and delete its \
+             crocodile-server.sqlite to clear old accounts."
         );
     }
     bail!("publish_device_key failed ({status}): {body}")

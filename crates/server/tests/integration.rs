@@ -342,3 +342,77 @@ fn random_suffix() -> String {
         })
         .collect()
 }
+
+/// Signup conflicts must distinguish "username taken" from "this
+/// identity is already registered", because the fixes differ and the
+/// client behaves differently for each.
+///
+/// Regression test: both used to surface as a raw
+/// "UNIQUE constraint failed: accounts.user_id", and the client
+/// blanket-treated any 409 as "account exists, just log in" — which
+/// then failed with an unexplained 401 whenever a user renamed while
+/// keeping the same state dir (same identity key).
+#[tokio::test]
+async fn signup_conflicts_are_distinguishable() {
+    let Some(server) = spawn_server().await else {
+        eprintln!("could not open test database; skipping");
+        return;
+    };
+    let client = reqwest::Client::new();
+    let identity = IdentityKeypair::generate(&mut OsRng);
+    let first = format!("first_{}", random_suffix());
+
+    let resp = client
+        .post(format!("{}/v1/accounts", server.base_url))
+        .json(&json!({
+            "username": first,
+            "password": "longenoughpw",
+            "identity_public_key_hex": hex::encode(identity.public_key().0),
+        }))
+        .send()
+        .await
+        .expect("signup");
+    assert_eq!(resp.status(), 201);
+
+    // Same identity key, different username → must name the account
+    // this identity already owns, not leak SQL.
+    let resp = client
+        .post(format!("{}/v1/accounts", server.base_url))
+        .json(&json!({
+            "username": format!("second_{}", random_suffix()),
+            "password": "longenoughpw",
+            "identity_public_key_hex": hex::encode(identity.public_key().0),
+        }))
+        .send()
+        .await
+        .expect("duplicate identity signup");
+    assert_eq!(resp.status(), 409);
+    let body = resp.text().await.unwrap_or_default();
+    assert!(
+        body.contains("already registered as") && body.contains(&first),
+        "identity conflict must name the existing account, got: {body}"
+    );
+    assert!(
+        !body.contains("UNIQUE constraint"),
+        "must not leak raw SQL, got: {body}"
+    );
+
+    // Different identity key, existing username → plain name clash.
+    let other = IdentityKeypair::generate(&mut OsRng);
+    let resp = client
+        .post(format!("{}/v1/accounts", server.base_url))
+        .json(&json!({
+            "username": first,
+            "password": "longenoughpw",
+            "identity_public_key_hex": hex::encode(other.public_key().0),
+        }))
+        .send()
+        .await
+        .expect("duplicate username signup");
+    assert_eq!(resp.status(), 409);
+    let body = resp.text().await.unwrap_or_default();
+    assert!(
+        body.contains("already taken"),
+        "username conflict must say so, got: {body}"
+    );
+}

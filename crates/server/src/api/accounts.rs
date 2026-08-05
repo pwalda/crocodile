@@ -45,12 +45,37 @@ pub async fn create_account(
     validate_password(&req.password)?;
     let ipk = parse_identity_public_key(&req.identity_public_key_hex)?;
 
+    let user_id: UserId = user_id_from_public_key(&ipk);
+
+    // Distinguish the two conflict cases *before* inserting. Letting the
+    // UNIQUE violation surface produced raw SQL text ("UNIQUE constraint
+    // failed: accounts.user_id") that told the caller nothing, and the
+    // two cases need very different fixes.
+    if accounts::by_username(state.storage.db(), &req.username)
+        .await?
+        .is_some()
+    {
+        return Err(ApiError::Conflict(format!(
+            "the username '{}' is already taken",
+            req.username
+        )));
+    }
+    if let Some(existing) = accounts::by_user_id(state.storage.db(), user_id).await? {
+        // The account id is derived from the identity key, which lives in
+        // the client's state dir. Registering a second username from the
+        // same state dir is therefore impossible — say so, and name the
+        // username this identity already owns.
+        return Err(ApiError::Conflict(format!(
+            "this device is already registered as '{}'. Use that username, \
+             or choose a different State dir in Settings to create a separate identity.",
+            existing.username
+        )));
+    }
+
     let hash = password::hash(&req.password)
         .map_err(|e| ApiError::Internal(anyhow::anyhow!("argon2 error: {e}")))?;
 
     accounts::insert(state.storage.db(), &req.username, &hash, &ipk).await?;
-
-    let user_id: UserId = user_id_from_public_key(&ipk);
 
     Ok((
         StatusCode::CREATED,
