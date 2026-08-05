@@ -11,8 +11,10 @@ Cargo.lock.bak
 .server_identity.key
 *.identity.key
 
-# Client per-account state directories created by the two_peer_call demo.
+# Client per-account state directories created by the demo binaries
+# and the GUI (identity seeds, MLS state, text history live here).
 /.crocodile-state-*/
+/crocodile-state*/
 /state-*/
 
 # SQLite cache files used by the client cache module.
