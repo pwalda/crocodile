@@ -116,10 +116,7 @@ pub async fn remove_member(
 }
 
 /// List the members of a room, joined with account identity data.
-pub async fn list_members(
-    pool: &PgPool,
-    room_id: RoomId,
-) -> Result<Vec<RoomMember>, sqlx::Error> {
+pub async fn list_members(pool: &PgPool, room_id: RoomId) -> Result<Vec<RoomMember>, sqlx::Error> {
     let rows: Vec<(Vec<u8>, Vec<u8>, String)> = sqlx::query_as(
         r#"SELECT a.user_id, a.identity_public_key, m.role
            FROM room_members m

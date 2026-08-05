@@ -57,8 +57,7 @@ mod integration_tests {
         // Tight staleness window so alice's old vector ages out
         // within the test's elapsed seconds.
         let mut election = ElectionState::new(me).with_stale_after(Duration::from_secs(5));
-        let mut fd = FailoverDetector::new()
-            .with_keepalive_timeout(Duration::from_secs(2));
+        let mut fd = FailoverDetector::new().with_keepalive_timeout(Duration::from_secs(2));
 
         // T=100: everyone reports. Alice has best upload.
         election.record_vector(qv_at(alice, 30_000, 100), UnixSeconds(100));
@@ -82,7 +81,10 @@ mod integration_tests {
 
         // T=103: silence for 2s → keepalive timeout.
         let trigger = fd.check(UnixSeconds(103), 4);
-        assert!(matches!(trigger, Some(FailoverTrigger::KeepaliveTimeout { .. })));
+        assert!(matches!(
+            trigger,
+            Some(FailoverTrigger::KeepaliveTimeout { .. })
+        ));
 
         // Runtime reacts: emergency-promote shadow.
         let promotion = election.promote_shadow().expect("shadow must promote");
@@ -168,7 +170,11 @@ mod integration_tests {
             election.record_vector(qv_at(alice, 100_000, t), UnixSeconds(t));
             election.record_vector(qv_at(bob, 20_000, t), UnixSeconds(t));
             let _ = election.tick(UnixSeconds(t));
-            assert_eq!(election.current_host(), Some(bob), "bob should hold at t={t}");
+            assert_eq!(
+                election.current_host(),
+                Some(bob),
+                "bob should hold at t={t}"
+            );
         }
     }
 }

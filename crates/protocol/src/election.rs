@@ -136,7 +136,11 @@ pub fn elect(
         .into_iter()
         .filter(|(d, _)| Some(*d) != shadow)
         .collect();
-    bench.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal).then(a.0.as_bytes().cmp(b.0.as_bytes())));
+    bench.sort_by(|a, b| {
+        b.1.partial_cmp(&a.1)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then(a.0.as_bytes().cmp(b.0.as_bytes()))
+    });
     let bench: Vec<DeviceId> = bench.into_iter().map(|(d, _)| d).collect();
 
     Election {

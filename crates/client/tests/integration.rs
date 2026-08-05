@@ -44,11 +44,15 @@ async fn spawn_server() -> Option<TestServer> {
         server_identity_path: identity_path,
         statement_ttl_secs: crocodile_protocol::time::DEFAULT_CACHE_TTL_SECS,
     };
-    let state = crocodile_server::build_state(config, pool).await.expect("state");
+    let state = crocodile_server::build_state(config, pool)
+        .await
+        .expect("state");
     let server_pubkey = state.identity.public_key();
     let app = crocodile_server::build_router(state);
 
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind");
     let addr: SocketAddr = listener.local_addr().expect("local_addr");
     let base_url = format!("http://{addr}");
     let handle = tokio::spawn(async move {
@@ -103,11 +107,7 @@ async fn cache_first_user_keys_fetch() {
             crocodile_protocol::signaling::CacheableServerStatement,
         >,
     > = cache
-        .get(
-            crocodile_client::cache::kind::USER_KEYS,
-            &user_id_hex,
-            now,
-        )
+        .get(crocodile_client::cache::kind::USER_KEYS, &user_id_hex, now)
         .await
         .expect("cache get");
     assert!(cached.is_some(), "cache must contain the entry");

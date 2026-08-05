@@ -239,8 +239,7 @@ mod tests {
         let bob_kp = KeyPackage::generate(&bob_identity, &bob_provider).unwrap();
         // Roundtrip the kp through bytes — simulating sending it via
         // signaling to Alice.
-        let kp_for_alice =
-            KeyPackage::from_bytes(bob_kp.as_bytes(), &alice_provider).unwrap();
+        let kp_for_alice = KeyPackage::from_bytes(bob_kp.as_bytes(), &alice_provider).unwrap();
 
         // Alice creates a group and adds Bob.
         let mut alice_group =
@@ -255,7 +254,11 @@ mod tests {
         // Bob joins from the welcome.
         let mut bob_group =
             Group::join_from_welcome(&bob_provider, &bob_identity, &outcome.welcome).unwrap();
-        assert_eq!(bob_group.epoch().0, 1, "bob should join at the post-add epoch");
+        assert_eq!(
+            bob_group.epoch().0,
+            1,
+            "bob should join at the post-add epoch"
+        );
 
         // Members match on both sides.
         let mut alice_members = alice_group.members();
@@ -300,8 +303,7 @@ mod tests {
                 KeyPackage::from_bytes(bob_kp.as_bytes(), &alice_provider).unwrap(),
             )
             .unwrap();
-        let mut b_group =
-            Group::join_from_welcome(&bob_provider, &bob, &bob_join.welcome).unwrap();
+        let mut b_group = Group::join_from_welcome(&bob_provider, &bob, &bob_join.welcome).unwrap();
 
         // Alice then adds Carol. Bob must process the resulting commit
         // to advance to the same epoch as Alice and Carol.
@@ -325,7 +327,9 @@ mod tests {
         assert_eq!(a_group.epoch().0, 2);
 
         // Alice encrypts; both Bob and Carol decrypt.
-        let ct = a_group.encrypt(&alice_provider, &alice, b"hello everyone").unwrap();
+        let ct = a_group
+            .encrypt(&alice_provider, &alice, b"hello everyone")
+            .unwrap();
         let ct_for_bob = ct.clone();
         let ct_for_carol = ct;
 

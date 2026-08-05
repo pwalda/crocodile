@@ -59,7 +59,10 @@ impl PeerEndpoint {
         endpoint.set_default_client_config(build_client_config()?);
 
         let local_addr = endpoint.local_addr().map_err(map_io)?;
-        Ok(Self { endpoint, local_addr })
+        Ok(Self {
+            endpoint,
+            local_addr,
+        })
     }
 
     /// Returns the address the endpoint is actually bound to (useful
@@ -119,8 +122,8 @@ fn generate_self_signed(
             .try_into()
             .map_err(|e| ClientError::Quic(format!("invalid san: {e}")))?,
     )];
-    let key_pair = KeyPair::generate()
-        .map_err(|e| ClientError::Quic(format!("keypair gen failed: {e}")))?;
+    let key_pair =
+        KeyPair::generate().map_err(|e| ClientError::Quic(format!("keypair gen failed: {e}")))?;
     let cert = params
         .self_signed(&key_pair)
         .map_err(|e| ClientError::Quic(format!("cert gen failed: {e}")))?;
@@ -419,10 +422,12 @@ mod tests {
 
         // Alice dials Bob but expects mallory's pubkey — verifier
         // should reject.
-        let result =
-            tokio::time::timeout(std::time::Duration::from_secs(3), alice.connect(bob_addr, mallory_pk))
-                .await
-                .expect("connect attempt didn't time out");
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(3),
+            alice.connect(bob_addr, mallory_pk),
+        )
+        .await
+        .expect("connect attempt didn't time out");
         assert!(
             result.is_err(),
             "handshake should fail when expected pubkey doesn't match"

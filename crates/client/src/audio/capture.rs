@@ -40,10 +40,7 @@ pub fn open_default(sink: UnboundedSender<Vec<f32>>) -> Result<CaptureStream> {
 }
 
 /// Like [`open_default`] but lets the caller pick a specific device.
-pub fn open_on_device(
-    device: &Device,
-    sink: UnboundedSender<Vec<f32>>,
-) -> Result<CaptureStream> {
+pub fn open_on_device(device: &Device, sink: UnboundedSender<Vec<f32>>) -> Result<CaptureStream> {
     let supported = device
         .default_input_config()
         .map_err(|e| ClientError::Other(anyhow::anyhow!("default_input_config: {e}")))?;
@@ -86,8 +83,7 @@ pub fn open_on_device(
                 &config,
                 move |data: &[i16], _: &cpal::InputCallbackInfo| {
                     // Convert i16 → f32 in [-1, 1].
-                    let f: Vec<f32> =
-                        data.iter().map(|&s| s as f32 / i16::MAX as f32).collect();
+                    let f: Vec<f32> = data.iter().map(|&s| s as f32 / i16::MAX as f32).collect();
                     let _ = sink.send(f);
                 },
                 err_fn,

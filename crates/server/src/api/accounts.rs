@@ -89,8 +89,8 @@ fn validate_password(s: &str) -> Result<(), ApiError> {
 }
 
 fn parse_identity_public_key(s: &str) -> Result<IdentityPublicKey, ApiError> {
-    let bytes =
-        hex::decode(s).map_err(|_| ApiError::BadRequest("identity_public_key_hex is not hex".into()))?;
+    let bytes = hex::decode(s)
+        .map_err(|_| ApiError::BadRequest("identity_public_key_hex is not hex".into()))?;
     let arr: [u8; 32] = bytes.try_into().map_err(|v: Vec<u8>| {
         ApiError::BadRequest(format!(
             "identity_public_key_hex must be 32 bytes, got {}",

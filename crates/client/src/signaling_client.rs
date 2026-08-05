@@ -35,11 +35,7 @@ impl SignalingChannel {
     /// `base_url` is the HTTP base of the coordination server
     /// (e.g. `http://example.com`); we rewrite the scheme to ws/wss
     /// for the upgrade.
-    pub async fn connect(
-        base_url: &str,
-        session_token: &str,
-        device_id: DeviceId,
-    ) -> Result<Self> {
+    pub async fn connect(base_url: &str, session_token: &str, device_id: DeviceId) -> Result<Self> {
         let ws_url = http_to_ws_url(base_url);
         let url = format!("{ws_url}/v1/signaling");
 

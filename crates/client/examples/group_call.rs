@@ -144,7 +144,9 @@ fn parse_args() -> Result<Args> {
                 i += 2;
             }
             "--state-dir" => {
-                state_dir = Some(PathBuf::from(raw.get(i + 1).cloned().context("--state-dir")?));
+                state_dir = Some(PathBuf::from(
+                    raw.get(i + 1).cloned().context("--state-dir")?,
+                ));
                 i += 2;
             }
             "--bind-addr" => {
@@ -275,7 +277,10 @@ async fn recv_app_from(
     expected_set: &std::collections::HashSet<DeviceId>,
 ) -> Result<(DeviceId, AppSignal)> {
     loop {
-        let frame = sig.recv().await.ok_or_else(|| anyhow!("signaling closed"))?;
+        let frame = sig
+            .recv()
+            .await
+            .ok_or_else(|| anyhow!("signaling closed"))?;
         match frame {
             SignalingServerFrame::Delivered { from, payload } if expected_set.contains(&from) => {
                 let msg: AppSignal = postcard::from_bytes(&payload)?;
@@ -293,10 +298,7 @@ async fn recv_app_from(
     }
 }
 
-async fn peer_user_devices(
-    client: &CoordinationClient,
-    user: UserId,
-) -> Result<Vec<DeviceId>> {
+async fn peer_user_devices(client: &CoordinationClient, user: UserId) -> Result<Vec<DeviceId>> {
     let stmt = client.user_keys(user, UnixSeconds::now()).await?;
     match stmt.payload {
         CacheableServerStatement::UserKeys { devices, .. } => Ok(devices
@@ -342,7 +344,10 @@ async fn main() -> Result<()> {
     let client = CoordinationClient::new(args.server.clone(), cache.clone(), server_pubkey);
 
     // Signup-or-login.
-    match client.create_account(&args.username, &args.password, &identity_pk).await {
+    match client
+        .create_account(&args.username, &args.password, &identity_pk)
+        .await
+    {
         Ok(_) => println!("Signed up."),
         Err(crocodile_client::ClientError::ServerStatus { status: 409, .. }) => {
             println!("Account exists; logging in.")
@@ -384,8 +389,7 @@ async fn main() -> Result<()> {
     // MLS setup.
     let provider = Arc::new(OpenMlsRustCrypto::default());
     let mls_identity = Arc::new(
-        Identity::generate(my_device_id, &provider)
-            .map_err(|e| anyhow!("mls identity: {e}"))?,
+        Identity::generate(my_device_id, &provider).map_err(|e| anyhow!("mls identity: {e}"))?,
     );
 
     match args.mode {
@@ -434,13 +438,17 @@ async fn main() -> Result<()> {
         }
         Mode::Join { room_id } => {
             // Identify host (room owner) from RoomState.
-            let stmt = client.room_state(room_id, &token, UnixSeconds::now()).await?;
+            let stmt = client
+                .room_state(room_id, &token, UnixSeconds::now())
+                .await?;
             let host_user = match stmt.payload {
-                CacheableServerStatement::RoomState { members, .. } => members
-                    .iter()
-                    .find(|m| m.role == RoomRole::Owner)
-                    .ok_or_else(|| anyhow!("no owner in room"))?
-                    .user,
+                CacheableServerStatement::RoomState { members, .. } => {
+                    members
+                        .iter()
+                        .find(|m| m.role == RoomRole::Owner)
+                        .ok_or_else(|| anyhow!("no owner in room"))?
+                        .user
+                }
                 _ => bail!("unexpected room state"),
             };
             println!("Host user: {}", hex::encode(host_user.as_bytes()));
@@ -490,8 +498,7 @@ async fn run_host(
 
     // Maintain a registry of joined peers and their links.
     let links: Arc<Mutex<HashMap<DeviceId, JoinerLink>>> = Arc::new(Mutex::new(HashMap::new()));
-    let (forward_tx, mut forward_rx) =
-        mpsc::unbounded_channel::<(DeviceId, Vec<u8>)>(); // (from, bytes)
+    let (forward_tx, mut forward_rx) = mpsc::unbounded_channel::<(DeviceId, Vec<u8>)>(); // (from, bytes)
 
     // Voice fan-out task: receives (sender_device, bytes), forwards
     // to all other peers in the registry.
@@ -548,7 +555,11 @@ async fn run_host(
                 let frame = {
                     let mut g = group_for_self_send.lock().await;
                     let epoch = g.epoch();
-                    let ct = match g.encrypt(&provider_for_self_send, &identity_for_self_send, &opus_bytes) {
+                    let ct = match g.encrypt(
+                        &provider_for_self_send,
+                        &identity_for_self_send,
+                        &opus_bytes,
+                    ) {
                         Ok(c) => c,
                         Err(e) => {
                             tracing::warn!(error = %e, "mls encrypt failed");
@@ -605,8 +616,7 @@ async fn run_host(
     // Background: accept new joiners. The accept loop runs in
     // parallel with the signaling dance below.
     let endpoint_for_accept = endpoint.clone();
-    let (incoming_tx, mut incoming_rx) =
-        mpsc::unbounded_channel::<quinn::Connection>();
+    let (incoming_tx, mut incoming_rx) = mpsc::unbounded_channel::<quinn::Connection>();
     let accept_handle = tokio::spawn(async move {
         while let Some(incoming) = endpoint_for_accept.accept().await {
             match incoming.await {
@@ -636,7 +646,10 @@ async fn run_host(
         // We need to map the sending device → user_id via keystore.
         let (from_device, msg) = recv_app_from_any(&mut sig, |d| {
             // Accept from any device that hasn't already joined.
-            !links.try_lock().map(|g| g.contains_key(&d)).unwrap_or(false)
+            !links
+                .try_lock()
+                .map(|g| g.contains_key(&d))
+                .unwrap_or(false)
         })
         .await?;
 
@@ -660,8 +673,8 @@ async fn run_host(
             hex::encode(&from_device.as_bytes()[..4])
         );
 
-        let kp = KeyPackage::from_bytes(&kp_bytes, &provider)
-            .map_err(|e| anyhow!("kp parse: {e}"))?;
+        let kp =
+            KeyPackage::from_bytes(&kp_bytes, &provider).map_err(|e| anyhow!("kp parse: {e}"))?;
         let outcome = {
             let mut g = group.lock().await;
             g.add_member(&provider, &mls_identity, kp)
@@ -669,14 +682,24 @@ async fn run_host(
         };
 
         // Send the welcome to the newcomer.
-        send_app(&sig, from_device, &AppSignal::Welcome(outcome.welcome.0.clone())).await?;
+        send_app(
+            &sig,
+            from_device,
+            &AppSignal::Welcome(outcome.welcome.0.clone()),
+        )
+        .await?;
 
         // Send the commit to each already-joined member so they
         // advance epoch.
         {
             let guard = links.lock().await;
             for (existing, _link) in guard.iter() {
-                send_app(&sig, *existing, &AppSignal::Commit(outcome.commit.0.clone())).await?;
+                send_app(
+                    &sig,
+                    *existing,
+                    &AppSignal::Commit(outcome.commit.0.clone()),
+                )
+                .await?;
             }
         }
 
@@ -689,7 +712,10 @@ async fn run_host(
         loop {
             let (from, msg) = recv_app_from(
                 &mut sig,
-                &[from_device].iter().copied().collect::<std::collections::HashSet<_>>(),
+                &[from_device]
+                    .iter()
+                    .copied()
+                    .collect::<std::collections::HashSet<_>>(),
             )
             .await?;
             if from == from_device {
@@ -795,10 +821,11 @@ async fn run_host(
                     .count_for_room(room_id_for_text)
                     .await
                     .unwrap_or(0);
-                let stored = match receiver.decode(&wire, &plaintext, sender_seq, UnixSeconds::now()) {
-                    Ok(s) => s,
-                    Err(_) => continue,
-                };
+                let stored =
+                    match receiver.decode(&wire, &plaintext, sender_seq, UnixSeconds::now()) {
+                        Ok(s) => s,
+                        Err(_) => continue,
+                    };
                 println!(
                     "[{}]: {}",
                     hex::encode(&stored.sender_device.as_bytes()[..4]),
@@ -857,7 +884,12 @@ async fn run_host(
     let identity_for_text_send = mls_identity.clone();
     let links_for_text_send = links.clone();
     let history_for_text_send = history.clone();
-    let local_head = history.most_recent(room_id).await.ok().flatten().map(|m| m.own_hash);
+    let local_head = history
+        .most_recent(room_id)
+        .await
+        .ok()
+        .flatten()
+        .map(|m| m.own_hash);
     let mut text_sender = TextSender::new(room_id, my_device_id, local_head);
     let text_send_handle = tokio::spawn(async move {
         use tokio::io::{AsyncBufReadExt, BufReader};
@@ -876,7 +908,11 @@ async fn run_host(
             let (wire, stored) = {
                 let mut g = group_for_text_send.lock().await;
                 let epoch = g.epoch();
-                let ct = match g.encrypt(&provider_for_text_send, &identity_for_text_send, &payload_bytes) {
+                let ct = match g.encrypt(
+                    &provider_for_text_send,
+                    &identity_for_text_send,
+                    &payload_bytes,
+                ) {
                     Ok(c) => c,
                     Err(_) => continue,
                 };
@@ -935,7 +971,9 @@ async fn run_joiner(
     }
     // Poll RoomState until the host's device appears online.
     let host_device = loop {
-        let stmt = client.room_state(room_id, &token, UnixSeconds::now()).await?;
+        let stmt = client
+            .room_state(room_id, &token, UnixSeconds::now())
+            .await?;
         let online: std::collections::HashSet<DeviceId> = match stmt.payload {
             CacheableServerStatement::RoomState { peer_hints, .. } => {
                 peer_hints.iter().map(|h| h.device).collect()
@@ -961,10 +999,15 @@ async fn run_joiner(
     };
 
     // MLS join dance.
-    let kp = KeyPackage::generate(&mls_identity, &provider)
-        .map_err(|e| anyhow!("kp generate: {e}"))?;
+    let kp =
+        KeyPackage::generate(&mls_identity, &provider).map_err(|e| anyhow!("kp generate: {e}"))?;
     send_app(&sig, host_device, &AppSignal::DevicePublicKey(device_pk.0)).await?;
-    send_app(&sig, host_device, &AppSignal::KeyPackage(kp.as_bytes().to_vec())).await?;
+    send_app(
+        &sig,
+        host_device,
+        &AppSignal::KeyPackage(kp.as_bytes().to_vec()),
+    )
+    .await?;
     send_app(&sig, host_device, &AppSignal::Address(advertise)).await?;
 
     let mut group: Option<Group> = None;
@@ -1010,7 +1053,8 @@ async fn run_joiner(
     println!("QUIC connected.");
 
     // Open the text bidi stream (we initiate).
-    let (mut text_send, mut text_recv) = conn.open_bi().await.map_err(|e| anyhow!("open_bi: {e}"))?;
+    let (mut text_send, mut text_recv) =
+        conn.open_bi().await.map_err(|e| anyhow!("open_bi: {e}"))?;
     text_send.write_all(&[0u8]).await.ok();
     let mut hello = [0u8; 1];
     text_recv.read_exact(&mut hello).await.ok();
@@ -1108,7 +1152,12 @@ async fn run_joiner(
 
     // Text loops.
     let text_history = history.clone();
-    let local_head = text_history.most_recent(room_id).await.ok().flatten().map(|m| m.own_hash);
+    let local_head = text_history
+        .most_recent(room_id)
+        .await
+        .ok()
+        .flatten()
+        .map(|m| m.own_hash);
     let mut text_sender = TextSender::new(room_id, my_device_id, local_head);
     let group_for_text_send = group.clone();
     let provider_for_text_send = provider.clone();
@@ -1131,7 +1180,11 @@ async fn run_joiner(
             let (wire, stored) = {
                 let mut g = group_for_text_send.lock().await;
                 let epoch = g.epoch();
-                let ct = match g.encrypt(&provider_for_text_send, &identity_for_text_send, &payload_bytes) {
+                let ct = match g.encrypt(
+                    &provider_for_text_send,
+                    &identity_for_text_send,
+                    &payload_bytes,
+                ) {
                     Ok(c) => c,
                     Err(_) => continue,
                 };
@@ -1170,11 +1223,10 @@ async fn run_joiner(
             if text_recv.read_exact(&mut payload).await.is_err() {
                 break;
             }
-            let wire: crocodile_protocol::text::TextMessage =
-                match postcard::from_bytes(&payload) {
-                    Ok(w) => w,
-                    Err(_) => continue,
-                };
+            let wire: crocodile_protocol::text::TextMessage = match postcard::from_bytes(&payload) {
+                Ok(w) => w,
+                Err(_) => continue,
+            };
             let pt = {
                 let mut g = group_for_text_recv.lock().await;
                 match g.decrypt(&provider_for_text_recv, &wire.ciphertext) {
@@ -1214,7 +1266,10 @@ async fn recv_app_from_any(
     accept: impl Fn(DeviceId) -> bool,
 ) -> Result<(DeviceId, AppSignal)> {
     loop {
-        let frame = sig.recv().await.ok_or_else(|| anyhow!("signaling closed"))?;
+        let frame = sig
+            .recv()
+            .await
+            .ok_or_else(|| anyhow!("signaling closed"))?;
         match frame {
             SignalingServerFrame::Delivered { from, payload } if accept(from) => {
                 let msg: AppSignal = postcard::from_bytes(&payload)?;
@@ -1287,12 +1342,7 @@ async fn create_room(server: &str, token: &str, name: &str) -> Result<RoomId> {
     Ok(RoomId::from_bytes(bytes))
 }
 
-async fn add_member_api(
-    server: &str,
-    token: &str,
-    room_id: RoomId,
-    user_id: UserId,
-) -> Result<()> {
+async fn add_member_api(server: &str, token: &str, room_id: RoomId, user_id: UserId) -> Result<()> {
     reqwest::Client::new()
         .post(format!(
             "{server}/v1/rooms/{}/members",
@@ -1329,15 +1379,17 @@ fn best_advertise_addr(server_url: &str, local_addr: SocketAddr) -> SocketAddr {
         .split('/')
         .next()
         .unwrap_or("8.8.8.8:80");
-    let server_target: Option<SocketAddr> = host_port
-        .to_socket_addrs()
-        .ok()
-        .and_then(|mut a| a.next());
+    let server_target: Option<SocketAddr> =
+        host_port.to_socket_addrs().ok().and_then(|mut a| a.next());
     let Some(target) = server_target else {
         return local_addr;
     };
 
-    let bind = if target.is_ipv6() { "[::]:0" } else { "0.0.0.0:0" };
+    let bind = if target.is_ipv6() {
+        "[::]:0"
+    } else {
+        "0.0.0.0:0"
+    };
     let Ok(probe) = std::net::UdpSocket::bind(bind) else {
         return local_addr;
     };

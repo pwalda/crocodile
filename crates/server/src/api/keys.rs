@@ -7,9 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use crocodile_protocol::envelope::SignedServerStatement;
 use crocodile_protocol::ids::UserId;
-use crocodile_protocol::keys::{
-    verify_identity_signature, DevicePublicKey, Signature,
-};
+use crocodile_protocol::keys::{verify_identity_signature, DevicePublicKey, Signature};
 use crocodile_protocol::signaling::CacheableServerStatement;
 
 use crate::api::auth_extract::AuthSession;
@@ -166,11 +164,10 @@ fn parse_signature(s: &str) -> Result<Signature, ApiError> {
 }
 
 fn parse_user_id(s: &str) -> Result<UserId, ApiError> {
-    let bytes =
-        hex::decode(s).map_err(|_| ApiError::BadRequest("user_id is not hex".into()))?;
-    let arr: [u8; 32] = bytes
-        .try_into()
-        .map_err(|v: Vec<u8>| ApiError::BadRequest(format!("user_id must be 32 bytes, got {}", v.len())))?;
+    let bytes = hex::decode(s).map_err(|_| ApiError::BadRequest("user_id is not hex".into()))?;
+    let arr: [u8; 32] = bytes.try_into().map_err(|v: Vec<u8>| {
+        ApiError::BadRequest(format!("user_id must be 32 bytes, got {}", v.len()))
+    })?;
     Ok(UserId::from_bytes(arr))
 }
 

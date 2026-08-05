@@ -163,7 +163,7 @@ mod tests {
         let mut jb = JitterBuffer::new(5);
         jb.push(0, vec![1]);
         assert_eq!(jb.pop(), Some(vec![1])); // head advances to 1
-        // a stragger arrives for already-played slot
+                                             // a stragger arrives for already-played slot
         let kept = jb.push(0, vec![99]);
         assert!(!kept);
     }

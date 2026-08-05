@@ -116,31 +116,35 @@ impl TextHistory {
         before: Option<UnixSeconds>,
     ) -> Result<Vec<StoredTextMessage>, CacheError> {
         let rows: Vec<HistoryRow> = match before {
-            None => sqlx::query_as::<_, HistoryRow>(
-                r#"SELECT room_id, sender_device, sender_seq, sent_at, received_at,
+            None => {
+                sqlx::query_as::<_, HistoryRow>(
+                    r#"SELECT room_id, sender_device, sender_seq, sent_at, received_at,
                           prev_hash, own_hash, in_reply_to, body
                    FROM text_messages
                    WHERE room_id = ?1
                    ORDER BY sent_at DESC, sender_device, sender_seq DESC
                    LIMIT ?2"#,
-            )
-            .bind(room.as_bytes().as_slice())
-            .bind(limit as i64)
-            .fetch_all(&self.pool)
-            .await?,
-            Some(before) => sqlx::query_as::<_, HistoryRow>(
-                r#"SELECT room_id, sender_device, sender_seq, sent_at, received_at,
+                )
+                .bind(room.as_bytes().as_slice())
+                .bind(limit as i64)
+                .fetch_all(&self.pool)
+                .await?
+            }
+            Some(before) => {
+                sqlx::query_as::<_, HistoryRow>(
+                    r#"SELECT room_id, sender_device, sender_seq, sent_at, received_at,
                           prev_hash, own_hash, in_reply_to, body
                    FROM text_messages
                    WHERE room_id = ?1 AND sent_at < ?2
                    ORDER BY sent_at DESC, sender_device, sender_seq DESC
                    LIMIT ?3"#,
-            )
-            .bind(room.as_bytes().as_slice())
-            .bind(before.get())
-            .bind(limit as i64)
-            .fetch_all(&self.pool)
-            .await?,
+                )
+                .bind(room.as_bytes().as_slice())
+                .bind(before.get())
+                .bind(limit as i64)
+                .fetch_all(&self.pool)
+                .await?
+            }
         };
         Ok(rows.into_iter().map(StoredTextMessage::from).collect())
     }
@@ -164,10 +168,7 @@ impl TextHistory {
 
     /// Return the most-recently-received message in a room, if any —
     /// useful as a sync waypoint when reconnecting.
-    pub async fn most_recent(
-        &self,
-        room: RoomId,
-    ) -> Result<Option<StoredTextMessage>, CacheError> {
+    pub async fn most_recent(&self, room: RoomId) -> Result<Option<StoredTextMessage>, CacheError> {
         let row: Option<HistoryRow> = sqlx::query_as(
             r#"SELECT room_id, sender_device, sender_seq, sent_at, received_at,
                       prev_hash, own_hash, in_reply_to, body
@@ -255,7 +256,10 @@ mod tests {
         let h = TextHistory::open_in_memory().await.unwrap();
         assert!(h.store(&msg(1, 9, 0, 100, "hi")).await.unwrap());
         assert!(h.store(&msg(1, 9, 1, 110, "there")).await.unwrap());
-        assert_eq!(h.count_for_room(RoomId::from_bytes([1; 32])).await.unwrap(), 2);
+        assert_eq!(
+            h.count_for_room(RoomId::from_bytes([1; 32])).await.unwrap(),
+            2
+        );
     }
 
     #[tokio::test]
@@ -274,7 +278,10 @@ mod tests {
         h.store(&msg(1, 9, 1, 200, "second")).await.unwrap();
         h.store(&msg(1, 9, 2, 300, "third")).await.unwrap();
 
-        let recent = h.list_recent(RoomId::from_bytes([1; 32]), 10, None).await.unwrap();
+        let recent = h
+            .list_recent(RoomId::from_bytes([1; 32]), 10, None)
+            .await
+            .unwrap();
         assert_eq!(recent.len(), 3);
         assert_eq!(recent[0].body, "third");
         assert_eq!(recent[2].body, "first");
@@ -284,7 +291,9 @@ mod tests {
     async fn list_recent_paginates_with_before() {
         let h = TextHistory::open_in_memory().await.unwrap();
         for (seq, t) in (0..5u64).zip([100, 200, 300, 400, 500]) {
-            h.store(&msg(1, 9, seq, t, &format!("m{seq}"))).await.unwrap();
+            h.store(&msg(1, 9, seq, t, &format!("m{seq}")))
+                .await
+                .unwrap();
         }
         let page = h
             .list_recent(RoomId::from_bytes([1; 32]), 2, Some(UnixSeconds(400)))
@@ -306,7 +315,11 @@ mod tests {
         h.store(&older).await.unwrap();
         h.store(&newer).await.unwrap();
 
-        let mr = h.most_recent(RoomId::from_bytes([1; 32])).await.unwrap().unwrap();
+        let mr = h
+            .most_recent(RoomId::from_bytes([1; 32]))
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(mr.body, "new");
     }
 
@@ -316,8 +329,14 @@ mod tests {
         h.store(&msg(1, 9, 0, 100, "in-room-1")).await.unwrap();
         h.store(&msg(2, 9, 0, 100, "in-room-2")).await.unwrap();
 
-        let r1 = h.list_recent(RoomId::from_bytes([1; 32]), 10, None).await.unwrap();
-        let r2 = h.list_recent(RoomId::from_bytes([2; 32]), 10, None).await.unwrap();
+        let r1 = h
+            .list_recent(RoomId::from_bytes([1; 32]), 10, None)
+            .await
+            .unwrap();
+        let r2 = h
+            .list_recent(RoomId::from_bytes([2; 32]), 10, None)
+            .await
+            .unwrap();
         assert_eq!(r1.len(), 1);
         assert_eq!(r2.len(), 1);
         assert_eq!(r1[0].body, "in-room-1");

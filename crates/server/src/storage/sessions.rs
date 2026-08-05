@@ -8,7 +8,11 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 /// Insert a new session for an account.
-pub async fn insert(pool: &PgPool, token_hash: &[u8; 32], account_id: Uuid) -> Result<(), sqlx::Error> {
+pub async fn insert(
+    pool: &PgPool,
+    token_hash: &[u8; 32],
+    account_id: Uuid,
+) -> Result<(), sqlx::Error> {
     sqlx::query(
         r#"
         INSERT INTO sessions (token_hash, account_id)

@@ -482,25 +482,44 @@ mod tests {
         let mut st = ElectionState::new(me).with_rounds_to_swap(3);
 
         // Round 0: alice is host.
-        st.record_vector(qv(alice, 20_000, 20_000, 50, NatType::Open, 3600, 100), UnixSeconds(100));
-        st.record_vector(qv(bob, 5_000, 5_000, 50, NatType::Open, 3600, 100), UnixSeconds(100));
+        st.record_vector(
+            qv(alice, 20_000, 20_000, 50, NatType::Open, 3600, 100),
+            UnixSeconds(100),
+        );
+        st.record_vector(
+            qv(bob, 5_000, 5_000, 50, NatType::Open, 3600, 100),
+            UnixSeconds(100),
+        );
         let _ = st.tick(UnixSeconds(100));
 
         // Bob's quality jumps; he should challenge but not win immediately.
-        st.record_vector(qv(bob, 30_000, 30_000, 50, NatType::Open, 3600, 110), UnixSeconds(110));
+        st.record_vector(
+            qv(bob, 30_000, 30_000, 50, NatType::Open, 3600, 110),
+            UnixSeconds(110),
+        );
 
         // Round 1: challenger present, no swap yet.
         let events = st.tick(UnixSeconds(110));
-        assert!(!events.iter().any(|e| matches!(e, ElectionEvent::HostChanged { .. })));
+        assert!(!events
+            .iter()
+            .any(|e| matches!(e, ElectionEvent::HostChanged { .. })));
         assert_eq!(st.current_host(), Some(alice));
 
         // Round 2: still no swap.
-        st.record_vector(qv(bob, 30_000, 30_000, 50, NatType::Open, 3600, 120), UnixSeconds(120));
+        st.record_vector(
+            qv(bob, 30_000, 30_000, 50, NatType::Open, 3600, 120),
+            UnixSeconds(120),
+        );
         let events = st.tick(UnixSeconds(120));
-        assert!(!events.iter().any(|e| matches!(e, ElectionEvent::HostChanged { .. })));
+        assert!(!events
+            .iter()
+            .any(|e| matches!(e, ElectionEvent::HostChanged { .. })));
 
         // Round 3: swap commits.
-        st.record_vector(qv(bob, 30_000, 30_000, 50, NatType::Open, 3600, 130), UnixSeconds(130));
+        st.record_vector(
+            qv(bob, 30_000, 30_000, 50, NatType::Open, 3600, 130),
+            UnixSeconds(130),
+        );
         let events = st.tick(UnixSeconds(130));
         assert!(events.iter().any(|e| matches!(
             e,
@@ -520,23 +539,44 @@ mod tests {
         let carol = device(4);
         let mut st = ElectionState::new(me).with_rounds_to_swap(3);
 
-        st.record_vector(qv(alice, 20_000, 20_000, 50, NatType::Open, 3600, 100), UnixSeconds(100));
-        st.record_vector(qv(bob, 5_000, 5_000, 50, NatType::Open, 3600, 100), UnixSeconds(100));
-        st.record_vector(qv(carol, 5_000, 5_000, 50, NatType::Open, 3600, 100), UnixSeconds(100));
+        st.record_vector(
+            qv(alice, 20_000, 20_000, 50, NatType::Open, 3600, 100),
+            UnixSeconds(100),
+        );
+        st.record_vector(
+            qv(bob, 5_000, 5_000, 50, NatType::Open, 3600, 100),
+            UnixSeconds(100),
+        );
+        st.record_vector(
+            qv(carol, 5_000, 5_000, 50, NatType::Open, 3600, 100),
+            UnixSeconds(100),
+        );
         let _ = st.tick(UnixSeconds(100));
         assert_eq!(st.current_host(), Some(alice));
 
         // Round 1: bob has the lead.
-        st.record_vector(qv(bob, 30_000, 30_000, 50, NatType::Open, 3600, 110), UnixSeconds(110));
+        st.record_vector(
+            qv(bob, 30_000, 30_000, 50, NatType::Open, 3600, 110),
+            UnixSeconds(110),
+        );
         let _ = st.tick(UnixSeconds(110));
 
         // Round 2: carol leads (different challenger) — bob's counter resets.
-        st.record_vector(qv(bob, 5_000, 5_000, 50, NatType::Open, 3600, 120), UnixSeconds(120));
-        st.record_vector(qv(carol, 30_000, 30_000, 50, NatType::Open, 3600, 120), UnixSeconds(120));
+        st.record_vector(
+            qv(bob, 5_000, 5_000, 50, NatType::Open, 3600, 120),
+            UnixSeconds(120),
+        );
+        st.record_vector(
+            qv(carol, 30_000, 30_000, 50, NatType::Open, 3600, 120),
+            UnixSeconds(120),
+        );
         let _ = st.tick(UnixSeconds(120));
 
         // Round 3: alice still on top because no challenger has held lead long enough.
-        st.record_vector(qv(carol, 5_000, 5_000, 50, NatType::Open, 3600, 130), UnixSeconds(130));
+        st.record_vector(
+            qv(carol, 5_000, 5_000, 50, NatType::Open, 3600, 130),
+            UnixSeconds(130),
+        );
         let _ = st.tick(UnixSeconds(130));
 
         assert_eq!(st.current_host(), Some(alice));
@@ -550,13 +590,22 @@ mod tests {
         // Generous staleness window for determinism.
         let mut st = ElectionState::new(me).with_stale_after(Duration::from_secs(30));
 
-        st.record_vector(qv(alice, 20_000, 20_000, 50, NatType::Open, 3600, 100), UnixSeconds(100));
-        st.record_vector(qv(bob, 5_000, 5_000, 50, NatType::Open, 3600, 100), UnixSeconds(100));
+        st.record_vector(
+            qv(alice, 20_000, 20_000, 50, NatType::Open, 3600, 100),
+            UnixSeconds(100),
+        );
+        st.record_vector(
+            qv(bob, 5_000, 5_000, 50, NatType::Open, 3600, 100),
+            UnixSeconds(100),
+        );
         let _ = st.tick(UnixSeconds(100));
         assert_eq!(st.current_host(), Some(alice));
 
         // 60 s later, alice's vector is stale; only bob remains active.
-        st.record_vector(qv(bob, 5_000, 5_000, 50, NatType::Open, 3600, 160), UnixSeconds(160));
+        st.record_vector(
+            qv(bob, 5_000, 5_000, 50, NatType::Open, 3600, 160),
+            UnixSeconds(160),
+        );
         let events = st.tick(UnixSeconds(160));
 
         assert!(events.iter().any(|e| matches!(
@@ -575,8 +624,14 @@ mod tests {
         let alice = device(2);
         let bob = device(3);
         let mut st = ElectionState::new(me);
-        st.record_vector(qv(alice, 20_000, 20_000, 50, NatType::Open, 3600, 100), UnixSeconds(100));
-        st.record_vector(qv(bob, 10_000, 30_000, 50, NatType::Open, 3600, 100), UnixSeconds(100));
+        st.record_vector(
+            qv(alice, 20_000, 20_000, 50, NatType::Open, 3600, 100),
+            UnixSeconds(100),
+        );
+        st.record_vector(
+            qv(bob, 10_000, 30_000, 50, NatType::Open, 3600, 100),
+            UnixSeconds(100),
+        );
         let _ = st.tick(UnixSeconds(100));
         assert_eq!(st.current_host(), Some(alice));
         assert_eq!(st.current_shadow(), Some(bob));
@@ -602,9 +657,18 @@ mod tests {
         let carol = device(4);
         let mut st = ElectionState::new(me).with_stale_after(Duration::from_secs(120));
 
-        st.record_vector(qv(alice, 30_000, 30_000, 50, NatType::Open, 3600, 100), UnixSeconds(100));
-        st.record_vector(qv(bob, 10_000, 10_000, 50, NatType::Open, 3600, 100), UnixSeconds(100));
-        st.record_vector(qv(carol, 5_000, 5_000, 50, NatType::Open, 3600, 100), UnixSeconds(100));
+        st.record_vector(
+            qv(alice, 30_000, 30_000, 50, NatType::Open, 3600, 100),
+            UnixSeconds(100),
+        );
+        st.record_vector(
+            qv(bob, 10_000, 10_000, 50, NatType::Open, 3600, 100),
+            UnixSeconds(100),
+        );
+        st.record_vector(
+            qv(carol, 5_000, 5_000, 50, NatType::Open, 3600, 100),
+            UnixSeconds(100),
+        );
         let _ = st.tick(UnixSeconds(100));
         assert_eq!(st.current_host(), Some(alice));
 
@@ -650,7 +714,9 @@ mod tests {
         st.record_vector(vector, UnixSeconds(100));
         let events = st.tick(UnixSeconds(100));
 
-        assert!(events.iter().any(|e| matches!(e, ElectionEvent::NoViableHost)));
+        assert!(events
+            .iter()
+            .any(|e| matches!(e, ElectionEvent::NoViableHost)));
         assert_eq!(st.current_host(), None);
     }
 }

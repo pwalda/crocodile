@@ -86,7 +86,11 @@ async fn run_socket(mut socket: WebSocket, state: AppState, auth: AuthSession) {
             return;
         }
     };
-    if socket.send(Message::Binary(welcome_bytes.into())).await.is_err() {
+    if socket
+        .send(Message::Binary(welcome_bytes.into()))
+        .await
+        .is_err()
+    {
         state.signaling.deregister(device_id).await;
         return;
     }
@@ -140,8 +144,8 @@ async fn recv_identify(socket: &mut WebSocket) -> Result<DeviceId, String> {
         Message::Binary(b) => b,
         _ => return Err("first frame must be binary".into()),
     };
-    let frame: SignalingClientFrame = postcard::from_bytes(&bytes)
-        .map_err(|e| format!("decode error: {e}"))?;
+    let frame: SignalingClientFrame =
+        postcard::from_bytes(&bytes).map_err(|e| format!("decode error: {e}"))?;
     match frame {
         SignalingClientFrame::Identify { device_id } => Ok(device_id),
         _ => Err("first frame must be Identify".into()),
@@ -153,13 +157,12 @@ async fn device_belongs_to(
     device: DeviceId,
     account_id: uuid::Uuid,
 ) -> Result<bool, sqlx::Error> {
-    let exists: Option<i32> = sqlx::query_scalar(
-        "SELECT 1 FROM devices WHERE device_id = $1 AND account_id = $2",
-    )
-    .bind(device.as_bytes().as_slice())
-    .bind(account_id)
-    .fetch_optional(pool)
-    .await?;
+    let exists: Option<i32> =
+        sqlx::query_scalar("SELECT 1 FROM devices WHERE device_id = $1 AND account_id = $2")
+            .bind(device.as_bytes().as_slice())
+            .bind(account_id)
+            .fetch_optional(pool)
+            .await?;
     Ok(exists.is_some())
 }
 
@@ -182,8 +185,7 @@ async fn handle_client_frame(
                 payload,
             };
             let env = Envelope {
-                bytes: postcard::to_stdvec(&delivered)
-                    .map_err(|e| format!("encode error: {e}"))?,
+                bytes: postcard::to_stdvec(&delivered).map_err(|e| format!("encode error: {e}"))?,
             };
             match state.signaling.deliver(to, env).await {
                 crate::signaling::DeliveryOutcome::Delivered => Ok(()),

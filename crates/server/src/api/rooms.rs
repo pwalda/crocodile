@@ -53,8 +53,13 @@ pub async fn create_room(
         )));
     }
 
-    let room_id =
-        rooms::create(state.storage.pool(), &req.name, &req.description, auth.account_id).await?;
+    let room_id = rooms::create(
+        state.storage.pool(),
+        &req.name,
+        &req.description,
+        auth.account_id,
+    )
+    .await?;
 
     Ok((
         StatusCode::CREATED,
@@ -109,12 +114,8 @@ pub async fn get_room_state(
 // lands properly in a follow-up. For now we return online members with
 // a placeholder address so the wire shape is stable.
 async fn build_peer_hints(state: &AppState, room_id: RoomId) -> Vec<PeerHint> {
-    let online: std::collections::HashSet<DeviceId> = state
-        .signaling
-        .online_devices()
-        .await
-        .into_iter()
-        .collect();
+    let online: std::collections::HashSet<DeviceId> =
+        state.signaling.online_devices().await.into_iter().collect();
     if online.is_empty() {
         return vec![];
     }
@@ -221,11 +222,7 @@ pub async fn remove_member(
     }
 }
 
-async fn require_admin(
-    state: &AppState,
-    room_id: RoomId,
-    account_id: uuid::Uuid,
-) -> ApiResult<()> {
+async fn require_admin(state: &AppState, room_id: RoomId, account_id: uuid::Uuid) -> ApiResult<()> {
     let role = rooms::role_of(state.storage.pool(), room_id, account_id).await?;
     match role {
         Some(RoomRole::Admin) | Some(RoomRole::Owner) => Ok(()),
@@ -346,26 +343,27 @@ async fn lookup_device_pubkey(
             .fetch_optional(pool)
             .await?;
     Ok(row.map(|(b,)| {
-        DevicePublicKey(b.try_into().expect("device_public_key column must be 32 bytes"))
+        DevicePublicKey(
+            b.try_into()
+                .expect("device_public_key column must be 32 bytes"),
+        )
     }))
 }
 
 // ---------- Helpers ----------
 
 fn parse_room_id(s: &str) -> Result<RoomId, ApiError> {
-    let bytes =
-        hex::decode(s).map_err(|_| ApiError::BadRequest("room_id is not hex".into()))?;
-    let arr: [u8; 32] = bytes
-        .try_into()
-        .map_err(|v: Vec<u8>| ApiError::BadRequest(format!("room_id must be 32 bytes, got {}", v.len())))?;
+    let bytes = hex::decode(s).map_err(|_| ApiError::BadRequest("room_id is not hex".into()))?;
+    let arr: [u8; 32] = bytes.try_into().map_err(|v: Vec<u8>| {
+        ApiError::BadRequest(format!("room_id must be 32 bytes, got {}", v.len()))
+    })?;
     Ok(RoomId::from_bytes(arr))
 }
 
 fn parse_user_id(s: &str) -> Result<UserId, ApiError> {
-    let bytes =
-        hex::decode(s).map_err(|_| ApiError::BadRequest("user_id is not hex".into()))?;
-    let arr: [u8; 32] = bytes
-        .try_into()
-        .map_err(|v: Vec<u8>| ApiError::BadRequest(format!("user_id must be 32 bytes, got {}", v.len())))?;
+    let bytes = hex::decode(s).map_err(|_| ApiError::BadRequest("user_id is not hex".into()))?;
+    let arr: [u8; 32] = bytes.try_into().map_err(|v: Vec<u8>| {
+        ApiError::BadRequest(format!("user_id must be 32 bytes, got {}", v.len()))
+    })?;
     Ok(UserId::from_bytes(arr))
 }

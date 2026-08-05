@@ -85,10 +85,7 @@ impl ComplaintTracker {
 
     /// Number of distinct complainants against `host_clock`.
     pub fn count_for(&self, host_clock: u64) -> usize {
-        self.by_clock
-            .get(&host_clock)
-            .map(|s| s.len())
-            .unwrap_or(0)
+        self.by_clock.get(&host_clock).map(|s| s.len()).unwrap_or(0)
     }
 
     /// Forget complaints for clocks ≤ `up_to_clock` (called after a
@@ -222,20 +219,13 @@ impl FailoverDetector {
     ///
     /// `total_members` is used for the complaint-fraction
     /// computation; pass the room's current member count.
-    pub fn check(
-        &mut self,
-        now: UnixSeconds,
-        total_members: usize,
-    ) -> Option<FailoverTrigger> {
+    pub fn check(&mut self, now: UnixSeconds, total_members: usize) -> Option<FailoverTrigger> {
         let host = self.current_host?;
         let host_clock = self.current_host_clock?;
 
         // Keepalive timeout first — it's the more decisive signal.
         if let Some(last) = self.last_keepalive_at {
-            let elapsed = now
-                .get()
-                .saturating_sub(last.get())
-                .max(0);
+            let elapsed = now.get().saturating_sub(last.get()).max(0);
             // UnixSeconds is at second resolution; treat any non-zero
             // difference past the second cutoff as elapsed. Sub-second
             // resolution would need a finer clock — out of scope here.
@@ -275,8 +265,7 @@ mod tests {
     #[test]
     fn keepalive_silence_triggers_timeout() {
         let host = device(1);
-        let mut fd = FailoverDetector::new()
-            .with_keepalive_timeout(Duration::from_secs(2));
+        let mut fd = FailoverDetector::new().with_keepalive_timeout(Duration::from_secs(2));
         fd.host_changed(host, 1, UnixSeconds(100));
 
         // 1 s later: still within window.
@@ -284,14 +273,16 @@ mod tests {
 
         // 2 s later: timeout fires.
         let trigger = fd.check(UnixSeconds(102), 3);
-        assert!(matches!(trigger, Some(FailoverTrigger::KeepaliveTimeout { .. })));
+        assert!(matches!(
+            trigger,
+            Some(FailoverTrigger::KeepaliveTimeout { .. })
+        ));
     }
 
     #[test]
     fn keepalive_arrival_resets_timer() {
         let host = device(1);
-        let mut fd = FailoverDetector::new()
-            .with_keepalive_timeout(Duration::from_secs(2));
+        let mut fd = FailoverDetector::new().with_keepalive_timeout(Duration::from_secs(2));
         fd.host_changed(host, 1, UnixSeconds(100));
 
         // Keepalive at t=101 keeps us alive.
@@ -300,21 +291,26 @@ mod tests {
 
         // Now silence — fires at t=103 (101 + 2s).
         let trigger = fd.check(UnixSeconds(103), 3);
-        assert!(matches!(trigger, Some(FailoverTrigger::KeepaliveTimeout { .. })));
+        assert!(matches!(
+            trigger,
+            Some(FailoverTrigger::KeepaliveTimeout { .. })
+        ));
     }
 
     #[test]
     fn stale_keepalive_is_ignored() {
         let host = device(1);
-        let mut fd = FailoverDetector::new()
-            .with_keepalive_timeout(Duration::from_secs(2));
+        let mut fd = FailoverDetector::new().with_keepalive_timeout(Duration::from_secs(2));
         fd.host_changed(host, 5, UnixSeconds(100));
 
         // Deposed host shouts with old clock — must not extend our
         // patience.
         fd.record_keepalive(host, 3, UnixSeconds(101));
         let trigger = fd.check(UnixSeconds(102), 3);
-        assert!(matches!(trigger, Some(FailoverTrigger::KeepaliveTimeout { .. })));
+        assert!(matches!(
+            trigger,
+            Some(FailoverTrigger::KeepaliveTimeout { .. })
+        ));
     }
 
     #[test]
@@ -332,7 +328,10 @@ mod tests {
         let trigger = fd.check(UnixSeconds(101), 10);
         assert!(matches!(
             trigger,
-            Some(FailoverTrigger::ComplaintThresholdReached { complaint_count: 3, .. })
+            Some(FailoverTrigger::ComplaintThresholdReached {
+                complaint_count: 3,
+                ..
+            })
         ));
     }
 
@@ -367,8 +366,7 @@ mod tests {
     fn host_change_clears_old_complaints() {
         let host_a = device(1);
         let host_b = device(2);
-        let mut fd = FailoverDetector::new()
-            .with_keepalive_timeout(Duration::from_secs(3600));
+        let mut fd = FailoverDetector::new().with_keepalive_timeout(Duration::from_secs(3600));
         fd.host_changed(host_a, 1, UnixSeconds(100));
 
         fd.record_complaint(device(3), 1, ComplaintReason::Loss);

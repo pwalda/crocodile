@@ -49,7 +49,10 @@ async fn spawn_server() -> Option<TestServer> {
         }
     };
 
-    sqlx::migrate!("./migrations").run(&pool).await.expect("migrations");
+    sqlx::migrate!("./migrations")
+        .run(&pool)
+        .await
+        .expect("migrations");
 
     // Generate a fresh identity per server spawn so tests don't share
     // a key file with anyone else.
@@ -68,7 +71,9 @@ async fn spawn_server() -> Option<TestServer> {
     let server_pubkey = state.identity.public_key();
     let app = build_router(state);
 
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind");
     let addr: SocketAddr = listener.local_addr().expect("local_addr");
     let base_url = format!("http://{addr}");
 
@@ -156,7 +161,12 @@ async fn full_flow_signup_login_keystore_room_history() {
         .send()
         .await
         .expect("publish device key");
-    assert_eq!(resp.status(), 201, "device pub body: {:?}", resp.text().await);
+    assert_eq!(
+        resp.status(),
+        201,
+        "device pub body: {:?}",
+        resp.text().await
+    );
 
     // ---- Fetch Alice's keystore as a SignedServerStatement and verify ----
     let resp = client
@@ -199,17 +209,16 @@ async fn full_flow_signup_login_keystore_room_history() {
         .await
         .expect("create room");
     assert_eq!(resp.status(), 201);
-    let room_id_hex = resp
-        .json::<serde_json::Value>()
-        .await
-        .expect("json")
-        ["room_id_hex"]
+    let room_id_hex = resp.json::<serde_json::Value>().await.expect("json")["room_id_hex"]
         .as_str()
         .expect("room_id_hex string")
         .to_string();
 
     let resp = client
-        .post(format!("{}/v1/rooms/{}/members", server.base_url, room_id_hex))
+        .post(format!(
+            "{}/v1/rooms/{}/members",
+            server.base_url, room_id_hex
+        ))
         .bearer_auth(&alice_token)
         .json(&json!({ "user_id_hex": hex::encode(bob_user_id.as_bytes()) }))
         .send()
@@ -248,10 +257,7 @@ async fn full_flow_signup_login_keystore_room_history() {
     let posted_at = UnixSeconds::now();
     let signing_input = postcard::to_stdvec(&(
         &crocodile_protocol::ids::RoomId::from_bytes(
-            hex::decode(&room_id_hex)
-                .unwrap()
-                .try_into()
-                .unwrap(),
+            hex::decode(&room_id_hex).unwrap().try_into().unwrap(),
         ),
         &crocodile_protocol::history::MessageHash(head_hash),
         1u64,
@@ -277,7 +283,12 @@ async fn full_flow_signup_login_keystore_room_history() {
         .send()
         .await
         .expect("post head");
-    assert_eq!(resp.status(), 201, "head post body: {:?}", resp.text().await);
+    assert_eq!(
+        resp.status(),
+        201,
+        "head post body: {:?}",
+        resp.text().await
+    );
 
     // ---- Re-posting an older head must be rejected ----
     let resp = client

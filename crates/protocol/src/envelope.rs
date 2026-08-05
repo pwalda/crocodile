@@ -154,7 +154,10 @@ mod tests {
 
     #[test]
     fn versioned_envelope_roundtrip() {
-        let env = VersionedEnvelope::new(DummyPayload { n: 7, s: "hi".into() });
+        let env = VersionedEnvelope::new(DummyPayload {
+            n: 7,
+            s: "hi".into(),
+        });
         let bytes = postcard::to_stdvec(&env).unwrap();
         let decoded: VersionedEnvelope<DummyPayload> = postcard::from_bytes(&bytes).unwrap();
         assert_eq!(env, decoded);
@@ -182,7 +185,10 @@ mod tests {
         let issued_at = UnixSeconds(1_000_000);
         let expires_at = UnixSeconds(1_000_000 + 48 * 3600);
 
-        let payload = DummyPayload { n: 1, s: "ok".into() };
+        let payload = DummyPayload {
+            n: 1,
+            s: "ok".into(),
+        };
         let mut stmt = SignedServerStatement {
             server_id: ServerId::from_bytes([1; 32]),
             issued_at,
@@ -193,7 +199,8 @@ mod tests {
         stmt.signature = server.sign(&stmt.signing_input().unwrap());
 
         // Within the window: ok.
-        stmt.verify(&server.public_key(), UnixSeconds(1_000_100)).unwrap();
+        stmt.verify(&server.public_key(), UnixSeconds(1_000_100))
+            .unwrap();
         // At exact expiry: still ok.
         stmt.verify(&server.public_key(), expires_at).unwrap();
         // Past expiry: rejected.
@@ -208,7 +215,10 @@ mod tests {
             server_id: ServerId::from_bytes([2; 32]),
             issued_at: UnixSeconds(0),
             expires_at: UnixSeconds(i64::MAX / 2),
-            payload: DummyPayload { n: 1, s: "a".into() },
+            payload: DummyPayload {
+                n: 1,
+                s: "a".into(),
+            },
             signature: Signature([0; 64]),
         };
         stmt.signature = server.sign(&stmt.signing_input().unwrap());
@@ -226,7 +236,10 @@ mod tests {
             sender: DeviceId::from_bytes([3; 32]),
             seq: 42,
             timestamp: UnixSeconds(123),
-            payload: DummyPayload { n: 9, s: "peer".into() },
+            payload: DummyPayload {
+                n: 9,
+                s: "peer".into(),
+            },
             signature: Signature([0; 64]),
         };
         msg.signature = device.sign(&msg.signing_input().unwrap());

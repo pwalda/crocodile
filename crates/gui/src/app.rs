@@ -190,7 +190,10 @@ impl CrocodileApp {
         let settings = self.settings.clone();
         let invite = self.invite_username.trim().to_string();
         if invite.is_empty() {
-            self.append_log("error", "enter an invitee username before starting a host call");
+            self.append_log(
+                "error",
+                "enter an invitee username before starting a host call",
+            );
             return;
         }
         if settings.username.is_empty() || settings.password.is_empty() {
@@ -285,23 +288,25 @@ impl eframe::App for CrocodileApp {
 impl CrocodileApp {
     fn draw_settings(&mut self, ui: &mut egui::Ui) {
         ui.heading("Account");
-        egui::Grid::new("account-grid").num_columns(2).show(ui, |ui| {
-            ui.label("Server URL:");
-            ui.text_edit_singleline(&mut self.settings.server);
-            ui.end_row();
+        egui::Grid::new("account-grid")
+            .num_columns(2)
+            .show(ui, |ui| {
+                ui.label("Server URL:");
+                ui.text_edit_singleline(&mut self.settings.server);
+                ui.end_row();
 
-            ui.label("Username:");
-            ui.text_edit_singleline(&mut self.settings.username);
-            ui.end_row();
+                ui.label("Username:");
+                ui.text_edit_singleline(&mut self.settings.username);
+                ui.end_row();
 
-            ui.label("Password:");
-            ui.add(egui::TextEdit::singleline(&mut self.settings.password).password(true));
-            ui.end_row();
+                ui.label("Password:");
+                ui.add(egui::TextEdit::singleline(&mut self.settings.password).password(true));
+                ui.end_row();
 
-            ui.label("State dir:");
-            ui.text_edit_singleline(&mut self.settings.state_dir);
-            ui.end_row();
-        });
+                ui.label("State dir:");
+                ui.text_edit_singleline(&mut self.settings.state_dir);
+                ui.end_row();
+            });
 
         ui.add_space(8.0);
         ui.collapsing("Network (advanced)", |ui| {
@@ -335,7 +340,11 @@ impl CrocodileApp {
 
     fn draw_call(&mut self, ui: &mut egui::Ui) {
         let in_call = self.call.is_some();
-        ui.heading(if in_call { "Active call" } else { "Start or join a call" });
+        ui.heading(if in_call {
+            "Active call"
+        } else {
+            "Start or join a call"
+        });
 
         if !in_call {
             ui.add_space(6.0);
@@ -405,9 +414,7 @@ impl CrocodileApp {
 
         ui.separator();
         ui.horizontal(|ui| {
-            let send_clicked = ui
-                .add_enabled(in_call, egui::Button::new("Send"))
-                .clicked();
+            let send_clicked = ui.add_enabled(in_call, egui::Button::new("Send")).clicked();
             let textbox = ui.add_enabled(
                 in_call,
                 egui::TextEdit::singleline(&mut self.chat_input).desired_width(f32::INFINITY),

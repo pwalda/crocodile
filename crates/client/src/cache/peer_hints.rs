@@ -59,7 +59,10 @@ pub struct PeerHintsRegistry {
 
 impl Default for PeerHintsRegistry {
     fn default() -> Self {
-        Self::new(DEFAULT_MAX_PER_ROOM, Duration::from_secs(DEFAULT_MAX_AGE_SECS as u64))
+        Self::new(
+            DEFAULT_MAX_PER_ROOM,
+            Duration::from_secs(DEFAULT_MAX_AGE_SECS as u64),
+        )
     }
 }
 
@@ -202,11 +205,7 @@ mod tests {
         }
     }
 
-    fn sign_hint(
-        kp: &DeviceKeypair,
-        room: RoomId,
-        last_seen: UnixSeconds,
-    ) -> SignedPeerHint {
+    fn sign_hint(kp: &DeviceKeypair, room: RoomId, last_seen: UnixSeconds) -> SignedPeerHint {
         let device = device_id_from_public_key(&kp.public_key());
         let hint = PeerHint {
             device,
@@ -233,7 +232,9 @@ mod tests {
         let kp = DeviceKeypair::generate(&mut OsRng);
         let signed = sign_hint(&kp, room(1), UnixSeconds(1000));
 
-        let stored = reg.ingest(signed, &kp.public_key(), UnixSeconds(1000)).unwrap();
+        let stored = reg
+            .ingest(signed, &kp.public_key(), UnixSeconds(1000))
+            .unwrap();
         assert!(stored);
         assert_eq!(reg.count_for_room(room(1)), 1);
     }
@@ -257,8 +258,11 @@ mod tests {
         let newer = sign_hint(&kp, room(1), UnixSeconds(2000));
         let older = sign_hint(&kp, room(1), UnixSeconds(1000));
 
-        reg.ingest(newer, &kp.public_key(), UnixSeconds(2000)).unwrap();
-        let stored = reg.ingest(older, &kp.public_key(), UnixSeconds(2000)).unwrap();
+        reg.ingest(newer, &kp.public_key(), UnixSeconds(2000))
+            .unwrap();
+        let stored = reg
+            .ingest(older, &kp.public_key(), UnixSeconds(2000))
+            .unwrap();
         assert!(!stored);
         assert_eq!(reg.count_for_room(room(1)), 1);
         // Freshest entry should be 2000.
@@ -273,7 +277,8 @@ mod tests {
         for i in 0..4u8 {
             let kp = DeviceKeypair::generate(&mut OsRng);
             let signed = sign_hint(&kp, room(1), UnixSeconds(1000 + i as i64 * 10));
-            reg.ingest(signed, &kp.public_key(), UnixSeconds(1100)).unwrap();
+            reg.ingest(signed, &kp.public_key(), UnixSeconds(1100))
+                .unwrap();
         }
         assert_eq!(reg.count_for_room(room(1)), 3);
         let listed = reg.list_for_room(room(1), UnixSeconds(1100));
@@ -314,8 +319,12 @@ mod tests {
         // Insert in arbitrary order.
         for (i, kp) in kps.iter().enumerate() {
             let last_seen = UnixSeconds(1000 + i as i64 * 100);
-            reg.ingest(sign_hint(kp, room(1), last_seen), &kp.public_key(), last_seen)
-                .unwrap();
+            reg.ingest(
+                sign_hint(kp, room(1), last_seen),
+                &kp.public_key(),
+                last_seen,
+            )
+            .unwrap();
         }
         let listed = reg.list_for_room(room(1), UnixSeconds(1500));
         assert_eq!(listed.len(), 3);

@@ -34,7 +34,8 @@ pub async fn get(pool: &PgPool, room_id: RoomId) -> Result<Option<HistoryHead>, 
         message_count: mc as u64,
         posted_at: UnixSeconds(pa),
         posted_by: DeviceId::from_bytes(
-            pbd.try_into().expect("posted_by_device column must be 32 bytes"),
+            pbd.try_into()
+                .expect("posted_by_device column must be 32 bytes"),
         ),
         signature: Signature(sig.try_into().expect("signature column must be 64 bytes")),
     }))

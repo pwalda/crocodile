@@ -97,7 +97,9 @@ fn parse_binding_response(buf: &[u8], expected_txid: &[u8; 12]) -> Result<Socket
     }
     let msg_type = u16::from_be_bytes([buf[0], buf[1]]);
     if msg_type != BINDING_SUCCESS_RESPONSE {
-        return Err(ClientError::Stun(format!("unexpected message type {msg_type:#06x}")));
+        return Err(ClientError::Stun(format!(
+            "unexpected message type {msg_type:#06x}"
+        )));
     }
     let msg_len = u16::from_be_bytes([buf[2], buf[3]]) as usize;
     let cookie = u32::from_be_bytes([buf[4], buf[5], buf[6], buf[7]]);
@@ -151,7 +153,10 @@ fn parse_xor_mapped_address(value: &[u8], txid: &[u8; 12]) -> Result<SocketAddr>
             }
             let xaddr = u32::from_be_bytes([value[4], value[5], value[6], value[7]]);
             let addr = xaddr ^ MAGIC_COOKIE;
-            Ok(SocketAddr::new(IpAddr::V4(Ipv4Addr::from(addr.to_be_bytes())), port))
+            Ok(SocketAddr::new(
+                IpAddr::V4(Ipv4Addr::from(addr.to_be_bytes())),
+                port,
+            ))
         }
         // IPv6
         0x02 => {
@@ -169,7 +174,9 @@ fn parse_xor_mapped_address(value: &[u8], txid: &[u8; 12]) -> Result<SocketAddr>
             }
             Ok(SocketAddr::new(IpAddr::V6(Ipv6Addr::from(x)), port))
         }
-        other => Err(ClientError::Stun(format!("unknown address family {other:#04x}"))),
+        other => Err(ClientError::Stun(format!(
+            "unknown address family {other:#04x}"
+        ))),
     }
 }
 
@@ -222,8 +229,7 @@ mod tests {
         response.extend_from_slice(&xaddr.to_be_bytes());
 
         let attrs_len = (response.len() - 20) as u16;
-        response[len_placeholder..len_placeholder + 2]
-            .copy_from_slice(&attrs_len.to_be_bytes());
+        response[len_placeholder..len_placeholder + 2].copy_from_slice(&attrs_len.to_be_bytes());
 
         let parsed = parse_binding_response(&response, &txid).unwrap();
         assert_eq!(parsed, "1.2.3.4:5678".parse().unwrap());

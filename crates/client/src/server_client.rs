@@ -38,7 +38,11 @@ impl CoordinationClient {
     /// `base_url` should NOT end with `/` (e.g. `http://example.com`).
     /// `server_pubkey` is the pinned identity public key — typically
     /// obtained from `/v1/server/info` on first contact and stored.
-    pub fn new(base_url: impl Into<String>, cache: Cache, server_pubkey: IdentityPublicKey) -> Self {
+    pub fn new(
+        base_url: impl Into<String>,
+        cache: Cache,
+        server_pubkey: IdentityPublicKey,
+    ) -> Self {
         Self {
             base_url: base_url.into(),
             http: reqwest::Client::new(),
@@ -99,10 +103,7 @@ impl CoordinationClient {
     pub async fn lookup_username(&self, username: &str) -> Result<String> {
         let resp = self
             .http
-            .get(format!(
-                "{}/v1/users/by-username/{username}",
-                self.base_url
-            ))
+            .get(format!("{}/v1/users/by-username/{username}", self.base_url))
             .send()
             .await?;
         ensure_success(&resp).await?;
@@ -176,11 +177,7 @@ impl CoordinationClient {
         Ok(stmt)
     }
 
-    async fn fetch_bytes(
-        &self,
-        path: &str,
-        bearer: Option<&str>,
-    ) -> Result<Vec<u8>> {
+    async fn fetch_bytes(&self, path: &str, bearer: Option<&str>) -> Result<Vec<u8>> {
         let mut req = self.http.get(format!("{}{path}", self.base_url));
         if let Some(token) = bearer {
             req = req.bearer_auth(token);

@@ -193,13 +193,8 @@ impl SignedPeerHint {
     }
 
     /// Verify the signature against the device's public key.
-    pub fn verify(
-        &self,
-        device_pk: &crate::keys::DevicePublicKey,
-    ) -> crate::error::Result<()> {
-        let input = self
-            .signing_input()
-            .map_err(crate::error::Error::from)?;
+    pub fn verify(&self, device_pk: &crate::keys::DevicePublicKey) -> crate::error::Result<()> {
+        let input = self.signing_input().map_err(crate::error::Error::from)?;
         crate::keys::verify_device_signature(device_pk, &input, &self.signature)
     }
 }

@@ -41,5 +41,4 @@ use openmls::prelude::Ciphersuite;
 /// for v1 keeps the protocol simple; cross-suite negotiation can come
 /// later if we ever need to. This suite aligns with our ed25519 device
 /// keys at the protocol layer.
-pub const CIPHERSUITE: Ciphersuite =
-    Ciphersuite::MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519;
+pub const CIPHERSUITE: Ciphersuite = Ciphersuite::MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519;

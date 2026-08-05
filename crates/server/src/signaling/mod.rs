@@ -121,7 +121,9 @@ mod tests {
         let device = DeviceId::from_bytes([1; 32]);
         hub.register(device, Connection::new(tx)).await;
 
-        let env = Envelope { bytes: vec![1, 2, 3] };
+        let env = Envelope {
+            bytes: vec![1, 2, 3],
+        };
         let outcome = hub.deliver(device, env.clone()).await;
         assert_eq!(outcome, DeliveryOutcome::Delivered);
         assert_eq!(rx.recv().await.unwrap().bytes, vec![1, 2, 3]);
@@ -143,9 +145,7 @@ mod tests {
         let device = DeviceId::from_bytes([2; 32]);
         hub.register(device, Connection::new(tx)).await;
         hub.deregister(device).await;
-        let outcome = hub
-            .deliver(device, Envelope { bytes: vec![] })
-            .await;
+        let outcome = hub.deliver(device, Envelope { bytes: vec![] }).await;
         assert_eq!(outcome, DeliveryOutcome::Unreachable);
     }
 
@@ -156,9 +156,7 @@ mod tests {
         let device = DeviceId::from_bytes([3; 32]);
         hub.register(device, Connection::new(tx)).await;
         drop(rx);
-        let outcome = hub
-            .deliver(device, Envelope { bytes: vec![] })
-            .await;
+        let outcome = hub.deliver(device, Envelope { bytes: vec![] }).await;
         assert_eq!(outcome, DeliveryOutcome::Unreachable);
     }
 }

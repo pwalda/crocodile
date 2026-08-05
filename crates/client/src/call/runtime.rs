@@ -313,10 +313,7 @@ impl CallRuntime {
                 let new_clock = self.advance_clock_for_change(from, to, reason);
                 self.failover.host_changed(to, new_clock, now);
 
-                actions.push(RuntimeAction::HostMoved {
-                    new: to,
-                    new_clock,
-                });
+                actions.push(RuntimeAction::HostMoved { new: to, new_clock });
 
                 if to == self.self_id {
                     actions.push(RuntimeAction::BecomeHost { clock: new_clock });

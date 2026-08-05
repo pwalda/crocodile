@@ -132,20 +132,33 @@ fn parse_args() -> Result<Args> {
         let arg = &raw[i];
         match arg.as_str() {
             "--server" => {
-                server = Some(raw.get(i + 1).cloned().context("missing value for --server")?);
+                server = Some(
+                    raw.get(i + 1)
+                        .cloned()
+                        .context("missing value for --server")?,
+                );
                 i += 2;
             }
             "--username" => {
-                username = Some(raw.get(i + 1).cloned().context("missing value for --username")?);
+                username = Some(
+                    raw.get(i + 1)
+                        .cloned()
+                        .context("missing value for --username")?,
+                );
                 i += 2;
             }
             "--password" => {
-                password = Some(raw.get(i + 1).cloned().context("missing value for --password")?);
+                password = Some(
+                    raw.get(i + 1)
+                        .cloned()
+                        .context("missing value for --password")?,
+                );
                 i += 2;
             }
             "--state-dir" => {
-                state_dir =
-                    Some(PathBuf::from(raw.get(i + 1).cloned().context("--state-dir")?));
+                state_dir = Some(PathBuf::from(
+                    raw.get(i + 1).cloned().context("--state-dir")?,
+                ));
                 i += 2;
             }
             "--bind-addr" => {
@@ -176,7 +189,9 @@ fn parse_args() -> Result<Args> {
             }
             "--invite-username" => {
                 invite_username = Some(
-                    raw.get(i + 1).cloned().context("missing --invite-username value")?,
+                    raw.get(i + 1)
+                        .cloned()
+                        .context("missing --invite-username value")?,
                 );
                 i += 2;
             }
@@ -294,20 +309,13 @@ fn load_or_create_keys(state_dir: &PathBuf) -> Result<(IdentityKeypair, DeviceKe
 
 // ---------- Helpers for relayed signaling ----------
 
-async fn send_app_signal(
-    sig: &SignalingChannel,
-    to: DeviceId,
-    msg: &AppSignal,
-) -> Result<()> {
+async fn send_app_signal(sig: &SignalingChannel, to: DeviceId, msg: &AppSignal) -> Result<()> {
     let payload = postcard::to_stdvec(msg)?;
     sig.send(SignalingClientFrame::Relay { to, payload })?;
     Ok(())
 }
 
-async fn recv_app_signal_from(
-    sig: &mut SignalingChannel,
-    expected: DeviceId,
-) -> Result<AppSignal> {
+async fn recv_app_signal_from(sig: &mut SignalingChannel, expected: DeviceId) -> Result<AppSignal> {
     loop {
         let frame = sig
             .recv()
@@ -392,10 +400,7 @@ fn member_present(members: &[RoomMember], target: UserId) -> bool {
     members.iter().any(|m| m.user == target)
 }
 
-async fn peer_user_devices(
-    client: &CoordinationClient,
-    user: UserId,
-) -> Result<Vec<DeviceId>> {
+async fn peer_user_devices(client: &CoordinationClient, user: UserId) -> Result<Vec<DeviceId>> {
     let stmt: SignedServerStatement<CacheableServerStatement> =
         client.user_keys(user, UnixSeconds::now()).await?;
     match stmt.payload {
@@ -426,8 +431,7 @@ async fn run_call(
 ) -> Result<()> {
     let (capture_tx, mut capture_rx) = mpsc::unbounded_channel::<Vec<f32>>();
     let (encoded_tx, mut encoded_rx) = mpsc::unbounded_channel::<(u32, Vec<u8>)>();
-    let (inbound_decoded_tx, mut inbound_decoded_rx) =
-        mpsc::unbounded_channel::<Vec<u8>>();
+    let (inbound_decoded_tx, mut inbound_decoded_rx) = mpsc::unbounded_channel::<Vec<u8>>();
     let playback_queue = PlaybackQueue::new();
 
     // Open cpal capture + playback. Streams must stay alive for the
@@ -573,10 +577,7 @@ async fn run_call(
     //
     // Reliable bi-directional QUIC stream. Joiner opens; host accepts.
     let (mut text_send, mut text_recv) = match role {
-        Role::Joiner => conn
-            .open_bi()
-            .await
-            .map_err(|e| anyhow!("open_bi: {e}"))?,
+        Role::Joiner => conn.open_bi().await.map_err(|e| anyhow!("open_bi: {e}"))?,
         Role::Host => conn
             .accept_bi()
             .await
@@ -634,7 +635,11 @@ async fn run_call(
             let (wire, stored) = {
                 let mut g = group_for_text_send.lock().await;
                 let epoch = g.epoch();
-                let ct = match g.encrypt(&provider_for_text_send, &identity_for_text_send, &payload_bytes) {
+                let ct = match g.encrypt(
+                    &provider_for_text_send,
+                    &identity_for_text_send,
+                    &payload_bytes,
+                ) {
                     Ok(c) => c,
                     Err(e) => {
                         tracing::warn!(error = %e, "MLS encrypt text failed");
@@ -684,14 +689,13 @@ async fn run_call(
             if text_recv.read_exact(&mut payload).await.is_err() {
                 break;
             }
-            let wire: crocodile_protocol::text::TextMessage =
-                match postcard::from_bytes(&payload) {
-                    Ok(w) => w,
-                    Err(e) => {
-                        tracing::warn!(error = %e, "text wire decode failed");
-                        continue;
-                    }
-                };
+            let wire: crocodile_protocol::text::TextMessage = match postcard::from_bytes(&payload) {
+                Ok(w) => w,
+                Err(e) => {
+                    tracing::warn!(error = %e, "text wire decode failed");
+                    continue;
+                }
+            };
             let plaintext = {
                 let mut g = group_for_text_recv.lock().await;
                 match g.decrypt(&provider_for_text_recv, &wire.ciphertext) {
@@ -713,13 +717,14 @@ async fn run_call(
                 .count_for_room(recv_room)
                 .await
                 .unwrap_or(0);
-            let stored = match text_receiver.decode(&wire, &plaintext, sender_seq, UnixSeconds::now()) {
-                Ok(s) => s,
-                Err(e) => {
-                    tracing::warn!(error = %e, "text decode failed");
-                    continue;
-                }
-            };
+            let stored =
+                match text_receiver.decode(&wire, &plaintext, sender_seq, UnixSeconds::now()) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        tracing::warn!(error = %e, "text decode failed");
+                        continue;
+                    }
+                };
             println!(
                 "[{}]: {}",
                 hex::encode(&stored.sender_device.as_bytes()[..4]),
@@ -821,7 +826,9 @@ async fn main() -> Result<()> {
             let invitee: UserId = if let Some(uid) = invite_user_id {
                 *uid
             } else if let Some(name) = invite_username {
-                let hex = client.lookup_username(name).await
+                let hex = client
+                    .lookup_username(name)
+                    .await
                     .with_context(|| format!("looking up username {name:?}"))?;
                 let bytes: [u8; 32] = hex::decode(&hex)
                     .context("server returned bad user_id hex")?
@@ -851,11 +858,13 @@ async fn main() -> Result<()> {
                 .room_state(*room_id, &token, UnixSeconds::now())
                 .await?;
             let peer = match &stmt.payload {
-                CacheableServerStatement::RoomState { members, .. } => members
-                    .iter()
-                    .find(|m| m.user != my_user_id)
-                    .ok_or_else(|| anyhow!("no peer member in room"))?
-                    .user,
+                CacheableServerStatement::RoomState { members, .. } => {
+                    members
+                        .iter()
+                        .find(|m| m.user != my_user_id)
+                        .ok_or_else(|| anyhow!("no peer member in room"))?
+                        .user
+                }
                 _ => bail!("unexpected room state payload"),
             };
             (*room_id, peer, Role::Joiner)
@@ -868,7 +877,10 @@ async fn main() -> Result<()> {
     println!("Waiting for peer to come online...");
     let peer_device =
         wait_for_peer_device(&client, room_id, &token, peer_user, my_device_id).await?;
-    println!("Peer device discovered: {}", hex::encode(peer_device.as_bytes()));
+    println!(
+        "Peer device discovered: {}",
+        hex::encode(peer_device.as_bytes())
+    );
 
     // Bind the QUIC endpoint and figure out our advertised address.
     let endpoint = PeerEndpoint::bind(args.bind_addr, &device_pk)?;
@@ -898,8 +910,7 @@ async fn main() -> Result<()> {
     // Spin up MLS + run the peer-to-peer signaling dance.
     let provider = std::sync::Arc::new(OpenMlsRustCrypto::default());
     let mls_identity = std::sync::Arc::new(
-        Identity::generate(my_device_id, &provider)
-            .map_err(|e| anyhow!("mls identity: {e}"))?,
+        Identity::generate(my_device_id, &provider).map_err(|e| anyhow!("mls identity: {e}"))?,
     );
 
     let (group, peer_addr) = match role {
@@ -935,7 +946,8 @@ async fn main() -> Result<()> {
                 .accept()
                 .await
                 .ok_or_else(|| anyhow!("endpoint closed before accept"))?;
-            tokio::time::timeout(Duration::from_secs(15), incoming).await
+            tokio::time::timeout(Duration::from_secs(15), incoming)
+                .await
                 .context("QUIC accept timeout")?
                 .map_err(|e| anyhow!("QUIC accept failed: {e}"))?
         }
@@ -992,12 +1004,16 @@ async fn host_signaling_dance(
         }
     };
 
-    let kp =
-        KeyPackage::from_bytes(&kp_bytes, provider).map_err(|e| anyhow!("kp parse: {e}"))?;
+    let kp = KeyPackage::from_bytes(&kp_bytes, provider).map_err(|e| anyhow!("kp parse: {e}"))?;
     let outcome = group
         .add_member(provider, mls_identity, kp)
         .map_err(|e| anyhow!("add_member: {e}"))?;
-    send_app_signal(sig, peer_device, &AppSignal::Welcome(outcome.welcome.0.clone())).await?;
+    send_app_signal(
+        sig,
+        peer_device,
+        &AppSignal::Welcome(outcome.welcome.0.clone()),
+    )
+    .await?;
     send_app_signal(sig, peer_device, &AppSignal::Ready).await?;
 
     // Joiner sends us their address.
@@ -1019,10 +1035,15 @@ async fn joiner_signaling_dance(
     mls_identity: &Identity,
 ) -> Result<(Group, SocketAddr)> {
     // Generate and send a key package.
-    let kp = KeyPackage::generate(mls_identity, provider)
-        .map_err(|e| anyhow!("kp generate: {e}"))?;
+    let kp =
+        KeyPackage::generate(mls_identity, provider).map_err(|e| anyhow!("kp generate: {e}"))?;
     send_app_signal(sig, peer_device, &AppSignal::DevicePublicKey(device_pk.0)).await?;
-    send_app_signal(sig, peer_device, &AppSignal::KeyPackage(kp.as_bytes().to_vec())).await?;
+    send_app_signal(
+        sig,
+        peer_device,
+        &AppSignal::KeyPackage(kp.as_bytes().to_vec()),
+    )
+    .await?;
 
     // Receive the welcome + host's address (any order).
     let mut welcome_bytes: Option<Vec<u8>> = None;
@@ -1121,7 +1142,11 @@ fn best_advertise_addr(server_url: &str, local_addr: SocketAddr) -> SocketAddr {
     let Some(target) = host_port.to_socket_addrs().ok().and_then(|mut a| a.next()) else {
         return local_addr;
     };
-    let bind = if target.is_ipv6() { "[::]:0" } else { "0.0.0.0:0" };
+    let bind = if target.is_ipv6() {
+        "[::]:0"
+    } else {
+        "0.0.0.0:0"
+    };
     let Ok(probe) = std::net::UdpSocket::bind(bind) else {
         return local_addr;
     };
@@ -1142,4 +1167,3 @@ fn init_tracing() {
         .with(fmt::layer())
         .init();
 }
-

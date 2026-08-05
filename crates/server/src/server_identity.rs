@@ -73,10 +73,7 @@ impl ServerIdentity {
     pub fn from_seed(seed: [u8; 32]) -> Self {
         let keypair = IdentityKeypair::from_seed(seed);
         let server_id = server_id_from_public_key(&keypair.public_key());
-        Self {
-            keypair,
-            server_id,
-        }
+        Self { keypair, server_id }
     }
 
     /// Server's stable identifier.

@@ -247,9 +247,7 @@ mod tests {
         );
 
         let recv = TextReceiver::new(room(1));
-        let stored = recv
-            .decode(&wire, &bytes, 0, UnixSeconds(501))
-            .unwrap();
+        let stored = recv.decode(&wire, &bytes, 0, UnixSeconds(501)).unwrap();
 
         // Wire identity matches; received_at differs.
         assert_eq!(stored.own_hash, sender_stored.own_hash);

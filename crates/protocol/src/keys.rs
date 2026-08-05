@@ -54,7 +54,10 @@ impl<'de> Deserialize<'de> for Signature {
             fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
                 f.write_str("a 64-byte ed25519 signature")
             }
-            fn visit_bytes<E: serde::de::Error>(self, v: &[u8]) -> std::result::Result<Signature, E> {
+            fn visit_bytes<E: serde::de::Error>(
+                self,
+                v: &[u8],
+            ) -> std::result::Result<Signature, E> {
                 let arr: [u8; SIGNATURE_LENGTH] = v
                     .try_into()
                     .map_err(|_| E::invalid_length(v.len(), &self))?;
@@ -147,7 +150,8 @@ pub fn verify_identity_signature(
 ) -> Result<()> {
     let vk = VerifyingKey::from_bytes(&pk.0)?;
     let sig = ed25519_dalek::Signature::from_bytes(&signature.0);
-    vk.verify(message, &sig).map_err(|_| Error::InvalidSignature)
+    vk.verify(message, &sig)
+        .map_err(|_| Error::InvalidSignature)
 }
 
 /// Verifies a signature over `message` using a device public key.
@@ -158,7 +162,8 @@ pub fn verify_device_signature(
 ) -> Result<()> {
     let vk = VerifyingKey::from_bytes(&pk.0)?;
     let sig = ed25519_dalek::Signature::from_bytes(&signature.0);
-    vk.verify(message, &sig).map_err(|_| Error::InvalidSignature)
+    vk.verify(message, &sig)
+        .map_err(|_| Error::InvalidSignature)
 }
 
 #[cfg(test)]

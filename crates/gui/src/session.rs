@@ -72,20 +72,21 @@ pub struct SessionHandle {
 
 /// Spawn a host session. Background task creates a room, adds the
 /// invitee, and waits for them to join.
-pub fn spawn_host(
-    runtime: &Runtime,
-    settings: Settings,
-    invite_username: String,
-) -> SessionHandle {
+pub fn spawn_host(runtime: &Runtime, settings: Settings, invite_username: String) -> SessionHandle {
     let (events_tx, events_rx) = mpsc::unbounded_channel();
     let (actions_tx, actions_rx) = mpsc::unbounded_channel();
     let room_id_slot = Arc::new(std::sync::Mutex::new(None));
     let room_id_for_task = room_id_slot.clone();
 
     runtime.spawn(async move {
-        let result =
-            run_host(settings, invite_username, events_tx.clone(), actions_rx, room_id_for_task)
-                .await;
+        let result = run_host(
+            settings,
+            invite_username,
+            events_tx.clone(),
+            actions_rx,
+            room_id_for_task,
+        )
+        .await;
         match result {
             Ok(()) => {
                 let _ = events_tx.send(SessionEvent::Ended);
@@ -219,7 +220,11 @@ async fn connect(
 
     let _ = events.send(SessionEvent::Status("signing in...".into()));
     match client
-        .create_account(&settings.username, &settings.password, &identity_kp.public_key())
+        .create_account(
+            &settings.username,
+            &settings.password,
+            &identity_kp.public_key(),
+        )
         .await
     {
         Ok(_) => {}
@@ -233,7 +238,13 @@ async fn connect(
     binding_input.extend_from_slice(my_user_id.as_bytes());
     binding_input.extend_from_slice(&device_pk.0);
     let binding_sig = identity_kp.sign(&binding_input);
-    publish_device_key(&settings.server, &login.session_token, &device_pk, &binding_sig).await?;
+    publish_device_key(
+        &settings.server,
+        &login.session_token,
+        &device_pk,
+        &binding_sig,
+    )
+    .await?;
 
     let _ = events.send(SessionEvent::Status("connecting signaling...".into()));
     let signaling =
@@ -292,13 +303,14 @@ async fn run_host(
     let mls_identity = Arc::new(
         Identity::generate(conn.my_device_id, &provider).map_err(|e| anyhow!("mls: {e}"))?,
     );
-    let mut group =
-        Group::create(&provider, &mls_identity, room_id.as_bytes()).map_err(|e| anyhow!("mls: {e}"))?;
+    let mut group = Group::create(&provider, &mls_identity, room_id.as_bytes())
+        .map_err(|e| anyhow!("mls: {e}"))?;
 
     // Wait for joiner's KP.
     let _ = events.send(SessionEvent::Status("waiting for peer...".into()));
     let invitee_devices = peer_user_devices(&conn.client, invitee).await?;
-    let invitee_set: std::collections::HashSet<DeviceId> = invitee_devices.iter().copied().collect();
+    let invitee_set: std::collections::HashSet<DeviceId> =
+        invitee_devices.iter().copied().collect();
     let peer_device = loop {
         let frame = conn
             .signaling
@@ -322,14 +334,28 @@ async fn run_host(
     let outcome = group
         .add_member(&provider, &mls_identity, kp)
         .map_err(|e| anyhow!("add: {e}"))?;
-    send_app(&conn.signaling, peer_device, &AppSignal::DevicePublicKey(conn.device_pk.0)).await?;
-    send_app(&conn.signaling, peer_device, &AppSignal::Welcome(outcome.welcome.0.clone())).await?;
+    send_app(
+        &conn.signaling,
+        peer_device,
+        &AppSignal::DevicePublicKey(conn.device_pk.0),
+    )
+    .await?;
+    send_app(
+        &conn.signaling,
+        peer_device,
+        &AppSignal::Welcome(outcome.welcome.0.clone()),
+    )
+    .await?;
     send_app(&conn.signaling, peer_device, &AppSignal::Address(advertise)).await?;
     send_app(&conn.signaling, peer_device, &AppSignal::Ready).await?;
 
     // Wait for joiner's address (informational; they dial us).
     loop {
-        let frame = conn.signaling.recv().await.ok_or_else(|| anyhow!("signaling closed"))?;
+        let frame = conn
+            .signaling
+            .recv()
+            .await
+            .ok_or_else(|| anyhow!("signaling closed"))?;
         if let SignalingServerFrame::Delivered { from, payload } = frame {
             if from == peer_device {
                 let msg: AppSignal = postcard::from_bytes(&payload)?;
@@ -348,7 +374,19 @@ async fn run_host(
     let quic_conn = incoming.await.map_err(|e| anyhow!("accept: {e}"))?;
     let _ = events.send(SessionEvent::Status("connected".into()));
 
-    run_call(quic_conn, group, provider, mls_identity, room_id, conn.my_device_id, history, events, actions, true).await
+    run_call(
+        quic_conn,
+        group,
+        provider,
+        mls_identity,
+        room_id,
+        conn.my_device_id,
+        history,
+        events,
+        actions,
+        true,
+    )
+    .await
 }
 
 // ----- Joiner flow -----
@@ -367,22 +405,32 @@ async fn run_join(
         .map_err(|_| anyhow!("room_id must be 32 bytes hex"))?;
     let room_id = RoomId::from_bytes(room_bytes);
 
-    let stmt = conn.client.room_state(room_id, &conn.token, UnixSeconds::now()).await?;
+    let stmt = conn
+        .client
+        .room_state(room_id, &conn.token, UnixSeconds::now())
+        .await?;
     let peer_user = match stmt.payload {
-        CacheableServerStatement::RoomState { members, .. } => members
-            .iter()
-            .find(|m| m.user != conn.my_user_id)
-            .ok_or_else(|| anyhow!("no other member in room"))?
-            .user,
+        CacheableServerStatement::RoomState { members, .. } => {
+            members
+                .iter()
+                .find(|m| m.user != conn.my_user_id)
+                .ok_or_else(|| anyhow!("no other member in room"))?
+                .user
+        }
         _ => bail!("unexpected room state"),
     };
-    let _ = events.send(SessionEvent::Status("waiting for host to come online...".into()));
+    let _ = events.send(SessionEvent::Status(
+        "waiting for host to come online...".into(),
+    ));
 
     let peer_devices = peer_user_devices(&conn.client, peer_user).await?;
     let peer_device = loop {
         let cache = Cache::open_in_memory().await?;
-        let tmp_client = CoordinationClient::new(settings.server.clone(), cache, conn.server_pubkey);
-        let s = tmp_client.room_state(room_id, &conn.token, UnixSeconds::now()).await?;
+        let tmp_client =
+            CoordinationClient::new(settings.server.clone(), cache, conn.server_pubkey);
+        let s = tmp_client
+            .room_state(room_id, &conn.token, UnixSeconds::now())
+            .await?;
         let online: std::collections::HashSet<DeviceId> = match s.payload {
             CacheableServerStatement::RoomState { peer_hints, .. } => {
                 peer_hints.iter().map(|h| h.device).collect()
@@ -417,15 +465,29 @@ async fn run_join(
         Identity::generate(conn.my_device_id, &provider).map_err(|e| anyhow!("mls: {e}"))?,
     );
     let kp = KeyPackage::generate(&mls_identity, &provider).map_err(|e| anyhow!("kp: {e}"))?;
-    send_app(&conn.signaling, peer_device, &AppSignal::DevicePublicKey(conn.device_pk.0)).await?;
-    send_app(&conn.signaling, peer_device, &AppSignal::KeyPackage(kp.as_bytes().to_vec())).await?;
+    send_app(
+        &conn.signaling,
+        peer_device,
+        &AppSignal::DevicePublicKey(conn.device_pk.0),
+    )
+    .await?;
+    send_app(
+        &conn.signaling,
+        peer_device,
+        &AppSignal::KeyPackage(kp.as_bytes().to_vec()),
+    )
+    .await?;
     send_app(&conn.signaling, peer_device, &AppSignal::Address(advertise)).await?;
 
     let mut welcome_bytes = None;
     let mut peer_addr = None;
     let mut ready = false;
     while welcome_bytes.is_none() || peer_addr.is_none() || !ready {
-        let frame = conn.signaling.recv().await.ok_or_else(|| anyhow!("signaling closed"))?;
+        let frame = conn
+            .signaling
+            .recv()
+            .await
+            .ok_or_else(|| anyhow!("signaling closed"))?;
         if let SignalingServerFrame::Delivered { from, payload } = frame {
             if from == peer_device {
                 let msg: AppSignal = postcard::from_bytes(&payload)?;
@@ -443,7 +505,9 @@ async fn run_join(
         .map_err(|e| anyhow!("mls join: {e}"))?;
     let peer_addr = peer_addr.unwrap();
 
-    let _ = events.send(SessionEvent::Status(format!("dialing host at {peer_addr}...")));
+    let _ = events.send(SessionEvent::Status(format!(
+        "dialing host at {peer_addr}..."
+    )));
     let quic_conn = endpoint.connect(peer_addr, peer_device_pk).await?;
     let _ = events.send(SessionEvent::Status("connected".into()));
 
@@ -613,8 +677,17 @@ async fn run_call(
     let mut hello = [0u8; 1];
     text_recv.read_exact(&mut hello).await.ok();
 
-    let local_head = history.most_recent(room_id).await.ok().flatten().map(|m| m.own_hash);
-    let text_sender = Arc::new(Mutex::new(TextSender::new(room_id, my_device_id, local_head)));
+    let local_head = history
+        .most_recent(room_id)
+        .await
+        .ok()
+        .flatten()
+        .map(|m| m.own_hash);
+    let text_sender = Arc::new(Mutex::new(TextSender::new(
+        room_id,
+        my_device_id,
+        local_head,
+    )));
     let text_receiver = TextReceiver::new(room_id);
 
     // Outbound text task: pulls from `actions`, encrypts, sends.
@@ -637,7 +710,11 @@ async fn run_call(
                     let (wire, stored) = {
                         let mut g = group_text_send.lock().await;
                         let epoch = g.epoch();
-                        let ct = match g.encrypt(&provider_text_send, &identity_text_send, &payload_bytes) {
+                        let ct = match g.encrypt(
+                            &provider_text_send,
+                            &identity_text_send,
+                            &payload_bytes,
+                        ) {
                             Ok(c) => c,
                             Err(_) => continue,
                         };
@@ -836,7 +913,11 @@ fn pick_advertise(settings: &Settings, local_addr: SocketAddr) -> SocketAddr {
     let Some(target) = host_port.to_socket_addrs().ok().and_then(|mut a| a.next()) else {
         return local_addr;
     };
-    let bind = if target.is_ipv6() { "[::]:0" } else { "0.0.0.0:0" };
+    let bind = if target.is_ipv6() {
+        "[::]:0"
+    } else {
+        "0.0.0.0:0"
+    };
     let Ok(probe) = std::net::UdpSocket::bind(bind) else {
         return local_addr;
     };

@@ -33,13 +33,10 @@ impl std::fmt::Debug for OpusEncoder {
 impl OpusEncoder {
     /// Create a new encoder.
     pub fn new() -> Result<Self> {
-        let mut inner = Encoder::new(
-            SAMPLE_RATE_HZ,
-            channels_const(),
-            Application::Voip,
-        )
-        .map_err(opus_err)?;
-        inner.set_bitrate(opus::Bitrate::Bits(TARGET_BITRATE_BPS))
+        let mut inner =
+            Encoder::new(SAMPLE_RATE_HZ, channels_const(), Application::Voip).map_err(opus_err)?;
+        inner
+            .set_bitrate(opus::Bitrate::Bits(TARGET_BITRATE_BPS))
             .map_err(opus_err)?;
         Ok(Self { inner })
     }
@@ -117,9 +114,7 @@ pub fn f32_to_i16(pcm: &[f32]) -> Vec<i16> {
 
 /// Convert i16 PCM back to f32 in `[-1.0, 1.0]`.
 pub fn i16_to_f32(pcm: &[i16]) -> Vec<f32> {
-    pcm.iter()
-        .map(|&s| s as f32 / i16::MAX as f32)
-        .collect()
+    pcm.iter().map(|&s| s as f32 / i16::MAX as f32).collect()
 }
 
 #[cfg(test)]
@@ -145,7 +140,11 @@ mod tests {
         let mut enc = OpusEncoder::new().unwrap();
         let encoded = enc.encode_frame(&silent_frame()).unwrap();
         // Silence compresses very well; expect well under 50 bytes.
-        assert!(encoded.len() <= 50, "silence frame was {} bytes", encoded.len());
+        assert!(
+            encoded.len() <= 50,
+            "silence frame was {} bytes",
+            encoded.len()
+        );
     }
 
     #[test]
