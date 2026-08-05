@@ -274,12 +274,19 @@ async fn run_host(
     let _ = &actions; // forwarded to run_call below
     let mut conn = connect(&settings, &events).await?;
 
-    // Resolve invitee.
-    let invitee_hex = conn
-        .client
-        .lookup_username(&invite_username)
-        .await
-        .with_context(|| format!("looking up {invite_username}"))?;
+    // Resolve invitee. A 404 here means the invitee has never signed
+    // in, so the server has no account for them yet — surface that
+    // clearly rather than as a bare lookup error.
+    let invitee_hex = match conn.client.lookup_username(&invite_username).await {
+        Ok(hex) => hex,
+        Err(crocodile_client::ClientError::ServerStatus { status: 404, .. }) => {
+            bail!(
+                "no user named '{invite_username}' — they must open Crocodile and \
+                 connect once (any Host/Join attempt) so their account exists, then retry"
+            );
+        }
+        Err(e) => return Err(anyhow!("looking up '{invite_username}': {e}")),
+    };
     let invitee_bytes: [u8; 32] = hex::decode(&invitee_hex)?
         .try_into()
         .map_err(|_| anyhow!("user_id must be 32 bytes"))?;
@@ -508,7 +515,19 @@ async fn run_join(
     let _ = events.send(SessionEvent::Status(format!(
         "dialing host at {peer_addr}..."
     )));
-    let quic_conn = endpoint.connect(peer_addr, peer_device_pk).await?;
+    let quic_conn = endpoint
+        .connect(peer_addr, peer_device_pk)
+        .await
+        .map_err(|e| {
+            anyhow!(
+                "could not reach the host at {peer_addr} over UDP ({e}). \
+             The coordination server connected fine, but the peer-to-peer voice \
+             link did not. Usual causes: the host's firewall is blocking inbound \
+             UDP (macOS: System Settings > Network > Firewall — turn it off or allow \
+             Crocodile on the HOST machine), or the two machines aren't on the same \
+             network. Tailscale avoids both."
+            )
+        })?;
     let _ = events.send(SessionEvent::Status("connected".into()));
 
     run_call(
