@@ -32,9 +32,11 @@ impl Config {
     /// defaults for everything except the database URL (which is too
     /// environment-sensitive to default).
     pub fn from_env() -> Result<Self> {
-        let database_url = std::env::var("DATABASE_URL").unwrap_or_else(|_| {
-            "postgres://crocodile:crocodile_dev@localhost:5432/crocodile".to_string()
-        });
+        // Default to a local SQLite file so the server runs with zero
+        // external dependencies. Point DATABASE_URL at a
+        // `postgres://...` URL for the production backend.
+        let database_url = std::env::var("DATABASE_URL")
+            .unwrap_or_else(|_| "sqlite://crocodile-server.sqlite".to_string());
 
         let db_max_connections = parse_env_or("DB_MAX_CONNECTIONS", 16u32)?;
         let bind_addr = std::env::var("BIND_ADDR").unwrap_or_else(|_| "127.0.0.1:8080".to_string());

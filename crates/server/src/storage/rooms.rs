@@ -2,17 +2,19 @@
 
 use rand::rngs::OsRng;
 use rand::RngCore;
-use sqlx::PgPool;
 use uuid::Uuid;
 
 use crocodile_protocol::ids::{RoomId, UserId};
 use crocodile_protocol::keys::IdentityPublicKey;
 use crocodile_protocol::signaling::{RoomMember, RoomRole};
 
+use crate::dispatch;
+use crate::storage::Db;
+
 /// Insert a new room with the given creator as `owner`. Returns the
 /// freshly-generated room id.
 pub async fn create(
-    pool: &PgPool,
+    db: &Db,
     name: &str,
     description: &str,
     creator_account_id: Uuid,
@@ -21,112 +23,116 @@ pub async fn create(
     OsRng.fill_bytes(&mut bytes);
     let room_id = RoomId::from_bytes(bytes);
 
-    let mut tx = pool.begin().await?;
-
-    sqlx::query("INSERT INTO rooms (id, name, description) VALUES ($1, $2, $3)")
+    // Wrap the two inserts in a transaction on whichever backend.
+    dispatch!(db, |pool| {
+        let mut tx = pool.begin().await?;
+        sqlx::query("INSERT INTO rooms (id, name, description) VALUES ($1, $2, $3)")
+            .bind(room_id.as_bytes().as_slice())
+            .bind(name)
+            .bind(description)
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query(
+            r#"INSERT INTO room_members (room_id, account_id, role)
+               VALUES ($1, $2, 'owner')"#,
+        )
         .bind(room_id.as_bytes().as_slice())
-        .bind(name)
-        .bind(description)
+        .bind(creator_account_id)
         .execute(&mut *tx)
         .await?;
-
-    sqlx::query(
-        r#"INSERT INTO room_members (room_id, account_id, role)
-           VALUES ($1, $2, 'owner')"#,
-    )
-    .bind(room_id.as_bytes().as_slice())
-    .bind(creator_account_id)
-    .execute(&mut *tx)
-    .await?;
-
-    tx.commit().await?;
+        tx.commit().await?;
+    });
     Ok(room_id)
 }
 
 /// Returns true if the given account is a member of the room.
-pub async fn is_member(
-    pool: &PgPool,
-    room_id: RoomId,
-    account_id: Uuid,
-) -> Result<bool, sqlx::Error> {
-    let exists: Option<i32> = sqlx::query_scalar(
-        r#"SELECT 1 FROM room_members
-           WHERE room_id = $1 AND account_id = $2"#,
-    )
-    .bind(room_id.as_bytes().as_slice())
-    .bind(account_id)
-    .fetch_optional(pool)
-    .await?;
+pub async fn is_member(db: &Db, room_id: RoomId, account_id: Uuid) -> Result<bool, sqlx::Error> {
+    let exists: Option<i32> = dispatch!(db, |pool| {
+        sqlx::query_scalar(
+            r#"SELECT 1 FROM room_members
+               WHERE room_id = $1 AND account_id = $2"#,
+        )
+        .bind(room_id.as_bytes().as_slice())
+        .bind(account_id)
+        .fetch_optional(pool)
+        .await?
+    });
     Ok(exists.is_some())
 }
 
 /// Returns the caller's role in the room, or `None` if not a member.
 pub async fn role_of(
-    pool: &PgPool,
+    db: &Db,
     room_id: RoomId,
     account_id: Uuid,
 ) -> Result<Option<RoomRole>, sqlx::Error> {
-    let row: Option<(String,)> = sqlx::query_as(
-        r#"SELECT role FROM room_members
-           WHERE room_id = $1 AND account_id = $2"#,
-    )
-    .bind(room_id.as_bytes().as_slice())
-    .bind(account_id)
-    .fetch_optional(pool)
-    .await?;
+    let row: Option<(String,)> = dispatch!(db, |pool| {
+        sqlx::query_as(
+            r#"SELECT role FROM room_members
+               WHERE room_id = $1 AND account_id = $2"#,
+        )
+        .bind(room_id.as_bytes().as_slice())
+        .bind(account_id)
+        .fetch_optional(pool)
+        .await?
+    });
     Ok(row.map(|(s,)| parse_role(&s)))
 }
 
 /// Add an account as a regular member. Returns `Ok(false)` if the
 /// account is already a member (idempotent), `Ok(true)` if newly added.
-pub async fn add_member(
-    pool: &PgPool,
-    room_id: RoomId,
-    account_id: Uuid,
-) -> Result<bool, sqlx::Error> {
-    let result = sqlx::query(
-        r#"INSERT INTO room_members (room_id, account_id, role)
-           VALUES ($1, $2, 'member')
-           ON CONFLICT DO NOTHING"#,
-    )
-    .bind(room_id.as_bytes().as_slice())
-    .bind(account_id)
-    .execute(pool)
-    .await?;
-    Ok(result.rows_affected() > 0)
+pub async fn add_member(db: &Db, room_id: RoomId, account_id: Uuid) -> Result<bool, sqlx::Error> {
+    // rows_affected() is extracted inside the arm because the two
+    // backends return distinct QueryResult types that can't unify
+    // across the match boundary.
+    let added = dispatch!(db, |pool| {
+        sqlx::query(
+            r#"INSERT INTO room_members (room_id, account_id, role)
+               VALUES ($1, $2, 'member')
+               ON CONFLICT DO NOTHING"#,
+        )
+        .bind(room_id.as_bytes().as_slice())
+        .bind(account_id)
+        .execute(pool)
+        .await?
+        .rows_affected()
+            > 0
+    });
+    Ok(added)
 }
 
 /// Remove a member. Returns whether a row was deleted. Refuses to remove
 /// an owner: the caller must check the target's role first and surface
 /// the right error to the user.
-pub async fn remove_member(
-    pool: &PgPool,
-    room_id: RoomId,
-    account_id: Uuid,
-) -> Result<u64, sqlx::Error> {
-    let result = sqlx::query(
-        r#"DELETE FROM room_members
-           WHERE room_id = $1 AND account_id = $2 AND role <> 'owner'"#,
-    )
-    .bind(room_id.as_bytes().as_slice())
-    .bind(account_id)
-    .execute(pool)
-    .await?;
-    Ok(result.rows_affected())
+pub async fn remove_member(db: &Db, room_id: RoomId, account_id: Uuid) -> Result<u64, sqlx::Error> {
+    let removed = dispatch!(db, |pool| {
+        sqlx::query(
+            r#"DELETE FROM room_members
+               WHERE room_id = $1 AND account_id = $2 AND role <> 'owner'"#,
+        )
+        .bind(room_id.as_bytes().as_slice())
+        .bind(account_id)
+        .execute(pool)
+        .await?
+        .rows_affected()
+    });
+    Ok(removed)
 }
 
 /// List the members of a room, joined with account identity data.
-pub async fn list_members(pool: &PgPool, room_id: RoomId) -> Result<Vec<RoomMember>, sqlx::Error> {
-    let rows: Vec<(Vec<u8>, Vec<u8>, String)> = sqlx::query_as(
-        r#"SELECT a.user_id, a.identity_public_key, m.role
-           FROM room_members m
-           JOIN accounts a ON a.id = m.account_id
-           WHERE m.room_id = $1
-           ORDER BY a.user_id"#,
-    )
-    .bind(room_id.as_bytes().as_slice())
-    .fetch_all(pool)
-    .await?;
+pub async fn list_members(db: &Db, room_id: RoomId) -> Result<Vec<RoomMember>, sqlx::Error> {
+    let rows: Vec<(Vec<u8>, Vec<u8>, String)> = dispatch!(db, |pool| {
+        sqlx::query_as(
+            r#"SELECT a.user_id, a.identity_public_key, m.role
+               FROM room_members m
+               JOIN accounts a ON a.id = m.account_id
+               WHERE m.room_id = $1
+               ORDER BY a.user_id"#,
+        )
+        .bind(room_id.as_bytes().as_slice())
+        .fetch_all(pool)
+        .await?
+    });
 
     Ok(rows
         .into_iter()
@@ -142,11 +148,13 @@ pub async fn list_members(pool: &PgPool, room_id: RoomId) -> Result<Vec<RoomMemb
 }
 
 /// Returns true if the room exists.
-pub async fn exists(pool: &PgPool, room_id: RoomId) -> Result<bool, sqlx::Error> {
-    let row: Option<i32> = sqlx::query_scalar("SELECT 1 FROM rooms WHERE id = $1")
-        .bind(room_id.as_bytes().as_slice())
-        .fetch_optional(pool)
-        .await?;
+pub async fn exists(db: &Db, room_id: RoomId) -> Result<bool, sqlx::Error> {
+    let row: Option<i32> = dispatch!(db, |pool| {
+        sqlx::query_scalar("SELECT 1 FROM rooms WHERE id = $1")
+            .bind(room_id.as_bytes().as_slice())
+            .fetch_optional(pool)
+            .await?
+    });
     Ok(row.is_some())
 }
 

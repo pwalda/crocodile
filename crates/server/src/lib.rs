@@ -22,12 +22,11 @@ pub mod storage;
 use std::sync::Arc;
 
 use axum::Router;
-use sqlx::PgPool;
 
 use crate::config::Config;
 use crate::server_identity::ServerIdentity;
 use crate::signaling::SignalingHub;
-use crate::storage::Storage;
+use crate::storage::{Db, Storage};
 
 /// Shared application state passed to all handlers.
 #[derive(Clone)]
@@ -63,11 +62,11 @@ pub fn build_router(state: AppState) -> Router {
 }
 
 /// Convenience: build an AppState from a config and an already-open
-/// Postgres pool. Loads or generates the server identity from the path
+/// [`Db`] handle. Loads or generates the server identity from the path
 /// in config.
-pub async fn build_state(config: Config, pool: PgPool) -> anyhow::Result<AppState> {
+pub async fn build_state(config: Config, db: Db) -> anyhow::Result<AppState> {
     let identity = ServerIdentity::load_or_generate(&config.server_identity_path)?;
-    let storage = Storage::new(pool);
+    let storage = Storage::new(db);
     Ok(AppState {
         storage: Arc::new(storage),
         identity: Arc::new(identity),

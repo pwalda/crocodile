@@ -34,7 +34,7 @@ pub async fn login(
     State(state): State<AppState>,
     Json(req): Json<LoginRequest>,
 ) -> ApiResult<(StatusCode, Json<LoginResponse>)> {
-    let account = accounts::by_username(state.storage.pool(), &req.username)
+    let account = accounts::by_username(state.storage.db(), &req.username)
         .await?
         // Same error for "no such user" and "wrong password" to avoid
         // a username-enumeration oracle.
@@ -47,7 +47,7 @@ pub async fn login(
     }
 
     let token = SessionToken::generate();
-    sessions::insert(state.storage.pool(), &token.hash(), account.id).await?;
+    sessions::insert(state.storage.db(), &token.hash(), account.id).await?;
 
     Ok((
         StatusCode::CREATED,
@@ -59,6 +59,6 @@ pub async fn login(
 }
 
 pub async fn logout(State(state): State<AppState>, auth: AuthSession) -> ApiResult<StatusCode> {
-    sessions::delete(state.storage.pool(), &auth.token_hash).await?;
+    sessions::delete(state.storage.db(), &auth.token_hash).await?;
     Ok(StatusCode::NO_CONTENT)
 }

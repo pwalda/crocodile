@@ -56,8 +56,9 @@ dist: release
 	@echo "Bundle assembled in ./$(DIST)"
 	@ls -lh $(DIST)/bin
 
+# Runs with the embedded SQLite backend by default (zero external
+# deps). Set DATABASE_URL=postgres://... to use Postgres instead.
 run-server:
-	DATABASE_URL=$${DATABASE_URL:-postgres://crocodile:crocodile_dev@localhost:5432/crocodile} \
 	BIND_ADDR=$${BIND_ADDR:-0.0.0.0:8080} \
 	$(CARGO) run --release --bin crocodile-server
 

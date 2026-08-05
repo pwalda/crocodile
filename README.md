@@ -34,20 +34,35 @@ You need the workspace built (Rust 1.95 toolchain, automatically pulled by `rust
 # initial libopus compile in clients; the server itself doesn't).
 brew install cmake
 
-# Docker Desktop / OrbStack for Postgres.
-docker compose up -d   # starts Postgres on :5432
-
 # First-time build (this takes a while; it's compiling rustls, quinn,
 # openmls, sqlx, libopus, ...).
 cargo build --release
 ```
 
+**No database to install.** The server defaults to an embedded SQLite
+file (`crocodile-server.sqlite`), so it runs with zero external
+dependencies. Postgres is still supported for production — see below.
+
 ### 2. Run the coordination server
 
-Either directly:
+Zero-config (SQLite):
 
 ```bash
+BIND_ADDR=0.0.0.0:8080 cargo run --release --bin crocodile-server
+```
+
+That's it — the server creates its SQLite file and identity key on
+first launch. It listens on `127.0.0.1:8080` by default; `BIND_ADDR=0.0.0.0:8080`
+accepts connections from other machines.
+
+**Postgres (optional, for production / federation):** point `DATABASE_URL`
+at a Postgres URL. A `docker compose up -d` brings up a dev Postgres on
+:5432 matching the default URL below.
+
+```bash
+docker compose up -d   # optional: dev Postgres on :5432
 DATABASE_URL=postgres://crocodile:crocodile_dev@localhost:5432/crocodile \
+    BIND_ADDR=0.0.0.0:8080 \
     cargo run --release --bin crocodile-server
 ```
 
@@ -61,8 +76,6 @@ docker run --rm --network host \
   -v $PWD/.server_identity.key:/data/.server_identity.key \
   crocodile-server
 ```
-
-It listens on `127.0.0.1:8080` by default. Override with `BIND_ADDR=0.0.0.0:8080` to accept connections from other machines.
 
 If you want your friend to reach this server from outside your LAN, options in order of effort:
 - **Tailscale (recommended for first try).** Install on both machines, run the server with `BIND_ADDR=0.0.0.0:8080`, give your friend your Tailscale IP. No router config, no public exposure.

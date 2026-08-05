@@ -3,9 +3,9 @@
 use std::net::SocketAddr;
 
 use anyhow::Context;
-use sqlx::postgres::PgPoolOptions;
 use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 
+use crocodile_server::storage::Db;
 use crocodile_server::{build_router, build_state, config::Config};
 
 #[tokio::main]
@@ -15,18 +15,12 @@ async fn main() -> anyhow::Result<()> {
     let config = Config::from_env().context("loading config from environment")?;
     tracing::info!(?config, "loaded config");
 
-    let pool = PgPoolOptions::new()
-        .max_connections(config.db_max_connections)
-        .connect(&config.database_url)
+    let db = Db::open(&config.database_url, config.db_max_connections)
         .await
-        .context("connecting to Postgres")?;
+        .context("opening database")?;
+    db.migrate().await.context("running migrations")?;
 
-    sqlx::migrate!("./migrations")
-        .run(&pool)
-        .await
-        .context("running migrations")?;
-
-    let state = build_state(config.clone(), pool).await?;
+    let state = build_state(config.clone(), db).await?;
     tracing::info!(server_id = %state.identity.server_id(), "server identity loaded");
 
     let app = build_router(state);

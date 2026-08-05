@@ -41,7 +41,7 @@ impl FromRequestParts<AppState> for AuthSession {
             .trim();
         let token = SessionToken::parse(token_str).ok_or(ApiError::Unauthorized)?;
         let token_hash = token.hash();
-        let account_id = sessions::touch_and_resolve(state.storage.pool(), &token_hash)
+        let account_id = sessions::touch_and_resolve(state.storage.db(), &token_hash)
             .await?
             .ok_or(ApiError::Unauthorized)?;
         Ok(AuthSession {

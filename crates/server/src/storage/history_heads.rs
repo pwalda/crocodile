@@ -5,12 +5,13 @@
 //! the incoming head wins. Fork handling (carrying multiple competing
 //! heads) is deferred to milestone 9.
 
-use sqlx::PgPool;
-
 use crocodile_protocol::history::{HistoryHead, MessageHash};
 use crocodile_protocol::ids::{DeviceId, RoomId};
 use crocodile_protocol::keys::Signature;
 use crocodile_protocol::time::UnixSeconds;
+
+use crate::dispatch;
+use crate::storage::Db;
 
 /// Shape of the raw row returned from the history_heads query.
 /// Tuple kept as a type alias to satisfy clippy's complex-type lint
@@ -18,15 +19,17 @@ use crocodile_protocol::time::UnixSeconds;
 type HistoryHeadRow = (Vec<u8>, i64, i64, Vec<u8>, Vec<u8>);
 
 /// Fetch the current head for a room, if any.
-pub async fn get(pool: &PgPool, room_id: RoomId) -> Result<Option<HistoryHead>, sqlx::Error> {
-    let row: Option<HistoryHeadRow> = sqlx::query_as(
-        r#"SELECT head_hash, message_count, posted_at, posted_by_device, signature
-           FROM history_heads
-           WHERE room_id = $1"#,
-    )
-    .bind(room_id.as_bytes().as_slice())
-    .fetch_optional(pool)
-    .await?;
+pub async fn get(db: &Db, room_id: RoomId) -> Result<Option<HistoryHead>, sqlx::Error> {
+    let row: Option<HistoryHeadRow> = dispatch!(db, |pool| {
+        sqlx::query_as(
+            r#"SELECT head_hash, message_count, posted_at, posted_by_device, signature
+               FROM history_heads
+               WHERE room_id = $1"#,
+        )
+        .bind(room_id.as_bytes().as_slice())
+        .fetch_optional(pool)
+        .await?
+    });
 
     Ok(row.map(|(hh, mc, pa, pbd, sig)| HistoryHead {
         room: room_id,
@@ -43,8 +46,13 @@ pub async fn get(pool: &PgPool, room_id: RoomId) -> Result<Option<HistoryHead>, 
 
 /// Upsert the head for a room. Caller is responsible for the freshness
 /// check; this is a raw write. Returns nothing.
-pub async fn put(pool: &PgPool, head: &HistoryHead) -> Result<(), sqlx::Error> {
-    sqlx::query(
+pub async fn put(db: &Db, head: &HistoryHead) -> Result<(), sqlx::Error> {
+    let now_expr = if db.is_sqlite() {
+        "strftime('%s','now')"
+    } else {
+        "now()"
+    };
+    let sql = format!(
         r#"INSERT INTO history_heads
            (room_id, head_hash, message_count, posted_at, posted_by_device, signature)
            VALUES ($1, $2, $3, $4, $5, $6)
@@ -54,15 +62,18 @@ pub async fn put(pool: &PgPool, head: &HistoryHead) -> Result<(), sqlx::Error> {
              posted_at = EXCLUDED.posted_at,
              posted_by_device = EXCLUDED.posted_by_device,
              signature = EXCLUDED.signature,
-             received_at = now()"#,
-    )
-    .bind(head.room.as_bytes().as_slice())
-    .bind(head.head.as_bytes().as_slice())
-    .bind(head.message_count as i64)
-    .bind(head.posted_at.get())
-    .bind(head.posted_by.as_bytes().as_slice())
-    .bind(head.signature.0.as_slice())
-    .execute(pool)
-    .await?;
+             received_at = {now_expr}"#
+    );
+    dispatch!(db, |pool| {
+        sqlx::query(&sql)
+            .bind(head.room.as_bytes().as_slice())
+            .bind(head.head.as_bytes().as_slice())
+            .bind(head.message_count as i64)
+            .bind(head.posted_at.get())
+            .bind(head.posted_by.as_bytes().as_slice())
+            .bind(head.signature.0.as_slice())
+            .execute(pool)
+            .await?;
+    });
     Ok(())
 }

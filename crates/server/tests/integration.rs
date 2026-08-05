@@ -1,19 +1,14 @@
-//! End-to-end integration tests against a real Postgres.
+//! End-to-end integration tests.
 //!
-//! Skips when `DATABASE_URL` is not set, so `cargo test` works in
-//! environments without Docker too. To run locally:
-//!
-//! ```bash
-//! docker compose up -d   # in repo root
-//! DATABASE_URL=postgres://crocodile:crocodile_dev@localhost:5432/crocodile \
-//!     cargo test --test integration
-//! ```
+//! By default these run against a **temp SQLite database**, so they
+//! execute on every `cargo test` with no external dependencies. Set
+//! `DATABASE_URL=postgres://...` to run the same suite against
+//! Postgres instead.
 
 use std::net::SocketAddr;
 
 use rand::rngs::OsRng;
 use serde_json::json;
-use sqlx::postgres::PgPoolOptions;
 use tempfile::tempdir;
 use tokio::task::JoinHandle;
 
@@ -25,6 +20,7 @@ use crocodile_protocol::keys::{
 use crocodile_protocol::signaling::CacheableServerStatement;
 use crocodile_protocol::time::UnixSeconds;
 
+use crocodile_server::storage::Db;
 use crocodile_server::{build_router, build_state, config::Config};
 
 /// Holds a running server so the test can drop it cleanly.
@@ -35,29 +31,25 @@ struct TestServer {
 }
 
 async fn spawn_server() -> Option<TestServer> {
-    let database_url = std::env::var("DATABASE_URL").ok()?;
+    // Fresh temp dir holds both the SQLite file and the server identity.
+    let dir = tempdir().expect("tempdir");
+    let identity_path = dir.path().join("identity.key");
 
-    let pool = match PgPoolOptions::new()
-        .max_connections(4)
-        .connect(&database_url)
-        .await
-    {
-        Ok(p) => p,
+    // Default: a temp SQLite file (always available). Override with
+    // DATABASE_URL for Postgres.
+    let database_url = std::env::var("DATABASE_URL").unwrap_or_else(|_| {
+        let db_path = dir.path().join("test.sqlite");
+        format!("sqlite://{}", db_path.display())
+    });
+
+    let db = match Db::open(&database_url, 4).await {
+        Ok(db) => db,
         Err(e) => {
-            eprintln!("integration test skipped: cannot connect to {database_url}: {e}");
+            eprintln!("integration test skipped: cannot open {database_url}: {e}");
             return None;
         }
     };
-
-    sqlx::migrate!("./migrations")
-        .run(&pool)
-        .await
-        .expect("migrations");
-
-    // Generate a fresh identity per server spawn so tests don't share
-    // a key file with anyone else.
-    let dir = tempdir().expect("tempdir");
-    let identity_path = dir.path().join("identity.key");
+    db.migrate().await.expect("migrations");
 
     let config = Config {
         database_url,
@@ -67,7 +59,7 @@ async fn spawn_server() -> Option<TestServer> {
         statement_ttl_secs: crocodile_protocol::time::DEFAULT_CACHE_TTL_SECS,
     };
 
-    let state = build_state(config, pool).await.expect("state");
+    let state = build_state(config, db).await.expect("state");
     let server_pubkey = state.identity.public_key();
     let app = build_router(state);
 
@@ -291,6 +283,21 @@ async fn full_flow_signup_login_keystore_room_history() {
     );
 
     // ---- Re-posting an older head must be rejected ----
+    // The stale head must itself be validly signed (with its own
+    // message_count) so it passes signature verification and is
+    // rejected specifically for being stale, not for a bad signature.
+    let stale_signing_input = postcard::to_stdvec(&(
+        &crocodile_protocol::ids::RoomId::from_bytes(
+            hex::decode(&room_id_hex).unwrap().try_into().unwrap(),
+        ),
+        &crocodile_protocol::history::MessageHash(head_hash),
+        0u64,
+        posted_at,
+        &device_id,
+    ))
+    .unwrap();
+    let stale_sig = alice_device.sign(&stale_signing_input);
+
     let resp = client
         .post(format!(
             "{}/v1/rooms/{}/history-head",
@@ -302,7 +309,7 @@ async fn full_flow_signup_login_keystore_room_history() {
             "message_count": 0u64,
             "posted_at_unix_secs": posted_at.get(),
             "posted_by_device_hex": hex::encode(device_id.as_bytes()),
-            "signature_hex": hex::encode(head_sig.0),
+            "signature_hex": hex::encode(stale_sig.0),
         }))
         .send()
         .await

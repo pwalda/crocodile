@@ -43,7 +43,7 @@ pub async fn publish_device_key(
     let device_pk = parse_device_public_key(&req.device_public_key_hex)?;
     let signature = parse_signature(&req.identity_signature_hex)?;
 
-    let account = accounts::by_id(state.storage.pool(), auth.account_id)
+    let account = accounts::by_id(state.storage.db(), auth.account_id)
         .await?
         .ok_or(ApiError::Unauthorized)?;
 
@@ -51,7 +51,7 @@ pub async fn publish_device_key(
     verify_identity_signature(&account.identity_pk_typed(), &signing_input, &signature)
         .map_err(|_| ApiError::BadRequest("identity_signature does not verify".into()))?;
 
-    let device_id = devices::upsert(state.storage.pool(), account.id, &device_pk, &signature)
+    let device_id = devices::upsert(state.storage.db(), account.id, &device_pk, &signature)
         .await
         .map_err(|e| match e {
             sqlx::Error::Database(ref db) if db.is_unique_violation() => {
@@ -82,11 +82,11 @@ pub async fn get_user_keys(
     Path(user_id_hex): Path<String>,
 ) -> ApiResult<Vec<u8>> {
     let user_id = parse_user_id(&user_id_hex)?;
-    let account = accounts::by_user_id(state.storage.pool(), user_id)
+    let account = accounts::by_user_id(state.storage.db(), user_id)
         .await?
         .ok_or(ApiError::NotFound)?;
 
-    let bindings = devices::list_for_account(state.storage.pool(), account.id).await?;
+    let bindings = devices::list_for_account(state.storage.db(), account.id).await?;
 
     let payload = CacheableServerStatement::UserKeys {
         user: user_id,
@@ -111,7 +111,7 @@ pub async fn lookup_by_username(
     State(state): State<AppState>,
     axum::extract::Path(username): axum::extract::Path<String>,
 ) -> ApiResult<axum::Json<UsernameLookupResponse>> {
-    let row = accounts::by_username(state.storage.pool(), &username)
+    let row = accounts::by_username(state.storage.db(), &username)
         .await?
         .ok_or(ApiError::NotFound)?;
     Ok(axum::Json(UsernameLookupResponse {

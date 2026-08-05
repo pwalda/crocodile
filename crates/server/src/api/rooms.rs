@@ -54,7 +54,7 @@ pub async fn create_room(
     }
 
     let room_id = rooms::create(
-        state.storage.pool(),
+        state.storage.db(),
         &req.name,
         &req.description,
         auth.account_id,
@@ -79,10 +79,10 @@ pub async fn get_room_state(
 ) -> ApiResult<Vec<u8>> {
     let room_id = parse_room_id(&room_id_hex)?;
 
-    if !rooms::exists(state.storage.pool(), room_id).await? {
+    if !rooms::exists(state.storage.db(), room_id).await? {
         return Err(ApiError::NotFound);
     }
-    if !rooms::is_member(state.storage.pool(), room_id, auth.account_id).await? {
+    if !rooms::is_member(state.storage.db(), room_id, auth.account_id).await? {
         // Hide membership of rooms the caller isn't in by returning the
         // same status as "doesn't exist." Disclosure of room existence
         // to non-members is a metadata leak; this collapses the two
@@ -90,8 +90,8 @@ pub async fn get_room_state(
         return Err(ApiError::NotFound);
     }
 
-    let members = rooms::list_members(state.storage.pool(), room_id).await?;
-    let head = history_heads::get(state.storage.pool(), room_id).await?;
+    let members = rooms::list_members(state.storage.db(), room_id).await?;
+    let head = history_heads::get(state.storage.db(), room_id).await?;
     let peer_hints: Vec<PeerHint> = build_peer_hints(&state, room_id).await;
 
     let payload = CacheableServerStatement::RoomState {
@@ -123,16 +123,18 @@ async fn build_peer_hints(state: &AppState, room_id: RoomId) -> Vec<PeerHint> {
     // For each member of the room, surface their currently-online
     // devices. Membership ↔ devices join: room_members → accounts →
     // devices. We do this cheaply with a single query.
-    let rows: Vec<(Vec<u8>,)> = match sqlx::query_as(
-        r#"SELECT d.device_id
-           FROM room_members m
-           JOIN devices d ON d.account_id = m.account_id
-           WHERE m.room_id = $1"#,
-    )
-    .bind(room_id.as_bytes().as_slice())
-    .fetch_all(state.storage.pool())
-    .await
-    {
+    let query_result = crate::dispatch!(state.storage.db(), |pool| {
+        sqlx::query_as::<_, (Vec<u8>,)>(
+            r#"SELECT d.device_id
+               FROM room_members m
+               JOIN devices d ON d.account_id = m.account_id
+               WHERE m.room_id = $1"#,
+        )
+        .bind(room_id.as_bytes().as_slice())
+        .fetch_all(pool)
+        .await
+    });
+    let rows: Vec<(Vec<u8>,)> = match query_result {
         Ok(rows) => rows,
         Err(e) => {
             tracing::warn!(error = %e, "peer_hint query failed; returning empty list");
@@ -181,11 +183,11 @@ pub async fn add_member(
     require_admin(&state, room_id, auth.account_id).await?;
 
     let user_id = parse_user_id(&req.user_id_hex)?;
-    let target = accounts::by_user_id(state.storage.pool(), user_id)
+    let target = accounts::by_user_id(state.storage.db(), user_id)
         .await?
         .ok_or_else(|| ApiError::BadRequest("user not found".into()))?;
 
-    let added = rooms::add_member(state.storage.pool(), room_id, target.id).await?;
+    let added = rooms::add_member(state.storage.db(), room_id, target.id).await?;
     Ok(if added {
         StatusCode::CREATED
     } else {
@@ -203,18 +205,18 @@ pub async fn remove_member(
     require_admin(&state, room_id, auth.account_id).await?;
 
     let user_id = parse_user_id(&user_id_hex)?;
-    let target = accounts::by_user_id(state.storage.pool(), user_id)
+    let target = accounts::by_user_id(state.storage.db(), user_id)
         .await?
         .ok_or_else(|| ApiError::BadRequest("user not found".into()))?;
 
     // remove_member at the storage layer refuses to delete owners; if
     // 0 rows are affected we either targeted the owner or a non-member.
-    let target_role = rooms::role_of(state.storage.pool(), room_id, target.id).await?;
+    let target_role = rooms::role_of(state.storage.db(), room_id, target.id).await?;
     if target_role == Some(RoomRole::Owner) {
         return Err(ApiError::BadRequest("cannot remove room owner".into()));
     }
 
-    let removed = rooms::remove_member(state.storage.pool(), room_id, target.id).await?;
+    let removed = rooms::remove_member(state.storage.db(), room_id, target.id).await?;
     if removed == 0 {
         Err(ApiError::NotFound)
     } else {
@@ -223,7 +225,7 @@ pub async fn remove_member(
 }
 
 async fn require_admin(state: &AppState, room_id: RoomId, account_id: uuid::Uuid) -> ApiResult<()> {
-    let role = rooms::role_of(state.storage.pool(), room_id, account_id).await?;
+    let role = rooms::role_of(state.storage.db(), room_id, account_id).await?;
     match role {
         Some(RoomRole::Admin) | Some(RoomRole::Owner) => Ok(()),
         // Treat "non-admin member" as Forbidden via 401-equivalent;
@@ -264,7 +266,7 @@ pub async fn post_history_head(
 ) -> ApiResult<(StatusCode, Json<PostHistoryHeadResponse>)> {
     let room_id = parse_room_id(&room_id_hex)?;
 
-    if !rooms::is_member(state.storage.pool(), room_id, auth.account_id).await? {
+    if !rooms::is_member(state.storage.db(), room_id, auth.account_id).await? {
         return Err(ApiError::NotFound);
     }
 
@@ -295,7 +297,7 @@ pub async fn post_history_head(
     // account but does not have to belong to the calling session
     // (e.g. the host on the call posts, even if a different session
     // owns the API call). We accept any device registered server-side.
-    let dpk = lookup_device_pubkey(state.storage.pool(), head.posted_by)
+    let dpk = lookup_device_pubkey(state.storage.db(), head.posted_by)
         .await?
         .ok_or_else(|| ApiError::BadRequest("posted_by_device is not registered".into()))?;
 
@@ -306,7 +308,7 @@ pub async fn post_history_head(
         .map_err(|_| ApiError::BadRequest("signature does not verify".into()))?;
 
     // Freshness check vs. the currently-stored head.
-    let current = history_heads::get(state.storage.pool(), room_id).await?;
+    let current = history_heads::get(state.storage.db(), room_id).await?;
     if let Some(prev) = current.as_ref() {
         match freshness_cmp(&head, prev) {
             std::cmp::Ordering::Greater => {} // proceed
@@ -323,7 +325,7 @@ pub async fn post_history_head(
         }
     }
 
-    history_heads::put(state.storage.pool(), &head).await?;
+    history_heads::put(state.storage.db(), &head).await?;
     Ok((
         StatusCode::CREATED,
         Json(PostHistoryHeadResponse {
@@ -334,14 +336,15 @@ pub async fn post_history_head(
 }
 
 async fn lookup_device_pubkey(
-    pool: &sqlx::PgPool,
+    db: &crate::storage::Db,
     device: DeviceId,
 ) -> Result<Option<DevicePublicKey>, sqlx::Error> {
-    let row: Option<(Vec<u8>,)> =
+    let row: Option<(Vec<u8>,)> = crate::dispatch!(db, |pool| {
         sqlx::query_as("SELECT device_public_key FROM devices WHERE device_id = $1")
             .bind(device.as_bytes().as_slice())
             .fetch_optional(pool)
-            .await?;
+            .await?
+    });
     Ok(row.map(|(b,)| {
         DevicePublicKey(
             b.try_into()

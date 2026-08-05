@@ -48,7 +48,7 @@ pub async fn create_account(
     let hash = password::hash(&req.password)
         .map_err(|e| ApiError::Internal(anyhow::anyhow!("argon2 error: {e}")))?;
 
-    accounts::insert(state.storage.pool(), &req.username, &hash, &ipk).await?;
+    accounts::insert(state.storage.db(), &req.username, &hash, &ipk).await?;
 
     let user_id: UserId = user_id_from_public_key(&ipk);
 

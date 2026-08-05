@@ -1,10 +1,12 @@
 //! Account-related storage.
 
-use sqlx::PgPool;
 use uuid::Uuid;
 
 use crocodile_protocol::ids::UserId;
 use crocodile_protocol::keys::{user_id_from_public_key, IdentityPublicKey};
+
+use crate::dispatch;
+use crate::storage::Db;
 
 /// Row stored in the `accounts` table.
 #[derive(Debug, Clone)]
@@ -34,71 +36,72 @@ impl AccountRow {
 }
 
 /// Insert a new account. Returns the created row's UUID.
+///
+/// The id is generated in Rust (rather than via a DB default) so the
+/// same INSERT works on both Postgres and SQLite — SQLite has no
+/// `gen_random_uuid()`.
 pub async fn insert(
-    pool: &PgPool,
+    db: &Db,
     username: &str,
     password_hash: &str,
     identity_public_key: &IdentityPublicKey,
 ) -> Result<Uuid, sqlx::Error> {
     let user_id = user_id_from_public_key(identity_public_key);
-    let id: Uuid = sqlx::query_scalar(
-        r#"
-        INSERT INTO accounts (username, password_hash, identity_public_key, user_id)
-        VALUES ($1, $2, $3, $4)
-        RETURNING id
-        "#,
-    )
-    .bind(username)
-    .bind(password_hash)
-    .bind(identity_public_key.0.as_slice())
-    .bind(user_id.as_bytes().as_slice())
-    .fetch_one(pool)
-    .await?;
+    let id = Uuid::new_v4();
+    dispatch!(db, |pool| {
+        sqlx::query(
+            r#"
+            INSERT INTO accounts (id, username, password_hash, identity_public_key, user_id)
+            VALUES ($1, $2, $3, $4, $5)
+            "#,
+        )
+        .bind(id)
+        .bind(username)
+        .bind(password_hash)
+        .bind(identity_public_key.0.as_slice())
+        .bind(user_id.as_bytes().as_slice())
+        .execute(pool)
+        .await?;
+    });
     Ok(id)
 }
 
+const SELECT_ACCOUNT: &str =
+    "SELECT id, username, password_hash, identity_public_key, user_id FROM accounts";
+
 /// Look up an account by username.
-pub async fn by_username(pool: &PgPool, username: &str) -> Result<Option<AccountRow>, sqlx::Error> {
-    let row = sqlx::query_as::<_, AccountRowDb>(
-        r#"
-        SELECT id, username, password_hash, identity_public_key, user_id
-        FROM accounts
-        WHERE username = $1
-        "#,
-    )
-    .bind(username)
-    .fetch_optional(pool)
-    .await?;
+pub async fn by_username(db: &Db, username: &str) -> Result<Option<AccountRow>, sqlx::Error> {
+    let sql = format!("{SELECT_ACCOUNT} WHERE username = $1");
+    let row = dispatch!(db, |pool| {
+        sqlx::query_as::<_, AccountRowDb>(&sql)
+            .bind(username)
+            .fetch_optional(pool)
+            .await?
+    });
     Ok(row.map(Into::into))
 }
 
 /// Look up an account by [`UserId`].
-pub async fn by_user_id(pool: &PgPool, user_id: UserId) -> Result<Option<AccountRow>, sqlx::Error> {
-    let row = sqlx::query_as::<_, AccountRowDb>(
-        r#"
-        SELECT id, username, password_hash, identity_public_key, user_id
-        FROM accounts
-        WHERE user_id = $1
-        "#,
-    )
-    .bind(user_id.as_bytes().as_slice())
-    .fetch_optional(pool)
-    .await?;
+pub async fn by_user_id(db: &Db, user_id: UserId) -> Result<Option<AccountRow>, sqlx::Error> {
+    let sql = format!("{SELECT_ACCOUNT} WHERE user_id = $1");
+    let row = dispatch!(db, |pool| {
+        sqlx::query_as::<_, AccountRowDb>(&sql)
+            .bind(user_id.as_bytes().as_slice())
+            .fetch_optional(pool)
+            .await?
+    });
     Ok(row.map(Into::into))
 }
 
 /// Look up an account by its internal UUID.
-pub async fn by_id(pool: &PgPool, id: Uuid) -> Result<Option<AccountRow>, sqlx::Error> {
-    let row = sqlx::query_as::<_, AccountRowDb>(
-        r#"
-        SELECT id, username, password_hash, identity_public_key, user_id
-        FROM accounts
-        WHERE id = $1
-        "#,
-    )
-    .bind(id)
-    .fetch_optional(pool)
-    .await?;
+pub async fn by_id(db: &Db, id: Uuid) -> Result<Option<AccountRow>, sqlx::Error> {
+    let sql = format!("{SELECT_ACCOUNT} WHERE id = $1");
+    let row = dispatch!(db, |pool| {
+        sqlx::query_as::<_, AccountRowDb>(&sql)
+            .bind(id)
+            .fetch_optional(pool)
+            .await?
+    });
     Ok(row.map(Into::into))
 }
 

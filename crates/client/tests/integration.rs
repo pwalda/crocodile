@@ -1,14 +1,15 @@
 //! Integration test: client speaks to a running server over HTTP.
 //!
-//! Skips gracefully when `DATABASE_URL` isn't set so `cargo test`
-//! works without Docker too.
+//! Runs against a temp SQLite database by default (no external deps);
+//! set `DATABASE_URL=postgres://...` to target Postgres.
 
 use std::net::SocketAddr;
 
 use rand::rngs::OsRng;
-use sqlx::postgres::PgPoolOptions;
 use tempfile::tempdir;
 use tokio::task::JoinHandle;
+
+use crocodile_server::storage::Db;
 
 use crocodile_protocol::keys::IdentityKeypair;
 use crocodile_protocol::time::UnixSeconds;
@@ -23,20 +24,15 @@ struct TestServer {
 }
 
 async fn spawn_server() -> Option<TestServer> {
-    let database_url = std::env::var("DATABASE_URL").ok()?;
-
-    let pool = PgPoolOptions::new()
-        .max_connections(4)
-        .connect(&database_url)
-        .await
-        .ok()?;
-    sqlx::migrate!("../server/migrations")
-        .run(&pool)
-        .await
-        .expect("migrations");
-
     let dir = tempdir().expect("tempdir");
     let identity_path = dir.path().join("identity.key");
+
+    let database_url = std::env::var("DATABASE_URL")
+        .unwrap_or_else(|_| format!("sqlite://{}", dir.path().join("test.sqlite").display()));
+
+    let db = Db::open(&database_url, 4).await.ok()?;
+    db.migrate().await.expect("migrations");
+
     let config = crocodile_server::config::Config {
         database_url,
         db_max_connections: 4,
@@ -44,7 +40,7 @@ async fn spawn_server() -> Option<TestServer> {
         server_identity_path: identity_path,
         statement_ttl_secs: crocodile_protocol::time::DEFAULT_CACHE_TTL_SECS,
     };
-    let state = crocodile_server::build_state(config, pool)
+    let state = crocodile_server::build_state(config, db)
         .await
         .expect("state");
     let server_pubkey = state.identity.public_key();
@@ -69,7 +65,7 @@ async fn spawn_server() -> Option<TestServer> {
 #[tokio::test]
 async fn cache_first_user_keys_fetch() {
     let Some(server) = spawn_server().await else {
-        eprintln!("DATABASE_URL not set; skipping integration test");
+        eprintln!("could not open test database; skipping");
         return;
     };
 

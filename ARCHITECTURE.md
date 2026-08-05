@@ -210,7 +210,7 @@ Even while some members are offline, any peer that has talked to the server with
 |---|---|---|
 | Server language | Rust | Shared protocol crate with client; strong async; type safety for security-critical code |
 | Server HTTP / WS | axum | Mature, ergonomic, integrates with Tokio |
-| Server DB | PostgreSQL | Boring, correct, well-understood |
+| Server DB | PostgreSQL (prod) / SQLite (local) | Postgres is boring/correct for production + federation; SQLite lets the server run with zero external deps for local/MVP use. Selected at runtime from the `DATABASE_URL` scheme; shared SQL via a `dispatch!` macro over both pools. |
 | Ephemeral state | Redis | Presence + signaling routing |
 | Client language | Rust | Same crate sharing; cross-platform; strong audio + crypto + QUIC ecosystems |
 | Client UI shell | Tauri + Svelte (or React) | Small binary, OS webview, fast UI iteration; sensitive logic in Rust |

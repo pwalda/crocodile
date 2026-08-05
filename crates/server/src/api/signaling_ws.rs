@@ -52,7 +52,7 @@ async fn run_socket(mut socket: WebSocket, state: AppState, auth: AuthSession) {
     };
 
     // Confirm the device belongs to the authenticated account.
-    match device_belongs_to(state.storage.pool(), device_id, auth.account_id).await {
+    match device_belongs_to(state.storage.db(), device_id, auth.account_id).await {
         Ok(true) => {}
         Ok(false) => {
             let _ = send_error(&mut socket, "device does not belong to this account").await;
@@ -153,16 +153,17 @@ async fn recv_identify(socket: &mut WebSocket) -> Result<DeviceId, String> {
 }
 
 async fn device_belongs_to(
-    pool: &sqlx::PgPool,
+    db: &crate::storage::Db,
     device: DeviceId,
     account_id: uuid::Uuid,
 ) -> Result<bool, sqlx::Error> {
-    let exists: Option<i32> =
+    let exists: Option<i32> = crate::dispatch!(db, |pool| {
         sqlx::query_scalar("SELECT 1 FROM devices WHERE device_id = $1 AND account_id = $2")
             .bind(device.as_bytes().as_slice())
             .bind(account_id)
             .fetch_optional(pool)
-            .await?;
+            .await?
+    });
     Ok(exists.is_some())
 }
 
