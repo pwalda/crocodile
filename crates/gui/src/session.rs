@@ -933,10 +933,25 @@ async fn publish_device_key(
         .await?;
     let status = resp.status();
     if status.is_success() || status.as_u16() == 409 {
-        Ok(())
-    } else {
-        bail!("publish_device_key: {status}")
+        return Ok(());
     }
+    let body = resp.text().await.unwrap_or_default();
+    // A signature-verification failure means this username is registered
+    // on the server under a *different* identity key than the one this
+    // client holds — usually because the state dir changed (or was
+    // wiped) since the account was created, or the server database was
+    // reset while the client kept its old identity. Explain the fix.
+    if body.contains("identity_signature does not verify") {
+        bail!(
+            "this username is already registered with a different identity key. \
+             That happens when your local state dir changed since the account was \
+             created, or the server's database was reset. Fix: pick a NEW username \
+             in Settings (simplest), or restore the original state dir. If you \
+             control the server and want to reuse the name, stop it and delete its \
+             crocodile-server.sqlite file to clear old accounts."
+        );
+    }
+    bail!("publish_device_key failed ({status}): {body}")
 }
 
 async fn create_room(server: &str, token: &str, name: &str) -> Result<RoomId> {

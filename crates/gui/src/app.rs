@@ -34,11 +34,25 @@ impl Default for Settings {
             server: "http://127.0.0.1:8080".to_string(),
             username: String::new(),
             password: String::new(),
-            state_dir: "./crocodile-state".to_string(),
+            // Absolute path under the home dir so the identity is stable
+            // regardless of which directory the binary is launched from.
+            // (A relative "./crocodile-state" would yield a *different*
+            // identity per working directory, which desyncs from the
+            // account registered on the server.)
+            state_dir: default_state_dir(),
             bind_addr: "0.0.0.0:0".to_string(),
             advertise_addr: String::new(),
         }
     }
+}
+
+fn default_state_dir() -> String {
+    let mut p = dirs_home();
+    p.push(".local");
+    p.push("share");
+    p.push("crocodile");
+    p.push("state");
+    p.to_string_lossy().into_owned()
 }
 
 impl Settings {
