@@ -158,6 +158,39 @@ pub struct CrocodileApp {
     /// Last connect error, shown prominently on the Settings tab (the
     /// Call-tab log isn't visible while you're on Settings).
     connect_error: Option<String>,
+    /// Cached audio device names.
+    ///
+    /// Enumerating CoreAudio devices measured ~177 ms — far beyond a
+    /// frame budget. Doing it inline in the draw code pinned the UI at
+    /// a few fps. Cache it and refresh only on demand.
+    audio_devices: AudioDeviceList,
+    /// Standalone mic test, so users can verify capture without being
+    /// in a call.
+    mic_test: Option<MicTest>,
+}
+
+/// Cached input/output device names.
+#[derive(Debug, Default, Clone)]
+struct AudioDeviceList {
+    inputs: Vec<String>,
+    outputs: Vec<String>,
+    loaded: bool,
+}
+
+impl AudioDeviceList {
+    fn refresh(&mut self) {
+        self.inputs = crocodile_client::audio::capture::list_devices();
+        self.outputs = crocodile_client::audio::playback::list_devices();
+        self.loaded = true;
+    }
+}
+
+/// A short-lived capture stream used only to prove the microphone
+/// works. Held on its own thread because cpal streams are not `Send`.
+struct MicTest {
+    controls: Arc<crocodile_client::audio::AudioControls>,
+    _stop: std::sync::mpsc::Sender<()>,
+    error: Option<String>,
 }
 
 impl CrocodileApp {
@@ -178,7 +211,54 @@ impl CrocodileApp {
             probe: None,
             probing: false,
             connect_error: None,
+            audio_devices: AudioDeviceList::default(),
+            mic_test: None,
         }
+    }
+
+    /// Start a standalone microphone test: opens capture on the chosen
+    /// input device and feeds the level meter until stopped. Lets a user
+    /// confirm the mic works before joining a call, which is where this
+    /// was previously only observable.
+    fn start_mic_test(&mut self) {
+        let controls = crocodile_client::audio::AudioControls::new();
+        let (stop_tx, stop_rx) = std::sync::mpsc::channel::<()>();
+        let controls_for_thread = controls.clone();
+        let device = self.settings.input_device.clone();
+        let (err_tx, err_rx) = std::sync::mpsc::channel::<String>();
+
+        std::thread::Builder::new()
+            .name("crocodile-mic-test".into())
+            .spawn(move || {
+                // Samples are discarded; only the level meter matters.
+                let (sink, mut drain) = tokio::sync::mpsc::unbounded_channel::<Vec<f32>>();
+                std::thread::spawn(move || while drain.blocking_recv().is_some() {});
+                let _stream = match crocodile_client::audio::capture::open_by_name(
+                    device.as_deref(),
+                    sink,
+                    controls_for_thread,
+                ) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        let _ = err_tx.send(e.to_string());
+                        return;
+                    }
+                };
+                let _ = stop_rx.recv();
+            })
+            .expect("spawn mic test thread");
+
+        // Give the stream a moment to fail fast on a bad device.
+        std::thread::sleep(std::time::Duration::from_millis(150));
+        let error = err_rx.try_recv().ok();
+        if let Some(e) = &error {
+            self.append_log("error", format!("mic test: {e}"));
+        }
+        self.mic_test = Some(MicTest {
+            controls,
+            _stop: stop_tx,
+            error,
+        });
     }
 
     fn start_connect(&mut self) {
@@ -381,9 +461,11 @@ impl eframe::App for CrocodileApp {
         // Pull events from the background session task + connect probe.
         self.drain_session_events();
         self.drain_probe();
-        // Re-render shortly so events show up even when the user isn't
-        // interacting — keeps the chat live.
-        ctx.request_repaint_after(std::time::Duration::from_millis(100));
+        // Re-render continuously so chat and the level meter stay live
+        // without user input. 50 ms (~20 fps) makes the meter feel
+        // responsive; it is only affordable because per-frame work is
+        // now cheap (device enumeration is cached, not re-queried).
+        ctx.request_repaint_after(std::time::Duration::from_millis(50));
 
         egui::TopBottomPanel::top("tabs").show(ctx, |ui| {
             ui.horizontal(|ui| {
@@ -446,49 +528,104 @@ impl CrocodileApp {
 
         ui.add_space(8.0);
         ui.heading("Audio");
-        // Device lists are queried live so newly-plugged hardware shows
-        // up without restarting.
-        let inputs = crocodile_client::audio::capture::list_devices();
-        let outputs = crocodile_client::audio::playback::list_devices();
+        // Populate the device cache once. Enumeration measured ~177 ms,
+        // so it must never run per frame — doing so pinned the UI at a
+        // few fps and made the level meter look frozen.
+        if !self.audio_devices.loaded {
+            self.audio_devices.refresh();
+        }
 
         egui::Grid::new("audio-grid").num_columns(2).show(ui, |ui| {
             ui.label("Microphone:");
-            device_picker(ui, "in-dev", &inputs, &mut self.settings.input_device);
+            device_picker(
+                ui,
+                "in-dev",
+                &self.audio_devices.inputs,
+                &mut self.settings.input_device,
+            );
             ui.end_row();
 
             ui.label("Speakers:");
-            device_picker(ui, "out-dev", &outputs, &mut self.settings.output_device);
+            device_picker(
+                ui,
+                "out-dev",
+                &self.audio_devices.outputs,
+                &mut self.settings.output_device,
+            );
             ui.end_row();
         });
+        if ui
+            .small_button("\u{21bb} Rescan devices")
+            .on_hover_text("Re-enumerate audio hardware (e.g. after plugging in a headset)")
+            .clicked()
+        {
+            self.audio_devices.refresh();
+        }
 
-        // Live input meter — the fastest way to tell whether the mic is
-        // actually capturing. Only meaningful during a call, since the
-        // audio streams open when the call starts.
-        ui.add_space(4.0);
-        if let Some(call) = self.call.as_ref() {
-            let level = call.controls.input_level.get();
-            ui.horizontal(|ui| {
-                ui.label("Mic level:");
-                ui.add(egui::ProgressBar::new(level.min(1.0)).desired_width(180.0));
-            });
-            let muted = call.controls.is_muted();
-            if ui
-                .button(if muted { "🔇 Unmute" } else { "🎤 Mute" })
-                .clicked()
-            {
-                call.controls.toggle_muted();
+        // Live input meter. During a call it reflects the call's capture
+        // stream; otherwise a standalone mic test can drive it, so the
+        // mic is verifiable before calling anyone.
+        ui.add_space(6.0);
+        let call_controls = self.call.as_ref().map(|c| c.controls.clone());
+        let test_controls = self.mic_test.as_ref().map(|t| t.controls.clone());
+        let active = call_controls.clone().or(test_controls);
+
+        ui.horizontal(|ui| {
+            ui.label("Mic level:");
+            let level = active.as_ref().map(|c| c.input_level.get()).unwrap_or(0.0);
+            ui.add(
+                egui::ProgressBar::new(level.min(1.0))
+                    .desired_width(200.0)
+                    .text(format!("{:.0}%", level * 100.0)),
+            );
+        });
+
+        ui.horizontal(|ui| {
+            if self.call.is_none() {
+                let testing = self.mic_test.is_some();
+                if ui
+                    .button(if testing {
+                        "Stop mic test"
+                    } else {
+                        "Test microphone"
+                    })
+                    .clicked()
+                {
+                    if testing {
+                        // Dropping the handle closes the stop channel,
+                        // ending the capture thread.
+                        self.mic_test = None;
+                    } else {
+                        self.start_mic_test();
+                    }
+                }
             }
-            if muted {
-                ui.colored_label(egui::Color32::from_rgb(230, 100, 100), "muted");
-            } else if level < 0.001 {
+            if let Some(c) = &call_controls {
+                let muted = c.is_muted();
+                if ui.button(if muted { "Unmute" } else { "Mute" }).clicked() {
+                    c.toggle_muted();
+                }
+                if muted {
+                    ui.colored_label(egui::Color32::from_rgb(230, 100, 100), "muted");
+                }
+            }
+        });
+
+        if let Some(t) = &self.mic_test {
+            if let Some(e) = &t.error {
+                ui.colored_label(egui::Color32::from_rgb(230, 100, 100), format!("x {e}"));
+            } else if t.controls.input_level.get() < 0.001 {
                 ui.colored_label(
                     egui::Color32::from_rgb(210, 170, 90),
-                    "no signal — check the mic is unmuted and, on macOS, that \
-                     System Settings > Privacy & Security > Microphone allows this app",
+                    "no signal yet - speak into the mic. If it stays flat, check macOS \
+                     System Settings > Privacy & Security > Microphone.",
+                );
+            } else {
+                ui.colored_label(
+                    egui::Color32::from_rgb(80, 200, 120),
+                    "microphone is capturing",
                 );
             }
-        } else {
-            ui.weak("Mic level and mute appear during a call.");
         }
 
         ui.add_space(8.0);
