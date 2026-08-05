@@ -67,7 +67,7 @@ impl CoordinationClient {
             .get(format!("{base_url}/v1/server/info"))
             .send()
             .await?;
-        ensure_success(&resp).await?;
+        let resp = check_status(resp).await?;
         Ok(resp.json().await?)
     }
 
@@ -88,7 +88,7 @@ impl CoordinationClient {
             }))
             .send()
             .await?;
-        ensure_success(&resp).await?;
+        let resp = check_status(resp).await?;
         #[derive(Deserialize)]
         struct R {
             user_id_hex: String,
@@ -106,7 +106,7 @@ impl CoordinationClient {
             .get(format!("{}/v1/users/by-username/{username}", self.base_url))
             .send()
             .await?;
-        ensure_success(&resp).await?;
+        let resp = check_status(resp).await?;
         #[derive(Deserialize)]
         struct R {
             user_id_hex: String,
@@ -123,7 +123,7 @@ impl CoordinationClient {
             .json(&json!({"username": username, "password": password}))
             .send()
             .await?;
-        ensure_success(&resp).await?;
+        let resp = check_status(resp).await?;
         Ok(resp.json().await?)
     }
 
@@ -183,7 +183,7 @@ impl CoordinationClient {
             req = req.bearer_auth(token);
         }
         let resp = req.send().await?;
-        ensure_success(&resp).await?;
+        let resp = check_status(resp).await?;
         Ok(resp.bytes().await?.to_vec())
     }
 }
@@ -206,20 +206,24 @@ pub struct ServerInfo {
     pub statement_ttl_secs: i64,
 }
 
-async fn ensure_success(resp: &reqwest::Response) -> Result<()> {
+/// On success returns the response for the caller to consume; on a
+/// non-2xx status consumes the response to read the body (the server
+/// returns `{"error":"..."}` diagnostics there) and surfaces it in the
+/// error so failures are actually explainable.
+async fn check_status(resp: reqwest::Response) -> Result<reqwest::Response> {
     let status = resp.status();
     if status.is_success() {
-        Ok(())
-    } else {
-        // Read body for diagnostics; reqwest::Response is consumed by
-        // .text() / .bytes(), so we have to clone status here. Caller
-        // already has the resp ref but we cannot move out of it; the
-        // small loss of context here (no body) is acceptable because
-        // callers do their own resp.error_for_status path. The
-        // alternative is to consume resp here and return an Either.
-        Err(ClientError::ServerStatus {
-            status: status.as_u16(),
-            body: String::new(),
-        })
+        return Ok(resp);
     }
+    let raw = resp.text().await.unwrap_or_default();
+    // Prefer the `error` field of the server's JSON body; fall back to
+    // the raw text.
+    let body = serde_json::from_str::<serde_json::Value>(&raw)
+        .ok()
+        .and_then(|v| v.get("error").and_then(|e| e.as_str()).map(str::to_string))
+        .unwrap_or(raw);
+    Err(ClientError::ServerStatus {
+        status: status.as_u16(),
+        body,
+    })
 }
