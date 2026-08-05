@@ -115,6 +115,19 @@ impl CoordinationClient {
         Ok(body.user_id_hex)
     }
 
+    /// List the rooms the authenticated caller belongs to. Lets the UI
+    /// present a pick-list instead of asking users to paste room ids.
+    pub async fn list_my_rooms(&self, session_token: &str) -> Result<Vec<MyRoom>> {
+        let resp = self
+            .http
+            .get(format!("{}/v1/rooms", self.base_url))
+            .bearer_auth(session_token)
+            .send()
+            .await?;
+        let resp = check_status(resp).await?;
+        Ok(resp.json().await?)
+    }
+
     /// Log in. Returns the session token and the derived user id (hex).
     pub async fn login(&self, username: &str, password: &str) -> Result<LoginOutput> {
         let resp = self
@@ -195,6 +208,17 @@ pub struct LoginOutput {
     pub session_token: String,
     /// Hex-encoded user id of the logged-in account.
     pub user_id_hex: String,
+}
+
+/// One room the caller belongs to (from [`CoordinationClient::list_my_rooms`]).
+#[derive(Debug, Clone, Deserialize)]
+pub struct MyRoom {
+    /// Room id, hex-encoded.
+    pub room_id_hex: String,
+    /// Human-readable room name.
+    pub name: String,
+    /// The caller's role: "owner", "admin", or "member".
+    pub role: String,
 }
 
 /// Response of `/v1/server/info`.

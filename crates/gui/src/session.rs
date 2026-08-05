@@ -60,6 +60,68 @@ pub enum SessionAction {
     Hangup,
 }
 
+/// One room the user belongs to, for the Join pick-list.
+#[derive(Debug, Clone)]
+pub struct RoomInfo {
+    pub room_id_hex: String,
+    pub name: String,
+    pub role: String,
+}
+
+/// Result of a "Connect / Refresh" probe: verifies the server is
+/// reachable, the account exists (creating it if needed), the device
+/// key is published, and returns the rooms the user belongs to.
+pub enum ProbeEvent {
+    Ok {
+        username: String,
+        server_id_hex: String,
+        rooms: Vec<RoomInfo>,
+    },
+    Err(String),
+}
+
+/// Spawn a one-shot connectivity probe. Sends exactly one
+/// [`ProbeEvent`] on the returned receiver, then finishes.
+pub fn spawn_probe(runtime: &Runtime, settings: Settings) -> mpsc::UnboundedReceiver<ProbeEvent> {
+    let (tx, rx) = mpsc::unbounded_channel();
+    runtime.spawn(async move {
+        let ev = match probe(&settings).await {
+            Ok(ev) => ev,
+            Err(e) => ProbeEvent::Err(e.to_string()),
+        };
+        let _ = tx.send(ev);
+    });
+    rx
+}
+
+async fn probe(settings: &Settings) -> Result<ProbeEvent> {
+    // connect() does the full handshake: server_info + signup-or-login
+    // + publish device key + open signaling. A successful return means
+    // this device can reach the coordination server and is registered.
+    let (throwaway, _rx) = mpsc::unbounded_channel();
+    let conn = connect(settings, &throwaway).await?;
+    let server_id = crocodile_protocol::keys::server_id_from_public_key(&conn.server_pubkey);
+    let rooms = conn
+        .client
+        .list_my_rooms(&conn.token)
+        .await
+        .context("listing your rooms")?;
+    Ok(ProbeEvent::Ok {
+        username: settings.username.clone(),
+        server_id_hex: hex::encode(server_id.as_bytes()),
+        rooms: rooms
+            .into_iter()
+            .map(|r| RoomInfo {
+                room_id_hex: r.room_id_hex,
+                name: r.name,
+                role: r.role,
+            })
+            .collect(),
+    })
+    // conn drops here, closing the probe's signaling WS — presence is
+    // only needed during an actual call.
+}
+
 /// Handle to a running session.
 pub struct SessionHandle {
     pub events: mpsc::UnboundedReceiver<SessionEvent>,

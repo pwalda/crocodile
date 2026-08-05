@@ -18,6 +18,43 @@ use crate::error::{ApiError, ApiResult};
 use crate::storage::{accounts, history_heads, rooms};
 use crate::AppState;
 
+// ---------- List my rooms ----------
+
+/// One entry in the caller's room list.
+#[derive(Debug, Serialize)]
+pub struct MyRoomEntry {
+    /// Room id, hex-encoded.
+    pub room_id_hex: String,
+    /// Human-readable room name.
+    pub name: String,
+    /// The caller's role: "owner", "admin", or "member".
+    pub role: String,
+}
+
+/// GET /v1/rooms — list the rooms the authenticated caller belongs to.
+/// Lets clients present a pick-list instead of making users paste room
+/// ids.
+pub async fn list_my_rooms(
+    State(state): State<AppState>,
+    auth: AuthSession,
+) -> ApiResult<Json<Vec<MyRoomEntry>>> {
+    let rooms = rooms::list_for_account(state.storage.db(), auth.account_id).await?;
+    let entries = rooms
+        .into_iter()
+        .map(|r| MyRoomEntry {
+            room_id_hex: hex::encode(r.room.as_bytes()),
+            name: r.name,
+            role: match r.role {
+                RoomRole::Owner => "owner",
+                RoomRole::Admin => "admin",
+                RoomRole::Member => "member",
+            }
+            .to_string(),
+        })
+        .collect();
+    Ok(Json(entries))
+}
+
 // ---------- Create room ----------
 
 #[derive(Debug, Deserialize)]

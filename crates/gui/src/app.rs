@@ -7,7 +7,7 @@ use std::sync::Arc;
 use eframe::egui;
 use tokio::runtime::Runtime;
 
-use crate::session::{self, SessionAction, SessionEvent, SessionHandle};
+use crate::session::{self, ProbeEvent, RoomInfo, SessionAction, SessionEvent, SessionHandle};
 
 /// Persisted settings, loaded from / saved to `~/.config/crocodile/settings.json`.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -93,6 +93,14 @@ struct LogLine {
     body: String,
 }
 
+/// Connection state from the last Connect/Refresh probe.
+#[derive(Debug, Clone)]
+struct Connected {
+    username: String,
+    server_id_hex: String,
+    rooms: Vec<RoomInfo>,
+}
+
 pub struct CrocodileApp {
     runtime: Arc<Runtime>,
     settings: Settings,
@@ -104,6 +112,12 @@ pub struct CrocodileApp {
     status: CallStatus,
     log: Vec<LogLine>,
     chat_input: String,
+    /// Result of the last successful Connect/Refresh probe.
+    connected: Option<Connected>,
+    /// In-flight probe, if any.
+    probe: Option<tokio::sync::mpsc::UnboundedReceiver<ProbeEvent>>,
+    /// True while a probe is running (for button state / spinner text).
+    probing: bool,
 }
 
 impl CrocodileApp {
@@ -120,6 +134,55 @@ impl CrocodileApp {
             status: CallStatus::Idle,
             log: Vec::new(),
             chat_input: String::new(),
+            connected: None,
+            probe: None,
+            probing: false,
+        }
+    }
+
+    fn start_connect(&mut self) {
+        if self.settings.username.trim().is_empty() || self.settings.password.is_empty() {
+            self.append_log("error", "fill username + password in Settings first");
+            return;
+        }
+        self.settings.save();
+        self.append_log("status", "connecting to coordination server...");
+        self.probing = true;
+        self.connected = None;
+        self.probe = Some(session::spawn_probe(&self.runtime, self.settings.clone()));
+    }
+
+    fn drain_probe(&mut self) {
+        let Some(rx) = self.probe.as_mut() else {
+            return;
+        };
+        if let Ok(ev) = rx.try_recv() {
+            self.probing = false;
+            self.probe = None;
+            match ev {
+                ProbeEvent::Ok {
+                    username,
+                    server_id_hex,
+                    rooms,
+                } => {
+                    let n = rooms.len();
+                    self.append_log(
+                        "status",
+                        format!("connected as {username} — {n} room(s) available"),
+                    );
+                    self.connected = Some(Connected {
+                        username,
+                        server_id_hex,
+                        rooms,
+                    });
+                    // Jump to the Call tab so the room list is visible.
+                    self.pane = Pane::Call;
+                }
+                ProbeEvent::Err(e) => {
+                    self.append_log("error", format!("connection failed: {e}"));
+                    self.connected = None;
+                }
+            }
         }
     }
 
@@ -256,8 +319,9 @@ impl CrocodileApp {
 
 impl eframe::App for CrocodileApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        // Pull events from the background session task.
+        // Pull events from the background session task + connect probe.
         self.drain_session_events();
+        self.drain_probe();
         // Re-render shortly so events show up even when the user isn't
         // interacting — keeps the chat live.
         ctx.request_repaint_after(std::time::Duration::from_millis(100));
@@ -267,6 +331,7 @@ impl eframe::App for CrocodileApp {
                 ui.selectable_value(&mut self.pane, Pane::Settings, "Settings");
                 ui.selectable_value(&mut self.pane, Pane::Call, "Call");
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    // Call state chip.
                     let chip = match &self.status {
                         CallStatus::Idle => "idle",
                         CallStatus::Connecting => "connecting…",
@@ -274,6 +339,18 @@ impl eframe::App for CrocodileApp {
                         CallStatus::Failed(_) => "failed",
                     };
                     ui.label(chip);
+                    ui.separator();
+                    // Connection chip.
+                    if self.probing {
+                        ui.label("● connecting…");
+                    } else if let Some(c) = &self.connected {
+                        ui.colored_label(
+                            egui::Color32::from_rgb(80, 200, 120),
+                            format!("● {}", c.username),
+                        );
+                    } else {
+                        ui.colored_label(egui::Color32::GRAY, "● not connected");
+                    }
                 });
             });
         });
@@ -322,6 +399,21 @@ impl CrocodileApp {
 
         ui.add_space(8.0);
         ui.horizontal(|ui| {
+            let connect_label = if self.probing {
+                "Connecting…"
+            } else {
+                "Connect / Refresh"
+            };
+            if ui
+                .add_enabled(!self.probing, egui::Button::new(connect_label))
+                .on_hover_text(
+                    "Verify this device can reach the coordination server, sign in, \
+                     and load the rooms you've been invited to.",
+                )
+                .clicked()
+            {
+                self.start_connect();
+            }
             if ui.button("Save settings").clicked() {
                 self.settings.save();
                 self.append_log("status", "settings saved");
@@ -330,6 +422,18 @@ impl CrocodileApp {
                 self.start_print_id();
             }
         });
+
+        if let Some(c) = &self.connected {
+            ui.add_space(6.0);
+            ui.colored_label(
+                egui::Color32::from_rgb(80, 200, 120),
+                format!(
+                    "✓ Connected as {} (server {}…)",
+                    c.username,
+                    &c.server_id_hex[..8]
+                ),
+            );
+        }
 
         if let Some(uid) = &self.my_user_id_hex {
             ui.add_space(8.0);
@@ -347,8 +451,26 @@ impl CrocodileApp {
         });
 
         if !in_call {
+            // Gate everything behind a connection so users can't fumble
+            // a call before confirming the server is reachable.
+            if self.connected.is_none() {
+                ui.add_space(6.0);
+                ui.label("Not connected yet.");
+                if ui
+                    .add_enabled(!self.probing, egui::Button::new("Connect to server"))
+                    .clicked()
+                {
+                    self.start_connect();
+                }
+                ui.label(
+                    "Connecting verifies you can reach the coordination server and \
+                     loads any rooms you've been invited to.",
+                );
+                return;
+            }
+
             ui.add_space(6.0);
-            ui.label("Host a call:");
+            ui.label("Host a call — invite someone by their username:");
             ui.horizontal(|ui| {
                 ui.label("Invite username:");
                 ui.text_edit_singleline(&mut self.invite_username);
@@ -357,22 +479,34 @@ impl CrocodileApp {
                 }
             });
 
-            ui.add_space(10.0);
-            ui.label("Join an existing call (room id from the host):");
+            ui.add_space(12.0);
             ui.horizontal(|ui| {
-                ui.label("ROOM_ID:");
-                ui.text_edit_singleline(&mut self.room_id_hex);
-                if ui.button("Join call").clicked() {
-                    self.start_join();
+                ui.label("Join a call — pick a room you were invited to:");
+                if ui.small_button("↻ Refresh").clicked() {
+                    self.start_connect();
                 }
             });
 
-            if let Some(uid) = &self.my_user_id_hex {
-                ui.add_space(10.0);
-                ui.label(format!("Your user_id: {uid}"));
+            let rooms = self
+                .connected
+                .as_ref()
+                .map(|c| c.rooms.clone())
+                .unwrap_or_default();
+            if rooms.is_empty() {
+                ui.label(
+                    "  (no rooms yet — either Host a call above, or have someone invite \
+                     you by your username, then click Refresh)",
+                );
             } else {
-                ui.add_space(10.0);
-                ui.label("(Visit Settings → Show my user_id to learn yours.)");
+                for room in &rooms {
+                    ui.horizontal(|ui| {
+                        if ui.button(format!("Join  “{}”", room.name)).clicked() {
+                            self.room_id_hex = room.room_id_hex.clone();
+                            self.start_join();
+                        }
+                        ui.weak(format!("({})", room.role));
+                    });
+                }
             }
         } else {
             ui.horizontal(|ui| {

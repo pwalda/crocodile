@@ -147,6 +147,41 @@ pub async fn list_members(db: &Db, room_id: RoomId) -> Result<Vec<RoomMember>, s
         .collect())
 }
 
+/// A room the caller belongs to: id, display name, and the caller's
+/// role in it.
+pub struct MyRoom {
+    /// Room id.
+    pub room: RoomId,
+    /// Human-readable room name.
+    pub name: String,
+    /// The caller's role in this room.
+    pub role: RoomRole,
+}
+
+/// List the rooms a given account is a member of, newest first.
+pub async fn list_for_account(db: &Db, account_id: Uuid) -> Result<Vec<MyRoom>, sqlx::Error> {
+    let rows: Vec<(Vec<u8>, String, String)> = dispatch!(db, |pool| {
+        sqlx::query_as(
+            r#"SELECT r.id, r.name, m.role
+               FROM room_members m
+               JOIN rooms r ON r.id = m.room_id
+               WHERE m.account_id = $1
+               ORDER BY r.created_at DESC"#,
+        )
+        .bind(account_id)
+        .fetch_all(pool)
+        .await?
+    });
+    Ok(rows
+        .into_iter()
+        .map(|(id, name, role)| MyRoom {
+            room: RoomId::from_bytes(id.try_into().expect("room id must be 32 bytes")),
+            name,
+            role: parse_role(&role),
+        })
+        .collect())
+}
+
 /// Returns true if the room exists.
 pub async fn exists(db: &Db, room_id: RoomId) -> Result<bool, sqlx::Error> {
     let row: Option<i32> = dispatch!(db, |pool| {

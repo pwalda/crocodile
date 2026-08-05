@@ -28,7 +28,10 @@ pub fn router(_state: AppState) -> Router<AppState> {
             get(super::keys::lookup_by_username),
         )
         // Rooms
-        .route("/v1/rooms", post(super::rooms::create_room))
+        .route(
+            "/v1/rooms",
+            post(super::rooms::create_room).get(super::rooms::list_my_rooms),
+        )
         .route("/v1/rooms/{room_id}", get(super::rooms::get_room_state))
         .route(
             "/v1/rooms/{room_id}/members",
