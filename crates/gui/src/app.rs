@@ -118,6 +118,9 @@ pub struct CrocodileApp {
     probe: Option<tokio::sync::mpsc::UnboundedReceiver<ProbeEvent>>,
     /// True while a probe is running (for button state / spinner text).
     probing: bool,
+    /// Last connect error, shown prominently on the Settings tab (the
+    /// Call-tab log isn't visible while you're on Settings).
+    connect_error: Option<String>,
 }
 
 impl CrocodileApp {
@@ -137,6 +140,7 @@ impl CrocodileApp {
             connected: None,
             probe: None,
             probing: false,
+            connect_error: None,
         }
     }
 
@@ -146,9 +150,13 @@ impl CrocodileApp {
             return;
         }
         self.settings.save();
-        self.append_log("status", "connecting to coordination server...");
+        self.append_log(
+            "status",
+            format!("connecting to {} ...", self.settings.server),
+        );
         self.probing = true;
         self.connected = None;
+        self.connect_error = None;
         self.probe = Some(session::spawn_probe(&self.runtime, self.settings.clone()));
     }
 
@@ -180,6 +188,7 @@ impl CrocodileApp {
                 }
                 ProbeEvent::Err(e) => {
                     self.append_log("error", format!("connection failed: {e}"));
+                    self.connect_error = Some(e);
                     self.connected = None;
                 }
             }
@@ -423,7 +432,10 @@ impl CrocodileApp {
             }
         });
 
-        if let Some(c) = &self.connected {
+        if self.probing {
+            ui.add_space(6.0);
+            ui.label(format!("Connecting to {} …", self.settings.server));
+        } else if let Some(c) = &self.connected {
             ui.add_space(6.0);
             ui.colored_label(
                 egui::Color32::from_rgb(80, 200, 120),
@@ -433,6 +445,25 @@ impl CrocodileApp {
                     &c.server_id_hex[..8]
                 ),
             );
+        } else if let Some(err) = &self.connect_error {
+            ui.add_space(6.0);
+            ui.colored_label(
+                egui::Color32::from_rgb(230, 100, 100),
+                format!("✗ Could not connect: {err}"),
+            );
+            // The most common cause on the server's own machine is a
+            // Server URL of 127.0.0.1 while the server is bound to a LAN
+            // IP — surface that hint.
+            if self.settings.server.contains("127.0.0.1")
+                || self.settings.server.contains("localhost")
+            {
+                ui.colored_label(
+                    egui::Color32::from_rgb(210, 170, 90),
+                    "Hint: if the server is bound to a LAN IP (BIND_ADDR=0.0.0.0:8080 \
+                     or a 192.168.x address), set Server URL to that same http://<ip>:8080 \
+                     — even on the machine running the server.",
+                );
+            }
         }
 
         if let Some(uid) = &self.my_user_id_hex {
