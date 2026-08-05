@@ -48,12 +48,26 @@ dependencies. Postgres is still supported for production — see below.
 Zero-config (SQLite):
 
 ```bash
-BIND_ADDR=0.0.0.0:8080 cargo run --release --bin crocodile-server
+cargo run --release --bin crocodile-server
 ```
 
 That's it — the server creates its SQLite file and identity key on
-first launch. It listens on `127.0.0.1:8080` by default; `BIND_ADDR=0.0.0.0:8080`
-accepts connections from other machines.
+first launch, and listens on `0.0.0.0:8080` (all interfaces) so other
+machines on your network can reach it. On startup it prints the exact
+URL peers should use, e.g.:
+
+```
+peers on your network should use: http://192.168.0.46:8080
+```
+
+Set `BIND_ADDR=127.0.0.1:8080` to restrict it to this machine only —
+but note that no other device will be able to connect, and the server
+logs a warning saying so.
+
+> **Server URL rule of thumb.** On the machine running the server,
+> either `http://127.0.0.1:8080` or the LAN IP works. On *every other*
+> machine you must use the server's LAN IP — `127.0.0.1` there means
+> that machine's own loopback, where nothing is listening.
 
 **Postgres (optional, for production / federation):** point `DATABASE_URL`
 at a Postgres URL. A `docker compose up -d` brings up a dev Postgres on

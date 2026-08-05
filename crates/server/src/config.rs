@@ -39,7 +39,13 @@ impl Config {
             .unwrap_or_else(|_| "sqlite://crocodile-server.sqlite".to_string());
 
         let db_max_connections = parse_env_or("DB_MAX_CONNECTIONS", 16u32)?;
-        let bind_addr = std::env::var("BIND_ADDR").unwrap_or_else(|_| "127.0.0.1:8080".to_string());
+        // Bind all interfaces by default. A coordination server exists to
+        // be reached by peers on other machines; the previous
+        // loopback-only default silently made the server unreachable from
+        // anywhere but its own host, which is the single most confusing
+        // failure mode in setup. Set BIND_ADDR=127.0.0.1:8080 explicitly
+        // to restrict it back to this machine.
+        let bind_addr = std::env::var("BIND_ADDR").unwrap_or_else(|_| "0.0.0.0:8080".to_string());
         let server_identity_path: PathBuf = std::env::var("SERVER_IDENTITY_PATH")
             .unwrap_or_else(|_| ".server_identity.key".to_string())
             .into();
