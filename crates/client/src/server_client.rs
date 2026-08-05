@@ -128,6 +128,20 @@ impl CoordinationClient {
         Ok(resp.json().await?)
     }
 
+    /// Delete a room you own, or leave one you're merely a member of.
+    /// Rooms are created per call, so without this they accumulate in
+    /// every member's list indefinitely.
+    pub async fn delete_or_leave_room(&self, room_id_hex: &str, session_token: &str) -> Result<()> {
+        let resp = self
+            .http
+            .delete(format!("{}/v1/rooms/{room_id_hex}", self.base_url))
+            .bearer_auth(session_token)
+            .send()
+            .await?;
+        check_status(resp).await?;
+        Ok(())
+    }
+
     /// Log in. Returns the session token and the derived user id (hex).
     pub async fn login(&self, username: &str, password: &str) -> Result<LoginOutput> {
         let resp = self

@@ -32,7 +32,10 @@ pub fn router(_state: AppState) -> Router<AppState> {
             "/v1/rooms",
             post(super::rooms::create_room).get(super::rooms::list_my_rooms),
         )
-        .route("/v1/rooms/{room_id}", get(super::rooms::get_room_state))
+        .route(
+            "/v1/rooms/{room_id}",
+            get(super::rooms::get_room_state).delete(super::rooms::delete_or_leave_room),
+        )
         .route(
             "/v1/rooms/{room_id}/members",
             post(super::rooms::add_member),

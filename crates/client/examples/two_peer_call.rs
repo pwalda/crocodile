@@ -53,7 +53,7 @@ use crocodile_protocol::voice::VoiceFrame;
 
 use crocodile_client::audio::opus::{f32_to_i16, i16_to_f32, OpusDecoder, OpusEncoder};
 use crocodile_client::audio::playback::{self, PlaybackQueue};
-use crocodile_client::audio::{capture, jitter::JitterBuffer, SAMPLES_PER_FRAME};
+use crocodile_client::audio::{capture, jitter::JitterBuffer, AudioControls, SAMPLES_PER_FRAME};
 use crocodile_client::cache::Cache;
 use crocodile_client::history::{TextHistory, TextReceiver, TextSender};
 use crocodile_client::server_client::{CoordinationClient, ServerInfo};
@@ -436,8 +436,8 @@ async fn run_call(
 
     // Open cpal capture + playback. Streams must stay alive for the
     // call's duration.
-    let _cap_stream = capture::open_default(capture_tx)?;
-    let _play_stream = playback::open_default(playback_queue.clone())?;
+    let _cap_stream = capture::open_default(capture_tx, AudioControls::new())?;
+    let _play_stream = playback::open_default(playback_queue.clone(), AudioControls::new())?;
     tracing::info!("audio devices opened");
 
     // Encoder task: f32 → 20ms frames of i16 → Opus.

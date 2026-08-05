@@ -26,6 +26,12 @@ pub struct Settings {
     pub bind_addr: String,
     /// Optional reachable address to advertise (auto-detected if empty).
     pub advertise_addr: String,
+    /// Input (microphone) device name; `None` uses the system default.
+    #[serde(default)]
+    pub input_device: Option<String>,
+    /// Output (speaker) device name; `None` uses the system default.
+    #[serde(default)]
+    pub output_device: Option<String>,
 }
 
 impl Default for Settings {
@@ -42,6 +48,8 @@ impl Default for Settings {
             state_dir: default_state_dir(),
             bind_addr: "0.0.0.0:0".to_string(),
             advertise_addr: String::new(),
+            input_device: None,
+            output_device: None,
         }
     }
 }
@@ -77,6 +85,21 @@ impl Settings {
             let _ = std::fs::write(Self::config_path(), s);
         }
     }
+}
+
+/// Dropdown for choosing an audio device, with "System default" as the
+/// `None` option.
+fn device_picker(ui: &mut egui::Ui, id: &str, devices: &[String], selected: &mut Option<String>) {
+    let label = selected.clone().unwrap_or_else(|| "System default".into());
+    egui::ComboBox::from_id_salt(id)
+        .selected_text(label)
+        .width(260.0)
+        .show_ui(ui, |ui| {
+            ui.selectable_value(selected, None, "System default");
+            for d in devices {
+                ui.selectable_value(selected, Some(d.clone()), d);
+            }
+        });
 }
 
 fn dirs_home() -> PathBuf {
@@ -172,6 +195,19 @@ impl CrocodileApp {
         self.connected = None;
         self.connect_error = None;
         self.probe = Some(session::spawn_probe(&self.runtime, self.settings.clone()));
+    }
+
+    /// Delete (if owner) or leave (if member) a room, then refresh the
+    /// list. Reuses the probe channel since the response is the same
+    /// refreshed room list.
+    fn forget_room(&mut self, room_id_hex: String) {
+        self.append_log("status", "removing room…");
+        self.probing = true;
+        self.probe = Some(session::spawn_forget_room(
+            &self.runtime,
+            self.settings.clone(),
+            room_id_hex,
+        ));
     }
 
     fn drain_probe(&mut self) {
@@ -409,6 +445,53 @@ impl CrocodileApp {
             });
 
         ui.add_space(8.0);
+        ui.heading("Audio");
+        // Device lists are queried live so newly-plugged hardware shows
+        // up without restarting.
+        let inputs = crocodile_client::audio::capture::list_devices();
+        let outputs = crocodile_client::audio::playback::list_devices();
+
+        egui::Grid::new("audio-grid").num_columns(2).show(ui, |ui| {
+            ui.label("Microphone:");
+            device_picker(ui, "in-dev", &inputs, &mut self.settings.input_device);
+            ui.end_row();
+
+            ui.label("Speakers:");
+            device_picker(ui, "out-dev", &outputs, &mut self.settings.output_device);
+            ui.end_row();
+        });
+
+        // Live input meter — the fastest way to tell whether the mic is
+        // actually capturing. Only meaningful during a call, since the
+        // audio streams open when the call starts.
+        ui.add_space(4.0);
+        if let Some(call) = self.call.as_ref() {
+            let level = call.controls.input_level.get();
+            ui.horizontal(|ui| {
+                ui.label("Mic level:");
+                ui.add(egui::ProgressBar::new(level.min(1.0)).desired_width(180.0));
+            });
+            let muted = call.controls.is_muted();
+            if ui
+                .button(if muted { "🔇 Unmute" } else { "🎤 Mute" })
+                .clicked()
+            {
+                call.controls.toggle_muted();
+            }
+            if muted {
+                ui.colored_label(egui::Color32::from_rgb(230, 100, 100), "muted");
+            } else if level < 0.001 {
+                ui.colored_label(
+                    egui::Color32::from_rgb(210, 170, 90),
+                    "no signal — check the mic is unmuted and, on macOS, that \
+                     System Settings > Privacy & Security > Microphone allows this app",
+                );
+            }
+        } else {
+            ui.weak("Mic level and mute appear during a call.");
+        }
+
+        ui.add_space(8.0);
         ui.collapsing("Network (advanced)", |ui| {
             egui::Grid::new("net-grid").num_columns(2).show(ui, |ui| {
                 ui.label("Bind addr:");
@@ -550,6 +633,20 @@ impl CrocodileApp {
                             self.start_join();
                         }
                         ui.weak(format!("({})", room.role));
+                        // Rooms are created per call and otherwise linger
+                        // forever; owners delete, members just leave.
+                        let verb = if room.role == "owner" {
+                            "Delete"
+                        } else {
+                            "Leave"
+                        };
+                        if ui
+                            .small_button("✖")
+                            .on_hover_text(format!("{verb} this room"))
+                            .clicked()
+                        {
+                            self.forget_room(room.room_id_hex.clone());
+                        }
                     });
                 }
             }

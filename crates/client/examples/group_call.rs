@@ -67,7 +67,7 @@ use crocodile_protocol::voice::VoiceFrame;
 
 use crocodile_client::audio::opus::{f32_to_i16, i16_to_f32, OpusDecoder, OpusEncoder};
 use crocodile_client::audio::playback::{self, PlaybackQueue};
-use crocodile_client::audio::{capture, jitter::JitterBuffer, SAMPLES_PER_FRAME};
+use crocodile_client::audio::{capture, jitter::JitterBuffer, AudioControls, SAMPLES_PER_FRAME};
 use crocodile_client::cache::Cache;
 use crocodile_client::history::{TextHistory, TextReceiver, TextSender};
 use crocodile_client::server_client::{CoordinationClient, ServerInfo};
@@ -521,8 +521,8 @@ async fn run_host(
     // pipeline, marked as from=self so we skip our own peer).
     let playback_queue = PlaybackQueue::new();
     let (capture_tx, mut capture_rx) = mpsc::unbounded_channel::<Vec<f32>>();
-    let _cap = capture::open_default(capture_tx)?;
-    let _play = playback::open_default(playback_queue.clone())?;
+    let _cap = capture::open_default(capture_tx, AudioControls::new())?;
+    let _play = playback::open_default(playback_queue.clone(), AudioControls::new())?;
 
     // Our own encode → broadcast loop.
     let provider_for_self_send = provider.clone();
@@ -1063,8 +1063,8 @@ async fn run_joiner(
     let (capture_tx, mut capture_rx) = mpsc::unbounded_channel::<Vec<f32>>();
     let (decoded_tx, mut decoded_rx) = mpsc::unbounded_channel::<Vec<u8>>();
     let playback_queue = PlaybackQueue::new();
-    let _cap = capture::open_default(capture_tx)?;
-    let _play = playback::open_default(playback_queue.clone())?;
+    let _cap = capture::open_default(capture_tx, AudioControls::new())?;
+    let _play = playback::open_default(playback_queue.clone(), AudioControls::new())?;
 
     // Encoder → send to host.
     let conn_for_send = conn.clone();

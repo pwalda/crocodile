@@ -31,7 +31,7 @@ use crocodile_protocol::voice::VoiceFrame;
 
 use crocodile_client::audio::opus::{f32_to_i16, i16_to_f32, OpusDecoder, OpusEncoder};
 use crocodile_client::audio::playback::{self, PlaybackQueue};
-use crocodile_client::audio::{capture, jitter::JitterBuffer, SAMPLES_PER_FRAME};
+use crocodile_client::audio::{capture, jitter::JitterBuffer, AudioControls, SAMPLES_PER_FRAME};
 use crocodile_client::cache::Cache;
 use crocodile_client::history::{TextHistory, TextReceiver, TextSender};
 use crocodile_client::server_client::{CoordinationClient, ServerInfo};
@@ -78,6 +78,49 @@ pub enum ProbeEvent {
         rooms: Vec<RoomInfo>,
     },
     Err(String),
+}
+
+/// Spawn a one-shot "delete or leave this room" request. Sends a single
+/// [`ProbeEvent`] describing the refreshed room list afterwards, so the
+/// UI updates without a second round trip.
+pub fn spawn_forget_room(
+    runtime: &Runtime,
+    settings: Settings,
+    room_id_hex: String,
+) -> mpsc::UnboundedReceiver<ProbeEvent> {
+    let (tx, rx) = mpsc::unbounded_channel();
+    runtime.spawn(async move {
+        let ev = match forget_room(&settings, &room_id_hex).await {
+            Ok(ev) => ev,
+            Err(e) => ProbeEvent::Err(format!("{e:#}")),
+        };
+        let _ = tx.send(ev);
+    });
+    rx
+}
+
+async fn forget_room(settings: &Settings, room_id_hex: &str) -> Result<ProbeEvent> {
+    let (throwaway, _rx) = mpsc::unbounded_channel();
+    let conn = connect(settings, &throwaway).await?;
+    conn.client
+        .delete_or_leave_room(room_id_hex, &conn.token)
+        .await
+        .context("removing room")?;
+    // Re-list so the caller can refresh the picker in one step.
+    let server_id = crocodile_protocol::keys::server_id_from_public_key(&conn.server_pubkey);
+    let rooms = conn.client.list_my_rooms(&conn.token).await?;
+    Ok(ProbeEvent::Ok {
+        username: settings.username.clone(),
+        server_id_hex: hex::encode(server_id.as_bytes()),
+        rooms: rooms
+            .into_iter()
+            .map(|r| RoomInfo {
+                room_id_hex: r.room_id_hex,
+                name: r.name,
+                role: r.role,
+            })
+            .collect(),
+    })
 }
 
 /// Spawn a one-shot connectivity probe. Sends exactly one
@@ -129,6 +172,9 @@ async fn probe(settings: &Settings) -> Result<ProbeEvent> {
 pub struct SessionHandle {
     pub events: mpsc::UnboundedReceiver<SessionEvent>,
     pub actions: mpsc::UnboundedSender<SessionAction>,
+    /// Live mute state + input/output levels, shared with the audio
+    /// callbacks so the UI can drive controls and meters.
+    pub controls: Arc<AudioControls>,
     /// Set by the host's session as soon as it has created the room.
     /// The UI polls this so the user can copy the ROOM_ID without
     /// scrolling the log.
@@ -142,6 +188,8 @@ pub fn spawn_host(runtime: &Runtime, settings: Settings, invite_username: String
     let (actions_tx, actions_rx) = mpsc::unbounded_channel();
     let room_id_slot = Arc::new(std::sync::Mutex::new(None));
     let room_id_for_task = room_id_slot.clone();
+    let controls = AudioControls::new();
+    let controls_for_task = controls.clone();
 
     runtime.spawn(async move {
         let result = run_host(
@@ -150,6 +198,7 @@ pub fn spawn_host(runtime: &Runtime, settings: Settings, invite_username: String
             events_tx.clone(),
             actions_rx,
             room_id_for_task,
+            controls_for_task,
         )
         .await;
         match result {
@@ -165,6 +214,7 @@ pub fn spawn_host(runtime: &Runtime, settings: Settings, invite_username: String
     SessionHandle {
         events: events_rx,
         actions: actions_tx,
+        controls,
         room_id: room_id_slot,
     }
 }
@@ -175,9 +225,18 @@ pub fn spawn_join(runtime: &Runtime, settings: Settings, room_id_hex: String) ->
     let (events_tx, events_rx) = mpsc::unbounded_channel();
     let (actions_tx, actions_rx) = mpsc::unbounded_channel();
     let room_id_slot = Arc::new(std::sync::Mutex::new(None));
+    let controls = AudioControls::new();
+    let controls_for_task = controls.clone();
 
     runtime.spawn(async move {
-        let result = run_join(settings, room_id_hex, events_tx.clone(), actions_rx).await;
+        let result = run_join(
+            settings,
+            room_id_hex,
+            events_tx.clone(),
+            actions_rx,
+            controls_for_task,
+        )
+        .await;
         match result {
             Ok(()) => {
                 let _ = events_tx.send(SessionEvent::Ended);
@@ -191,6 +250,7 @@ pub fn spawn_join(runtime: &Runtime, settings: Settings, room_id_hex: String) ->
     SessionHandle {
         events: events_rx,
         actions: actions_tx,
+        controls,
         room_id: room_id_slot,
     }
 }
@@ -349,6 +409,7 @@ async fn run_host(
     events: mpsc::UnboundedSender<SessionEvent>,
     actions: mpsc::UnboundedReceiver<SessionAction>,
     room_id_slot: Arc<std::sync::Mutex<Option<String>>>,
+    controls: Arc<AudioControls>,
 ) -> Result<()> {
     let _ = &actions; // forwarded to run_call below
     let mut conn = connect(&settings, &events).await?;
@@ -471,6 +532,8 @@ async fn run_host(
         events,
         actions,
         true,
+        controls,
+        settings,
     )
     .await
 }
@@ -482,6 +545,7 @@ async fn run_join(
     room_id_hex: String,
     events: mpsc::UnboundedSender<SessionEvent>,
     actions: mpsc::UnboundedReceiver<SessionAction>,
+    controls: Arc<AudioControls>,
 ) -> Result<()> {
     let _ = &actions; // forwarded to run_call below
     let mut conn = connect(&settings, &events).await?;
@@ -620,6 +684,8 @@ async fn run_join(
         events,
         actions,
         false,
+        controls,
+        settings,
     )
     .await
 }
@@ -638,6 +704,8 @@ async fn run_call(
     events: mpsc::UnboundedSender<SessionEvent>,
     mut actions: mpsc::UnboundedReceiver<SessionAction>,
     is_host: bool,
+    controls: Arc<AudioControls>,
+    settings: Settings,
 ) -> Result<()> {
     let (capture_tx, mut capture_rx) = mpsc::unbounded_channel::<Vec<f32>>();
     let (encoded_tx, mut encoded_rx) = mpsc::unbounded_channel::<(u32, Vec<u8>)>();
@@ -650,23 +718,49 @@ async fn run_call(
     // the (Send-safe) channel + the PlaybackQueue's internal Mutex.
     let pq_for_audio = playback_queue.clone();
     let (audio_shutdown_tx, audio_shutdown_rx) = std::sync::mpsc::channel::<()>();
+    let audio_events = events.clone();
+    let controls_cap = controls.clone();
+    let controls_play = controls.clone();
+    let input_device = settings.input_device.clone();
+    let output_device = settings.output_device.clone();
     let _audio_thread = std::thread::Builder::new()
         .name("crocodile-audio".into())
         .spawn(move || {
-            let _cap = match capture::open_default(capture_tx) {
-                Ok(s) => s,
-                Err(e) => {
-                    tracing::error!(error = %e, "audio capture init failed");
-                    return;
-                }
-            };
-            let _play = match playback::open_default(pq_for_audio) {
-                Ok(s) => s,
-                Err(e) => {
-                    tracing::error!(error = %e, "audio playback init failed");
-                    return;
-                }
-            };
+            // Audio failures used to go only to the tracing log, which
+            // the GUI never shows — a user with a bad device or denied
+            // microphone permission saw a silent call and no reason.
+            // Report them to the UI instead.
+            let _cap =
+                match capture::open_by_name(input_device.as_deref(), capture_tx, controls_cap) {
+                    Ok(s) => {
+                        let c = s.config().clone();
+                        let _ = audio_events.send(SessionEvent::Status(format!(
+                            "mic: {} ({} ch @ {} Hz)",
+                            c.device_name, c.channels, c.sample_rate
+                        )));
+                        s
+                    }
+                    Err(e) => {
+                        let _ = audio_events.send(SessionEvent::Failed(format!("microphone: {e}")));
+                        return;
+                    }
+                };
+            let _play =
+                match playback::open_by_name(output_device.as_deref(), pq_for_audio, controls_play)
+                {
+                    Ok(s) => {
+                        let c = s.config().clone();
+                        let _ = audio_events.send(SessionEvent::Status(format!(
+                            "speakers: {} ({} ch @ {} Hz)",
+                            c.device_name, c.channels, c.sample_rate
+                        )));
+                        s
+                    }
+                    Err(e) => {
+                        let _ = audio_events.send(SessionEvent::Failed(format!("speakers: {e}")));
+                        return;
+                    }
+                };
             // Park until shutdown.
             let _ = audio_shutdown_rx.recv();
         })

@@ -18,9 +18,12 @@
 //! we have today; an abstraction over a single use site is premature.
 
 pub mod capture;
+pub mod controls;
 pub mod jitter;
 pub mod opus;
 pub mod playback;
+
+pub use controls::AudioControls;
 
 /// Sample rate we standardise on across capture, codec, and playback.
 /// 48 kHz is Opus's native rate and what virtually all consumer audio

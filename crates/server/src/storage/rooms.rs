@@ -182,6 +182,19 @@ pub async fn list_for_account(db: &Db, account_id: Uuid) -> Result<Vec<MyRoom>, 
         .collect())
 }
 
+/// Delete a room and, by cascade, its membership and history-head rows.
+/// Caller must have already checked that the requester owns the room.
+pub async fn delete(db: &Db, room_id: RoomId) -> Result<u64, sqlx::Error> {
+    let removed = dispatch!(db, |pool| {
+        sqlx::query("DELETE FROM rooms WHERE id = $1")
+            .bind(room_id.as_bytes().as_slice())
+            .execute(pool)
+            .await?
+            .rows_affected()
+    });
+    Ok(removed)
+}
+
 /// Returns true if the room exists.
 pub async fn exists(db: &Db, room_id: RoomId) -> Result<bool, sqlx::Error> {
     let row: Option<i32> = dispatch!(db, |pool| {

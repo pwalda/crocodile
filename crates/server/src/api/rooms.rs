@@ -55,6 +55,37 @@ pub async fn list_my_rooms(
     Ok(Json(entries))
 }
 
+// ---------- Delete / leave room ----------
+
+/// DELETE /v1/rooms/{room_id}
+///
+/// Owners delete the room outright (cascading to membership and the
+/// history-head commitment). Non-owner members just leave it.
+///
+/// Rooms are created per call and would otherwise accumulate forever in
+/// every member's room list, since nothing else removes them.
+pub async fn delete_or_leave_room(
+    State(state): State<AppState>,
+    auth: AuthSession,
+    Path(room_id_hex): Path<String>,
+) -> ApiResult<StatusCode> {
+    let room_id = parse_room_id(&room_id_hex)?;
+    let role = rooms::role_of(state.storage.db(), room_id, auth.account_id)
+        .await?
+        // Hide existence of rooms the caller isn't in.
+        .ok_or(ApiError::NotFound)?;
+
+    match role {
+        RoomRole::Owner => {
+            rooms::delete(state.storage.db(), room_id).await?;
+        }
+        RoomRole::Admin | RoomRole::Member => {
+            rooms::remove_member(state.storage.db(), room_id, auth.account_id).await?;
+        }
+    }
+    Ok(StatusCode::NO_CONTENT)
+}
+
 // ---------- Create room ----------
 
 #[derive(Debug, Deserialize)]
