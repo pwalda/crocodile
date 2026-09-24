@@ -27,6 +27,7 @@ port.on('message', ({ data: msg }) => {
           sessionId: msg.sessionId,
           epoch: msg.epoch,
           identity: identityFromSeed(fromB64u(msg.seed)),
+          hostPeer: msg.hostPeer,
           slots: msg.slots,
           iceServers: msg.iceServers,
           // Lets this device's own client reach its relay over loopback.

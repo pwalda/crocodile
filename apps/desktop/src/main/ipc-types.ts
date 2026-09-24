@@ -6,6 +6,7 @@ export type RelayProcessIn =
       type: 'start';
       handle: string;
       seed: string;
+      hostPeer: string;
       sessionId: string;
       epoch: number;
       slots: number;

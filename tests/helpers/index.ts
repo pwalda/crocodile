@@ -1,5 +1,12 @@
 import { Coordinator, type CoordinatorConfig } from '@crocodile/coordinator';
-import { createIdentity, randomId, signRecord, spaceIdFor, type Identity } from '@crocodile/crypto';
+import {
+  createIdentity,
+  randomDeviceId,
+  randomId,
+  signRecord,
+  spaceIdFor,
+  type Identity,
+} from '@crocodile/crypto';
 import { recordKey, type HostCaps, type SignedRecord } from '@crocodile/protocol';
 import { CoordinatorConnection } from '@crocodile/client-core';
 
@@ -41,10 +48,12 @@ export async function connectUser(
   server: Coordinator,
   identity = createIdentity(),
   username = `user${randomId(2)}`,
+  deviceId = randomDeviceId(),
 ): Promise<TestUser> {
   const conn = await CoordinatorConnection.connect({
     url: server.url,
     identity,
+    deviceId,
     platform: 'bot',
     version: 'test',
   });
@@ -57,6 +66,7 @@ export async function connectUser(
     'voice',
     'replaced',
     'session_closed',
+    'relay_expired',
   ] as const) {
     conn.on(ev, (d) => events.push({ ev, d }));
   }

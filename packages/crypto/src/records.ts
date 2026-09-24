@@ -105,6 +105,20 @@ export function validateRecord(input: unknown, ctx: ValidationContext): Validati
         return reject('only the user may write this record');
       return { ok: true, authorId };
     }
+    case 'device': {
+      const body = record.body as RecordBodies['device'];
+      if (
+        parts.length !== 3 ||
+        parts[1] !== authorId ||
+        body.userId !== authorId ||
+        body.deviceId !== parts[2]
+      ) {
+        return reject('only the user may register their devices');
+      }
+      if (existing && (existing.body as RecordBodies['device']).revoked)
+        return reject('device was revoked');
+      return { ok: true, authorId };
+    }
     case 'space': {
       const body = record.body as SpaceBody;
       if (parts.length !== 2) return reject('bad space key');

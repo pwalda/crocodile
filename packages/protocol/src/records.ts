@@ -8,11 +8,38 @@ import { LIMITS } from './constants';
  *
  * Voice and text content are never records.
  */
-export const RECORD_KINDS = ['profile', 'friends', 'space', 'invite', 'member'] as const;
+export const RECORD_KINDS = ['profile', 'device', 'friends', 'space', 'invite', 'member'] as const;
 export type RecordKind = (typeof RECORD_KINDS)[number];
 
 const id = z.string().regex(/^[a-z2-7]{8,64}$/);
 const pubKey = z.string().regex(/^[A-Za-z0-9_-]{43}$/);
+export const DeviceId = z.string().regex(/^[a-z2-7]{8,32}$/);
+
+/**
+ * A device's current one-time-ish prekey: an X25519 key plus an ML-KEM-768
+ * key (post-quantum). Sender keys are sealed to both (hybrid), and devices
+ * rotate prekeys weekly and delete the old secrets, giving forward secrecy.
+ */
+export const PrekeyBundle = z.object({
+  id: z.number().int().min(0).max(0xffffffff),
+  x25519: pubKey,
+  /** ML-KEM-768 encapsulation key, base64url (1184 bytes). */
+  mlkem: z.string().regex(/^[A-Za-z0-9_-]{1579}$/),
+  expiresAt: z.number().int(),
+});
+export type PrekeyBundle = z.infer<typeof PrekeyBundle>;
+
+export const DeviceBody = z.object({
+  userId: id,
+  deviceId: DeviceId,
+  /** Human-readable, e.g. "Desktop · Windows". */
+  name: z.string().trim().min(1).max(64),
+  platform: z.enum(['desktop', 'web', 'mobile', 'bot']),
+  prekey: PrekeyBundle,
+  /** Revocation is permanent: later versions of a revoked device are refused. */
+  revoked: z.boolean().optional(),
+});
+export type DeviceBody = z.infer<typeof DeviceBody>;
 
 export const ProfileBody = z.object({
   username: z.string().trim().min(1).max(LIMITS.usernameMax),
@@ -90,6 +117,7 @@ export type MemberBody = z.infer<typeof MemberBody>;
 
 export interface RecordBodies {
   profile: ProfileBody;
+  device: DeviceBody;
   friends: FriendsBody;
   space: SpaceBody;
   invite: InviteBody;
@@ -98,6 +126,7 @@ export interface RecordBodies {
 
 export const RECORD_BODY_SCHEMAS = {
   profile: ProfileBody,
+  device: DeviceBody,
   friends: FriendsBody,
   space: SpaceBody,
   invite: InviteBody,
@@ -129,6 +158,8 @@ export const SignedRecordEnvelope = z.object({
 
 export const recordKey = {
   profile: (userId: string) => `profile:${userId}`,
+  device: (userId: string, deviceId: string) => `device:${userId}:${deviceId}`,
+  devicePrefix: (userId: string) => `device:${userId}:`,
   friends: (userId: string) => `friends:${userId}`,
   space: (spaceId: string) => `space:${spaceId}`,
   invite: (code: string) => `invite:${code}`,
@@ -139,8 +170,9 @@ export const recordKey = {
 /** Replication order: records later in this list may depend on earlier ones. */
 export const RECORD_KIND_ORDER: Record<RecordKind, number> = {
   profile: 0,
-  friends: 1,
-  space: 2,
-  invite: 3,
-  member: 4,
+  device: 1,
+  friends: 2,
+  space: 3,
+  invite: 4,
+  member: 5,
 };

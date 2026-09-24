@@ -1,4 +1,10 @@
-import { sign, verifyPayload, type Identity } from '@crocodile/crypto';
+import {
+  answerChannel,
+  SecureChannel,
+  sign,
+  verifyPayload,
+  type Identity,
+} from '@crocodile/crypto';
 import {
   SIG_DOMAIN,
   type Platform,
@@ -29,6 +35,8 @@ export type ConnectionEvents = ServerEvents & {
 export interface ConnectOptions {
   url: string;
   identity: Identity;
+  /** This installation's device id. */
+  deviceId: string;
   platform: Platform;
   version: string;
   /** If known (from the directory), the server must prove it holds this key. */
@@ -63,9 +71,12 @@ export class CoordinatorConnection extends Emitter<ConnectionEvents> {
 
   private constructor(
     private readonly ws: WebSocket,
+    private readonly channel: SecureChannel,
     readonly server: ServerInfo,
     readonly stun: string[],
     readonly userId: string,
+    /** `<userId>.<deviceId>` */
+    readonly peer: string,
   ) {
     super();
     ws.onmessage = (ev) => this.onMessage(ev.data);
@@ -77,6 +88,7 @@ export class CoordinatorConnection extends Emitter<ConnectionEvents> {
     return new Promise((resolve, reject) => {
       const ws = new WS(wsUrl(opts.url));
       let hello: ServerHello | undefined;
+      let channel: SecureChannel | undefined;
       const fail = (err: Error) => {
         clearTimeout(timer);
         try {
@@ -93,39 +105,75 @@ export class CoordinatorConnection extends Emitter<ConnectionEvents> {
       ws.onerror = () => fail(new Error(`cannot reach ${opts.url}`));
       ws.onclose = (ev) => fail(new Error(`connection closed: ${ev.reason || ev.code}`));
       ws.onmessage = (ev) => {
-        let frame: ServerFrame;
+        let frame: ServerFrame | { t: 'x'; n: number; c: string };
         try {
-          frame = JSON.parse(String(ev.data)) as ServerFrame;
+          frame = JSON.parse(String(ev.data));
         } catch {
           return fail(new Error('invalid frame from server'));
         }
-        if (frame.t === 'hello') {
+        if (frame.t === 'x') {
+          const inner = channel?.open(frame) as ServerFrame | undefined;
+          if (!inner) return fail(new Error('could not decrypt server frame'));
+          frame = inner;
+        }
+        if (frame.t === 'hello' && !hello) {
           hello = frame;
           const ok = verifyPayload(
             frame.server.key,
             SIG_DOMAIN.serverHello,
-            { challenge: frame.challenge, server: frame.server.id, time: frame.time },
+            {
+              challenge: frame.challenge,
+              server: frame.server.id,
+              time: frame.time,
+              channel: frame.channel,
+            },
             frame.sig,
           );
           if (!ok) return fail(new Error('server failed to prove its identity'));
           if (opts.expectedServerKey && opts.expectedServerKey !== frame.server.key) {
             return fail(new Error('server key does not match the directory listing'));
           }
+          let answer: { epk: string; kem: string };
+          try {
+            const res = answerChannel(frame.channel);
+            answer = res.answer;
+            const peer = `${opts.identity.userId}.${opts.deviceId}`;
+            channel = new SecureChannel(
+              res.secret,
+              `${frame.challenge}|${frame.server.id}|${peer}`,
+              true,
+            );
+          } catch {
+            return fail(new Error('server offered an invalid channel'));
+          }
           ws.send(
             JSON.stringify({
               t: 'auth',
               key: opts.identity.publicKey,
+              device: opts.deviceId,
+              channel: answer,
               sig: sign(opts.identity, SIG_DOMAIN.auth, {
                 challenge: frame.challenge,
                 server: frame.server.id,
+                device: opts.deviceId,
+                channel: answer,
               }),
               client: { platform: opts.platform, version: opts.version },
             }),
           );
-        } else if (frame.t === 'auth_ok' && hello) {
+        } else if (frame.t === 'auth_ok' && hello && channel) {
           clearTimeout(timer);
           ws.onerror = null;
-          resolve(new CoordinatorConnection(ws, hello.server, hello.stun, frame.userId));
+          resolve(
+            new CoordinatorConnection(
+              ws,
+              channel,
+              hello.server,
+              hello.stun,
+              frame.userId,
+              frame.peer,
+            ),
+          );
         } else if (frame.t === 'error') {
           fail(new Error(frame.err.message));
         }
@@ -150,7 +198,7 @@ export class CoordinatorConnection extends Emitter<ConnectionEvents> {
         reject(new RpcCallError('unavailable', `${method} timed out`));
       }, timeoutMs);
       this.pending.set(id, { resolve: resolve as (v: unknown) => void, reject, timer });
-      this.ws.send(JSON.stringify({ t: 'req', id, m: method, p: params }));
+      this.ws.send(JSON.stringify(this.channel.seal({ t: 'req', id, m: method, p: params })));
     });
   }
 
@@ -163,7 +211,11 @@ export class CoordinatorConnection extends Emitter<ConnectionEvents> {
   private onMessage(data: unknown) {
     let frame: ServerFrame;
     try {
-      frame = JSON.parse(String(data)) as ServerFrame;
+      const outer = JSON.parse(String(data)) as { t: string; n: number; c: string };
+      if (outer.t !== 'x') return;
+      const inner = this.channel.open(outer) as ServerFrame | undefined;
+      if (!inner) return this.close();
+      frame = inner;
     } catch {
       return;
     }

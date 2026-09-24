@@ -60,7 +60,22 @@ export const HostCaps = z.object({
 });
 export type HostCaps = z.infer<typeof HostCaps>;
 
+/**
+ * A peer is one device of one user: `<userId>.<deviceId>`. Users may be in a
+ * session from several devices at once; each device is a separate peer with
+ * its own connection and its own sender key.
+ */
+export const PeerId = z.string().regex(/^[a-z2-7]{8,64}\.[a-z2-7]{8,32}$/);
+
+export const peerIds = {
+  make: (userId: string, deviceId: string) => `${userId}.${deviceId}`,
+  user: (peer: string) => peer.split('.')[0]!,
+  device: (peer: string) => peer.split('.')[1] ?? '',
+};
+
 export interface SessionMember {
+  /** `<userId>.<deviceId>` */
+  peer: string;
   userId: string;
   joinedAt: number;
   caps: HostCaps;
@@ -70,6 +85,7 @@ export interface SessionState {
   id: string;
   /** Increments every time the host changes; stale signals are ignored. */
   epoch: number;
+  /** Peer ids (`<userId>.<deviceId>`). */
   host: string | null;
   backup: string | null;
   members: SessionMember[];
@@ -80,6 +96,8 @@ export interface SessionState {
 export interface VoiceOccupancy {
   spaceId: string;
   channelId: string;
+  /** User ids (deduplicated across devices). */
   members: string[];
+  /** User id of the host. */
   host: string | null;
 }

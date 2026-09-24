@@ -30,7 +30,7 @@ export interface ElectionInput {
   members: SessionMember[];
   host: string | null;
   backup: string | null;
-  /** userId -> epoch ms until which the member may not host (failed as host recently). */
+  /** peer id -> epoch ms until which the member may not host (failed as host recently). */
   penalties: Map<string, number>;
   now: number;
 }
@@ -39,29 +39,28 @@ export function elect({ members, host, backup, penalties, now }: ElectionInput):
   host: string | null;
   backup: string | null;
 } {
-  const available = (m: SessionMember) =>
-    isHostEligible(m) && (penalties.get(m.userId) ?? 0) <= now;
-  const byId = new Map(members.map((m) => [m.userId, m]));
+  const available = (m: SessionMember) => isHostEligible(m) && (penalties.get(m.peer) ?? 0) <= now;
+  const byId = new Map(members.map((m) => [m.peer, m]));
   const ranked = members
     .filter(available)
-    .sort((a, b) => hostScore(b, now) - hostScore(a, now) || a.userId.localeCompare(b.userId));
+    .sort((a, b) => hostScore(b, now) - hostScore(a, now) || a.peer.localeCompare(b.peer));
 
   let nextHost: string | null = null;
   const current = host ? byId.get(host) : undefined;
-  if (current && available(current)) nextHost = current.userId;
+  if (current && available(current)) nextHost = current.peer;
   else {
     const standby = backup ? byId.get(backup) : undefined;
-    if (standby && available(standby)) nextHost = standby.userId;
-    else nextHost = ranked[0]?.userId ?? null;
+    if (standby && available(standby)) nextHost = standby.peer;
+    else nextHost = ranked[0]?.peer ?? null;
   }
 
   // Keep the backup stable unless a clearly better candidate appears.
-  const candidates = ranked.filter((m) => m.userId !== nextHost);
-  let nextBackup: string | null = candidates[0]?.userId ?? null;
+  const candidates = ranked.filter((m) => m.peer !== nextHost);
+  let nextBackup: string | null = candidates[0]?.peer ?? null;
   const currentBackup = backup && backup !== nextHost ? byId.get(backup) : undefined;
   if (currentBackup && available(currentBackup) && candidates[0]) {
     if (hostScore(candidates[0], now) - hostScore(currentBackup, now) < 10)
-      nextBackup = currentBackup.userId;
+      nextBackup = currentBackup.peer;
   }
   return { host: nextHost, backup: nextBackup };
 }

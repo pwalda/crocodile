@@ -70,6 +70,7 @@ export async function attachRelayBridge(
     '__relayStart',
     async (opts: {
       seed: string;
+      hostPeer: string;
       sessionId: string;
       epoch: number;
       slots: number;
@@ -81,6 +82,7 @@ export async function attachRelayBridge(
         sessionId: opts.sessionId,
         epoch: opts.epoch,
         identity: identityFromSeed(fromB64u(opts.seed)),
+        hostPeer: opts.hostPeer,
         slots: opts.slots,
         iceServers: stunUrls(),
         includeLoopback: true,

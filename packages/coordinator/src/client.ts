@@ -1,9 +1,20 @@
 import type { WebSocket } from 'ws';
-import { randomId, sign, userIdFromKey, verifyPayload } from '@crocodile/crypto';
+import {
+  acceptChannel,
+  createChannelKeys,
+  randomId,
+  SecureChannel,
+  sign,
+  userIdFromKey,
+  verifyPayload,
+  type ChannelKeys,
+} from '@crocodile/crypto';
 import {
   ClientAuth,
   RpcParams,
   SIG_DOMAIN,
+  peerIds,
+  type LinkBox,
   type Platform,
   type RpcMethod,
   type ServerEvents,
@@ -16,10 +27,20 @@ import { RateLimiter, RpcFailure, sendJson } from './util';
 
 let nextConnId = 1;
 
-/** One client WebSocket: challenge-response login, then JSON RPC + events. */
+/**
+ * One client WebSocket (one device). The server greets with a signed hello
+ * carrying fresh hybrid (X25519 + ML-KEM-768) channel keys; the client
+ * answers with its half and a signature binding its identity, device and
+ * channel. Every later frame is AES-256-GCM encrypted and length-padded.
+ */
 export class ClientConnection implements ClientHandle {
   readonly connId = nextConnId++;
   userId = '';
+  deviceId = '';
+  peer = '';
+  publicKey = '';
+  /** X25519 key of this identity (only used for device linking). */
+  encKey = '';
   platform: Platform = 'desktop';
   connectedAt = Date.now();
   status: OwnStatus = 'online';
@@ -29,9 +50,12 @@ export class ClientConnection implements ClientHandle {
   voiceWatch = new Set<string>();
 
   private authed = false;
+  private channel?: SecureChannel;
+  private readonly channelKeys: ChannelKeys = createChannelKeys();
   private readonly challenge = randomId(16);
   private readonly limiter = new RateLimiter(30, 120);
   private readonly writeLimiter = new RateLimiter(5, 40);
+  private readonly linkLimiter = new RateLimiter(0.2, 5);
   private alive = true;
   private pingTimer?: ReturnType<typeof setInterval>;
 
@@ -41,16 +65,19 @@ export class ClientConnection implements ClientHandle {
   ) {
     const time = Date.now();
     const info = hub.info;
+    const channel = this.channelKeys.offer;
     this.frame({
       t: 'hello',
       server: info,
       challenge: this.challenge,
       stun: hub.stunUrls(),
       time,
+      channel,
       sig: sign(hub.identity, SIG_DOMAIN.serverHello, {
         challenge: this.challenge,
         server: info.id,
         time,
+        channel,
       }),
     });
     const authTimer = setTimeout(() => {
@@ -70,8 +97,13 @@ export class ClientConnection implements ClientHandle {
         ws.close(1003, 'invalid json');
         return;
       }
-      if (!this.authed) this.onAuth(msg);
-      else void this.onRequest(msg);
+      if (!this.authed) return this.onAuth(msg);
+      const f = msg as { t?: unknown; n?: unknown; c?: unknown };
+      if (f.t !== 'x' || typeof f.n !== 'number' || typeof f.c !== 'string')
+        return ws.close(1008, 'expected encrypted frame');
+      const inner = this.channel!.open({ n: f.n, c: f.c });
+      if (inner === undefined) return ws.close(1008, 'bad frame');
+      void this.onRequest(inner);
     });
     ws.on('pong', () => (this.alive = true));
     this.pingTimer = setInterval(() => {
@@ -89,7 +121,7 @@ export class ClientConnection implements ClientHandle {
   }
 
   private frame(f: ServerFrame) {
-    sendJson(this.ws, f);
+    sendJson(this.ws, this.channel ? this.channel.seal(f) : f);
   }
 
   send<E extends keyof ServerEvents>(ev: E, d: ServerEvents[E]) {
@@ -106,11 +138,11 @@ export class ClientConnection implements ClientHandle {
       this.ws.close(4002, 'expected auth');
       return;
     }
-    const { key, sig, client } = parsed.data;
+    const { key, sig, client, device, channel } = parsed.data;
     const ok = verifyPayload(
       key,
       SIG_DOMAIN.auth,
-      { challenge: this.challenge, server: this.hub.info.id },
+      { challenge: this.challenge, server: this.hub.info.id, device, channel },
       sig,
     );
     if (!ok) {
@@ -118,11 +150,26 @@ export class ClientConnection implements ClientHandle {
       this.ws.close(4003, 'unauthorized');
       return;
     }
+    let secret: Uint8Array;
+    try {
+      secret = acceptChannel(this.channelKeys, channel);
+    } catch {
+      this.ws.close(4003, 'bad channel');
+      return;
+    }
     this.userId = userIdFromKey(key);
+    this.deviceId = device;
+    this.peer = peerIds.make(this.userId, device);
+    this.publicKey = key;
     this.platform = client.platform;
+    this.channel = new SecureChannel(
+      secret,
+      `${this.challenge}|${this.hub.info.id}|${this.peer}`,
+      false,
+    );
     this.authed = true;
     this.connectedAt = Date.now();
-    this.frame({ t: 'auth_ok', userId: this.userId });
+    this.frame({ t: 'auth_ok', userId: this.userId, peer: this.peer });
     this.hub.onClientAuthed(this);
   }
 
@@ -207,7 +254,7 @@ export class ClientConnection implements ClientHandle {
       }
       case 'session.leave': {
         const { sessionId } = p as unknown as { sessionId: string };
-        await hub.sessions.leave(this.userId, sessionId);
+        await hub.sessions.leave(this.peer, sessionId);
         return {};
       }
       case 'session.update': {
@@ -235,12 +282,35 @@ export class ClientConnection implements ClientHandle {
           sessionId: string;
           data: never;
         };
-        if (!hub.sessions.inSession(this.userId, sessionId))
+        if (!hub.sessions.inSession(this.peer, sessionId))
           throw new RpcFailure('forbidden', 'join the session first');
-        return { delivered: hub.deliver(to, 'signal', { from: this.userId, sessionId, data }) };
+        return { delivered: hub.deliverToPeer(to, 'signal', { from: this.peer, sessionId, data }) };
       }
       case 'servers.list':
         return { servers: [hub.info, ...hub.mesh.knownServers()] };
+      case 'link.open': {
+        const { encKey } = p as unknown as { encKey: string };
+        this.encKey = encKey;
+        return hub.openLink(this);
+      }
+      case 'link.claim': {
+        if (!this.linkLimiter.take())
+          throw new RpcFailure('rate_limited', 'too many attempts; wait a minute');
+        const { code } = p as unknown as { code: string };
+        return hub.claimLink(this, code);
+      }
+      case 'link.send': {
+        const { code, box } = p as unknown as { code: string; box: LinkBox };
+        hub.sendLink(this, code, box);
+        return {};
+      }
+      case 'relay.request': {
+        const { sessionId } = p as unknown as { sessionId: string };
+        return { grant: hub.requestRelay(this, sessionId) };
+      }
+      case 'relay.release':
+        hub.endRelay(this.userId, 'released');
+        return {};
     }
   }
 

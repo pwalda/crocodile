@@ -19,6 +19,7 @@ declare global {
     croc: CrocodileClient;
     __relayStart(opts: {
       seed: string;
+      hostPeer: string;
       sessionId: string;
       epoch: number;
       slots: number;
@@ -47,6 +48,7 @@ const relay: HostRelayAdapter = {
   async start(opts) {
     const handle = await window.__relayStart({
       seed: toB64u(opts.identity.seed),
+      hostPeer: opts.hostPeer,
       sessionId: opts.sessionId,
       epoch: opts.epoch,
       slots: opts.slots,

@@ -26,12 +26,15 @@ export interface HostRelayOptions {
   epoch: number;
   /** The host's identity: answers are signed with it. */
   identity: Identity;
+  /** The host's peer id (`<userId>.<deviceId>`). */
+  hostPeer: string;
   slots: number;
   iceServers: { urls: string }[];
   /** Deliver a signal to a member through the coordination server. */
   sendSignal: (to: string, data: SignalData) => void;
   /** Extra admission check (e.g. space membership); defaults to allow. */
-  admit?: (userId: string) => boolean;
+  /** Admission check by peer id (e.g. space membership of its user). */
+  admit?: (peer: string) => boolean;
   /** Expose loopback candidates so the host's own client can connect locally. */
   includeLoopback?: boolean;
   icePortRange?: [number, number];
@@ -41,7 +44,8 @@ export interface HostRelayOptions {
 }
 
 interface Peer {
-  userId: string;
+  /** Peer id `<userId>.<deviceId>`. */
+  id: string;
   pc: RTCPeerConnection;
   dc?: RTCDataChannel;
   ready: boolean;
@@ -62,7 +66,9 @@ const OPUS = new RTCRtpCodecParameters({
   mimeType: 'audio/opus',
   clockRate: 48000,
   channels: 2,
-  parameters: 'minptime=10;useinbandfec=1',
+  // Constant bitrate: VBR packet sizes can leak what is being said even
+  // through encryption (known attacks on VBR VoIP).
+  parameters: 'minptime=10;useinbandfec=1;cbr=1',
 });
 
 /**
@@ -101,7 +107,7 @@ export class HostRelay {
   }
 
   connectedPeerIds() {
-    return [...this.peers.values()].filter((p) => p.ready).map((p) => p.userId);
+    return [...this.peers.values()].filter((p) => p.ready).map((p) => p.id);
   }
 
   async handleSignal(from: string, data: SignalData): Promise<void> {
@@ -128,7 +134,7 @@ export class HostRelay {
 
   private async onOffer(from: string, offer: Extract<SignalData, { type: 'offer' }>) {
     const { sessionId, identity } = this.opts;
-    if (!verifySdp(offer, { sessionId, from, to: identity.userId })) {
+    if (!verifySdp(offer, { sessionId, from, to: this.opts.hostPeer })) {
       this.opts.log?.warn('rejected offer with bad signature', { from });
       return;
     }
@@ -147,10 +153,10 @@ export class HostRelay {
       ...(this.opts.icePortRange ? { icePortRange: this.opts.icePortRange } : {}),
     });
     const peer: Peer = {
-      userId: from,
+      id: from,
       pc,
       ready: false,
-      state: { userId: from, muted: false, deafened: false },
+      state: { id: from, muted: false, deafened: false },
       slotSenders: [],
       slots: new SlotTable(this.opts.slots),
       rewriters: Array.from({ length: this.opts.slots }, () => new StreamRewriter()),
@@ -221,7 +227,12 @@ export class HostRelay {
       // (Gathering can stall for seconds when a STUN server is unreachable.)
       this.opts.sendSignal(
         from,
-        signSdp(identity, 'answer', { sessionId, epoch: this.opts.epoch, to: from }, answer.sdp),
+        signSdp(
+          identity,
+          'answer',
+          { sessionId, epoch: this.opts.epoch, from: this.opts.hostPeer, to: from },
+          answer.sdp,
+        ),
       );
       await pc.setLocalDescription(answer);
       for (const c of peer.pendingCandidates.splice(0))
@@ -233,18 +244,18 @@ export class HostRelay {
   }
 
   private onPeerReady(peer: Peer) {
-    if (peer.ready || this.peers.get(peer.userId) !== peer) return;
+    if (peer.ready || this.peers.get(peer.id) !== peer) return;
     peer.ready = true;
     const others = [...this.peers.values()].filter((p) => p.ready && p !== peer);
     this.send(peer, {
       t: 'hello',
-      you: peer.userId,
-      host: this.opts.identity.userId,
+      you: peer.id,
+      host: this.opts.hostPeer,
       peers: others.map((p) => p.state),
       slots: this.opts.slots,
     });
     for (const o of others) this.send(o, { t: 'peer_join', peer: peer.state });
-    this.opts.log?.info('peer joined relay', { userId: peer.userId, peers: others.length + 1 });
+    this.opts.log?.info('peer joined relay', { peer: peer.id, peers: others.length + 1 });
   }
 
   private onDataMessage(peer: Peer, raw: string | Buffer) {
@@ -259,23 +270,22 @@ export class HostRelay {
     const msg = parsed.data;
     switch (msg.t) {
       case 'bcast': {
-        const out: RelayToClient = { t: 'msg', from: peer.userId, direct: false, d: msg.d };
+        const out: RelayToClient = { t: 'msg', from: peer.id, direct: false, d: msg.d };
         const text = JSON.stringify(out);
         for (const p of this.peers.values()) if (p !== peer && p.ready) this.sendRaw(p, text);
         return;
       }
       case 'direct': {
         const target = this.peers.get(msg.to);
-        if (target?.ready)
-          this.send(target, { t: 'msg', from: peer.userId, direct: true, d: msg.d });
+        if (target?.ready) this.send(target, { t: 'msg', from: peer.id, direct: true, d: msg.d });
         return;
       }
       case 'ping':
         this.send(peer, { t: 'pong', ts: msg.ts });
         return;
       case 'state': {
-        peer.state = { userId: peer.userId, muted: msg.muted, deafened: msg.deafened };
-        if (msg.muted) this.lastLoud.delete(peer.userId);
+        peer.state = { id: peer.id, muted: msg.muted, deafened: msg.deafened };
+        if (msg.muted) this.lastLoud.delete(peer.id);
         for (const p of this.peers.values())
           if (p.ready) this.send(p, { t: 'peer_state', peer: peer.state });
         return;
@@ -285,7 +295,7 @@ export class HostRelay {
 
   private onUpstreamRtp(speaker: Peer, rtp: RtpPacket) {
     if (speaker.state.muted) return;
-    this.opts.onUpstreamFrame?.(speaker.userId, rtp.payload);
+    this.opts.onUpstreamFrame?.(speaker.id, rtp.payload);
     const now = Date.now();
     let level = 127;
     if (speaker.audioLevelExtId !== undefined) {
@@ -295,17 +305,17 @@ export class HostRelay {
       level = 0;
     }
     const loud = level < SPEECH_LEVEL;
-    if (loud) this.lastLoud.set(speaker.userId, now);
+    if (loud) this.lastLoud.set(speaker.id, now);
     const lastLoud = (id: string) => this.lastLoud.get(id) ?? 0;
-    const recentlyLoud = now - lastLoud(speaker.userId) < 1200;
+    const recentlyLoud = now - lastLoud(speaker.id) < 1200;
 
     let raw: Buffer | undefined;
     for (const listener of this.peers.values()) {
       if (listener === speaker || !listener.ready || listener.state.deafened) continue;
-      let slot = listener.slots.indexOf(speaker.userId);
+      let slot = listener.slots.indexOf(speaker.id);
       if (slot < 0) {
         if (!recentlyLoud) continue;
-        slot = listener.slots.assign(speaker.userId, now, lastLoud);
+        slot = listener.slots.assign(speaker.id, now, lastLoud);
         if (slot < 0) continue;
         this.send(listener, { t: 'slots', map: [...listener.slots.slots] });
       }
@@ -314,7 +324,7 @@ export class HostRelay {
       raw ??= rtp.serialize();
       const pkt = RtpPacket.deSerialize(raw);
       const { seq, ts, marker } = listener.rewriters[slot]!.rewrite(
-        speaker.userId,
+        speaker.id,
         pkt.header.sequenceNumber,
         pkt.header.timestamp,
         now,
@@ -355,18 +365,18 @@ export class HostRelay {
     }
   }
 
-  removePeer(userId: string, reason: string) {
-    const peer = this.peers.get(userId);
+  removePeer(id: string, reason: string) {
+    const peer = this.peers.get(id);
     if (!peer) return;
-    this.peers.delete(userId);
+    this.peers.delete(id);
     if (peer.closeTimer) clearTimeout(peer.closeTimer);
     void peer.pc.close().catch(() => {});
-    this.lastLoud.delete(userId);
+    this.lastLoud.delete(id);
     for (const p of this.peers.values()) {
-      if (p.slots.release(userId) && p.ready) this.send(p, { t: 'slots', map: [...p.slots.slots] });
-      if (peer.ready && p.ready) this.send(p, { t: 'peer_leave', userId });
+      if (p.slots.release(id) && p.ready) this.send(p, { t: 'slots', map: [...p.slots.slots] });
+      if (peer.ready && p.ready) this.send(p, { t: 'peer_leave', peer: id });
     }
-    this.opts.log?.info('peer left relay', { userId, reason });
+    this.opts.log?.info('peer left relay', { peer: id, reason });
   }
 
   async close() {

@@ -1,109 +1,142 @@
 import {
+  AUDIO_EPOCH_MS,
+  TextReceiver,
   createSenderKey,
-  decryptGroup,
-  deriveSenderKey,
-  encryptGroup,
-  exportSenderKey,
-  importSenderKey,
-  type DerivedSenderKey,
+  encryptText,
+  exportChains,
+  importChain,
+  ratchet,
+  type ChainState,
+  type ExportedChains,
   type SenderKey,
 } from '@crocodile/crypto';
+import { toB64u } from '@crocodile/protocol';
 import { Emitter } from './emitter';
 
 interface PeerKey {
-  userId: string;
-  derived: DerivedSenderKey;
-  secret: SenderKey;
-  /** Epoch ms after which the key is dropped (set when superseded or the peer left). */
+  peer: string;
+  kid: number;
+  text: TextReceiver;
+  /** Audio chain as received; the frame worker ratchets it forward itself. */
+  audio: ChainState;
+  /** When set, the key is dropped after this time (superseded, or peer left). */
   expiresAt: number | null;
 }
 
 /** Snapshot handed to the voice frame worker. */
 export interface FrameKeys {
-  mine: { kid: number; secret: string } | null;
-  peers: { kid: number; userId: string; secret: string }[];
+  mine: { kid: number; gen: number; key: string } | null;
+  peers: { kid: number; peer: string; gen: number; key: string }[];
 }
 
 const GRACE_MS = 10_000;
+/** Fresh sender key (new randomness) at least this often: post-compromise healing. */
+export const SENDER_KEY_ROTATION_MS = 30 * 60_000;
 
 /**
- * Sender keys for one session: our own (rotated whenever someone leaves, so a
- * departed member cannot decrypt what follows) and the keys other members
- * sealed to us.
+ * Sender keys for one session: our own ratcheting key and the keys other
+ * members sealed to us. Our key is replaced whenever a member leaves and
+ * every 30 minutes; the audio chain ratchets every 30 s and the text chain
+ * after every message.
  */
-export class GroupKeyring extends Emitter<{ changed: FrameKeys; rotated: SenderKey }> {
-  private mine: { key: SenderKey; derived: DerivedSenderKey; counter: number };
+export class GroupKeyring extends Emitter<{ changed: FrameKeys; rotated: ExportedChains }> {
+  private mine: SenderKey;
   private peers = new Map<number, PeerKey>();
+  private audioTimer?: ReturnType<typeof setInterval>;
+  private rotateTimer?: ReturnType<typeof setInterval>;
 
-  constructor() {
+  constructor(opts: { autoRatchet?: boolean } = {}) {
     super();
-    const key = createSenderKey();
-    this.mine = { key, derived: deriveSenderKey(key), counter: 0 };
-  }
-
-  get myKey(): SenderKey {
-    return this.mine.key;
-  }
-
-  exportMine() {
-    return { kid: this.mine.key.kid, key: exportSenderKey(this.mine.key) };
-  }
-
-  rotate(): SenderKey {
-    const key = createSenderKey();
-    this.mine = { key, derived: deriveSenderKey(key), counter: 0 };
-    this.emit('rotated', key);
-    this.emitChanged();
-    return key;
-  }
-
-  addPeerKey(userId: string, kid: number, secret: string) {
-    const existing = this.peers.get(kid);
-    if (existing && existing.userId !== userId) return false;
-    const sk = importSenderKey(kid, secret);
-    const now = Date.now();
-    // A newer key from the same peer supersedes older ones after a grace period.
-    for (const p of this.peers.values()) {
-      if (p.userId === userId && p.derived.kid !== kid && p.expiresAt === null)
-        p.expiresAt = now + GRACE_MS;
+    this.mine = createSenderKey();
+    if (opts.autoRatchet !== false) {
+      this.audioTimer = setInterval(() => this.advanceAudio(), AUDIO_EPOCH_MS);
+      this.rotateTimer = setInterval(() => this.rotate(), SENDER_KEY_ROTATION_MS);
+      (this.audioTimer as { unref?: () => void }).unref?.();
+      (this.rotateTimer as { unref?: () => void }).unref?.();
     }
-    this.peers.set(kid, { userId, secret: sk, derived: deriveSenderKey(sk), expiresAt: null });
+  }
+
+  dispose() {
+    clearInterval(this.audioTimer);
+    clearInterval(this.rotateTimer);
+    this.removeAll();
+  }
+
+  get kid() {
+    return this.mine.kid;
+  }
+
+  /** Current chain state to hand to a (new) member: never earlier generations. */
+  exportMine(): ExportedChains {
+    return exportChains(this.mine);
+  }
+
+  rotate(): ExportedChains {
+    this.mine = createSenderKey();
+    const exported = exportChains(this.mine);
+    this.emit('rotated', exported);
+    this.emitChanged();
+    return exported;
+  }
+
+  advanceAudio() {
+    this.mine.audio = ratchet(this.mine.audio);
+    this.emitChanged();
+  }
+
+  addPeerKey(peer: string, chains: ExportedChains): boolean {
+    const kid = chains.kid >>> 0;
+    const existing = this.peers.get(kid);
+    if (existing && existing.peer !== peer) return false;
+    // Re-sent current state for a key we already track: keep our (newer) receiver.
+    if (existing && existing.text.gen >= chains.text.gen) return true;
+    const now = Date.now();
+    for (const p of this.peers.values()) {
+      if (p.peer === peer && p.kid !== kid && p.expiresAt === null) p.expiresAt = now + GRACE_MS;
+    }
+    this.peers.set(kid, {
+      peer,
+      kid,
+      text: new TextReceiver(kid, importChain(chains.text)),
+      audio: importChain(chains.audio),
+      expiresAt: null,
+    });
     this.emitChanged();
     return true;
   }
 
-  hasKeyFrom(userId: string) {
-    for (const p of this.peers.values())
-      if (p.userId === userId && p.expiresAt === null) return true;
+  hasKeyFrom(peer: string) {
+    for (const p of this.peers.values()) if (p.peer === peer && p.expiresAt === null) return true;
     return false;
   }
 
-  peerLeft(userId: string) {
+  peerLeft(peer: string) {
     const at = Date.now() + GRACE_MS;
     for (const p of this.peers.values())
-      if (p.userId === userId && p.expiresAt === null) p.expiresAt = at;
+      if (p.peer === peer && p.expiresAt === null) p.expiresAt = at;
   }
 
   encrypt(plaintext: Uint8Array) {
-    return encryptGroup(this.mine.derived, this.mine.counter++, plaintext);
+    return encryptText(this.mine, plaintext);
   }
 
-  decrypt(kid: number, n: number, ct: string): { userId: string; plaintext: Uint8Array } | null {
+  decrypt(kid: number, g: number, ct: string): { peer: string; plaintext: Uint8Array } | null {
     this.prune();
-    const peer = this.peers.get(kid >>> 0);
-    if (!peer) return null;
-    const plaintext = decryptGroup(peer.derived, n, ct);
-    return plaintext ? { userId: peer.userId, plaintext } : null;
+    const pk = this.peers.get(kid >>> 0);
+    if (!pk) return null;
+    const plaintext = pk.text.decrypt(g, ct);
+    return plaintext ? { peer: pk.peer, plaintext } : null;
   }
 
   frameKeys(): FrameKeys {
     this.prune();
     return {
-      mine: { kid: this.mine.key.kid, secret: exportSenderKey(this.mine.key) },
+      mine: { kid: this.mine.kid, gen: this.mine.audio.gen, key: toB64u(this.mine.audio.key) },
       peers: [...this.peers.values()].map((p) => ({
-        kid: p.derived.kid,
-        userId: p.userId,
-        secret: exportSenderKey(p.secret),
+        kid: p.kid,
+        peer: p.peer,
+        gen: p.audio.gen,
+        key: toB64u(p.audio.key),
       })),
     };
   }

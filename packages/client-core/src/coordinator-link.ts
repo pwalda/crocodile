@@ -24,6 +24,7 @@ export type LinkEvents = ServerEvents & {
 
 export interface CoordinatorLinkOptions {
   identity: Identity;
+  deviceId: string;
   platform: Platform;
   version: string;
   kv: KeyValueStore;
@@ -44,6 +45,9 @@ const FORWARDED_EVENTS: (keyof ServerEvents)[] = [
   'voice',
   'session_invite',
   'replaced',
+  'link_claimed',
+  'link_payload',
+  'relay_expired',
 ];
 
 /**
@@ -169,6 +173,7 @@ export class CoordinatorLink extends Emitter<LinkEvents> {
         const conn = await CoordinatorConnection.connect({
           url: candidate.info.url,
           identity: this.opts.identity,
+          deviceId: this.opts.deviceId,
           platform: this.opts.platform,
           version: this.opts.version,
           expectedServerKey: candidate.info.key || undefined,

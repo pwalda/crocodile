@@ -230,3 +230,93 @@ describe('client', () => {
     expect(alice.state.server!.info.id).toBe(a.info.id);
   });
 });
+
+describe('multiple devices', () => {
+  it('links a new device with a code and delivers to every device of a user', async () => {
+    const coord = await server();
+    const net = new FakeRelayNetwork();
+    const alice1 = await signUp(makeClient(net, coord, { nat: 'open' }), 'alice');
+    const bob = await signUp(makeClient(net, coord), 'bob');
+
+    // A fresh install shows a code; the signed-in device types it in.
+    const alice2 = makeClient(net, coord);
+    await alice2.init();
+    expect(alice2.state.phase).toBe('onboarding');
+    await alice2.startDeviceLink();
+    const code = await waitFor(
+      () => (alice2.state.linking?.role === 'new' ? alice2.state.linking.code : undefined),
+      5000,
+      'code',
+    );
+    const shownOnOld = await alice1.claimDeviceLink(code);
+    const shownOnNew = await waitFor(
+      () =>
+        alice2.state.linking?.role === 'new' && alice2.state.linking.step === 'claimed'
+          ? alice2.state.linking.securityCode
+          : undefined,
+      5000,
+      'claimed',
+    );
+    expect(shownOnNew).toBe(shownOnOld);
+    await alice1.confirmDeviceLink();
+    await waitFor(
+      () => alice2.identity?.userId === alice1.userId && alice2.state.link === 'connected',
+      5000,
+      'linked',
+    );
+    alice2.finishOnboarding();
+    expect(alice2.deviceId).not.toBe(alice1.deviceId);
+    await waitFor(() => alice1.state.devices.length === 2, 5000, 'device list');
+
+    const spaceId = await alice1.createSpace('Devices');
+    const code2 = await alice1.createInvite(spaceId);
+    await bob.joinWithInvite(code2);
+    await waitFor(() => alice2.state.spaces[spaceId], 5000, 'space on second device');
+    const ch = channelOf(alice1, spaceId);
+    for (const c of [alice1, alice2, bob]) await c.openChannel(ch);
+    const sid = sessionIds.space(spaceId);
+    await waitFor(
+      () => [alice1, alice2, bob].every((c) => c.sessionFor(sid)?.peers.size === 2),
+      8000,
+      'three peers',
+    );
+    await bob.sendMessage(ch, 'to all your devices');
+    await waitFor(
+      () =>
+        bodies(alice1, ch).includes('to all your devices') &&
+        bodies(alice2, ch).includes('to all your devices'),
+      5000,
+    );
+    await alice2.sendMessage(ch, 'from my laptop');
+    await waitFor(
+      () =>
+        bodies(alice1, ch).includes('from my laptop') && bodies(bob, ch).includes('from my laptop'),
+      5000,
+    );
+
+    // Removing a device: peers stop trusting it.
+    await alice1.revokeDevice(alice2.deviceId);
+    const alice2Peer = `${alice2.userId}.${alice2.deviceId}`;
+    await waitFor(() => !bob.isAllowedPeer(sid, alice2Peer), 5000, 'revocation seen by bob');
+    expect(bob.isAllowedPeer(sid, `${alice1.userId}.${alice1.deviceId}`)).toBe(true);
+  });
+
+  it('rejects a link when the security codes are not confirmed', async () => {
+    const coord = await server();
+    const net = new FakeRelayNetwork();
+    const alice = await signUp(makeClient(net, coord), 'alice');
+    const fresh = makeClient(net, coord);
+    await fresh.init();
+    await fresh.startDeviceLink();
+    const code = await waitFor(
+      () => (fresh.state.linking?.role === 'new' ? fresh.state.linking.code : undefined),
+      5000,
+    );
+    await expect(alice.claimDeviceLink('WRONGCODE')).rejects.toThrow(/not valid/);
+    await alice.claimDeviceLink(code);
+    // Not confirmed: nothing is sent and the new device stays signed out.
+    await new Promise((r) => setTimeout(r, 300));
+    expect(fresh.identity).toBeNull();
+    fresh.cancelDeviceLink();
+  });
+});

@@ -1,99 +1,218 @@
-import { toB64u, fromB64u } from '@crocodile/protocol';
+import { fromB64u, toB64u } from '@crocodile/protocol';
 import { aesGcmDecrypt, aesGcmEncrypt, hkdfSha256, randomBytes } from './primitives';
+import { pad, unpad } from './padding';
 
 /**
- * Sender keys (as in Signal groups / SFrame): every participant encrypts its
- * outgoing voice frames and group text with its own symmetric key, which it
- * hands to each other participant through a sealed box. The host relay
- * forwards ciphertext it cannot decrypt. Keys rotate whenever someone leaves.
+ * Sender keys with symmetric ratchets (as in Signal's group sender keys and
+ * SFrame). Each member owns a key identified by `kid` with two hash chains:
  *
- * Voice frame layout (appended trailer, SFrame-like):
+ *  - text chain: advances after every message, so a leaked chain key cannot
+ *    decrypt earlier messages (per-message forward secrecy);
+ *  - audio chain: advances every AUDIO_EPOCH_MS; frames within an epoch use
+ *    a counter nonce.
  *
- *   ciphertext || GCM tag (16) || kid u32 BE || counter u32 BE || 0xC7
+ * New members only ever receive the *current* chain keys, and members
+ * replace their whole sender key with fresh randomness periodically and
+ * whenever someone leaves, which heals the group after a compromise.
  *
- * nonce = salt XOR (0^4 || kid || counter), AAD = trailer.
+ * Voice frame layout (SFrame-like trailer, authenticated as AAD):
+ *   ciphertext ‖ GCM tag(16) ‖ kid u32 ‖ gen u16 ‖ counter u32 ‖ 0xC8
  */
-export const FRAME_MAGIC = 0xc7;
-export const FRAME_TRAILER_BYTES = 9;
+export const FRAME_MAGIC = 0xc8;
+export const FRAME_TRAILER_BYTES = 11;
+export const AUDIO_EPOCH_MS = 30_000;
 const TAG_BYTES = 16;
+const MAX_TEXT_SKIP = 2000;
+const MAX_SKIPPED_KEYS = 256;
+const MAX_AUDIO_SKIP = 16;
+
+export interface ChainState {
+  gen: number;
+  key: Uint8Array;
+}
 
 export interface SenderKey {
   kid: number;
-  secret: Uint8Array;
+  text: ChainState;
+  audio: ChainState;
 }
 
-export interface DerivedSenderKey {
+export interface ExportedChains {
   kid: number;
-  audioKey: Uint8Array;
-  audioSalt: Uint8Array;
-  textKey: Uint8Array;
-  textSalt: Uint8Array;
+  text: { gen: number; key: string };
+  audio: { gen: number; key: string };
+}
+
+function kidBytes(kid: number) {
+  const b = new Uint8Array(4);
+  new DataView(b.buffer).setUint32(0, kid >>> 0);
+  return b;
 }
 
 export function createSenderKey(): SenderKey {
-  const kidBytes = randomBytes(4);
-  const kid =
-    ((kidBytes[0]! << 24) | (kidBytes[1]! << 16) | (kidBytes[2]! << 8) | kidBytes[3]!) >>> 0;
-  return { kid, secret: randomBytes(32) };
-}
-
-export function deriveSenderKey(sk: SenderKey): DerivedSenderKey {
-  const salt = new Uint8Array(4);
-  new DataView(salt.buffer).setUint32(0, sk.kid);
-  const audio = hkdfSha256(sk.secret, salt, 'croc/v1/frame/audio', 44);
-  const text = hkdfSha256(sk.secret, salt, 'croc/v1/frame/text', 44);
+  const b = randomBytes(4);
+  const kid = ((b[0]! << 24) | (b[1]! << 16) | (b[2]! << 8) | b[3]!) >>> 0;
+  const seed = randomBytes(32);
   return {
-    kid: sk.kid,
-    audioKey: audio.slice(0, 32),
-    audioSalt: audio.slice(32, 44),
-    textKey: text.slice(0, 32),
-    textSalt: text.slice(32, 44),
+    kid,
+    text: { gen: 0, key: hkdfSha256(seed, kidBytes(kid), 'croc/v2/text-chain', 32) },
+    audio: { gen: 0, key: hkdfSha256(seed, kidBytes(kid), 'croc/v2/audio-chain', 32) },
   };
 }
 
-export function exportSenderKey(sk: SenderKey): string {
-  return toB64u(sk.secret);
+export function ratchet(chain: ChainState): ChainState {
+  return {
+    gen: chain.gen + 1,
+    key: hkdfSha256(chain.key, new Uint8Array(0), 'croc/v2/ratchet', 32),
+  };
 }
 
-export function importSenderKey(kid: number, secret: string): SenderKey {
-  const bytes = fromB64u(secret);
-  if (bytes.length !== 32) throw new Error('bad sender key');
-  return { kid: kid >>> 0, secret: bytes };
+interface MessageKey {
+  key: Uint8Array;
+  salt: Uint8Array;
 }
 
-function nonceFor(salt: Uint8Array, kid: number, counter: number): Uint8Array {
+function messageKey(chain: ChainState, kid: number, label: 'text' | 'audio'): MessageKey {
+  const okm = hkdfSha256(chain.key, kidBytes(kid), `croc/v2/${label}-message`, 44);
+  return { key: okm.slice(0, 32), salt: okm.slice(32, 44) };
+}
+
+export function exportChains(sk: SenderKey): ExportedChains {
+  return {
+    kid: sk.kid,
+    text: { gen: sk.text.gen, key: toB64u(sk.text.key) },
+    audio: { gen: sk.audio.gen, key: toB64u(sk.audio.key) },
+  };
+}
+
+export function importChain(c: { gen: number; key: string }): ChainState {
+  const key = fromB64u(c.key);
+  if (key.length !== 32) throw new Error('bad chain key');
+  return { gen: c.gen, key };
+}
+
+// ---------------------------------------------------------------------------
+// Text
+// ---------------------------------------------------------------------------
+
+function textAad(kid: number, gen: number) {
+  const aad = new Uint8Array(8);
+  const v = new DataView(aad.buffer);
+  v.setUint32(0, kid >>> 0);
+  v.setUint32(4, gen >>> 0);
+  return aad;
+}
+
+/** Encrypts and advances the sender's text chain (mutates `sk`). */
+export function encryptText(
+  sk: SenderKey,
+  plaintext: Uint8Array,
+): { kid: number; g: number; ct: string } {
+  const mk = messageKey(sk.text, sk.kid, 'text');
+  const g = sk.text.gen;
+  const ct = aesGcmEncrypt(mk.key, mk.salt, pad(plaintext), textAad(sk.kid, g));
+  sk.text = ratchet(sk.text);
+  return { kid: sk.kid, g, ct: toB64u(ct) };
+}
+
+/** Receiving side of one sender's text chain, tolerant of small reordering. */
+export class TextReceiver {
+  private skipped = new Map<number, MessageKey>();
+  constructor(
+    readonly kid: number,
+    private chain: ChainState,
+  ) {}
+
+  get gen() {
+    return this.chain.gen;
+  }
+
+  decrypt(g: number, ct: string): Uint8Array | null {
+    let data: Uint8Array;
+    try {
+      data = fromB64u(ct);
+    } catch {
+      return null;
+    }
+    const aad = textAad(this.kid, g);
+    if (g < this.chain.gen) {
+      const mk = this.skipped.get(g);
+      if (!mk) return null;
+      const out = aesGcmDecrypt(mk.key, mk.salt, data, aad);
+      if (out) this.skipped.delete(g);
+      return out && unpad(out);
+    }
+    if (g - this.chain.gen > MAX_TEXT_SKIP) return null;
+    // Work on a copy; only commit if the message authenticates.
+    let chain = this.chain;
+    const skipped: [number, MessageKey][] = [];
+    while (chain.gen < g) {
+      skipped.push([chain.gen, messageKey(chain, this.kid, 'text')]);
+      chain = ratchet(chain);
+    }
+    const mk = messageKey(chain, this.kid, 'text');
+    const out = aesGcmDecrypt(mk.key, mk.salt, data, aad);
+    if (!out) return null;
+    for (const [gen, k] of skipped) this.skipped.set(gen, k);
+    while (this.skipped.size > MAX_SKIPPED_KEYS)
+      this.skipped.delete(this.skipped.keys().next().value!);
+    this.chain = ratchet(chain);
+    return unpad(out);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Audio frames
+// ---------------------------------------------------------------------------
+
+function frameNonce(salt: Uint8Array, counter: number) {
   const nonce = salt.slice();
-  const view = new DataView(nonce.buffer);
-  view.setUint32(4, view.getUint32(4) ^ kid);
-  view.setUint32(8, view.getUint32(8) ^ counter);
+  const v = new DataView(nonce.buffer);
+  v.setUint32(8, v.getUint32(8) ^ (counter >>> 0));
   return nonce;
 }
 
-export function encryptFrame(
-  key: DerivedSenderKey,
-  counter: number,
-  frame: Uint8Array,
-): Uint8Array {
-  const trailer = new Uint8Array(FRAME_TRAILER_BYTES);
-  const tv = new DataView(trailer.buffer);
-  tv.setUint32(0, key.kid);
-  tv.setUint32(4, counter >>> 0);
-  trailer[8] = FRAME_MAGIC;
-  const ct = aesGcmEncrypt(
-    key.audioKey,
-    nonceFor(key.audioSalt, key.kid, counter >>> 0),
-    frame,
-    trailer,
-  );
-  const out = new Uint8Array(ct.length + FRAME_TRAILER_BYTES);
-  out.set(ct, 0);
-  out.set(trailer, ct.length);
-  return out;
+export class AudioSender {
+  private mk: MessageKey;
+  private counter = 0;
+  constructor(
+    readonly kid: number,
+    private chain: ChainState,
+  ) {
+    this.mk = messageKey(chain, kid, 'audio');
+  }
+
+  get gen() {
+    return this.chain.gen;
+  }
+
+  /** Moves to a newer generation of the same chain (sent by the keyring). */
+  update(chain: ChainState) {
+    if (chain.gen <= this.chain.gen) return;
+    this.chain = chain;
+    this.mk = messageKey(chain, this.kid, 'audio');
+    this.counter = 0;
+  }
+
+  encrypt(frame: Uint8Array): Uint8Array {
+    const trailer = new Uint8Array(FRAME_TRAILER_BYTES);
+    const tv = new DataView(trailer.buffer);
+    const counter = this.counter++ >>> 0;
+    tv.setUint32(0, this.kid);
+    tv.setUint16(4, this.chain.gen & 0xffff);
+    tv.setUint32(6, counter);
+    trailer[10] = FRAME_MAGIC;
+    const ct = aesGcmEncrypt(this.mk.key, frameNonce(this.mk.salt, counter), frame, trailer);
+    const out = new Uint8Array(ct.length + FRAME_TRAILER_BYTES);
+    out.set(ct, 0);
+    out.set(trailer, ct.length);
+    return out;
+  }
 }
 
 export function peekFrameKid(data: Uint8Array): number | null {
-  if (data.length < FRAME_TRAILER_BYTES + TAG_BYTES) return null;
-  if (data[data.length - 1] !== FRAME_MAGIC) return null;
+  if (data.length < FRAME_TRAILER_BYTES + TAG_BYTES || data[data.length - 1] !== FRAME_MAGIC)
+    return null;
   return new DataView(
     data.buffer,
     data.byteOffset + data.length - FRAME_TRAILER_BYTES,
@@ -101,42 +220,57 @@ export function peekFrameKid(data: Uint8Array): number | null {
   ).getUint32(0);
 }
 
-export function decryptFrame(key: DerivedSenderKey, data: Uint8Array): Uint8Array | null {
-  if (data.length < FRAME_TRAILER_BYTES + TAG_BYTES || data[data.length - 1] !== FRAME_MAGIC)
-    return null;
-  const trailer = data.subarray(data.length - FRAME_TRAILER_BYTES);
-  const tv = new DataView(trailer.buffer, trailer.byteOffset, FRAME_TRAILER_BYTES);
-  const kid = tv.getUint32(0);
-  if (kid !== key.kid) return null;
-  const counter = tv.getUint32(4);
-  return aesGcmDecrypt(
-    key.audioKey,
-    nonceFor(key.audioSalt, kid, counter),
-    data.subarray(0, data.length - FRAME_TRAILER_BYTES),
-    trailer,
-  );
-}
+export class AudioReceiver {
+  private keys = new Map<number, MessageKey>();
+  constructor(
+    readonly kid: number,
+    private chain: ChainState,
+  ) {
+    this.keys.set(chain.gen, messageKey(chain, kid, 'audio'));
+  }
 
-export function encryptGroup(key: DerivedSenderKey, counter: number, plaintext: Uint8Array) {
-  const aad = new Uint8Array(8);
-  new DataView(aad.buffer).setUint32(0, key.kid);
-  new DataView(aad.buffer).setUint32(4, counter >>> 0);
-  const ct = aesGcmEncrypt(
-    key.textKey,
-    nonceFor(key.textSalt, key.kid, counter >>> 0),
-    plaintext,
-    aad,
-  );
-  return { kid: key.kid, n: counter >>> 0, ct: toB64u(ct) };
-}
+  get gen() {
+    return this.chain.gen;
+  }
 
-export function decryptGroup(key: DerivedSenderKey, n: number, ct: string): Uint8Array | null {
-  const aad = new Uint8Array(8);
-  new DataView(aad.buffer).setUint32(0, key.kid);
-  new DataView(aad.buffer).setUint32(4, n >>> 0);
-  try {
-    return aesGcmDecrypt(key.textKey, nonceFor(key.textSalt, key.kid, n >>> 0), fromB64u(ct), aad);
-  } catch {
-    return null;
+  decrypt(data: Uint8Array): Uint8Array | null {
+    if (data.length < FRAME_TRAILER_BYTES + TAG_BYTES || data[data.length - 1] !== FRAME_MAGIC)
+      return null;
+    const trailer = data.subarray(data.length - FRAME_TRAILER_BYTES);
+    const tv = new DataView(trailer.buffer, trailer.byteOffset, FRAME_TRAILER_BYTES);
+    if (tv.getUint32(0) !== this.kid) return null;
+    const gen16 = tv.getUint16(4);
+    const counter = tv.getUint32(6);
+    // Map the 16-bit generation onto our chain position.
+    const current16 = this.chain.gen & 0xffff;
+    const ahead = (gen16 - current16) & 0xffff;
+    let target: number;
+    if (ahead <= MAX_AUDIO_SKIP) target = this.chain.gen + ahead;
+    else if (((current16 - gen16) & 0xffff) <= 1)
+      target = this.chain.gen - ((current16 - gen16) & 0xffff);
+    else return null;
+    let mk = this.keys.get(target);
+    let chain = this.chain;
+    if (!mk && target > chain.gen) {
+      while (chain.gen < target) chain = ratchet(chain);
+      mk = messageKey(chain, this.kid, 'audio');
+    }
+    if (!mk) return null;
+    const plain = aesGcmDecrypt(
+      mk.key,
+      frameNonce(mk.salt, counter),
+      data.subarray(0, data.length - FRAME_TRAILER_BYTES),
+      trailer,
+    );
+    if (!plain) return null;
+    if (target > this.chain.gen) {
+      // Keep only the previous generation for frames reordered across the boundary.
+      const prev = this.keys.get(this.chain.gen);
+      this.keys.clear();
+      if (target - this.chain.gen === 1 && prev) this.keys.set(this.chain.gen, prev);
+      this.chain = chain;
+      this.keys.set(target, mk);
+    }
+    return plain;
   }
 }

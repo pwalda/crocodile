@@ -3,6 +3,7 @@ import {
   DEFAULT_RELAY_SLOTS,
   LIMITS,
   parseSessionId,
+  peerIds,
   type FedSessionOp,
   type FedVoice,
   type HostCaps,
@@ -44,7 +45,7 @@ const MEMBER_RECONNECT_GRACE_MS = 10_000;
  * so the new owner rebuilds identical state without disturbing the call.
  */
 export class SessionService {
-  /** sessionId -> local userId -> caps */
+  /** sessionId -> local peer id -> caps */
   private local = new Map<string, Map<string, HostCaps>>();
   private lastOwner = new Map<string, string>();
   private lastKnown = new Map<string, Hint>();
@@ -102,21 +103,21 @@ export class SessionService {
       throw new RpcFailure('forbidden', 'this user is not accepting messages from you');
   }
 
-  inSession(userId: string, sessionId: string) {
-    return this.local.get(sessionId)?.has(userId) ?? false;
+  inSession(peer: string, sessionId: string) {
+    return this.local.get(sessionId)?.has(peer) ?? false;
   }
 
   async join(client: ClientHandle, sessionId: string, caps: HostCaps): Promise<SessionState> {
     this.checkAccess(client.userId, sessionId);
-    const leaveKey = `${sessionId}|${client.userId}`;
+    const leaveKey = `${sessionId}|${client.peer}`;
     clearTimeout(this.pendingLeaves.get(leaveKey));
     this.pendingLeaves.delete(leaveKey);
     let members = this.local.get(sessionId);
     if (!members) this.local.set(sessionId, (members = new Map()));
-    members.set(client.userId, caps);
+    members.set(client.peer, caps);
     this.lastOwner.set(sessionId, this.ownerOf(sessionId));
     const hint = this.lastKnown.get(sessionId);
-    const state = (await this.submit(sessionId, client.userId, {
+    const state = (await this.submit(sessionId, client.peer, {
       op: 'join',
       caps,
       ...(hint ? { hint } : {}),
@@ -126,48 +127,48 @@ export class SessionService {
 
   async update(client: ClientHandle, sessionId: string, caps: HostCaps) {
     const members = this.local.get(sessionId);
-    if (!members?.has(client.userId)) throw new RpcFailure('not_found', 'not in session');
-    members.set(client.userId, caps);
-    await this.submit(sessionId, client.userId, { op: 'update', caps });
+    if (!members?.has(client.peer)) throw new RpcFailure('not_found', 'not in session');
+    members.set(client.peer, caps);
+    await this.submit(sessionId, client.peer, { op: 'update', caps });
   }
 
-  async leave(userId: string, sessionId: string) {
+  async leave(peer: string, sessionId: string) {
     const members = this.local.get(sessionId);
-    if (!members?.delete(userId)) return;
+    if (!members?.delete(peer)) return;
     if (members.size === 0) {
       this.local.delete(sessionId);
       this.lastOwner.delete(sessionId);
       this.lastKnown.delete(sessionId);
     }
-    await this.submit(sessionId, userId, { op: 'leave' }).catch(() => {});
+    await this.submit(sessionId, peer, { op: 'leave' }).catch(() => {});
   }
 
   async report(client: ClientHandle, sessionId: string, epoch: number) {
-    if (!this.inSession(client.userId, sessionId))
+    if (!this.inSession(client.peer, sessionId))
       throw new RpcFailure('not_found', 'not in session');
-    await this.submit(sessionId, client.userId, { op: 'report', epoch, issue: 'host_unreachable' });
+    await this.submit(sessionId, client.peer, { op: 'report', epoch, issue: 'host_unreachable' });
   }
 
   private pendingLeaves = new Map<string, ReturnType<typeof setTimeout>>();
   private orphanTimers = new Map<string, ReturnType<typeof setTimeout>>();
 
-  onClientReplaced(userId: string) {
+  onClientReplaced(peer: string) {
     for (const [sessionId, members] of this.local) {
-      if (!members.has(userId)) continue;
-      const key = `${sessionId}|${userId}`;
+      if (!members.has(peer)) continue;
+      const key = `${sessionId}|${peer}`;
       clearTimeout(this.pendingLeaves.get(key));
       const timer = setTimeout(() => {
         this.pendingLeaves.delete(key);
-        void this.leave(userId, sessionId);
+        void this.leave(peer, sessionId);
       }, 10_000);
       timer.unref?.();
       this.pendingLeaves.set(key, timer);
     }
   }
 
-  onClientGone(userId: string) {
+  onClientGone(peer: string) {
     for (const [sessionId, members] of [...this.local]) {
-      if (members.has(userId)) void this.leave(userId, sessionId);
+      if (members.has(peer)) void this.leave(peer, sessionId);
     }
   }
 
@@ -177,9 +178,9 @@ export class SessionService {
       this.lastKnown.set(state.id, { epoch: state.epoch, host: state.host, backup: state.backup });
   }
 
-  /** Sessions the given local user is in (for tests and diagnostics). */
-  sessionsOf(userId: string) {
-    return [...this.local].filter(([, m]) => m.has(userId)).map(([id]) => id);
+  /** Sessions the given local peer is in (for tests and diagnostics). */
+  sessionsOf(peer: string) {
+    return [...this.local].filter(([, m]) => m.has(peer)).map(([id]) => id);
   }
 
   ownedState(sessionId: string): SessionState | undefined {
@@ -190,11 +191,11 @@ export class SessionService {
   // Routing to the owner
   // -------------------------------------------------------------------------
 
-  private submit(sessionId: string, userId: string, op: SessionOp): Promise<unknown> {
+  private submit(sessionId: string, peer: string, op: SessionOp): Promise<unknown> {
     const owner = this.ownerOf(sessionId);
     if (owner === this.selfId) {
       try {
-        return Promise.resolve(this.apply(sessionId, userId, this.selfId, op));
+        return Promise.resolve(this.apply(sessionId, peer, this.selfId, op));
       } catch (err) {
         return Promise.reject(err);
       }
@@ -206,7 +207,7 @@ export class SessionService {
         reject(new RpcFailure('unavailable', 'session owner did not respond'));
       }, OP_TIMEOUT_MS);
       this.pendingOps.set(opId, { server: owner, resolve, reject, timer });
-      const sent = this.hub.mesh.sendTo(owner, { t: 'session_op', opId, sessionId, userId, op });
+      const sent = this.hub.mesh.sendTo(owner, { t: 'session_op', opId, sessionId, peer, op });
       if (!sent) {
         clearTimeout(timer);
         this.pendingOps.delete(opId);
@@ -217,7 +218,7 @@ export class SessionService {
 
   handleRemoteOp(fromServer: string, frame: FedSessionOp) {
     try {
-      const ok = this.apply(frame.sessionId, frame.userId, fromServer, frame.op);
+      const ok = this.apply(frame.sessionId, frame.peer, fromServer, frame.op);
       this.hub.mesh.sendTo(fromServer, { t: 'session_op_res', opId: frame.opId, ok });
     } catch (err) {
       const code = err instanceof RpcFailure ? err.code : 'internal';
@@ -242,7 +243,8 @@ export class SessionService {
   // Owner-side state machine
   // -------------------------------------------------------------------------
 
-  private apply(sessionId: string, userId: string, serverId: string, op: SessionOp): unknown {
+  private apply(sessionId: string, peer: string, serverId: string, op: SessionOp): unknown {
+    const userId = peerIds.user(peer);
     const scope = parseSessionId(sessionId);
     if (!scope) throw new RpcFailure('bad_request', 'invalid session id');
     const now = Date.now();
@@ -274,16 +276,16 @@ export class SessionService {
         s.pendingHostUntil = now + PENDING_HOST_GRACE_MS;
         this.scheduleRecheck(s, PENDING_HOST_GRACE_MS + 50);
       }
-      const existing = s.state.members.find((m) => m.userId === userId);
+      const existing = s.state.members.find((m) => m.peer === peer);
       if (existing) existing.caps = op.caps;
       else {
         if (s.state.members.length >= LIMITS.sessionMembersMax)
           throw new RpcFailure('conflict', 'session is full');
-        s.state.members.push({ userId, joinedAt: now, caps: op.caps });
+        s.state.members.push({ peer, userId, joinedAt: now, caps: op.caps });
       }
-      s.memberServer.set(userId, serverId);
-      clearTimeout(this.orphanTimers.get(`${sessionId}|${userId}`));
-      this.orphanTimers.delete(`${sessionId}|${userId}`);
+      s.memberServer.set(peer, serverId);
+      clearTimeout(this.orphanTimers.get(`${sessionId}|${peer}`));
+      this.orphanTimers.delete(`${sessionId}|${peer}`);
       this.recompute(s);
       if (scope.kind === 'dm') {
         const other = scope.users[0] === userId ? scope.users[1] : scope.users[0];
@@ -295,7 +297,7 @@ export class SessionService {
     }
 
     if (!s) return {};
-    const member = s.state.members.find((m) => m.userId === userId);
+    const member = s.state.members.find((m) => m.peer === peer);
     switch (op.op) {
       case 'update':
         if (member) {
@@ -304,12 +306,12 @@ export class SessionService {
         }
         return {};
       case 'leave':
-        this.removeMember(s, userId);
+        this.removeMember(s, peer);
         return {};
       case 'report': {
-        if (!member || op.epoch !== s.state.epoch || !s.state.host || userId === s.state.host)
+        if (!member || op.epoch !== s.state.epoch || !s.state.host || peer === s.state.host)
           return {};
-        s.reports.add(userId);
+        s.reports.add(peer);
         const others = s.state.members.length - 1;
         if (s.reports.size >= Math.max(1, Math.ceil(others / 2))) {
           s.penalties.set(s.state.host, now + HOST_PENALTY_MS);
@@ -324,11 +326,11 @@ export class SessionService {
     }
   }
 
-  private removeMember(s: OwnedSession, userId: string) {
+  private removeMember(s: OwnedSession, peer: string) {
     const before = s.state.members.length;
-    s.state.members = s.state.members.filter((m) => m.userId !== userId);
-    s.memberServer.delete(userId);
-    s.reports.delete(userId);
+    s.state.members = s.state.members.filter((m) => m.peer !== peer);
+    s.memberServer.delete(peer);
+    s.reports.delete(peer);
     if (s.state.members.length === before) return;
     if (s.state.members.length === 0) {
       this.dropOwned(s.state.id, true);
@@ -363,7 +365,7 @@ export class SessionService {
     const now = Date.now();
     const st = s.state;
     const prevHost = st.host;
-    const hostIsMember = !!st.host && st.members.some((m) => m.userId === st.host);
+    const hostIsMember = !!st.host && st.members.some((m) => m.peer === st.host);
     let result: { host: string | null; backup: string | null };
     if (st.host && !hostIsMember && s.pendingHostUntil > now) {
       // The adopted host has not re-joined yet; keep it during the grace period.
@@ -398,7 +400,7 @@ export class SessionService {
   }
 
   private broadcast(s: OwnedSession) {
-    for (const m of s.state.members) this.hub.deliver(m.userId, 'session', { state: s.state });
+    for (const m of s.state.members) this.hub.deliverToPeer(m.peer, 'session', { state: s.state });
     this.announceVoice(s.state);
   }
 
@@ -412,8 +414,8 @@ export class SessionService {
     const occ: VoiceOccupancy = {
       spaceId: scope.spaceId,
       channelId: scope.channelId,
-      members: state.members.map((m) => m.userId),
-      host: state.host,
+      members: [...new Set(state.members.map((m) => m.userId))],
+      host: state.host ? peerIds.user(state.host) : null,
     };
     this.setOccupancy(state.id, occ, this.selfId);
     this.hub.mesh.broadcast({ t: 'voice', sessionId: state.id, occ });
@@ -426,7 +428,7 @@ export class SessionService {
   private setOccupancy(sessionId: string, occ: VoiceOccupancy, owner: string) {
     if (occ.members.length === 0) this.occupancy.delete(sessionId);
     else this.occupancy.set(sessionId, { occ, owner });
-    for (const client of this.hub.presence.local.values()) {
+    for (const client of this.hub.presence.localClients()) {
       if (client.voiceWatch.has(occ.spaceId)) client.send('voice', occ);
     }
   }
@@ -462,15 +464,15 @@ export class SessionService {
     // another server before we treat them as gone; this avoids needless host
     // failovers when only a coordinator (not the peer) went away.
     for (const s of [...this.owned.values()]) {
-      for (const [userId, server] of [...s.memberServer]) {
+      for (const [peer, server] of [...s.memberServer]) {
         if (server !== serverId) continue;
-        const key = `${s.state.id}|${userId}`;
+        const key = `${s.state.id}|${peer}`;
         clearTimeout(this.orphanTimers.get(key));
         const timer = setTimeout(() => {
           this.orphanTimers.delete(key);
           const current = this.owned.get(s.state.id);
-          if (current && current.memberServer.get(userId) === serverId)
-            this.removeMember(current, userId);
+          if (current && current.memberServer.get(peer) === serverId)
+            this.removeMember(current, peer);
         }, MEMBER_RECONNECT_GRACE_MS);
         timer.unref?.();
         this.orphanTimers.set(key, timer);
@@ -492,10 +494,9 @@ export class SessionService {
       if (this.lastOwner.get(sessionId) === owner) continue;
       this.lastOwner.set(sessionId, owner);
       const hint = this.lastKnown.get(sessionId);
-      for (const [userId, caps] of members) {
-        this.submit(sessionId, userId, { op: 'join', caps, ...(hint ? { hint } : {}) }).catch(
-          (err) =>
-            this.hub.log.warn('re-join after owner change failed', { sessionId, err: String(err) }),
+      for (const [peer, caps] of members) {
+        this.submit(sessionId, peer, { op: 'join', caps, ...(hint ? { hint } : {}) }).catch((err) =>
+          this.hub.log.warn('re-join after owner change failed', { sessionId, err: String(err) }),
         );
       }
     }

@@ -1,7 +1,15 @@
 import { z } from 'zod';
 import type { SignedRecord } from './records';
 import { SignedRecordEnvelope } from './records';
-import { HostCaps, SessionId, type SessionState, type VoiceOccupancy, Platform } from './session';
+import {
+  HostCaps,
+  PeerId,
+  SessionId,
+  type SessionState,
+  type VoiceOccupancy,
+  Platform,
+} from './session';
+import { DeviceId } from './records';
 
 /** Public identity of a coordination server. */
 export const ServerInfo = z.object({
@@ -31,6 +39,16 @@ export interface PresenceEntry {
 // Handshake (WebSocket /v1/client)
 // ---------------------------------------------------------------------------
 
+/**
+ * Fresh per-connection keys for the encrypted client↔server channel
+ * (X25519 + ML-KEM-768, forward secret). With these, even plain ws:// to a
+ * home-hosted server keeps metadata confidential.
+ */
+export interface ChannelOffer {
+  x25519: string;
+  mlkem: string;
+}
+
 export interface ServerHello {
   t: 'hello';
   server: ServerInfo;
@@ -38,14 +56,18 @@ export interface ServerHello {
   /** STUN URLs clients should use for ICE. */
   stun: string[];
   time: number;
-  /** Server signature over (challenge, server.id, time). */
+  channel: ChannelOffer;
+  /** Server signature over (challenge, server.id, time, channel). */
   sig: string;
 }
 
 export const ClientAuth = z.object({
   t: z.literal('auth'),
   key: z.string(),
-  /** Signature over (challenge, server.id). */
+  device: DeviceId,
+  /** Client's half of the channel: ephemeral X25519 key and ML-KEM ciphertext. */
+  channel: z.object({ epk: z.string().max(64), kem: z.string().max(2000) }),
+  /** Signature over (challenge, server.id, device, channel). */
   sig: z.string(),
   client: z.object({
     platform: Platform,
@@ -57,6 +79,16 @@ export type ClientAuth = z.infer<typeof ClientAuth>;
 export interface AuthOk {
   t: 'auth_ok';
   userId: string;
+  /** This connection's peer id (`<userId>.<deviceId>`). */
+  peer: string;
+}
+
+/** An encrypted frame on an established channel. */
+export interface SecureFrame {
+  t: 'x';
+  /** Strictly increasing per direction; part of the nonce. */
+  n: number;
+  c: string;
 }
 
 export interface RpcRequest {
@@ -95,6 +127,25 @@ export interface RpcEvent {
 export type ServerFrame =
   ServerHello | AuthOk | RpcResponse | RpcEvent | { t: 'error'; err: RpcError };
 export type ClientFrame = ClientAuth | RpcRequest;
+
+/** Account seed sealed to a new device during linking (see link.* methods). */
+export const LinkBox = z.object({
+  epk: z.string().max(64),
+  ct: z.string().max(4000),
+  from: z.string(),
+  sig: z.string(),
+});
+export type LinkBox = z.infer<typeof LinkBox>;
+
+/** Short-lived TURN credentials for the opt-in server relay. */
+export interface RelayGrant {
+  urls: string[];
+  username: string;
+  credential: string;
+  expiresAt: number;
+  /** Server that issued the grant (display). */
+  server: string;
+}
 
 // ---------------------------------------------------------------------------
 // Signalling between a member and the session host's relay. Opaque to the
@@ -166,8 +217,17 @@ export const RpcParams = {
     issue: z.enum(['host_unreachable']),
   }),
   'voice.watch': z.object({ spaceIds: z.array(userId).max(200) }),
-  'signal.send': z.object({ to: userId, sessionId: SessionId, data: SignalData }),
+  'signal.send': z.object({ to: PeerId, sessionId: SessionId, data: SignalData }),
   'servers.list': z.object({}),
+  /** New device: get a short code to show; the existing device enters it. */
+  'link.open': z.object({ encKey: z.string().regex(/^[A-Za-z0-9_-]{43}$/) }),
+  /** Existing device: look up the new device behind a code. */
+  'link.claim': z.object({ code: z.string().min(6).max(16) }),
+  /** Existing device: deliver the sealed account seed. */
+  'link.send': z.object({ code: z.string().min(6).max(16), box: LinkBox }),
+  /** Opt-in relay through this coordination server (TURN), max one hour. */
+  'relay.request': z.object({ sessionId: SessionId }),
+  'relay.release': z.object({}),
 } as const;
 
 export interface RpcMethods {
@@ -187,6 +247,11 @@ export interface RpcMethods {
   'voice.watch': { voice: VoiceOccupancy[] };
   'signal.send': { delivered: boolean };
   'servers.list': { servers: ServerInfo[] };
+  'link.open': { code: string; expiresAt: number };
+  'link.claim': { peer: string; key: string; encKey: string };
+  'link.send': Record<string, never>;
+  'relay.request': { grant: RelayGrant };
+  'relay.release': Record<string, never>;
 }
 
 export type RpcMethod = keyof RpcMethods;
@@ -198,10 +263,17 @@ export interface ServerEvents {
   session: { state: SessionState };
   /** The session no longer includes you (kicked, space left, or server moved it). */
   session_closed: { sessionId: string; reason: string };
+  /** `from` is a peer id. */
   signal: { from: string; sessionId: string; data: SignalData };
   voice: VoiceOccupancy;
   /** Someone opened a direct conversation with you; join it to talk. */
   session_invite: { sessionId: string; from: string };
-  /** Another connection authenticated with the same identity. */
+  /** Another connection authenticated as the same device. */
   replaced: { reason: string };
+  /** Linking: an existing device claimed our code (compare the security code!). */
+  link_claimed: { key: string; userId: string };
+  /** Linking: the sealed account seed. */
+  link_payload: { box: LinkBox };
+  /** The relay grant ran out; the relayed connection will stop. */
+  relay_expired: { reason: string };
 }
