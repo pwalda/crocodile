@@ -96,8 +96,8 @@ describe('sessions and host election', () => {
       caps: caps({ nat: 'open' }),
     });
     // Bob was first and healthy, so he stays host: no flapping when a better peer joins.
-    expect(state.host).toBe(bob.identity.userId);
-    expect(state.backup).toBe(alice.identity.userId);
+    expect(state.host).toBe(bob.conn.peer);
+    expect(state.backup).toBe(alice.conn.peer);
     await carol.conn.request('session.join', {
       sessionId,
       caps: caps({ platform: 'web', canHost: false }),
@@ -106,8 +106,8 @@ describe('sessions and host election', () => {
       const st = lastSession(bob, sessionId);
       return st && st.members.length === 3 ? st : null;
     });
-    expect(seen.host).toBe(bob.identity.userId);
-    expect(seen.backup).toBe(alice.identity.userId);
+    expect(seen.host).toBe(bob.conn.peer);
+    expect(seen.backup).toBe(alice.conn.peer);
   });
 
   it('fails over to the backup when the host disconnects', async () => {
@@ -118,18 +118,18 @@ describe('sessions and host election', () => {
     });
     await bob.conn.request('session.join', { sessionId, caps: caps() });
     await carol.conn.request('session.join', { sessionId, caps: caps({ nat: 'symmetric' }) });
-    expect(first.state.host).toBe(alice.identity.userId);
+    expect(first.state.host).toBe(alice.conn.peer);
     alice.conn.close();
     const st = await waitFor(
       () => {
         const s = lastSession(carol, sessionId);
-        return s && s.host === bob.identity.userId ? s : null;
+        return s && s.host === bob.conn.peer ? s : null;
       },
       3000,
       'failover',
     );
     expect(st.epoch).toBe(first.state.epoch + 1);
-    expect(st.backup).toBe(carol.identity.userId);
+    expect(st.backup).toBe(carol.conn.peer);
   });
 
   it('fails over when members report the host unreachable', async () => {
@@ -148,12 +148,12 @@ describe('sessions and host election', () => {
     const st = await waitFor(
       () => {
         const s = lastSession(carol, sessionId);
-        return s && s.host !== alice.identity.userId ? s : null;
+        return s && s.host !== alice.conn.peer ? s : null;
       },
       3000,
       'report failover',
     );
-    expect(st.host).toBe(bob.identity.userId);
+    expect(st.host).toBe(bob.conn.peer);
     expect(st.members).toHaveLength(3);
   });
 
@@ -163,14 +163,14 @@ describe('sessions and host election', () => {
     await alice.conn.request('session.join', { sessionId, caps: caps() });
     await bob.conn.request('session.join', { sessionId, caps: caps() });
     const data = { type: 'bye' as const, epoch: 1, dir: 'toRelay' as const };
-    const r = await bob.conn.request('signal.send', { to: alice.identity.userId, sessionId, data });
+    const r = await bob.conn.request('signal.send', { to: alice.conn.peer, sessionId, data });
     expect(r.delivered).toBe(true);
     await waitFor(() => alice.events.find((e) => e.ev === 'signal'));
     await expect(
       outsider.conn.request('session.join', { sessionId, caps: caps() }),
     ).rejects.toThrow(/not a member/);
     await expect(
-      outsider.conn.request('signal.send', { to: alice.identity.userId, sessionId, data }),
+      outsider.conn.request('signal.send', { to: alice.conn.peer, sessionId, data }),
     ).rejects.toThrow(/join the session/);
   });
 
@@ -248,11 +248,11 @@ describe('coordination mesh', () => {
     const sessionId = `voice:${s.spaceId}:${s.voiceChannel}`;
     const r1 = await alice.conn.request('session.join', { sessionId, caps: caps({ nat: 'open' }) });
     const r2 = await bob.conn.request('session.join', { sessionId, caps: caps() });
-    expect(r2.state.host).toBe(alice.identity.userId);
+    expect(r2.state.host).toBe(alice.conn.peer);
     expect(r2.state.id).toBe(r1.state.id);
 
     const sig = await bob.conn.request('signal.send', {
-      to: alice.identity.userId,
+      to: alice.conn.peer,
       sessionId,
       data: { type: 'bye', epoch: 1, dir: 'toRelay' },
     });
@@ -272,7 +272,7 @@ describe('coordination mesh', () => {
         5000,
         'rebuild',
       );
-      expect(st.host).toBe(alice.identity.userId);
+      expect(st.host).toBe(alice.conn.peer);
       expect(st.epoch).toBe(r2.state.epoch);
     } else {
       // Alice's server owns it and Alice is host: killing A drops Alice, Bob takes over.
@@ -280,12 +280,12 @@ describe('coordination mesh', () => {
       const st = await waitFor(
         () => {
           const x = survivor.sessions.ownedState(sessionId);
-          return x && x.host === bob.identity.userId ? x : null;
+          return x && x.host === bob.conn.peer ? x : null;
         },
         5000,
         'takeover',
       );
-      expect(st.members.map((m) => m.userId)).toEqual([survivingUser.identity.userId]);
+      expect(st.members.map((m) => m.peer)).toEqual([survivingUser.conn.peer]);
     }
   });
 
@@ -318,7 +318,7 @@ describe('coordination mesh', () => {
 
     const hostId = createIdentity();
     await waitFor(() => b.records.get(`invite:${s.code}`), 3000, 'replicated');
-    const host = await connectUser(b, hostId);
+    const host = await connectUser(b, hostId, 'host', 'hostdevicex');
     cleanup.push(() => host.conn.close());
     await joinSpace(host, s.spaceId, s.code);
     await waitFor(() => a.isSpaceMember(s.spaceId, hostId.userId), 3000);
@@ -327,18 +327,73 @@ describe('coordination mesh', () => {
       caps: caps({ nat: 'open' }),
     });
     await owner.conn.request('session.join', { sessionId, caps: caps({ nat: 'symmetric' }) });
-    expect(first.state.host).toBe(hostId.userId);
+    expect(first.state.host).toBe(host.conn.peer);
 
     // B dies; the host's app fails over to C and re-joins with the same identity.
     await b.stop();
-    const again = await connectUser(c, hostId);
+    const again = await connectUser(c, hostId, 'host', 'hostdevicex');
     cleanup.push(() => again.conn.close());
     await waitFor(() => c.isSpaceMember(s.spaceId, hostId.userId), 3000, 'membership on C');
     const rejoined = await again.conn.request('session.join', {
       sessionId,
       caps: caps({ nat: 'open' }),
     });
-    expect(rejoined.state.host).toBe(hostId.userId);
+    expect(rejoined.state.host).toBe(host.conn.peer);
     expect(rejoined.state.epoch).toBe(first.state.epoch);
+  });
+});
+
+describe('opt-in server relay', () => {
+  it('issues time-limited grants to session members, capped per server', async () => {
+    const c = await server({ relay: { enabled: true, maxUsers: 1 }, stunPort: 0 });
+    const alice = await user(c);
+    const bob = await user(c);
+    const outsider = await user(c);
+    const s = await createSpace(alice);
+    await joinSpace(bob, s.spaceId, s.code);
+    const sessionId = `space:${s.spaceId}`;
+    await expect(alice.conn.request('relay.request', { sessionId })).rejects.toThrow(
+      /join the session/,
+    );
+    await alice.conn.request('session.join', { sessionId, caps: caps() });
+    await bob.conn.request('session.join', { sessionId, caps: caps() });
+
+    const { grant } = await alice.conn.request('relay.request', { sessionId });
+    expect(grant.urls[0]).toMatch(/^turn:/);
+    expect(grant.expiresAt - Date.now()).toBeLessThanOrEqual(60 * 60_000);
+    expect(grant.expiresAt - Date.now()).toBeGreaterThan(59 * 60_000);
+    // Asking again does not extend the window.
+    const again = await alice.conn.request('relay.request', { sessionId });
+    expect(again.grant.expiresAt).toBe(grant.expiresAt);
+    // Capacity: one user at a time on this server.
+    await expect(bob.conn.request('relay.request', { sessionId })).rejects.toThrow(/capacity/);
+    await expect(outsider.conn.request('relay.request', { sessionId })).rejects.toThrow();
+    await alice.conn.request('relay.release', {});
+    const forBob = await bob.conn.request('relay.request', { sessionId });
+    expect(forBob.grant.username).toContain(bob.identity.userId);
+  });
+
+  it('ends grants after the window and tells the user', async () => {
+    const c = await server({ stunPort: 0 });
+    c.turn!.limits.maxGrantMs = 300;
+    const alice = await user(c);
+    const s = await createSpace(alice);
+    const sessionId = `space:${s.spaceId}`;
+    await alice.conn.request('session.join', { sessionId, caps: caps() });
+    await alice.conn.request('relay.request', { sessionId });
+    await waitFor(() => alice.events.find((e) => e.ev === 'relay_expired'), 3000, 'expiry event');
+    expect(c.relayStats().activeUsers).toBe(0);
+  });
+});
+
+describe('encrypted client channel', () => {
+  it('refuses plaintext requests after authentication', async () => {
+    const c = await server();
+    const alice = await user(c);
+    // Reach into the raw socket: a plaintext frame must kill the connection.
+    const raw = (alice.conn as unknown as { ws: WebSocket }).ws;
+    const closed = new Promise<number>((r) => raw.addEventListener('close', (e) => r(e.code)));
+    raw.send(JSON.stringify({ t: 'req', id: 99, m: 'servers.list', p: {} }));
+    expect(await closed).toBe(1008);
   });
 });

@@ -64,8 +64,9 @@ it('sqlite state survives a restart', () => {
 });
 
 describe('election', () => {
-  const member = (userId: string, nat: 'open' | 'cone' | 'symmetric', extra = {}) => ({
-    userId,
+  const member = (peer: string, nat: 'open' | 'cone' | 'symmetric', extra = {}) => ({
+    peer,
+    userId: peer,
     joinedAt: 0,
     caps: { canHost: true, platform: 'desktop' as const, nat, ...extra },
   });

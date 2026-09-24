@@ -27,7 +27,7 @@ setInterval(() => {
     publish({
       ...status,
       peers: coordinator.mesh.peerIds().length,
-      users: coordinator.presence.local.size,
+      users: coordinator.presence.localCount,
       announced,
     });
   }

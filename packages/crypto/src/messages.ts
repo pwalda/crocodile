@@ -1,4 +1,4 @@
-import { SIG_DOMAIN, type ChatMessage, type SignalData } from '@crocodile/protocol';
+import { SIG_DOMAIN, peerIds, type ChatMessage, type SignalData } from '@crocodile/protocol';
 import { verifyPayload } from './primitives';
 import { keyMatchesUserId, sign, timeId, type Identity } from './identity';
 
@@ -37,14 +37,14 @@ type SdpSignal = Extract<SignalData, { type: 'offer' | 'answer' }>;
 export function signSdp(
   identity: Identity,
   type: 'offer' | 'answer',
-  ctx: { sessionId: string; epoch: number; to: string },
+  ctx: { sessionId: string; epoch: number; from: string; to: string },
   sdp: string,
 ): SdpSignal {
   const payload = {
     type,
     sessionId: ctx.sessionId,
     epoch: ctx.epoch,
-    from: identity.userId,
+    from: ctx.from,
     to: ctx.to,
     sdp,
   };
@@ -57,11 +57,12 @@ export function signSdp(
   };
 }
 
+/** `from` and `to` are peer ids; the key must belong to the sending user. */
 export function verifySdp(
   signal: SdpSignal,
   ctx: { sessionId: string; from: string; to: string },
 ): boolean {
-  if (!keyMatchesUserId(signal.key, ctx.from)) return false;
+  if (!keyMatchesUserId(signal.key, peerIds.user(ctx.from))) return false;
   const payload = {
     type: signal.type,
     sessionId: ctx.sessionId,

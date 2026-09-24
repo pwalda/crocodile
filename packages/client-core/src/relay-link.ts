@@ -19,10 +19,15 @@ export interface FrameCryptoHooks {
 export interface RelayLinkOptions {
   RTCPeerConnection: typeof RTCPeerConnection;
   identity: Identity;
+  /** Our peer id (`<userId>.<deviceId>`). */
+  self: string;
   sessionId: string;
   epoch: number;
+  /** Host peer id. */
   host: string;
-  iceServers: { urls: string }[];
+  iceServers: RTCIceServer[];
+  /** Set when using the opt-in server relay as a fallback. */
+  iceTransportPolicy?: RTCIceTransportPolicy;
   slots: number;
   micTrack?: MediaStreamTrack | null;
   crypto?: FrameCryptoHooks;
@@ -58,6 +63,7 @@ export class RelayLink extends Emitter<RelayLinkEvents> {
     super();
     this.pc = new opts.RTCPeerConnection({
       iceServers: opts.iceServers,
+      iceTransportPolicy: opts.iceTransportPolicy ?? 'all',
       bundlePolicy: 'max-bundle',
       ...(opts.crypto?.rtcConfig ?? {}),
     } as RTCConfiguration);
@@ -124,7 +130,7 @@ export class RelayLink extends Emitter<RelayLinkEvents> {
       signSdp(
         opts.identity,
         'offer',
-        { sessionId: opts.sessionId, epoch: opts.epoch, to: opts.host },
+        { sessionId: opts.sessionId, epoch: opts.epoch, from: opts.self, to: opts.host },
         this.pc.localDescription!.sdp,
       ),
     );
@@ -137,7 +143,7 @@ export class RelayLink extends Emitter<RelayLinkEvents> {
         !verifySdp(data, {
           sessionId: this.opts.sessionId,
           from: this.opts.host,
-          to: this.opts.identity.userId,
+          to: this.opts.self,
         })
       ) {
         this.fail('host answer failed signature check');

@@ -1,23 +1,37 @@
 import { describe, expect, it } from 'vitest';
 import { recordKey, type SignedRecord, utf8 } from '@crocodile/protocol';
 import {
+  AudioReceiver,
+  AudioSender,
+  PREKEY_LIFETIME_MS,
+  SecureChannel,
+  TextReceiver,
+  acceptChannel,
+  answerChannel,
+  createChannelKeys,
+  createPrekey,
+  encryptText,
+  exportChains,
+  importChain,
+  linkSecurityCode,
+  openLink,
+  padmeLength,
+  ratchet,
+  rotatePrekeys,
+  sealLink,
+  sealToDevice,
+  userIdFromKey,
   createChatMessage,
   createIdentity,
   createSenderKey,
   decodeRecoveryKey,
-  decryptFrame,
-  decryptGroup,
-  deriveSenderKey,
   encodeRecoveryKey,
-  encryptFrame,
-  encryptGroup,
   identityFromSeed,
   isSpaceMember,
   openSealed,
   peekFrameKid,
   randomId,
   safetyNumber,
-  seal,
   signRecord,
   signSdp,
   spaceIdFor,
@@ -147,39 +161,135 @@ describe('records', () => {
   });
 });
 
-describe('sealed boxes', () => {
-  it('only the recipient can open and the sender is authenticated', () => {
+describe('hybrid post-quantum sealed boxes', () => {
+  it('only the target device can open, sender is authenticated', () => {
     const alice = createIdentity();
     const bob = createIdentity();
     const eve = createIdentity();
-    const box = seal(alice, bob.encPublicKey, utf8.encode('hello bob'));
-    const opened = openSealed(bob, box);
-    expect(opened?.from).toBe(alice.userId);
+    const bobPeer = `${bob.userId}.bobdevice1`;
+    const pk = createPrekey();
+    const box = sealToDevice(
+      alice,
+      'alicedev1',
+      { peer: bobPeer, prekey: pk.bundle },
+      utf8.encode('hello bob'),
+    );
+    const lookup = (id: number) => (id === pk.id ? pk : undefined);
+    const opened = openSealed({ peer: bobPeer }, lookup, box, userIdFromKey);
+    expect(opened?.from).toBe(`${alice.userId}.alicedev1`);
     expect(utf8.decode(opened!.plaintext)).toBe('hello bob');
-    expect(openSealed(eve, box)).toBeNull();
-    expect(openSealed(bob, { ...box, from: eve.publicKey })).toBeNull();
+    // Wrong device, wrong prekey, forged sender, tampering: all rejected.
+    expect(openSealed({ peer: `${bob.userId}.otherdev11` }, lookup, box, userIdFromKey)).toBeNull();
+    expect(openSealed({ peer: bobPeer }, () => createPrekey(), box, userIdFromKey)).toBeNull();
+    expect(
+      openSealed({ peer: bobPeer }, lookup, { ...box, from: eve.publicKey }, userIdFromKey),
+    ).toBeNull();
+    expect(
+      openSealed(
+        { peer: bobPeer },
+        lookup,
+        { ...box, ct: box.ct.slice(0, -2) + 'AA' },
+        userIdFromKey,
+      ),
+    ).toBeNull();
+    // Length hiding: boxes are padded.
+    const small = sealToDevice(
+      alice,
+      'alicedev1',
+      { peer: bobPeer, prekey: pk.bundle },
+      utf8.encode('x'),
+    );
+    const medium = sealToDevice(
+      alice,
+      'alicedev1',
+      { peer: bobPeer, prekey: pk.bundle },
+      utf8.encode('x'.repeat(40)),
+    );
+    expect(small.ct.length).toBe(medium.ct.length);
+  });
+
+  it('rotates prekeys and forgets expired secrets', () => {
+    const t0 = 1_000_000_000_000;
+    const first = rotatePrekeys([], t0);
+    expect(first.keys).toHaveLength(1);
+    expect(rotatePrekeys(first.keys, t0 + 1000).rotated).toBe(false);
+    const later = rotatePrekeys(first.keys, t0 + PREKEY_LIFETIME_MS - 1000);
+    expect(later.keys).toHaveLength(2);
+    const much = rotatePrekeys(later.keys, t0 + PREKEY_LIFETIME_MS + 3 * 24 * 3600_000);
+    expect(much.keys.map((k) => k.id)).not.toContain(first.keys[0]!.id);
+  });
+
+  it('links devices: only the new device opens, and the security codes agree', () => {
+    const account = createIdentity();
+    const temp = createIdentity();
+    const box = sealLink(account, temp.encPublicKey, account.seed);
+    expect(openLink(temp, box, account.userId)).toEqual(account.seed);
+    expect(openLink(temp, box, createIdentity().userId)).toBeNull();
+    expect(openLink(createIdentity(), box, account.userId)).toBeNull();
+    expect(linkSecurityCode(temp.publicKey, account.publicKey)).toMatch(/^\d{3} \d{3}$/);
   });
 });
 
-describe('sender keys', () => {
-  it('encrypts and decrypts voice frames', () => {
-    const key = deriveSenderKey(createSenderKey());
-    const frame = Uint8Array.from({ length: 80 }, (_, i) => i);
-    const enc = encryptFrame(key, 42, frame);
-    expect(peekFrameKid(enc)).toBe(key.kid);
-    expect(decryptFrame(key, enc)).toEqual(frame);
-    enc[3] = enc[3]! ^ 1;
-    expect(decryptFrame(key, enc)).toBeNull();
-    expect(
-      decryptFrame(deriveSenderKey(createSenderKey()), encryptFrame(key, 1, frame)),
-    ).toBeNull();
+describe('ratcheting sender keys', () => {
+  it('text: per-message ratchet, out-of-order within a window, no going back', () => {
+    const sk = createSenderKey();
+    const exported = exportChains(sk);
+    const rx = new TextReceiver(sk.kid, importChain(exported.text));
+    const m0 = encryptText(sk, utf8.encode('zero'));
+    const m1 = encryptText(sk, utf8.encode('one'));
+    const m2 = encryptText(sk, utf8.encode('two'));
+    expect(utf8.decode(rx.decrypt(m2.g, m2.ct)!)).toBe('two');
+    expect(utf8.decode(rx.decrypt(m0.g, m0.ct)!)).toBe('zero');
+    expect(rx.decrypt(m0.g, m0.ct)).toBeNull(); // replay
+    expect(utf8.decode(rx.decrypt(m1.g, m1.ct)!)).toBe('one');
+    // A member given the current chain cannot read earlier messages.
+    const late = new TextReceiver(sk.kid, importChain(exportChains(sk).text));
+    expect(late.decrypt(m1.g, m1.ct)).toBeNull();
+    const m3 = encryptText(sk, utf8.encode('three'));
+    expect(utf8.decode(late.decrypt(m3.g, m3.ct)!)).toBe('three');
+    // Bogus far-future generations do not advance state.
+    expect(rx.decrypt(m3.g + 5000, m3.ct)).toBeNull();
+    expect(utf8.decode(rx.decrypt(m3.g, m3.ct)!)).toBe('three');
   });
 
-  it('encrypts group text', () => {
-    const key = deriveSenderKey(createSenderKey());
-    const env = encryptGroup(key, 7, utf8.encode('hi all'));
-    expect(utf8.decode(decryptGroup(key, env.n, env.ct)!)).toBe('hi all');
-    expect(decryptGroup(key, env.n + 1, env.ct)).toBeNull();
+  it('audio: frames across generations, tampering rejected', () => {
+    const sk = createSenderKey();
+    const sender = new AudioSender(sk.kid, sk.audio);
+    const rx = new AudioReceiver(sk.kid, importChain(exportChains(sk).audio));
+    const frame = Uint8Array.from({ length: 80 }, (_, i) => i);
+    const f0 = sender.encrypt(frame);
+    expect(peekFrameKid(f0)).toBe(sk.kid);
+    expect(rx.decrypt(f0)).toEqual(frame);
+    sender.update(ratchet(ratchet(sk.audio)));
+    const f2 = sender.encrypt(frame);
+    expect(rx.decrypt(f2)).toEqual(frame);
+    expect(rx.gen).toBe(2);
+    const bad = f2.slice();
+    bad[3] = bad[3]! ^ 1;
+    expect(rx.decrypt(bad)).toBeNull();
+    const other = createSenderKey();
+    expect(new AudioReceiver(other.kid, other.audio).decrypt(f2)).toBeNull();
+  });
+});
+
+describe('secure channel', () => {
+  it('hybrid handshake, encrypted frames, replay protection', () => {
+    const keys = createChannelKeys();
+    const { answer, secret } = answerChannel(keys.offer);
+    const server = new SecureChannel(acceptChannel(keys, answer), 'ctx', false);
+    const client = new SecureChannel(secret, 'ctx', true);
+    const f1 = client.seal({ hello: 'world' });
+    expect(server.open(f1)).toEqual({ hello: 'world' });
+    expect(server.open(f1)).toBeUndefined();
+    const back = server.seal({ ok: true });
+    expect(client.open(back)).toEqual({ ok: true });
+    expect(new SecureChannel(secret, 'other', false).open(client.seal({ x: 1 }))).toBeUndefined();
+  });
+
+  it('padme buckets', () => {
+    expect(padmeLength(10)).toBe(64);
+    expect(padmeLength(1000)).toBeGreaterThanOrEqual(1000);
+    expect(padmeLength(1000)).toBeLessThan(1000 * 1.13);
   });
 });
 
@@ -192,19 +302,15 @@ describe('messages and signalling', () => {
     expect(verifyChatMessage({ ...msg, author: createIdentity().userId })).toBe(false);
   });
 
-  it('binds SDP to session and identities', () => {
+  it('binds SDP to session and peers', () => {
     const alice = createIdentity();
     const bob = createIdentity();
-    const offer = signSdp(alice, 'offer', { sessionId: 's', epoch: 1, to: bob.userId }, 'v=0...');
-    expect(verifySdp(offer, { sessionId: 's', from: alice.userId, to: bob.userId })).toBe(true);
-    expect(verifySdp(offer, { sessionId: 'other', from: alice.userId, to: bob.userId })).toBe(
-      false,
-    );
-    expect(
-      verifySdp(
-        { ...offer, sdp: 'v=0 evil' },
-        { sessionId: 's', from: alice.userId, to: bob.userId },
-      ),
-    ).toBe(false);
+    const from = `${alice.userId}.aaaadevice`;
+    const to = `${bob.userId}.bbbbdevice`;
+    const offer = signSdp(alice, 'offer', { sessionId: 's', epoch: 1, from, to }, 'v=0...');
+    expect(verifySdp(offer, { sessionId: 's', from, to })).toBe(true);
+    expect(verifySdp(offer, { sessionId: 'other', from, to })).toBe(false);
+    expect(verifySdp(offer, { sessionId: 's', from: `${bob.userId}.aaaadevice`, to })).toBe(false);
+    expect(verifySdp({ ...offer, sdp: 'v=0 evil' }, { sessionId: 's', from, to })).toBe(false);
   });
 });

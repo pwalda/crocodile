@@ -5,23 +5,38 @@ import {
   encodeRecoveryKey,
   identityFromSeed,
   isSpaceMember,
+  keyMatchesUserId,
+  linkSecurityCode,
+  openLink,
+  openSealed,
+  randomDeviceId,
   randomId,
+  rotatePrekeys,
+  sealLink,
+  sealToDevice,
+  userIdFromKey,
   signRecord,
   spaceIdFor,
   userTag,
   verifyChatMessage,
   type Identity,
+  type PrekeySecret,
 } from '@crocodile/crypto';
 import {
   LIMITS,
   fromB64u,
   parseSessionId,
+  peerIds,
   recordKey,
   sessionIds,
   toB64u,
   type Channel,
   type ChannelKind,
   type ChatMessage,
+  type DeviceBody,
+  type LinkBox,
+  type RelayGrant,
+  type SealedBox,
   type FriendsBody,
   type HostCaps,
   type PresenceStatus,
@@ -33,6 +48,7 @@ import {
   type VoiceOccupancy,
 } from '@crocodile/protocol';
 import { CoordinatorLink, type LinkStatus } from './coordinator-link';
+import { CoordinatorConnection } from './coordinator-connection';
 import { Emitter } from './emitter';
 import {
   GroupSession,
@@ -64,6 +80,13 @@ export interface Settings {
   preferredServers: string[];
   status: 'online' | 'idle' | 'dnd' | 'invisible';
   notifications: boolean;
+  /**
+   * When no direct path to a host works, relay through a coordination server
+   * (TURN). Traffic stays end-to-end encrypted; grants last at most an hour.
+   */
+  allowServerRelay: boolean;
+  /** Display name of this device. */
+  deviceName?: string;
 }
 
 export const defaultSettings: Settings = {
@@ -71,6 +94,7 @@ export const defaultSettings: Settings = {
   preferredServers: [],
   status: 'online',
   notifications: true,
+  allowServerRelay: false,
 };
 
 export interface ProfileView {
@@ -94,19 +118,51 @@ export interface SpaceView {
   bans: string[];
 }
 
+/** A session as the UI sees it: user ids (devices collapsed). */
 export interface SessionView {
   id: string;
   status: RelayStatus;
+  /** User id of the host. */
   host: string | null;
   backup: string | null;
   epoch: number;
   members: string[];
+  /** Other users currently connected through the relay. */
   peers: string[];
   speaking: string[];
   muted: string[];
   deafened: string[];
+  /** This device is the host. */
   iAmHost: boolean;
+  /** Connected through a coordination server's relay until this time. */
+  relay: { server: string; expiresAt: number } | null;
 }
+
+export interface DeviceView {
+  deviceId: string;
+  name: string;
+  platform: string;
+  current: boolean;
+  revoked: boolean;
+  lastUpdated: number;
+}
+
+export type LinkingState =
+  | {
+      role: 'new';
+      step: 'waiting' | 'claimed' | 'done' | 'error';
+      code?: string;
+      securityCode?: string;
+      account?: string;
+      error?: string;
+    }
+  | {
+      role: 'existing';
+      step: 'confirm' | 'sent' | 'error';
+      code: string;
+      securityCode: string;
+      error?: string;
+    };
 
 export interface MessageView extends ChatMessage {
   edited?: boolean;
@@ -139,6 +195,12 @@ export interface ClientState {
   deafened: boolean;
   settings: Settings;
   errors: { id: number; message: string }[];
+  /** This account's devices. */
+  devices: DeviceView[];
+  deviceId: string | null;
+  linking: LinkingState | null;
+  /** The server relay window ended; the UI may offer to extend it. */
+  relayEnded: { sessionId: string; reason: string } | null;
 }
 
 export type ClientEvents = {
@@ -155,6 +217,9 @@ const APP_VERSION_FALLBACK = '0.1.0';
 export class CrocodileClient extends Emitter<ClientEvents> {
   readonly store: StateStore<ClientState>;
   identity: Identity | null = null;
+  deviceId = '';
+  private prekeys: PrekeySecret[] = [];
+  private prekeyTimer?: ReturnType<typeof setInterval>;
   link?: CoordinatorLink;
   readonly records: RecordCache;
   private sessions = new Map<string, GroupSession>();
@@ -194,8 +259,13 @@ export class CrocodileClient extends Emitter<ClientEvents> {
       deafened: false,
       settings: defaultSettings,
       errors: [],
+      devices: [],
+      deviceId: null,
+      linking: null,
+      relayEnded: null,
     });
     this.records.on('changed', (r) => this.onRecordChanged(r));
+    this.records.on('wanted', (keys) => this.fetchWanted(keys));
   }
 
   get state() {
@@ -210,6 +280,11 @@ export class CrocodileClient extends Emitter<ClientEvents> {
   get userId(): string {
     if (!this.identity) throw new Error('not signed in');
     return this.identity.userId;
+  }
+
+  /** This device's peer id (`<userId>.<deviceId>`). */
+  get peer(): string {
+    return peerIds.make(this.userId, this.deviceId);
   }
 
   private log(msg: string, extra?: Record<string, unknown>) {
@@ -237,7 +312,8 @@ export class CrocodileClient extends Emitter<ClientEvents> {
       ...((await this.platform.kv.get<Partial<Settings>>('settings')) ?? {}),
     };
     const dms = (await this.platform.kv.get<string[]>('dms')) ?? [];
-    this.store.set({ settings, dms });
+    await this.loadDevice();
+    this.store.set({ settings, dms, deviceId: this.deviceId });
     await this.records.load();
     const seed = await this.platform.kv.get<string>('identity-seed');
     if (!seed) {
@@ -274,6 +350,46 @@ export class CrocodileClient extends Emitter<ClientEvents> {
     this.connect();
   }
 
+  private async loadDevice() {
+    let deviceId = await this.platform.kv.get<string>('device-id');
+    if (!deviceId) {
+      deviceId = randomDeviceId();
+      await this.platform.kv.set('device-id', deviceId);
+    }
+    this.deviceId = deviceId;
+    this.prekeys = (await this.platform.kv.get<PrekeySecret[]>('prekeys')) ?? [];
+  }
+
+  /**
+   * Keep this device's prekey fresh and its device record published. Old
+   * prekey secrets are deleted after a grace period (forward secrecy).
+   */
+  private async ensureDeviceRecord() {
+    const identity = this.identity!;
+    const { keys, rotated } = rotatePrekeys(this.prekeys);
+    this.prekeys = keys;
+    if (rotated) await this.platform.kv.set('prekeys', keys);
+    const newest = keys.at(-1)!;
+    const key = recordKey.device(identity.userId, this.deviceId);
+    const res = await this.link!.request('records.get', { keys: [key] });
+    const remote = res.records[0] as SignedRecord<'device'> | undefined;
+    if (remote) this.records.ingest(remote);
+    if (remote?.body.revoked) {
+      this.reportError('This device was removed from your account on another device.');
+      return;
+    }
+    const name = this.state.settings.deviceName ?? defaultDeviceName(this.platform.platform);
+    if (remote && remote.body.prekey.id === newest.id && remote.body.name === name) return;
+    const body: DeviceBody = {
+      userId: identity.userId,
+      deviceId: this.deviceId,
+      name,
+      platform: this.platform.platform,
+      prekey: newest.bundle,
+    };
+    await this.putRecord(signRecord(identity, 'device', key, body, this.nextVersion(key)));
+  }
+
   /** Onboarding UIs call this once the user has seen their recovery key. */
   finishOnboarding() {
     if (this.identity) this.store.set({ phase: 'ready' });
@@ -290,8 +406,16 @@ export class CrocodileClient extends Emitter<ClientEvents> {
     this.sessions.clear();
     this.link?.stop();
     this.link = undefined;
+    if (this.identity && this.deviceId) {
+      await this.revokeDevice(this.deviceId).catch(() => {});
+    }
     await this.platform.kv.delete('identity-seed');
     await this.platform.kv.delete('records-cache');
+    await this.platform.kv.delete('prekeys');
+    await this.platform.kv.delete('device-id');
+    clearInterval(this.prekeyTimer);
+    this.prekeys = [];
+    await this.loadDevice();
     this.identity = null;
     this.store.set({ phase: 'onboarding', me: null, spaces: {}, sessions: {}, messages: {} });
   }
@@ -320,6 +444,7 @@ export class CrocodileClient extends Emitter<ClientEvents> {
     this.link?.stop();
     const link = new CoordinatorLink({
       identity: this.identity,
+      deviceId: this.deviceId,
       platform: this.platform.platform,
       version: this.platform.appVersion || APP_VERSION_FALLBACK,
       kv: this.platform.kv,
@@ -342,7 +467,20 @@ export class CrocodileClient extends Emitter<ClientEvents> {
       );
     });
     link.on('disconnected', () => this.store.set({ server: null }));
-    link.on('record', ({ record }) => this.records.ingest(record));
+    link.on('record', ({ record }) => {
+      this.records.ingest(record);
+      // Membership of ours whose space we have not seen yet (joined on another device).
+      if (record.kind === 'member') {
+        const body = (record as SignedRecord<'member'>).body;
+        if (
+          body.userId === this.identity?.userId &&
+          !body.left &&
+          !this.records.get(recordKey.space(body.spaceId))
+        ) {
+          void this.adoptSpace(body.spaceId);
+        }
+      }
+    });
     link.on('presence', (p) =>
       this.store.set((s) => ({ presence: { ...s.presence, [p.userId]: p.status } })),
     );
@@ -353,8 +491,16 @@ export class CrocodileClient extends Emitter<ClientEvents> {
     link.on('voice', (occ) => this.setOccupancy(occ));
     link.on('session_invite', ({ sessionId, from }) => void this.onSessionInvite(sessionId, from));
     link.on('replaced', () =>
-      this.reportError('Signed in from another window or device; this one is now offline.'),
+      this.reportError('This device connected again from another window; this one is now offline.'),
     );
+    link.on('relay_expired', ({ reason }) => {
+      for (const s of this.sessions.values()) {
+        if (s.relayGrant) {
+          s.dropServerRelay();
+          this.store.set({ relayEnded: { sessionId: s.sessionId, reason } });
+        }
+      }
+    });
     link.start();
   }
 
@@ -362,13 +508,26 @@ export class CrocodileClient extends Emitter<ClientEvents> {
     const link = this.link!;
     const me = this.userId;
     await this.ensureProfilePublished();
+    await this.ensureDeviceRecord();
+    clearInterval(this.prekeyTimer);
+    this.prekeyTimer = setInterval(
+      () => void this.ensureDeviceRecord().catch(() => {}),
+      6 * 3600_000,
+    );
 
     const [mine, incoming, own] = await Promise.all([
       link.request('spaces.mine', {}),
       link.request('friends.incoming', {}),
       link.request('records.get', { keys: [recordKey.profile(me), recordKey.friends(me)] }),
     ]);
-    this.records.ingestAll([...own.records, ...mine.spaces, ...mine.members, ...incoming.records]);
+    const myDevices = await link.request('records.list', { prefix: recordKey.devicePrefix(me) });
+    this.records.ingestAll([
+      ...own.records,
+      ...myDevices.records,
+      ...mine.spaces,
+      ...mine.members,
+      ...incoming.records,
+    ]);
     const spaceIds = mine.spaces.map((s) => s.key.slice('space:'.length));
     // Members of our spaces, so we can verify peers and show member lists.
     for (const id of spaceIds) {
@@ -379,6 +538,7 @@ export class CrocodileClient extends Emitter<ClientEvents> {
       prefixes: [
         recordKey.profile(me),
         recordKey.friends(me),
+        recordKey.devicePrefix(me),
         ...spaceIds.flatMap((id) => [recordKey.space(id), recordKey.memberPrefix(id)]),
       ],
     });
@@ -461,6 +621,20 @@ export class CrocodileClient extends Emitter<ClientEvents> {
   private onRecordChanged(record: SignedRecord) {
     if (!this.identity) return;
     this.refreshDerivedState(record);
+    if (
+      record.kind === 'member' ||
+      record.kind === 'device' ||
+      record.kind === 'friends' ||
+      record.kind === 'space'
+    ) {
+      for (const s of this.sessions.values()) s.recheckPeers();
+    }
+    if (record.kind === 'member') {
+      // A space joined (or created) on another of our devices.
+      const body = (record as SignedRecord<'member'>).body;
+      if (body.userId === this.userId && !body.left && !this.state.spaces[body.spaceId])
+        void this.adoptSpace(body.spaceId);
+    }
     if (record.kind === 'friends' || record.kind === 'member') {
       void this.fetchProfiles(this.relevantUsers()).catch(() => {});
     }
@@ -493,6 +667,22 @@ export class CrocodileClient extends Emitter<ClientEvents> {
       }
       patch.profiles = profiles;
       patch.me = profiles[me] ?? null;
+    }
+    if (!changed || changed.kind === 'device') {
+      patch.devices = this.records
+        .list(recordKey.devicePrefix(me))
+        .map((r) => {
+          const b = r.body as DeviceBody;
+          return {
+            deviceId: b.deviceId,
+            name: b.name,
+            platform: b.platform,
+            current: b.deviceId === this.deviceId,
+            revoked: !!b.revoked,
+            lastUpdated: r.version,
+          };
+        })
+        .sort((a, b) => Number(b.current) - Number(a.current) || b.lastUpdated - a.lastUpdated);
     }
     if (!changed || changed.kind === 'friends') {
       const mine = (this.records.get(recordKey.friends(me)) as SignedRecord<'friends'> | undefined)
@@ -682,6 +872,40 @@ export class CrocodileClient extends Emitter<ClientEvents> {
     return spaceId;
   }
 
+  private wanted = new Set<string>();
+  private wantedTimer?: ReturnType<typeof setTimeout>;
+
+  /** Fetch records that others depend on (e.g. the invite behind a membership). */
+  private fetchWanted(keys: string[]) {
+    for (const k of keys) this.wanted.add(k);
+    if (this.wantedTimer) return;
+    this.wantedTimer = setTimeout(() => {
+      this.wantedTimer = undefined;
+      const batch = [...this.wanted].slice(0, 400);
+      for (const k of batch) this.wanted.delete(k);
+      void this.link
+        ?.request('records.get', { keys: batch })
+        .then((res) => this.records.ingestAll(res.records))
+        .catch(() => {});
+    }, 20);
+  }
+
+  private adopting = new Set<string>();
+
+  private async adoptSpace(spaceId: string) {
+    if (this.adopting.has(spaceId) || !this.link) return;
+    this.adopting.add(spaceId);
+    try {
+      const res = await this.link.request('records.get', { keys: [recordKey.space(spaceId)] });
+      this.records.ingestAll(res.records);
+      if (this.state.spaces[spaceId]) await this.afterSpaceJoined(spaceId);
+    } catch (err) {
+      this.log('could not adopt space', { spaceId, err: String(err) });
+    } finally {
+      this.adopting.delete(spaceId);
+    }
+  }
+
   private async afterSpaceJoined(spaceId: string) {
     await this.link!.request('records.subscribe', {
       prefixes: [recordKey.space(spaceId), recordKey.memberPrefix(spaceId)],
@@ -817,13 +1041,21 @@ export class CrocodileClient extends Emitter<ClientEvents> {
       sessionId,
       {
         identity: this.identity!,
+        peer: this.peer,
         link: this.link!,
         platform: this.platform,
         messages: this.platform.messages,
         iceServers: () => this.stun.map((urls) => ({ urls })),
         caps: () => this.caps(),
-        encKeyOf: (u) => this.encKeyOf(u),
-        isAllowedPeer: (sid, u) => this.isAllowedPeer(sid, u),
+        seal: (to, pt) => this.sealTo(to, pt),
+        open: (box) => this.openBox(box),
+        isAllowedPeer: (sid, p) => this.isAllowedPeer(sid, p),
+        refreshPeer: (sid, p) => this.refreshPeer(sid, p),
+        relay: {
+          allowed: () => this.state.settings.allowServerRelay,
+          request: async (sid) =>
+            (await this.link!.request('relay.request', { sessionId: sid })).grant,
+        },
         historyChannels: (sid) => this.historyChannels(sid),
         acceptMessage: (sid, m) => this.acceptMessage(sid, m),
         log: (m, e) => this.log(m, { session: sessionId, ...e }),
@@ -835,12 +1067,10 @@ export class CrocodileClient extends Emitter<ClientEvents> {
     );
     session.on('update', () => this.publishSession(session!));
     session.on('track', (ev) =>
-      this.voiceEngine?.playSlot(
-        sessionId,
-        ev.slot,
-        ev.track,
-        () => session!.slots[ev.slot] ?? null,
-      ),
+      this.voiceEngine?.playSlot(sessionId, ev.slot, ev.track, () => {
+        const peer = session!.slots[ev.slot];
+        return peer ? peerIds.user(peer) : null;
+      }),
     );
     session.on('call', ({ userId, action }) => this.onCallSignal(sessionId, userId, action));
     session.on('typing', ({ userId, ch }) => {
@@ -857,18 +1087,31 @@ export class CrocodileClient extends Emitter<ClientEvents> {
   private publishSession(session: GroupSession) {
     const st: SessionState | null = session.state;
     const peers = [...session.peers.values()];
+    const users = (ids: string[]) => [...new Set(ids.map((p) => peerIds.user(p)))];
+    const me = this.userId;
+    const grant = session.relayGrant;
+    // Our own voice state is known locally (the relay does not echo us).
+    const selfMuted =
+      session.isVoice && this.state.voiceSession === session.sessionId && this.state.muted
+        ? [me]
+        : [];
+    const selfDeaf =
+      session.isVoice && this.state.voiceSession === session.sessionId && this.state.deafened
+        ? [me]
+        : [];
     const view: SessionView = {
       id: session.sessionId,
       status: session.status,
-      host: st?.host ?? null,
-      backup: st?.backup ?? null,
+      host: st?.host ? peerIds.user(st.host) : null,
+      backup: st?.backup ? peerIds.user(st.backup) : null,
       epoch: st?.epoch ?? 0,
-      members: st?.members.map((m) => m.userId) ?? [],
-      peers: peers.map((p) => p.userId),
-      speaking: session.speaking,
-      muted: peers.filter((p) => p.muted).map((p) => p.userId),
-      deafened: peers.filter((p) => p.deafened).map((p) => p.userId),
+      members: users(st?.members.map((m) => m.peer) ?? []),
+      peers: users(peers.map((p) => p.id)).filter((u) => u !== me),
+      speaking: users(session.speaking),
+      muted: [...users(peers.filter((p) => p.muted).map((p) => p.id)), ...selfMuted],
+      deafened: [...users(peers.filter((p) => p.deafened).map((p) => p.id)), ...selfDeaf],
       iAmHost: session.isHost,
+      relay: grant ? { server: grant.server, expiresAt: grant.expiresAt } : null,
     };
     this.store.set((s) => ({ sessions: { ...s.sessions, [session.sessionId]: view } }));
   }
@@ -893,23 +1136,202 @@ export class CrocodileClient extends Emitter<ClientEvents> {
     };
   }
 
-  private async encKeyOf(userId: string): Promise<string | null> {
-    let r = this.records.get(recordKey.profile(userId)) as SignedRecord<'profile'> | undefined;
-    if (!r) {
-      await this.fetchProfiles([userId]);
-      r = this.records.get(recordKey.profile(userId)) as SignedRecord<'profile'> | undefined;
+  /** Current, unrevoked device record of a peer, fetching it if needed. */
+  private async deviceOf(peer: string): Promise<DeviceBody | null> {
+    const userId = peerIds.user(peer);
+    const key = recordKey.device(userId, peerIds.device(peer));
+    let r = this.records.get(key) as SignedRecord<'device'> | undefined;
+    if (!r || r.body.prekey.expiresAt < Date.now()) {
+      const res = await this.link?.request('records.get', { keys: [key] }).catch(() => null);
+      if (res) this.records.ingestAll(res.records);
+      void this.link
+        ?.request('records.subscribe', { prefixes: [recordKey.devicePrefix(userId)] })
+        .catch(() => {});
+      r = this.records.get(key) as SignedRecord<'device'> | undefined;
     }
-    return r?.body.encKey ?? null;
+    if (!r || r.body.revoked) return null;
+    return r.body;
   }
 
-  isAllowedPeer(sessionId: string, userId: string): boolean {
+  private async sealTo(peer: string, plaintext: Uint8Array): Promise<SealedBox | null> {
+    const device = await this.deviceOf(peer);
+    if (!device) return null;
+    return sealToDevice(this.identity!, this.deviceId, { peer, prekey: device.prekey }, plaintext);
+  }
+
+  private openBox(box: SealedBox): { from: string; plaintext: Uint8Array } | null {
+    const opened = openSealed(
+      { peer: this.peer },
+      (id) => this.prekeys.find((k) => k.id === id),
+      box,
+      userIdFromKey,
+    );
+    return opened ? { from: opened.from, plaintext: opened.plaintext } : null;
+  }
+
+  private async refreshPeer(sessionId: string, peer: string) {
+    const scope = parseSessionId(sessionId);
+    if (!scope || !this.link) return;
+    const userId = peerIds.user(peer);
+    const keys = [recordKey.device(userId, peerIds.device(peer))];
+    if (scope.kind !== 'dm')
+      keys.push(recordKey.member(scope.spaceId, userId), recordKey.space(scope.spaceId));
+    else keys.push(recordKey.friends(userId));
+    const res = await this.link.request('records.get', { keys });
+    this.records.ingestAll(res.records);
+  }
+
+  /** `peer` is `<userId>.<deviceId>`; bare user ids are accepted too. */
+  isAllowedPeer(sessionId: string, peer: string): boolean {
     const scope = parseSessionId(sessionId);
     if (!scope) return false;
+    const userId = peerIds.user(peer);
+    if (peer.includes('.')) {
+      const device = this.records.get(recordKey.device(userId, peerIds.device(peer))) as
+        SignedRecord<'device'> | undefined;
+      if (device?.body.revoked) return false;
+    }
     if (scope.kind === 'dm') {
       if (!scope.users.includes(userId)) return false;
       return !this.state.friends.blocked.includes(userId);
     }
     return isSpaceMember(this.records, scope.spaceId, userId);
+  }
+
+  // ===========================================================================
+  // Devices and linking
+  // ===========================================================================
+
+  /** Remove a device from this account (permanent). */
+  async revokeDevice(deviceId: string) {
+    const id = this.identity!;
+    const key = recordKey.device(id.userId, deviceId);
+    const current = this.records.get(key) as SignedRecord<'device'> | undefined;
+    if (!current) throw new Error('unknown device');
+    await this.putRecord(
+      signRecord(id, 'device', key, { ...current.body, revoked: true }, this.nextVersion(key)),
+    );
+  }
+
+  async renameDevice(name: string) {
+    await this.updateSettings({ deviceName: name.trim() || undefined });
+    await this.ensureDeviceRecord();
+  }
+
+  private linkTemp?: { identity: Identity; conn: CoordinatorConnection; claimedBy?: string };
+
+  /**
+   * New device: get a short code to type on a device that is already signed
+   * in. Resolves when the account arrives (the user must also compare the
+   * security code shown on both screens).
+   */
+  async startDeviceLink(): Promise<void> {
+    this.cancelDeviceLink();
+    const temp = createIdentity();
+    const urls = [...this.state.settings.preferredServers, ...(this.config.preferredServers ?? [])];
+    let conn: CoordinatorConnection | undefined;
+    const candidates = urls.length
+      ? urls
+      : await import('./server-selection').then(async (m) => {
+          const { servers, loads } = await m.fetchServerList(
+            this.config.directories,
+            this.platform.kv,
+            this.platform.fetch,
+          );
+          return (await m.rankServers(servers, loads, this.platform.fetch)).map((r) => r.info.url);
+        });
+    for (const url of candidates) {
+      try {
+        conn = await CoordinatorConnection.connect({
+          url,
+          identity: temp,
+          deviceId: randomDeviceId(),
+          platform: this.platform.platform,
+          version: this.platform.appVersion,
+          WebSocketImpl: this.platform.WebSocketImpl,
+        });
+        break;
+      } catch {
+        /* try next */
+      }
+    }
+    if (!conn) {
+      this.store.set({
+        linking: { role: 'new', step: 'error', error: 'No coordination server reachable' },
+      });
+      return;
+    }
+    this.linkTemp = { identity: temp, conn };
+    const { code } = await conn.request('link.open', { encKey: temp.encPublicKey });
+    this.store.set({ linking: { role: 'new', step: 'waiting', code: code.toUpperCase() } });
+    conn.on('link_claimed', ({ key, userId }) => {
+      if (!this.linkTemp || !keyMatchesUserId(key, userId)) return;
+      this.linkTemp.claimedBy = userId;
+      this.store.set({
+        linking: {
+          role: 'new',
+          step: 'claimed',
+          code: code.toUpperCase(),
+          securityCode: linkSecurityCode(temp.publicKey, key),
+          account: userId,
+        },
+      });
+    });
+    conn.on('link_payload', ({ box }) => void this.onLinkPayload(box));
+  }
+
+  private async onLinkPayload(box: LinkBox) {
+    const t = this.linkTemp;
+    if (!t?.claimedBy) return;
+    const seed = openLink(t.identity, box, t.claimedBy);
+    if (!seed) {
+      this.store.set({
+        linking: { role: 'new', step: 'error', error: 'The account could not be verified.' },
+      });
+      return;
+    }
+    t.conn.close();
+    this.linkTemp = undefined;
+    this.store.set({ linking: { role: 'new', step: 'done' } });
+    await this.adoptIdentity(identityFromSeed(seed));
+  }
+
+  cancelDeviceLink() {
+    this.linkTemp?.conn.close();
+    this.linkTemp = undefined;
+    this.store.set({ linking: null });
+  }
+
+  private pendingLinkTarget?: { code: string; encKey: string };
+
+  /** Existing device: enter the code the new device shows. */
+  async claimDeviceLink(code: string): Promise<string> {
+    const res = await this.link!.request('link.claim', { code });
+    const securityCode = linkSecurityCode(res.key, this.identity!.publicKey);
+    this.pendingLinkTarget = { code, encKey: res.encKey };
+    this.store.set({ linking: { role: 'existing', step: 'confirm', code, securityCode } });
+    return securityCode;
+  }
+
+  /** Existing device: the security codes match, send the account over. */
+  async confirmDeviceLink() {
+    const t = this.pendingLinkTarget;
+    const linking = this.state.linking;
+    if (!t || linking?.role !== 'existing') return;
+    const box = sealLink(this.identity!, t.encKey, this.identity!.seed);
+    await this.link!.request('link.send', { code: t.code, box });
+    this.pendingLinkTarget = undefined;
+    this.store.set({ linking: { ...linking, step: 'sent' } });
+  }
+
+  /** Server relay: extend after the one-hour window ended (explicit user action). */
+  async extendRelay(sessionId: string) {
+    this.store.set({ relayEnded: null });
+    await this.sessions.get(sessionId)?.useServerRelay();
+  }
+
+  dismissRelayNotice() {
+    this.store.set({ relayEnded: null });
   }
 
   private historyChannels(sessionId: string): string[] {
@@ -1220,6 +1642,31 @@ export class CrocodileClient extends Emitter<ClientEvents> {
     for (const s of this.sessions.values()) await s.leave().catch(() => {});
     this.link?.stop();
   }
+}
+
+export function defaultDeviceName(platform: string): string {
+  const nav = (globalThis as { navigator?: { platform?: string; userAgent?: string } }).navigator;
+  const ua = `${nav?.platform ?? ''} ${nav?.userAgent ?? ''}`;
+  const os = /Win/i.test(ua)
+    ? 'Windows'
+    : /Mac/i.test(ua)
+      ? 'macOS'
+      : /Linux/i.test(ua)
+        ? 'Linux'
+        : /Android/i.test(ua)
+          ? 'Android'
+          : /iPhone|iPad/i.test(ua)
+            ? 'iOS'
+            : '';
+  const kind =
+    platform === 'desktop'
+      ? 'Desktop'
+      : platform === 'mobile'
+        ? 'Phone'
+        : platform === 'web'
+          ? 'Browser'
+          : 'Bot';
+  return os ? `${kind} · ${os}` : kind;
 }
 
 /** Applies edit/delete messages onto the originals they reference. */

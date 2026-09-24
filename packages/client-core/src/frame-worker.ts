@@ -2,52 +2,45 @@
 /**
  * Voice frame encryption worker. Runs inside Chromium's encoded-transform
  * pipeline: every Opus frame leaving the microphone is encrypted with our
- * sender key before packetisation, and every frame arriving on a speaker slot
- * is decrypted with the sending member's key. The host relay only ever sees
- * ciphertext. Frames we cannot encrypt or authenticate are dropped, never
- * passed through in the clear.
+ * ratcheting sender key before packetisation, and every frame arriving on a
+ * speaker slot is decrypted with the sending member's key. The host relay
+ * only ever sees ciphertext. Frames we cannot encrypt or authenticate are
+ * dropped, never passed through in the clear.
  */
-import {
-  decryptFrame,
-  deriveSenderKey,
-  encryptFrame,
-  importSenderKey,
-  peekFrameKid,
-  type DerivedSenderKey,
-} from '@crocodile/crypto';
+import { AudioReceiver, AudioSender, importChain, peekFrameKid } from '@crocodile/crypto';
 import type { FrameKeys } from './keyring';
 
 interface Scope {
-  mine: { derived: DerivedSenderKey; counter: number } | null;
-  peers: Map<number, DerivedSenderKey>;
+  sender: AudioSender | null;
+  receivers: Map<number, AudioReceiver>;
 }
 
 const scopes = new Map<string, Scope>();
-const derivedCache = new Map<string, DerivedSenderKey>();
-
-function derive(kid: number, secret: string) {
-  const cacheKey = `${kid}:${secret}`;
-  let d = derivedCache.get(cacheKey);
-  if (!d) {
-    d = deriveSenderKey(importSenderKey(kid, secret));
-    derivedCache.set(cacheKey, d);
-    if (derivedCache.size > 512) derivedCache.delete(derivedCache.keys().next().value!);
-  }
-  return d;
-}
 
 function scope(id: string): Scope {
   let s = scopes.get(id);
-  if (!s) scopes.set(id, (s = { mine: null, peers: new Map() }));
+  if (!s) scopes.set(id, (s = { sender: null, receivers: new Map() }));
   return s;
 }
 
 function updateKeys(id: string, keys: FrameKeys) {
   const s = scope(id);
-  if (keys.mine && s.mine?.derived.kid !== keys.mine.kid) {
-    s.mine = { derived: derive(keys.mine.kid, keys.mine.secret), counter: 0 };
+  if (keys.mine) {
+    const chain = importChain({ gen: keys.mine.gen, key: keys.mine.key });
+    if (!s.sender || s.sender.kid !== keys.mine.kid)
+      s.sender = new AudioSender(keys.mine.kid, chain);
+    else s.sender.update(chain);
   }
-  s.peers = new Map(keys.peers.map((p) => [p.kid >>> 0, derive(p.kid, p.secret)]));
+  const next = new Map<number, AudioReceiver>();
+  for (const p of keys.peers) {
+    const kid = p.kid >>> 0;
+    // Keep receivers we already have: they may have ratcheted past the given state.
+    next.set(
+      kid,
+      s.receivers.get(kid) ?? new AudioReceiver(kid, importChain({ gen: p.gen, key: p.key })),
+    );
+  }
+  s.receivers = next;
 }
 
 interface EncodedFrame {
@@ -65,16 +58,14 @@ function pipe(
       const s = scopes.get(scopeId);
       const data = new Uint8Array(frame.data);
       if (role === 'encrypt') {
-        if (!s?.mine) return;
-        const out = encryptFrame(s.mine.derived, s.mine.counter++, data);
-        frame.data = out.slice().buffer;
+        if (!s?.sender) return;
+        frame.data = s.sender.encrypt(data).slice().buffer;
         controller.enqueue(frame);
         return;
       }
       const kid = peekFrameKid(data);
-      const key = kid === null ? undefined : s?.peers.get(kid);
-      if (!key) return;
-      const plain = decryptFrame(key, data);
+      const receiver = kid === null ? undefined : s?.receivers.get(kid);
+      const plain = receiver?.decrypt(data);
       if (!plain) return;
       frame.data = plain.slice().buffer;
       controller.enqueue(frame);

@@ -10,10 +10,11 @@ export const RELAY_CHANNEL_LABEL = 'croc';
 export const RELAY_CHANNEL_ID = 0;
 
 const userId = z.string().regex(/^[a-z2-7]{8,64}$/);
+const peerId = z.string().regex(/^[a-z2-7]{8,64}\.[a-z2-7]{8,32}$/);
 
 export const ClientToRelay = z.discriminatedUnion('t', [
   z.object({ t: z.literal('bcast'), d: z.unknown() }),
-  z.object({ t: z.literal('direct'), to: userId, d: z.unknown() }),
+  z.object({ t: z.literal('direct'), to: peerId, d: z.unknown() }),
   z.object({ t: z.literal('ping'), ts: z.number() }),
   /** Client-side mute state so the relay can skip forwarding and show icons. */
   z.object({ t: z.literal('state'), muted: z.boolean(), deafened: z.boolean() }),
@@ -21,7 +22,8 @@ export const ClientToRelay = z.discriminatedUnion('t', [
 export type ClientToRelay = z.infer<typeof ClientToRelay>;
 
 export interface PeerState {
-  userId: string;
+  /** Peer id: `<userId>.<deviceId>`. */
+  id: string;
   muted: boolean;
   deafened: boolean;
 }
@@ -29,7 +31,7 @@ export interface PeerState {
 export type RelayToClient =
   | { t: 'hello'; you: string; host: string; peers: PeerState[]; slots: number }
   | { t: 'peer_join'; peer: PeerState }
-  | { t: 'peer_leave'; userId: string }
+  | { t: 'peer_leave'; peer: string }
   | { t: 'peer_state'; peer: PeerState }
   | { t: 'msg'; from: string; direct: boolean; d: unknown }
   /** Which speaker currently occupies each of this listener's audio slots. */
@@ -41,26 +43,37 @@ export type RelayToClient =
 // End-to-end envelopes carried inside relay messages (`d`).
 // ---------------------------------------------------------------------------
 
+/**
+ * Hybrid post-quantum sealed box to one device: X25519 + ML-KEM-768 against
+ * the device's current prekey, HKDF-SHA256, AES-256-GCM, signed by the sender.
+ */
 export const SealedBox = z.object({
+  v: z.literal(2),
+  /** Recipient peer id. */
+  to: peerId,
+  /** Recipient prekey id. */
+  pk: z.number().int().min(0).max(0xffffffff),
   /** Ephemeral X25519 public key. */
   epk: z.string(),
-  /** AES-256-GCM ciphertext (nonce is derived, see crypto/seal). */
+  /** ML-KEM-768 ciphertext. */
+  kem: z.string(),
   ct: z.string(),
-  /** Sender's Ed25519 public key. */
+  /** Sender's Ed25519 identity key. */
   from: z.string(),
-  /** Signature over (domain, epk, ct, recipient). */
+  /** Sender's device id. */
+  fromDevice: z.string().regex(/^[a-z2-7]{8,32}$/),
   sig: z.string(),
 });
 export type SealedBox = z.infer<typeof SealedBox>;
 
 export const E2EEnvelope = z.discriminatedUnion('k', [
-  /** Pairwise-sealed payload: sender keys, history sync, receipts. */
+  /** Pairwise-sealed payload: sender keys, history sync. */
   z.object({ k: z.literal('sealed'), box: SealedBox }),
-  /** Group message encrypted with the sender's current sender key. */
+  /** Group message: key id + ratchet generation of the sender's text chain. */
   z.object({
     k: z.literal('group'),
     kid: z.number().int().min(0).max(0xffffffff),
-    n: z.number().int().min(0),
+    g: z.number().int().min(0),
     ct: z.string(),
   }),
 ]);
@@ -91,7 +104,9 @@ export const SealedPayload = z.discriminatedUnion('type', [
     /** Session the key belongs to; guards against cross-session replay. */
     sessionId: z.string(),
     kid: z.number().int().min(0).max(0xffffffff),
-    key: z.string(),
+    /** Current state of the sender's ratcheting chains (never earlier ones). */
+    text: z.object({ gen: z.number().int().min(0), key: z.string() }),
+    audio: z.object({ gen: z.number().int().min(0), key: z.string() }),
   }),
   z.object({
     type: z.literal('history_req'),

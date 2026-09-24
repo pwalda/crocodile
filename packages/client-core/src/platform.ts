@@ -29,9 +29,11 @@ export interface RelayStartOptions {
   sessionId: string;
   epoch: number;
   identity: Identity;
+  /** This device's peer id; answers are signed as it. */
+  hostPeer: string;
   slots: number;
   iceServers: { urls: string }[];
-  /** Members allowed to connect; checked on every offer. */
+  /** Peer ids allowed to connect; checked on every offer. */
   members: () => string[];
   sendSignal: (to: string, data: SignalData) => void;
 }

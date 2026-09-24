@@ -120,6 +120,7 @@ function relayAdapter(api: DesktopApi): HostRelayAdapter {
         type: 'start',
         handle,
         seed: toB64u(opts.identity.seed),
+        hostPeer: opts.hostPeer,
         sessionId: opts.sessionId,
         epoch: opts.epoch,
         slots: opts.slots,

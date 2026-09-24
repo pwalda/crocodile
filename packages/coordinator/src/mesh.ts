@@ -1,6 +1,17 @@
 import { WebSocket } from 'ws';
-import { keyMatchesUserId, randomId, sign, verifyPayload } from '@crocodile/crypto';
 import {
+  acceptChannel,
+  answerChannel,
+  createChannelKeys,
+  keyMatchesUserId,
+  randomId,
+  SecureChannel,
+  sign,
+  verifyPayload,
+  type ChannelKeys,
+} from '@crocodile/crypto';
+import {
+  concatBytes,
   LIMITS,
   ServerInfo,
   SIG_DOMAIN,
@@ -22,6 +33,12 @@ interface Link {
   syncDone: boolean;
   sentUpTo: number;
   alive: boolean;
+  /** Our fresh key-exchange offer for this link. */
+  channelKeys: ChannelKeys;
+  peerOffer?: { x25519: string; mlkem: string };
+  /** Secret from answering the peer's offer. */
+  answeredSecret?: Uint8Array;
+  channel?: SecureChannel;
 }
 
 const SYNC_BATCH = 500;
@@ -73,19 +90,47 @@ export class Mesh {
 
   sendTo(serverId: string, frame: FedFrame): boolean {
     const link = this.links.get(serverId);
-    return link ? sendJson(link.ws, frame) : false;
+    return link ? this.send(link, frame) : false;
   }
 
   broadcast(frame: FedFrame, except?: string) {
-    const text = JSON.stringify(frame);
     for (const [id, link] of this.links) {
-      if (id !== except && link.ws.readyState === link.ws.OPEN) link.ws.send(text);
+      if (id !== except && link.ws.readyState === link.ws.OPEN) this.send(link, frame);
     }
   }
 
   // -------------------------------------------------------------------------
   // Link lifecycle
   // -------------------------------------------------------------------------
+
+  private send(link: Link, frame: FedFrame): boolean {
+    if (!link.channel) return false;
+    return sendJson(link.ws, link.channel.seal(frame));
+  }
+
+  private linkQueries = new Map<
+    string,
+    {
+      pending: number;
+      resolve: (v: { peer: string; key: string; encKey: string } | undefined) => void;
+      timer: ReturnType<typeof setTimeout>;
+    }
+  >();
+
+  /** Ask every peer server whether it holds a device-link code. */
+  queryLink(code: string): Promise<{ peer: string; key: string; encKey: string } | undefined> {
+    const peers = [...this.links.values()];
+    if (peers.length === 0) return Promise.resolve(undefined);
+    const qid = randomId(8);
+    return new Promise((resolve) => {
+      const timer = setTimeout(() => {
+        this.linkQueries.delete(qid);
+        resolve(undefined);
+      }, 4000);
+      this.linkQueries.set(qid, { pending: peers.length, resolve, timer });
+      for (const l of peers) this.send(l, { t: 'link_query', qid, code });
+    });
+  }
 
   private ensureDial(url: string) {
     if (this.closed || url === this.hub.info.url) return;
@@ -141,7 +186,12 @@ export class Mesh {
   }
 
   private sendHello(link: Link) {
-    sendJson(link.ws, { t: 'fed_hello', server: this.hub.info, challenge: link.challenge });
+    sendJson(link.ws, {
+      t: 'fed_hello',
+      server: this.hub.info,
+      challenge: link.challenge,
+      channel: link.channelKeys.offer,
+    });
   }
 
   private setupLink(ws: WebSocket, initiator: boolean, url?: string): Link {
@@ -156,6 +206,7 @@ export class Mesh {
       syncDone: false,
       sentUpTo: 0,
       alive: true,
+      channelKeys: createChannelKeys(),
     };
     this.pendingLinks.add(link);
     const authTimer = setTimeout(() => {
@@ -170,6 +221,17 @@ export class Mesh {
         frame = JSON.parse(raw.toString()) as FedFrame;
       } catch {
         ws.close(1003, 'bad json');
+        return;
+      }
+      if (link.channel) {
+        // After the handshake every frame is encrypted.
+        const inner = frame.t === 'x' ? link.channel.open(frame) : undefined;
+        if (inner === undefined) {
+          ws.close(1008, 'bad frame');
+          return;
+        }
+        frame = inner as FedFrame;
+      } else if (frame.t !== 'fed_hello' && frame.t !== 'fed_auth') {
         return;
       }
       try {
@@ -209,26 +271,59 @@ export class Mesh {
         return;
       }
       link.peer = parsed.data;
+      link.peerOffer = frame.channel;
+      let answer: { epk: string; kem: string };
+      try {
+        const res = answerChannel(frame.channel);
+        answer = res.answer;
+        link.answeredSecret = res.secret;
+      } catch {
+        link.ws.close(1008, 'bad channel offer');
+        return;
+      }
       const sig = sign(this.hub.identity, SIG_DOMAIN.federation, {
         challenge: frame.challenge,
         from: this.hub.info.id,
         to: link.peer.id,
+        offer: link.channelKeys.offer,
+        answer,
       });
-      sendJson(link.ws, { t: 'fed_auth', sig, cursor: this.cursor(link.peer.id) });
+      sendJson(link.ws, { t: 'fed_auth', answer, sig, cursor: this.cursor(link.peer.id) });
       return;
     }
     if (frame.t === 'fed_auth') {
-      if (!link.peer) return;
+      if (!link.peer || !link.answeredSecret || !link.peerOffer) return;
       const ok = verifyPayload(
         link.peer.key,
         SIG_DOMAIN.federation,
-        { challenge: link.challenge, from: link.peer.id, to: this.hub.info.id },
+        {
+          challenge: link.challenge,
+          from: link.peer.id,
+          to: this.hub.info.id,
+          offer: link.peerOffer,
+          answer: frame.answer,
+        },
         frame.sig,
       );
       if (!ok) {
         link.ws.close(1008, 'bad federation signature');
         return;
       }
+      let accepted: Uint8Array;
+      try {
+        accepted = acceptChannel(link.channelKeys, frame.answer);
+      } catch {
+        link.ws.close(1008, 'bad channel answer');
+        return;
+      }
+      // Both directions' secrets, ordered by server id so both sides agree.
+      const self = this.hub.info.id;
+      const lower = self < link.peer.id;
+      const secret = lower
+        ? concatBytes(accepted, link.answeredSecret)
+        : concatBytes(link.answeredSecret, accepted);
+      const ctx = lower ? `${self}|${link.peer.id}` : `${link.peer.id}|${self}`;
+      link.channel = new SecureChannel(secret, ctx, lower);
       this.onAuthed(link, frame.cursor);
       return;
     }
@@ -259,8 +354,29 @@ export class Mesh {
         this.hub.sessions.applyRemoteVoice(peerId, frame);
         return;
       case 'ping':
-        sendJson(link.ws, { t: 'pong' });
+        this.send(link, { t: 'pong' });
         return;
+      case 'link_query': {
+        const found = this.hub.findLink(frame.code);
+        this.send(link, {
+          t: 'link_answer',
+          qid: frame.qid,
+          ...(found ? { found: { peer: found.peer, key: found.key, encKey: found.encKey } } : {}),
+        });
+        if (found) found.claimedBy = `remote:${peerId}`;
+        return;
+      }
+      case 'link_answer': {
+        const q = this.linkQueries.get(frame.qid);
+        if (!q) return;
+        q.pending -= 1;
+        if (frame.found || q.pending <= 0) {
+          this.linkQueries.delete(frame.qid);
+          clearTimeout(q.timer);
+          q.resolve(frame.found);
+        }
+        return;
+      }
     }
   }
 
@@ -288,9 +404,9 @@ export class Mesh {
     if (link.url) this.dialing.delete(link.url);
     this.hub.log.info('mesh link up', { peer: peer.id, name: peer.name, url: peer.url });
 
-    sendJson(link.ws, { t: 'servers', servers: [this.hub.info, ...this.knownServers()] });
-    sendJson(link.ws, { t: 'presence', full: true, entries: this.hub.presence.localEntries() });
-    for (const v of this.hub.sessions.ownedVoiceFrames()) sendJson(link.ws, v);
+    this.send(link, { t: 'servers', servers: [this.hub.info, ...this.knownServers()] });
+    this.send(link, { t: 'presence', full: true, entries: this.hub.presence.localEntries() });
+    for (const v of this.hub.sessions.ownedVoiceFrames()) this.send(link, v);
     link.sentUpTo = Math.max(0, Math.min(cursor, this.hub.records.store.latestSeq()));
     void this.pump(link);
     this.hub.onServerUp(peer.id);
@@ -309,7 +425,7 @@ export class Mesh {
           break;
         }
         const upTo = batch[batch.length - 1]!.seq;
-        sendJson(link.ws, { t: 'records', items: batch, upTo });
+        this.send(link, { t: 'records', items: batch, upTo });
         link.sentUpTo = upTo;
         while (link.ws.readyState === link.ws.OPEN && link.ws.bufferedAmount > 4 * 1024 * 1024) {
           await new Promise((r) => setTimeout(r, 20));
@@ -325,7 +441,7 @@ export class Mesh {
   onRecord(record: SignedRecord, seq: number, origin: string | null) {
     for (const [id, link] of this.links) {
       if (!link.syncDone || seq <= link.sentUpTo) continue;
-      if (id !== origin) sendJson(link.ws, { t: 'records', items: [{ seq, record }], upTo: seq });
+      if (id !== origin) this.send(link, { t: 'records', items: [{ seq, record }], upTo: seq });
       link.sentUpTo = seq;
     }
   }

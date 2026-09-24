@@ -13,6 +13,8 @@ import { createIdentity, signSdp, verifySdp, type Identity } from '@crocodile/cr
 import type { RelayToClient, SignalData } from '@crocodile/protocol';
 import { HostRelay } from '../src';
 
+/** Peer id of an identity's (single) test device. */
+const P = (id: Identity) => `${id.userId}.testdevicex`;
 const SESSION = 'voice:aaaaaaaaaaaaaaaaaaaaaaaaaa:bbbbbbbbbbbbbbbbbbbbbbbbbb';
 const SLOTS = 3;
 
@@ -79,11 +81,9 @@ async function joinRelay(
 
   const early: unknown[] = [];
   let answered = false;
-  deliver.set(identity.userId, async (data) => {
+  deliver.set(P(identity), async (data) => {
     if (data.type === 'answer') {
-      expect(verifySdp(data, { sessionId: SESSION, from: host.userId, to: identity.userId })).toBe(
-        true,
-      );
+      expect(verifySdp(data, { sessionId: SESSION, from: P(host), to: P(identity) })).toBe(true);
       await pc.setRemoteDescription({ type: 'answer', sdp: data.sdp });
       answered = true;
       for (const c of early.splice(0)) await pc.addIceCandidate(c as never);
@@ -94,7 +94,7 @@ async function joinRelay(
   });
   pc.onIceCandidate.subscribe((c) => {
     if (c?.candidate) {
-      void relay.handleSignal(identity.userId, {
+      void relay.handleSignal(P(identity), {
         type: 'candidate',
         epoch: 1,
         dir: 'toRelay',
@@ -109,11 +109,11 @@ async function joinRelay(
   const offer = await pc.createOffer();
   await pc.setLocalDescription(offer);
   await relay.handleSignal(
-    identity.userId,
+    P(identity),
     signSdp(
       identity,
       'offer',
-      { sessionId: SESSION, epoch: 1, to: host.userId },
+      { sessionId: SESSION, epoch: 1, from: P(identity), to: P(host) },
       pc.localDescription!.sdp,
     ),
   );
@@ -153,6 +153,7 @@ describe('HostRelay', () => {
       sessionId: SESSION,
       epoch: 1,
       identity: host,
+      hostPeer: P(host),
       slots: SLOTS,
       iceServers: stun(),
       includeLoopback: true,
@@ -165,15 +166,13 @@ describe('HostRelay', () => {
     const c = await joinRelay(relay, host, createIdentity(), deliver);
     expect(relay.connectedPeerIds()).toHaveLength(3);
     const helloC = c.inbox.find((m) => m.t === 'hello') as Extract<RelayToClient, { t: 'hello' }>;
-    expect(helloC.peers.map((p) => p.userId).sort()).toEqual(
-      [a.identity.userId, b.identity.userId].sort(),
-    );
-    expect(helloC.host).toBe(host.userId);
+    expect(helloC.peers.map((p) => p.id).sort()).toEqual([P(a.identity), P(b.identity)].sort());
+    expect(helloC.host).toBe(P(host));
 
     b.dc.send(JSON.stringify({ t: 'bcast', d: { k: 'x' } }));
-    c.dc.send(JSON.stringify({ t: 'direct', to: a.identity.userId, d: { k: 'secret' } }));
+    c.dc.send(JSON.stringify({ t: 'direct', to: P(a.identity), d: { k: 'secret' } }));
     await waitFor(() => a.inbox.some((m) => m.t === 'msg' && m.direct));
-    await waitFor(() => c.inbox.some((m) => m.t === 'msg' && m.from === b.identity.userId));
+    await waitFor(() => c.inbox.some((m) => m.t === 'msg' && m.from === P(b.identity)));
     expect(b.inbox.some((m) => m.t === 'msg' && m.direct)).toBe(false);
 
     // Wait for media to connect, then have A talk.
@@ -188,10 +187,8 @@ describe('HostRelay', () => {
       RelayToClient,
       { t: 'slots' }
     >;
-    expect(slots.map).toContain(a.identity.userId);
-    await waitFor(() =>
-      b.inbox.some((m) => m.t === 'speaking' && m.users.includes(a.identity.userId)),
-    );
+    expect(slots.map).toContain(P(a.identity));
+    await waitFor(() => b.inbox.some((m) => m.t === 'speaking' && m.users.includes(P(a.identity))));
 
     // Silence from a speaker without a slot is not forwarded.
     const before = a.received.length;
@@ -208,11 +205,9 @@ describe('HostRelay', () => {
     expect(c.received.length).toBe(cCount);
 
     // Leaving members say goodbye through signalling (crashes are caught by ICE consent checks).
-    await relay.handleSignal(c.identity.userId, { type: 'bye', epoch: 1, dir: 'toRelay' });
+    await relay.handleSignal(P(c.identity), { type: 'bye', epoch: 1, dir: 'toRelay' });
     await c.pc.close();
-    await waitFor(() =>
-      a.inbox.some((m) => m.t === 'peer_leave' && m.userId === c.identity.userId),
-    );
+    await waitFor(() => a.inbox.some((m) => m.t === 'peer_leave' && m.peer === P(c.identity)));
   });
 
   it('rejects offers whose signature does not match the sender', async () => {
@@ -224,6 +219,7 @@ describe('HostRelay', () => {
       sessionId: SESSION,
       epoch: 1,
       identity: host,
+      hostPeer: P(host),
       slots: 1,
       iceServers: [],
       sendSignal: (_to, d) => sent.push(d),
@@ -232,10 +228,10 @@ describe('HostRelay', () => {
     const offer = signSdp(
       mallory,
       'offer',
-      { sessionId: SESSION, epoch: 1, to: host.userId },
+      { sessionId: SESSION, epoch: 1, from: P(mallory), to: P(host) },
       'v=0',
     );
-    await relay.handleSignal(victim.userId, offer);
+    await relay.handleSignal(P(victim), offer);
     expect(relay.peerIds()).toEqual([]);
     expect(sent).toEqual([]);
   });

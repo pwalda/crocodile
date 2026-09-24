@@ -19,8 +19,8 @@ export class FakeRelayNetwork {
   adapter(): HostRelayAdapter {
     return {
       start: async (opts) => {
-        const relay = new FakeRelay(opts.identity.userId, opts.members);
-        const key = `${opts.sessionId}|${opts.epoch}|${opts.identity.userId}`;
+        const relay = new FakeRelay(opts.hostPeer, opts.members);
+        const key = `${opts.sessionId}|${opts.epoch}|${opts.hostPeer}`;
         this.relays.set(key, relay);
         return {
           handleSignal: () => {},
@@ -35,7 +35,7 @@ export class FakeRelayNetwork {
 
   transportFactory(): TransportFactory {
     return (opts) =>
-      new FakeTransport(this, `${opts.sessionId}|${opts.epoch}|${opts.host}`, opts.identity.userId);
+      new FakeTransport(this, `${opts.sessionId}|${opts.epoch}|${opts.host}`, opts.self);
   }
 
   find(key: string) {
@@ -45,7 +45,7 @@ export class FakeRelayNetwork {
   /** Simulate the host vanishing without a goodbye (crash, network loss). */
   killRelaysOf(userId: string) {
     for (const [key, relay] of this.relays) {
-      if (key.endsWith(`|${userId}`)) {
+      if (key.split('|')[2]!.startsWith(`${userId}.`)) {
         this.relays.delete(key);
         relay.close();
       }
@@ -63,7 +63,7 @@ class FakeRelay {
   attach(t: FakeTransport): boolean {
     if (!this.members().includes(t.userId)) return false;
     const others = [...this.peers.values()];
-    this.peers.set(t.userId, { t, state: { userId: t.userId, muted: false, deafened: false } });
+    this.peers.set(t.userId, { t, state: { id: t.userId, muted: false, deafened: false } });
     t.deliver({
       t: 'hello',
       you: t.userId,
@@ -72,13 +72,13 @@ class FakeRelay {
       slots: 0,
     });
     for (const o of others)
-      o.t.deliver({ t: 'peer_join', peer: { userId: t.userId, muted: false, deafened: false } });
+      o.t.deliver({ t: 'peer_join', peer: { id: t.userId, muted: false, deafened: false } });
     return true;
   }
 
   detach(userId: string) {
     if (!this.peers.delete(userId)) return;
-    for (const o of this.peers.values()) o.t.deliver({ t: 'peer_leave', userId });
+    for (const o of this.peers.values()) o.t.deliver({ t: 'peer_leave', peer: userId });
   }
 
   route(from: string, msg: { t: string; to?: string; d?: unknown }) {

@@ -10,7 +10,7 @@ const KV_KEY = 'records-cache';
  * re-verified here: the client does not trust coordination servers.
  * Persisted so the app can show spaces and friends while offline.
  */
-export class RecordCache extends Emitter<{ changed: SignedRecord }> {
+export class RecordCache extends Emitter<{ changed: SignedRecord; wanted: string[] }> {
   private map = new Map<string, SignedRecord>();
   private pending: SignedRecord[] = [];
   private saveTimer?: ReturnType<typeof setTimeout>;
@@ -51,7 +51,12 @@ export class RecordCache extends Emitter<{ changed: SignedRecord }> {
       fresh: false,
     });
     if (!res.ok) {
-      if (res.retryable) this.pending.push(record);
+      if (res.retryable) {
+        this.pending.push(record);
+        if (this.pending.length > 2000) this.pending.shift();
+        const wanted = dependenciesOf(record).filter((k) => !this.map.has(k));
+        if (wanted.length) this.emit('wanted', wanted);
+      }
       return false;
     }
     this.map.set(record.key, record);
@@ -68,4 +73,14 @@ export class RecordCache extends Emitter<{ changed: SignedRecord }> {
     clearTimeout(this.saveTimer);
     this.saveTimer = setTimeout(() => void this.kv.set(KV_KEY, [...this.map.values()]), 1000);
   }
+}
+
+/** Records a record's validation depends on. */
+function dependenciesOf(record: SignedRecord): string[] {
+  const body = record.body as { spaceId?: string; inviteCode?: string };
+  if (record.kind === 'invite') return [`space:${body.spaceId}`];
+  if (record.kind === 'member') {
+    return [`space:${body.spaceId}`, ...(body.inviteCode ? [`invite:${body.inviteCode}`] : [])];
+  }
+  return [];
 }

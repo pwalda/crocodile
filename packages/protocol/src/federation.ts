@@ -12,14 +12,31 @@ export interface FedHello {
   t: 'fed_hello';
   server: ServerInfo;
   challenge: string;
+  /** Fresh hybrid key-exchange offer for the encrypted link. */
+  channel: { x25519: string; mlkem: string };
 }
 
 export interface FedAuth {
   t: 'fed_auth';
-  /** Signature over (peer challenge, own id, peer id). */
+  /** Our answer to the peer's channel offer. */
+  answer: { epk: string; kem: string };
+  /** Signature over (peer challenge, own id, peer id, own offer, answer). */
   sig: string;
   /** Highest seq of the peer's log that we have already applied. */
   cursor: number;
+}
+
+/** Device linking: find which server holds a link code. */
+export interface FedLinkQuery {
+  t: 'link_query';
+  qid: string;
+  code: string;
+}
+
+export interface FedLinkAnswer {
+  t: 'link_answer';
+  qid: string;
+  found?: { peer: string; key: string; encKey: string };
 }
 
 export interface FedRecords {
@@ -42,12 +59,15 @@ export interface FedPresence {
     status: 'online' | 'idle' | 'dnd' | 'invisible' | 'offline';
     text?: string;
     since: number;
+    /** Device ids of the user connected to the sender. */
+    devices: string[];
   }[];
 }
 
 /** Deliver a client event to a user connected to the receiving server. */
 export interface FedRoute {
   t: 'route';
+  /** A user id (all their devices on the receiver) or a peer id (one device). */
   to: string;
   ev: string;
   d: unknown;
@@ -69,7 +89,8 @@ export interface FedSessionOp {
   t: 'session_op';
   opId: string;
   sessionId: string;
-  userId: string;
+  /** Peer id of the member. */
+  peer: string;
   op: SessionOp;
 }
 
@@ -103,5 +124,8 @@ export type FedFrame =
   | FedSessionOpResult
   | FedServers
   | FedVoice
+  | FedLinkQuery
+  | FedLinkAnswer
+  | { t: 'x'; n: number; c: string }
   | { t: 'ping' }
   | { t: 'pong' };
