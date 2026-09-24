@@ -20,7 +20,9 @@ module.exports = {
   npmRebuild: false,
   nodeGypRebuild: false,
   protocols: [{ name: 'Crocodile invite', schemes: ['croc'] }],
-  publish: { provider: 'github', owner: 'pwalda', repo: 'crocodile' },
+  // Upload into the release for the tag (created by the workflow as a draft,
+  // or published by hand in the GitHub UI).
+  publish: { provider: 'github', owner: 'pwalda', repo: 'crocodile', releaseType: 'release' },
   // Predictable names for scripts/install.sh and install.ps1.
   artifactName: 'Crocodile-${version}-${os}-${arch}.${ext}',
   // Lets the app know whether macOS auto-update can work (needs Developer ID).
