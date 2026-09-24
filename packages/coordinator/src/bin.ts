@@ -27,6 +27,7 @@ const { values } = parseArgs({
     'relay-max-users': { type: 'string' },
     'relay-ip': { type: 'string' },
     mailbox: { type: 'string' },
+    source: { type: 'string' },
     'mailbox-days': { type: 'string' },
     'log-level': { type: 'string' },
     help: { type: 'boolean', short: 'h' },
@@ -56,6 +57,9 @@ Options (environment variable in brackets):
   --mailbox on|off       hold sealed mail for offline     [CROC_MAILBOX]
                          devices (opt-in for users)
   --mailbox-days <n>     how long mail is kept, max 7 (3) [CROC_MAILBOX_DAYS]
+  --source <url>         where users get this server's    [CROC_SOURCE_URL]
+                         source (required by the AGPL if
+                         you run a modified version)
   --log-level <lvl>      debug|info|warn|error            [CROC_LOG_LEVEL]`);
   process.exit(0);
 }
@@ -86,6 +90,7 @@ const coordinator = new Coordinator({
     ),
     publicIp: pick(values['relay-ip'], 'CROC_RELAY_IP'),
   },
+  sourceUrl: pick(values.source, 'CROC_SOURCE_URL'),
   mailbox: {
     ...defaultConfig.mailbox,
     enabled: (pick(values.mailbox, 'CROC_MAILBOX') ?? 'on') !== 'off',

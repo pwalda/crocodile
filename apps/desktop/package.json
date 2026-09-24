@@ -8,7 +8,7 @@
     "name": "Crocodile contributors",
     "email": "pawel.walda@gmail.com"
   },
-  "license": "Apache-2.0 OR MIT",
+  "license": "AGPL-3.0-only",
   "type": "module",
   "main": "dist/main/main.cjs",
   "scripts": {

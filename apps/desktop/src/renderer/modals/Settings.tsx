@@ -32,7 +32,9 @@ import {
   useCroc,
   useUi,
 } from '../croc';
-import { copyText, imageToDataUrl, keyLabel, stampOf } from '../lib/format';
+import { copyText, imageToDataUrl, keyLabel, openLink, stampOf } from '../lib/format';
+
+const SOURCE_URL = 'https://github.com/pwalda/crocodile';
 import { desktop } from '../platform';
 import { Avatar, Button, Input, Label, Toggle, cx } from '../components/ui';
 import type { CoordinatorSettings, CoordinatorStatus } from '../../main/ipc-types';
@@ -1025,6 +1027,21 @@ function AboutTab() {
           by to take over.
         </p>
         <p>Volunteer coordination servers handle introductions and never see content.</p>
+      </Card>
+      <Card className="mt-3 space-y-2 text-sm leading-relaxed text-text-2">
+        <p>
+          Crocodile is free software: the app, coordination server and directory are licensed under
+          the GNU Affero General Public License v3; the protocol, crypto and client libraries under
+          Apache-2.0. “Crocodile” and the crocodile logo are trademarks of the project.
+        </p>
+        <div className="flex gap-2 pt-1">
+          <Button variant="secondary" onClick={() => openLink(SOURCE_URL)}>
+            Source code
+          </Button>
+          <Button variant="ghost" onClick={() => openLink(`${SOURCE_URL}/blob/main/LICENSE`)}>
+            License
+          </Button>
+        </div>
       </Card>
     </>
   );

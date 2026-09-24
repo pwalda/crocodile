@@ -12,7 +12,7 @@ import { PeopleView } from './components/PeopleView';
 import { CallDock } from './components/CallDock';
 import { CommandPalette } from './components/CommandPalette';
 import { Avatar, Button, Toasts, UserName } from './components/ui';
-import { EyeMark, Logo } from './components/Logo';
+import { CrocMark, Logo } from './components/Logo';
 import {
   AddSpaceModal,
   CreateChannelModal,
@@ -118,7 +118,7 @@ function Shell() {
 function EmptyState({ title, text }: { title: string; text: string }) {
   return (
     <div className="island flex flex-1 flex-col items-center justify-center text-center">
-      <EyeMark size={64} className="text-accent" />
+      <CrocMark size={64} className="text-accent" />
       <h2 className="mt-4 text-xl font-bold">{title}</h2>
       <p className="mt-1 text-muted">{text}</p>
     </div>

@@ -110,6 +110,8 @@ export class Directory {
     app.get(DIRECTORY_PATHS.health, async () => ({
       ok: true,
       servers: this.listing().servers.length,
+      // AGPL-3.0 section 13: where to get this service's source.
+      source: process.env.CROC_SOURCE_URL ?? 'https://github.com/pwalda/crocodile',
     }));
     app.get(DIRECTORY_PATHS.list, async (_req, reply) => {
       reply.header('cache-control', 'public, max-age=15');
