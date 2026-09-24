@@ -1,6 +1,7 @@
 import { createSocket, type RemoteInfo, type Socket } from 'node:dgram';
 import { createHash, createHmac, timingSafeEqual } from 'node:crypto';
 import { isIPv4 } from 'node:net';
+import { networkInterfaces } from 'node:os';
 
 /**
  * A small TURN server (RFC 5766 over UDP) plus STUN binding responder.
@@ -254,6 +255,8 @@ const u32 = (n: number) => {
 interface Allocation {
   tuple: string;
   client: { address: string; port: number };
+  /** Listening socket the client talks to; replies must come from it. */
+  via: Socket;
   userId: string;
   integrityKey: Buffer;
   grantExpiresAt: number;
@@ -281,7 +284,8 @@ export interface TurnServerOptions {
 
 export class TurnServer {
   readonly limits: TurnLimits;
-  private socket!: Socket;
+  /** One socket per local address, so replies leave from the address the client used. */
+  private sockets: Socket[] = [];
   private allocations = new Map<string, Allocation>();
   private sweep?: ReturnType<typeof setInterval>;
   port = 0;
@@ -292,17 +296,21 @@ export class TurnServer {
 
   async start(): Promise<this> {
     const host = this.opts.host ?? '0.0.0.0';
-    this.socket = createSocket({ type: host.includes(':') ? 'udp6' : 'udp4', reuseAddr: true });
-    this.socket.on('message', (msg, rinfo) => this.onClientPacket(msg, rinfo));
-    await new Promise<void>((resolve, reject) => {
-      this.socket.once('error', reject);
-      this.socket.bind(this.opts.port, host, () => {
-        this.socket.off('error', reject);
-        this.socket.on('error', () => {});
-        resolve();
-      });
-    });
-    this.port = this.socket.address().port;
+    const wildcard = host === '0.0.0.0' || host === '::';
+    const addresses = wildcard ? localAddresses(host === '::') : [host];
+    let port = this.opts.port;
+    for (const address of addresses) {
+      try {
+        const socket = await bindUdp(address, port);
+        port = socket.address().port;
+        socket.on('message', (msg, rinfo) => this.onClientPacket(socket, msg, rinfo));
+        this.sockets.push(socket);
+      } catch (err) {
+        if (this.sockets.length === 0 && address === addresses.at(-1)) throw err;
+      }
+    }
+    if (this.sockets.length === 0) throw new Error('could not bind any UDP socket');
+    this.port = port;
     this.sweep = setInterval(() => this.expire(), 2000);
     this.sweep.unref?.();
     return this;
@@ -331,7 +339,7 @@ export class TurnServer {
   stop() {
     clearInterval(this.sweep);
     for (const a of [...this.allocations.values()]) this.remove(a);
-    this.socket?.close();
+    for (const s of this.sockets) s.close();
   }
 
   // ---------------------------------------------------------------------------
@@ -357,13 +365,14 @@ export class TurnServer {
 
   /** Long-term credential check; returns the key and user, or sends an error. */
   private authenticate(
+    via: Socket,
     m: Msg,
     rinfo: RemoteInfo,
   ): { key: Buffer; userId: string; grantExpiresAt: number } | null {
     const username = attrOf(m, ATTR.username)?.toString('utf8');
     const nonce = attrOf(m, ATTR.nonce)?.toString('utf8');
     const challenge = (code: number, reason: string) =>
-      this.reply(m, rinfo, CLASS.error, [
+      this.reply(via, m, rinfo, CLASS.error, [
         errorAttr(code, reason),
         { type: ATTR.realm, value: Buffer.from(REALM) },
         { type: ATTR.nonce, value: Buffer.from(this.nonce()) },
@@ -392,7 +401,7 @@ export class TurnServer {
     return { key, userId: match[2]!, grantExpiresAt: expiry };
   }
 
-  private reply(m: Msg, rinfo: RemoteInfo, cls: number, attrs: Attr[], key?: Buffer) {
+  private reply(via: Socket, m: Msg, rinfo: RemoteInfo, cls: number, attrs: Attr[], key?: Buffer) {
     const out = encodeStun(
       m.method,
       cls,
@@ -400,10 +409,10 @@ export class TurnServer {
       [...attrs, { type: ATTR.software, value: Buffer.from('crocodile') }],
       key,
     );
-    this.socket.send(out, rinfo.port, rinfo.address);
+    via.send(out, rinfo.port, rinfo.address);
   }
 
-  private onClientPacket(buf: Buffer, rinfo: RemoteInfo) {
+  private onClientPacket(via: Socket, buf: Buffer, rinfo: RemoteInfo) {
     const tuple = `${rinfo.address}|${rinfo.port}`;
     // ChannelData: first two bits 01.
     if (buf.length >= 4 && (buf[0]! & 0xc0) === 0x40) {
@@ -425,7 +434,7 @@ export class TurnServer {
     const m = parseStun(buf);
     if (!m) return;
     if (m.method === METHOD.binding && m.cls === CLASS.request) {
-      this.reply(m, rinfo, CLASS.success, [
+      this.reply(via, m, rinfo, CLASS.success, [
         { type: ATTR.xorMappedAddress, value: xorAddress(rinfo.address, rinfo.port, m.txId) },
       ]);
       return;
@@ -443,30 +452,31 @@ export class TurnServer {
     if (m.cls !== CLASS.request) return;
     switch (m.method) {
       case METHOD.allocate:
-        void this.onAllocate(m, rinfo, tuple);
+        void this.onAllocate(via, m, rinfo, tuple);
         return;
       case METHOD.refresh:
-        this.onRefresh(m, rinfo, tuple);
+        this.onRefresh(via, m, rinfo, tuple);
         return;
       case METHOD.createPermission:
-        this.onCreatePermission(m, rinfo, tuple);
+        this.onCreatePermission(via, m, rinfo, tuple);
         return;
       case METHOD.channelBind:
-        this.onChannelBind(m, rinfo, tuple);
+        this.onChannelBind(via, m, rinfo, tuple);
         return;
     }
   }
 
-  private async onAllocate(m: Msg, rinfo: RemoteInfo, tuple: string) {
-    const auth = this.authenticate(m, rinfo);
+  private async onAllocate(via: Socket, m: Msg, rinfo: RemoteInfo, tuple: string) {
+    const auth = this.authenticate(via, m, rinfo);
     if (!auth) return;
     if (this.allocations.has(tuple)) {
-      this.reply(m, rinfo, CLASS.error, [errorAttr(437, 'Allocation Mismatch')], auth.key);
+      this.reply(via, m, rinfo, CLASS.error, [errorAttr(437, 'Allocation Mismatch')], auth.key);
       return;
     }
     const transport = attrOf(m, ATTR.requestedTransport);
     if (!transport || transport[0] !== 17) {
       this.reply(
+        via,
         m,
         rinfo,
         CLASS.error,
@@ -481,7 +491,14 @@ export class TurnServer {
       (!users.has(auth.userId) && users.size >= this.limits.maxUsers) ||
       mine >= this.limits.maxAllocationsPerUser
     ) {
-      this.reply(m, rinfo, CLASS.error, [errorAttr(486, 'Allocation Quota Reached')], auth.key);
+      this.reply(
+        via,
+        m,
+        rinfo,
+        CLASS.error,
+        [errorAttr(486, 'Allocation Quota Reached')],
+        auth.key,
+      );
       return;
     }
     const socket = createSocket({ type: isIPv4(rinfo.address) ? 'udp4' : 'udp6' });
@@ -494,7 +511,7 @@ export class TurnServer {
         });
       });
     } catch {
-      this.reply(m, rinfo, CLASS.error, [errorAttr(508, 'Insufficient Capacity')], auth.key);
+      this.reply(via, m, rinfo, CLASS.error, [errorAttr(508, 'Insufficient Capacity')], auth.key);
       return;
     }
     socket.on('error', () => {});
@@ -503,6 +520,7 @@ export class TurnServer {
     const a: Allocation = {
       tuple,
       client: { address: rinfo.address, port: rinfo.port },
+      via,
       userId: auth.userId,
       integrityKey: auth.key,
       grantExpiresAt: auth.grantExpiresAt,
@@ -520,6 +538,7 @@ export class TurnServer {
     this.allocations.set(tuple, a);
     this.opts.log?.('relay allocation', { user: auth.userId, lifetime });
     this.reply(
+      via,
       m,
       rinfo,
       CLASS.success,
@@ -539,41 +558,48 @@ export class TurnServer {
     return Math.max(0, Math.min(want, 3600, left));
   }
 
-  private onRefresh(m: Msg, rinfo: RemoteInfo, tuple: string) {
-    const auth = this.authenticate(m, rinfo);
+  private onRefresh(via: Socket, m: Msg, rinfo: RemoteInfo, tuple: string) {
+    const auth = this.authenticate(via, m, rinfo);
     if (!auth) return;
     const a = this.allocations.get(tuple);
     if (!a) {
-      this.reply(m, rinfo, CLASS.error, [errorAttr(437, 'Allocation Mismatch')], auth.key);
+      this.reply(via, m, rinfo, CLASS.error, [errorAttr(437, 'Allocation Mismatch')], auth.key);
       return;
     }
     const lifetime = this.lifetime(m, auth.grantExpiresAt);
     if (lifetime === 0) this.remove(a);
     else a.expiresAt = Date.now() + lifetime * 1000;
-    this.reply(m, rinfo, CLASS.success, [{ type: ATTR.lifetime, value: u32(lifetime) }], auth.key);
+    this.reply(
+      via,
+      m,
+      rinfo,
+      CLASS.success,
+      [{ type: ATTR.lifetime, value: u32(lifetime) }],
+      auth.key,
+    );
   }
 
-  private onCreatePermission(m: Msg, rinfo: RemoteInfo, tuple: string) {
-    const auth = this.authenticate(m, rinfo);
+  private onCreatePermission(via: Socket, m: Msg, rinfo: RemoteInfo, tuple: string) {
+    const auth = this.authenticate(via, m, rinfo);
     if (!auth) return;
     const a = this.allocations.get(tuple);
     if (!a) {
-      this.reply(m, rinfo, CLASS.error, [errorAttr(437, 'Allocation Mismatch')], auth.key);
+      this.reply(via, m, rinfo, CLASS.error, [errorAttr(437, 'Allocation Mismatch')], auth.key);
       return;
     }
     const peers = m.attrs
       .filter((x) => x.type === ATTR.xorPeerAddress)
       .map((x) => parseXorAddress(x.value, m.txId));
     if (peers.length === 0 || peers.some((p) => !p)) {
-      this.reply(m, rinfo, CLASS.error, [errorAttr(400, 'Bad Request')], auth.key);
+      this.reply(via, m, rinfo, CLASS.error, [errorAttr(400, 'Bad Request')], auth.key);
       return;
     }
     for (const p of peers) a.permissions.set(p!.address, Date.now() + 300_000);
-    this.reply(m, rinfo, CLASS.success, [], auth.key);
+    this.reply(via, m, rinfo, CLASS.success, [], auth.key);
   }
 
-  private onChannelBind(m: Msg, rinfo: RemoteInfo, tuple: string) {
-    const auth = this.authenticate(m, rinfo);
+  private onChannelBind(via: Socket, m: Msg, rinfo: RemoteInfo, tuple: string) {
+    const auth = this.authenticate(via, m, rinfo);
     if (!auth) return;
     const a = this.allocations.get(tuple);
     const ch = attrOf(m, ATTR.channelNumber);
@@ -581,7 +607,7 @@ export class TurnServer {
     const peer = peerAttr && parseXorAddress(peerAttr, m.txId);
     const number = ch && ch.length >= 2 ? ch.readUInt16BE(0) : 0;
     if (!a || !peer || number < 0x4000 || number > 0x7ffe) {
-      this.reply(m, rinfo, CLASS.error, [errorAttr(400, 'Bad Request')], auth.key);
+      this.reply(via, m, rinfo, CLASS.error, [errorAttr(400, 'Bad Request')], auth.key);
       return;
     }
     const key = `${peer.address}|${peer.port}`;
@@ -590,13 +616,13 @@ export class TurnServer {
       (existing && `${existing.address}|${existing.port}` !== key) ||
       (a.channelByPeer.has(key) && a.channelByPeer.get(key) !== number)
     ) {
-      this.reply(m, rinfo, CLASS.error, [errorAttr(400, 'Bad Request')], auth.key);
+      this.reply(via, m, rinfo, CLASS.error, [errorAttr(400, 'Bad Request')], auth.key);
       return;
     }
     a.channels.set(number, peer);
     a.channelByPeer.set(key, number);
     a.permissions.set(peer.address, Date.now() + 300_000);
-    this.reply(m, rinfo, CLASS.success, [], auth.key);
+    this.reply(via, m, rinfo, CLASS.success, [], auth.key);
   }
 
   private onPeerPacket(a: Allocation, data: Buffer, from: RemoteInfo) {
@@ -607,7 +633,7 @@ export class TurnServer {
       out.writeUInt16BE(channel, 0);
       out.writeUInt16BE(data.length, 2);
       data.copy(out, 4);
-      this.socket.send(out, a.client.port, a.client.address);
+      a.via.send(out, a.client.port, a.client.address);
       return;
     }
     const txId = Buffer.alloc(12);
@@ -616,7 +642,7 @@ export class TurnServer {
       { type: ATTR.xorPeerAddress, value: xorAddress(from.address, from.port, txId) },
       { type: ATTR.data, value: data },
     ]);
-    this.socket.send(ind, a.client.port, a.client.address);
+    a.via.send(ind, a.client.port, a.client.address);
   }
 
   private hasPermission(a: Allocation, address: string) {
@@ -654,4 +680,27 @@ export class TurnServer {
     }
     this.opts.log?.('relay allocation closed', { user: a.userId, bytes: a.bytesRelayed });
   }
+}
+
+function localAddresses(ipv6: boolean): string[] {
+  const out: string[] = [];
+  for (const list of Object.values(networkInterfaces())) {
+    for (const a of list ?? []) {
+      if (a.family === 'IPv4') out.push(a.address);
+      else if (ipv6 && !a.address.startsWith('fe80')) out.push(a.address);
+    }
+  }
+  return out.length ? out : ['0.0.0.0'];
+}
+
+function bindUdp(address: string, port: number): Promise<Socket> {
+  return new Promise((resolve, reject) => {
+    const socket = createSocket({ type: isIPv4(address) ? 'udp4' : 'udp6' });
+    socket.once('error', reject);
+    socket.bind(port, address, () => {
+      socket.off('error', reject);
+      socket.on('error', () => {});
+      resolve(socket);
+    });
+  });
 }
