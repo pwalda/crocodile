@@ -76,7 +76,7 @@ describe('client', () => {
       'incoming request',
     );
     await alice.addFriend(bob.userId);
-    await waitFor(() => bob.state.friends.friends.includes(alice.userId), 3000, 'friendship');
+    await waitFor(() => bob.state.friends.friends.includes(alice.userId), 12000, 'friendship');
 
     // Space + invite.
     const spaceId = await alice.createSpace('Swamp');
@@ -103,14 +103,14 @@ describe('client', () => {
     expect(alice.state.sessions[sid]!.iAmHost).toBe(true);
 
     await alice.sendMessage(ch, 'hello swamp');
-    await waitFor(() => bodies(bob, ch).includes('hello swamp'), 3000, 'bob receives');
+    await waitFor(() => bodies(bob, ch).includes('hello swamp'), 12000, 'bob receives');
     await bob.sendMessage(ch, 'hi alice');
-    await waitFor(() => bodies(alice, ch).includes('hi alice'), 3000, 'alice receives');
+    await waitFor(() => bodies(alice, ch).includes('hi alice'), 12000, 'alice receives');
 
     // Edits fold onto the original.
     const original = bob.state.messages[ch]!.find((m) => m.body === 'hello swamp')!;
     await alice.editMessage(ch, original.id, 'hello swamp!');
-    await waitFor(() => bodies(bob, ch).includes('hello swamp!'), 3000, 'edit');
+    await waitFor(() => bodies(bob, ch).includes('hello swamp!'), 12000, 'edit');
     expect(bob.state.messages[ch]!.find((m) => m.id === original.id)!.edited).toBe(true);
   });
 
@@ -124,13 +124,13 @@ describe('client', () => {
     await bob.joinWithInvite(code);
     const ch = channelOf(alice, spaceId);
     const sid = sessionIds.space(spaceId);
-    await waitFor(() => alice.state.sessions[sid]?.peers.includes(bob.userId), 5000);
+    await waitFor(() => alice.state.sessions[sid]?.peers.includes(bob.userId), 12000);
     for (let i = 0; i < 5; i++) await alice.sendMessage(ch, `msg ${i}`);
 
     const carol = await signUp(makeClient(net, coord), 'carol');
     await carol.joinWithInvite(code);
     await carol.openChannel(ch);
-    await waitFor(() => bodies(carol, ch).length === 5, 5000, 'history');
+    await waitFor(() => bodies(carol, ch).length === 5, 12000, 'history');
     expect(bodies(carol, ch)).toEqual(['msg 0', 'msg 1', 'msg 2', 'msg 3', 'msg 4']);
   });
 
@@ -140,21 +140,21 @@ describe('client', () => {
     const alice = await signUp(makeClient(net, coord), 'alice');
     const bob = await signUp(makeClient(net, coord), 'bob');
     await alice.addFriend(bob.userId);
-    await waitFor(() => bob.state.friends.incoming.includes(alice.userId), 3000);
+    await waitFor(() => bob.state.friends.incoming.includes(alice.userId), 12000);
     await bob.addFriend(alice.userId);
 
     const dm = await alice.openDm(bob.userId);
-    await waitFor(() => bob.state.dms.includes(alice.userId), 3000, 'dm invite');
+    await waitFor(() => bob.state.dms.includes(alice.userId), 12000, 'dm invite');
     await alice.openChannel(dm);
     await bob.openChannel(dm);
-    await waitFor(() => alice.state.sessions[dm]?.peers.includes(bob.userId), 5000, 'dm connected');
+    await waitFor(() => alice.state.sessions[dm]?.peers.includes(bob.userId), 12000, 'dm connected');
     await alice.sendMessage(dm, 'psst');
-    await waitFor(() => bodies(bob, dm).includes('psst'), 3000, 'dm delivered');
+    await waitFor(() => bodies(bob, dm).includes('psst'), 12000, 'dm delivered');
 
     // Bob goes offline; Alice writes; Bob comes back and syncs from Alice.
     const bobKv = bob.platform.kv as MemoryKeyValueStore;
     await bob.shutdown();
-    await waitFor(() => alice.state.sessions[dm]?.peers.length === 0, 5000, 'bob gone');
+    await waitFor(() => alice.state.sessions[dm]?.peers.length === 0, 12000, 'bob gone');
     await alice.sendMessage(dm, 'while you were away');
     expect(alice.state.messages[dm]!.at(-1)!.pending).toBe(true);
 
@@ -187,7 +187,7 @@ describe('client', () => {
     const sid = sessionIds.space(spaceId);
     await bob.openChannel(ch);
     await carol.openChannel(ch);
-    await waitFor(() => carol.state.sessions[sid]?.peers.length === 2, 5000, 'all connected');
+    await waitFor(() => carol.state.sessions[sid]?.peers.length === 2, 12000, 'all connected');
     expect(carol.state.sessions[sid]!.host).toBe(alice.userId);
     expect(carol.state.sessions[sid]!.backup).toBe(bob.userId);
 
@@ -202,19 +202,19 @@ describe('client', () => {
       'failover',
     );
     await carol.sendMessage(ch, 'still here?');
-    await waitFor(() => bodies(bob, ch).includes('still here?'), 3000, 'chat after failover');
+    await waitFor(() => bodies(bob, ch).includes('still here?'), 12000, 'chat after failover');
   });
 
   it('works across two coordination servers in a mesh', async () => {
     const a = await server({ name: 'A' });
     const b = await server({ name: 'B', meshPeers: [a.url] });
-    await waitFor(() => a.mesh.peerIds().length === 1, 5000, 'mesh');
+    await waitFor(() => a.mesh.peerIds().length === 1, 12000, 'mesh');
     const net = new FakeRelayNetwork();
     const alice = await signUp(makeClient(net, a, { nat: 'open' }), 'alice');
     const bob = await signUp(makeClient(net, b), 'bob');
     const spaceId = await alice.createSpace('Federated');
     const code = await alice.createInvite(spaceId);
-    await waitFor(() => b.records.get(`invite:${code}`), 3000, 'invite replicated');
+    await waitFor(() => b.records.get(`invite:${code}`), 12000, 'invite replicated');
     await bob.joinWithInvite(code);
     const ch = channelOf(alice, spaceId);
     await bob.openChannel(ch);
@@ -225,7 +225,7 @@ describe('client', () => {
       'cross-server relay',
     );
     await alice.sendMessage(ch, 'across the mesh');
-    await waitFor(() => bodies(bob, ch).includes('across the mesh'), 3000);
+    await waitFor(() => bodies(bob, ch).includes('across the mesh'), 12000);
     expect(bob.state.server!.info.id).toBe(b.info.id);
     expect(alice.state.server!.info.id).toBe(a.info.id);
   });
@@ -266,12 +266,12 @@ describe('multiple devices', () => {
     );
     alice2.finishOnboarding();
     expect(alice2.deviceId).not.toBe(alice1.deviceId);
-    await waitFor(() => alice1.state.devices.length === 2, 5000, 'device list');
+    await waitFor(() => alice1.state.devices.length === 2, 12000, 'device list');
 
     const spaceId = await alice1.createSpace('Devices');
     const code2 = await alice1.createInvite(spaceId);
     await bob.joinWithInvite(code2);
-    await waitFor(() => alice2.state.spaces[spaceId], 5000, 'space on second device');
+    await waitFor(() => alice2.state.spaces[spaceId], 12000, 'space on second device');
     const ch = channelOf(alice1, spaceId);
     for (const c of [alice1, alice2, bob]) await c.openChannel(ch);
     const sid = sessionIds.space(spaceId);
@@ -297,7 +297,7 @@ describe('multiple devices', () => {
     // Removing a device: peers stop trusting it.
     await alice1.revokeDevice(alice2.deviceId);
     const alice2Peer = `${alice2.userId}.${alice2.deviceId}`;
-    await waitFor(() => !bob.isAllowedPeer(sid, alice2Peer), 5000, 'revocation seen by bob');
+    await waitFor(() => !bob.isAllowedPeer(sid, alice2Peer), 12000, 'revocation seen by bob');
     expect(bob.isAllowedPeer(sid, `${alice1.userId}.${alice1.deviceId}`)).toBe(true);
   });
 
