@@ -40,16 +40,16 @@ hosts a group. This document explains how the pieces fit and why.
 
 ## 2. Design principles → mechanisms
 
-| Principle                                                             | Mechanism                                                                                                                                                                                                                                                                                                                                                                       |
-| --------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Voice and text only P2P, always E2E                                   | Voice frames are encrypted by the sender's app (Encoded Transforms, SFrame-style) before they leave the device; text is group-encrypted with sender keys. The host relay forwards ciphertext. Coordination servers carry signalling only. There is no TURN fallback: if peers cannot reach the host, the host is re-elected rather than traffic being relayed through a server. |
-| Coordination servers on a good-will basis                             | Anyone can run `crocodile-coordinator` or tick "Host a coordination server" in the app. Servers register with the directory, which verifies they are reachable.                                                                                                                                                                                                                 |
-| Servers hold accounts and metadata, shared across a mesh              | Accounts are key pairs. Profiles, friend lists, spaces, invites and memberships are **records signed by their author**; every server replicates every record and every client re-verifies them, so no server has to be trusted for integrity.                                                                                                                                   |
-| Lowest-latency server, runner-up as backup                            | Clients fetch the directory, probe `/health` round-trip times, connect to the best and fail over to the standby instantly.                                                                                                                                                                                                                                                      |
-| Every install can be server and client                                | The coordinator and relay are libraries; the desktop app runs them in Electron utility processes.                                                                                                                                                                                                                                                                               |
-| Hassle-free install                                                   | One-click per-user installers (NSIS/DMG/AppImage/deb/rpm), no accounts, passwords or emails: onboarding is "pick a name".                                                                                                                                                                                                                                                       |
-| Best peer hosts groups, runner-up is backup, server re-connects peers | Per-session host election on the coordination server with a standby backup and failover on disconnect or member reports.                                                                                                                                                                                                                                                        |
-| Discord/TeamSpeak-style UX                                            | Space rail, text + voice channels with live occupants and speaking indicators, friends, DMs, calls.                                                                                                                                                                                                                                                                             |
+| Principle                                                             | Mechanism                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| --------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Voice and text only P2P, always E2E                                   | Voice frames are encrypted by the sender's app (Encoded Transforms, SFrame-style) before they leave the device; text is group-encrypted with ratcheting sender keys. The host relay forwards ciphertext. Coordination servers carry signalling only. If peers cannot reach the host, the host is re-elected first; only users who opted in may then fall back to a coordinator's relay (TURN), which carries the same end-to-end ciphertext, for at most an hour at a time and for a capped number of users per server. |
+| Coordination servers on a good-will basis                             | Anyone can run `crocodile-coordinator` or tick "Host a coordination server" in the app. Servers register with the directory, which verifies they are reachable.                                                                                                                                                                                                                                                                                                                                                         |
+| Servers hold accounts and metadata, shared across a mesh              | Accounts are key pairs. Profiles, friend lists, spaces, invites and memberships are **records signed by their author**; every server replicates every record and every client re-verifies them, so no server has to be trusted for integrity.                                                                                                                                                                                                                                                                           |
+| Lowest-latency server, runner-up as backup                            | Clients fetch the directory, probe `/health` round-trip times, connect to the best and fail over to the standby instantly.                                                                                                                                                                                                                                                                                                                                                                                              |
+| Every install can be server and client                                | The coordinator and relay are libraries; the desktop app runs them in Electron utility processes.                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| Hassle-free install                                                   | One-click per-user installers (NSIS/DMG/AppImage/deb/rpm), no accounts, passwords or emails: onboarding is "pick a name".                                                                                                                                                                                                                                                                                                                                                                                               |
+| Best peer hosts groups, runner-up is backup, server re-connects peers | Per-session host election on the coordination server with a standby backup and failover on disconnect or member reports.                                                                                                                                                                                                                                                                                                                                                                                                |
+| Discord/TeamSpeak-style UX                                            | Familiar model (spaces, text channels, voice rooms, friends, DMs, calls) with its own look: space tabs, floating panels, rooms as live cards, a call dock, a command palette, light and dark themes.                                                                                                                                                                                                                                                                                                                    |
 
 ## 3. Identity and signed records
 
@@ -57,8 +57,16 @@ hosts a group. This document explains how the pieces fit and why.
   X25519 encryption key. `userId = base32(sha256(signing public key))[:26]`,
   so ids are self-certifying: a server cannot substitute someone's key.
 - The seed is the account. It is shown once as a **recovery key**
-  (base32 + checksum) and stored with the OS keychain (Electron
-  `safeStorage`).
+  (base32 + checksum) and kept encrypted with a key from the OS keychain
+  (Electron `safeStorage`), like all local data.
+- **Devices.** Each install has a device id and publishes a signed `device`
+  record with a name and a **prekey bundle** (X25519 + ML-KEM-768) that
+  rotates weekly. The peer id used in sessions is `<userId>.<deviceId>`, so
+  one person can be in a call from one device while chatting on another.
+  A new device is linked by typing a short code shown on it into a signed-in
+  device and comparing a 6-digit security code on both; the account seed is
+  then sent in a hybrid-encrypted, signed box. Removing a device publishes
+  a permanent revocation.
 - `name#1234` tags are a display aid derived from the user id.
 - **Safety numbers** let two users compare keys out of band.
 
@@ -71,6 +79,7 @@ Metadata lives in signed records (`packages/protocol/src/records.ts`):
 | space   | `space:<spaceId>`           | the owner; `spaceId = hash(owner key, nonce)` binds ownership without history |
 | invite  | `invite:<code>`             | the space owner                                                               |
 | member  | `member:<spaceId>:<userId>` | the user, referencing a valid invite                                          |
+| device  | `device:<userId>:<device>`  | the user (name, platform, current prekeys, revoked flag)                      |
 
 Validation (`crypto/src/records.ts`) checks the signature, authority, and
 last-writer-wins versioning, identically on servers and clients.
@@ -79,8 +88,12 @@ last-writer-wins versioning, identically on servers and clients.
 
 A coordinator (`packages/coordinator`) offers a WebSocket JSON-RPC API:
 
-1. Server sends a signed `hello` with a challenge. The client checks it
-   against the key in the directory listing, then signs the challenge.
+1. Server sends a signed `hello` with a challenge and a fresh hybrid
+   key-exchange offer (X25519 + ML-KEM-768). The client checks the signature
+   against the key in the directory listing, answers the key exchange and
+   signs the transcript. From then on every frame is AES-256-GCM encrypted
+   and padded, so metadata is confidential even over plain `ws://` to a
+   home server. Server-to-server mesh links use the same handshake.
 2. The client can put and get records, subscribe to prefixes, search users,
    watch presence and voice-channel occupancy, join or leave sessions, and
    send signalling messages to other session members.
@@ -103,8 +116,15 @@ the call.
 **Storage.** SQLite (`node:sqlite`) with secondary indexes, or a
 JSON-snapshotted memory store where SQLite is unavailable.
 
-**STUN.** Each coordinator runs a minimal RFC 5389 binding responder so the
-ecosystem does not depend on third-party STUN. It never relays traffic.
+**STUN and the opt-in relay.** Each coordinator answers STUN (RFC 5389) on
+one UDP port so the ecosystem does not depend on third-party STUN. The same
+port can act as a TURN relay (RFC 5766) for users who turned on "Relay through
+a coordination server" and whose direct connection failed. Grants use
+short-lived credentials, last at most one hour (the app asks before
+continuing), are capped per server (`--relay-max-users`, 25 by default, 10 in
+the desktop app) and rate-limited per allocation. The relayed packets are the
+same DTLS-SRTP-wrapped, end-to-end encrypted frames: the server sees only
+ciphertext, sizes and timing.
 
 ## 5. Host election and failover
 
@@ -151,20 +171,35 @@ splice itself into the WebRTC transport.
 
 ## 7. End-to-end encryption
 
-- **Sender keys.** Each member has a random 256-bit key per session. It is
-  sent to every other _verified_ member (space membership or DM party is
-  checked from signed records, never taken from the relay or server) in a
-  **sealed box**: ephemeral X25519 → HKDF-SHA256 → AES-256-GCM, signed with the
-  sender's Ed25519 key. Keys rotate whenever a member leaves.
-- **Voice.** An Encoded Transform worker (`client-core/src/frame-worker.ts`)
-  encrypts every Opus frame with AES-256-GCM before packetisation:
-  `ciphertext ‖ tag ‖ kid ‖ counter ‖ 0xC7`, nonce = salt ⊕ (kid ‖ counter).
-  Receivers look up the key by `kid`. Frames that cannot be encrypted or
-  authenticated are dropped, never sent in the clear. Voice is disabled on
-  platforms without encoded transforms.
+Goal: the strongest protection that costs no noticeable CPU, latency or user
+effort. Everything below is automatic.
+
+- **Hybrid post-quantum key exchange.** Pairwise secrets (sender-key
+  distribution, history sync, device linking, server channels) combine X25519
+  with ML-KEM-768 (FIPS 203) through HKDF-SHA256, so recorded traffic stays
+  safe even against a future quantum computer. Sealed boxes to a device use
+  its current **prekey**; prekey secrets are deleted after rotation plus a
+  grace period, giving forward secrecy even for keys delivered to offline
+  devices. Every box is signed by the sender's Ed25519 key.
+- **Ratcheting sender keys.** Each member has a sender key per session with
+  two HKDF hash chains: the text chain advances after every message
+  (per-message forward secrecy); the audio chain advances every 30 s. Keys are
+  replaced with fresh randomness every 30 minutes and whenever someone leaves
+  (post-compromise healing), and are only ever sent to devices whose
+  membership the client verified itself from signed records.
+- **Voice.** An Encoded Transform worker encrypts every Opus frame with
+  AES-256-GCM before packetisation:
+  `ciphertext ‖ tag ‖ kid ‖ gen ‖ counter ‖ 0xC8`, the trailer authenticated
+  as AAD. Frames that cannot be encrypted are dropped, never sent in the
+  clear. Opus runs at a **constant bitrate** so packet sizes do not reveal
+  what is said.
 - **Text.** Messages are signed by their author (so history can be re-shared
-  verifiably) and group-encrypted with the sender key.
-- **Transport.** DTLS-SRTP and SCTP-over-DTLS underneath, as in all WebRTC.
+  verifiably), padded (Padmé) to hide their exact length and encrypted with
+  the text chain.
+- **At rest.** Identity, prekeys and message history are encrypted in local
+  storage with a key protected by the OS keychain.
+- **Transport.** DTLS-SRTP and SCTP-over-DTLS underneath, as in all WebRTC;
+  SDP is identity-signed so nobody can splice into the connection.
 
 ## 8. Text history without servers
 
@@ -181,8 +216,8 @@ offline.
 `CrocodileClient` (`client-core/src/client.ts`) exposes one observable state
 object plus methods (create space, send message, join voice, …).
 `GroupSession` follows a session's state: it hosts the relay when elected,
-connects to the host otherwise, runs the E2E layer and reconnects on
-failover. Platform specifics come in through a `PlatformAdapter` (storage,
+connects to the host otherwise, runs the E2E layer, reconnects on
+failover and, if the user allowed it, falls back to a coordinator relay. Platform specifics come in through a `PlatformAdapter` (storage,
 relay runner, WebRTC, capabilities), so the same core serves desktop, web
 (which never hosts) and mobile.
 
@@ -203,17 +238,23 @@ relay runner, WebRTC, capabilities), so the same core serves desktop, web
 
 See [docs/ROADMAP.md](docs/ROADMAP.md). The main ones:
 
-- **No TURN, by design.** Peers behind symmetric NATs on both sides may not
-  connect. We elect reachable hosts and plan UPnP/NAT-PMP port mapping; an
-  opt-in "encrypted relay of last resort" is open for discussion.
-- **Sender keys, not MLS.** There is forward secrecy per session and rekeying
-  on leave, but not MLS-grade post-compromise security. MLS (RFC 9420) is the
-  planned upgrade.
-- **Transport security to coordinators.** Server identity is verified, but
-  plain `ws://` is allowed for home-hosted servers. Use HTTPS/WSS for public
-  servers.
-- **Mesh trust.** Servers cannot forge records. A malicious server could
-  still lie about presence or drop messages; clients mitigate this by
-  verifying membership themselves before sharing keys.
-- **One device per identity** at a time (restore on another device with the
-  recovery key). Multi-device linking is planned.
+- **Offline delivery is peer-to-peer.** A message reaches someone who was
+  offline only once a member who has it is online at the same time as them
+  (any of their devices counts). Servers never store content, so there is no
+  guaranteed store-and-forward as in Signal or Telegram.
+- **Sender keys, not MLS.** Ratchets and periodic rekeying give forward
+  secrecy and post-compromise healing within 30 minutes; MLS (RFC 9420) would
+  make rekeying very large groups cheaper.
+- **Devices share the account key.** Linked devices hold the same identity
+  seed. Removing a device stops new keys from reaching it, but a stolen device
+  could still sign as you. Per-device signing keys certified by the identity
+  are planned.
+- **The relay is UDP only.** Networks that block all UDP cannot use it yet
+  (TURN over TCP/TLS is planned).
+- **Mesh trust.** Servers cannot forge records or read content. A malicious
+  server could still lie about presence or drop signalling; clients verify
+  membership themselves before sharing keys.
+- **Global push-to-talk** needs X11 on Linux (not Wayland) and the
+  Accessibility permission on macOS; otherwise it works while the app is
+  focused.
+- **Mobile apps** are not built yet.

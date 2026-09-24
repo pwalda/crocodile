@@ -44,16 +44,30 @@ pnpm install && pnpm --filter @crocodile/coordinator build
 node packages/coordinator/dist/bin.js --help
 ```
 
-| Option         | Env               | Default                        |
-| -------------- | ----------------- | ------------------------------ |
-| `--name`       | `CROC_NAME`       | Crocodile coordinator          |
-| `--port`       | `CROC_PORT`       | 7443                           |
-| `--public-url` | `CROC_PUBLIC_URL` | `http://<host>:<port>`         |
-| `--data-dir`   | `CROC_DATA_DIR`   | `.crocodile-data`              |
-| `--directory`  | `CROC_DIRECTORY`  | none                           |
-| `--peers`      | `CROC_PEERS`      | none (static mesh peers)       |
-| `--stun-port`  | `CROC_STUN_PORT`  | same as port, `off` to disable |
-| `--private`    | `CROC_PRIVATE=1`  | announce to directory          |
+| Option              | Env                    | Default                        |
+| ------------------- | ---------------------- | ------------------------------ |
+| `--name`            | `CROC_NAME`            | Crocodile coordinator          |
+| `--port`            | `CROC_PORT`            | 7443                           |
+| `--public-url`      | `CROC_PUBLIC_URL`      | `http://<host>:<port>`         |
+| `--data-dir`        | `CROC_DATA_DIR`        | `.crocodile-data`              |
+| `--directory`       | `CROC_DIRECTORY`       | none                           |
+| `--peers`           | `CROC_PEERS`           | none (static mesh peers)       |
+| `--stun-port`       | `CROC_STUN_PORT`       | same as port, `off` to disable |
+| `--private`         | `CROC_PRIVATE=1`       | announce to directory          |
+| `--relay`           | `CROC_RELAY`           | `on` (`off` to disable)        |
+| `--relay-max-users` | `CROC_RELAY_MAX_USERS` | 25                             |
+| `--relay-ip`        | `CROC_RELAY_IP`        | public IP from `--public-url`  |
+
+### The opt-in relay
+
+Some users sit behind networks that block direct connections. If they turn
+on "Relay through a coordination server", your server can relay their
+already end-to-end encrypted media over the STUN UDP port (TURN). Each
+grant lasts at most one hour, `--relay-max-users` caps how many people use
+it at once, and each allocation is rate-limited (about 100 kbit/s of voice
+per person). Your server only ever sees ciphertext. Turn it off with
+`--relay off` if bandwidth is scarce. The desktop app's built-in server
+leaves it off unless you enable "Offer a relay".
 
 ## Running a directory
 

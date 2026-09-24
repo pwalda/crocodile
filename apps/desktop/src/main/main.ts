@@ -4,6 +4,7 @@ import {
   ipcMain,
   Menu,
   nativeImage,
+  Notification,
   safeStorage,
   session,
   shell,
@@ -350,12 +351,46 @@ app.whenReady().then(() => {
   createTray();
   applyCoordinator();
 
-  if (app.isPackaged) {
-    import('electron-updater')
-      .then(({ autoUpdater }) => autoUpdater.checkForUpdatesAndNotify())
-      .catch((err) => console.warn('auto-update unavailable', err));
-  }
+  if (app.isPackaged) void checkForUpdates();
 });
+
+/**
+ * Updates install themselves, except on macOS builds without a Developer ID
+ * signature: Squirrel.Mac refuses to apply those, so we point the user to the
+ * download instead (see docs/DISTRIBUTION.md).
+ */
+async function checkForUpdates() {
+  try {
+    const { autoUpdater } = await import('electron-updater');
+    if (process.platform === 'darwin' && !developerSigned()) {
+      autoUpdater.autoDownload = false;
+      autoUpdater.on('update-available', (info) => {
+        const n = new Notification({
+          title: 'A new version of Crocodile is available',
+          body: `Version ${info.version} is ready. Click to download it.`,
+        });
+        n.on('click', () => void shell.openExternal(RELEASES_URL));
+        n.show();
+      });
+      await autoUpdater.checkForUpdates();
+    } else {
+      await autoUpdater.checkForUpdatesAndNotify();
+    }
+  } catch (err) {
+    console.warn('auto-update unavailable', err);
+  }
+}
+
+const RELEASES_URL = 'https://github.com/pwalda/crocodile/releases/latest';
+
+function developerSigned(): boolean {
+  try {
+    const pkg = JSON.parse(readFileSync(join(app.getAppPath(), 'package.json'), 'utf8'));
+    return pkg.crocSigned === true;
+  } catch {
+    return false;
+  }
+}
 
 app.on('activate', showWindow);
 app.on('before-quit', () => {

@@ -23,6 +23,9 @@ const { values } = parseArgs({
     stun: { type: 'string' },
     capacity: { type: 'string' },
     private: { type: 'boolean' },
+    relay: { type: 'string' },
+    'relay-max-users': { type: 'string' },
+    'relay-ip': { type: 'string' },
     'log-level': { type: 'string' },
     help: { type: 'boolean', short: 'h' },
   },
@@ -45,6 +48,9 @@ Options (environment variable in brackets):
   --stun <urls>          extra STUN URLs for clients      [CROC_STUN]
   --capacity <n>         max users advertised (5000)      [CROC_CAPACITY]
   --private              do not register with directory   [CROC_PRIVATE=1]
+  --relay on|off         opt-in relay for blocked users   [CROC_RELAY]
+  --relay-max-users <n>  concurrent relay users (25)      [CROC_RELAY_MAX_USERS]
+  --relay-ip <addr>      public IP for relay candidates   [CROC_RELAY_IP]
   --log-level <lvl>      debug|info|warn|error            [CROC_LOG_LEVEL]`);
   process.exit(0);
 }
@@ -68,6 +74,13 @@ const coordinator = new Coordinator({
   extraStun: list(pick(values.stun, 'CROC_STUN')),
   capacity: Number(pick(values.capacity, 'CROC_CAPACITY') ?? defaultConfig.capacity),
   announce: !(values.private || env.CROC_PRIVATE === '1'),
+  relay: {
+    enabled: (pick(values.relay, 'CROC_RELAY') ?? 'on') !== 'off',
+    maxUsers: Number(
+      pick(values['relay-max-users'], 'CROC_RELAY_MAX_USERS') ?? defaultConfig.relay.maxUsers,
+    ),
+    publicIp: pick(values['relay-ip'], 'CROC_RELAY_IP'),
+  },
   logLevel: (pick(values['log-level'], 'CROC_LOG_LEVEL') as never) ?? 'info',
 });
 

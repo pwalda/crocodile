@@ -21,6 +21,10 @@ module.exports = {
   nodeGypRebuild: false,
   protocols: [{ name: 'Crocodile invite', schemes: ['croc'] }],
   publish: { provider: 'github', owner: 'pwalda', repo: 'crocodile' },
+  // Predictable names for scripts/install.sh and install.ps1.
+  artifactName: 'Crocodile-${version}-${os}-${arch}.${ext}',
+  // Lets the app know whether macOS auto-update can work (needs Developer ID).
+  extraMetadata: { crocSigned: signed },
 
   mac: {
     category: 'public.app-category.social-networking',

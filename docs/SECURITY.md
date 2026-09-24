@@ -2,19 +2,26 @@
 
 ## What we protect
 
-| Asset                            | Who can read it                                                                     |
-| -------------------------------- | ----------------------------------------------------------------------------------- |
-| Voice                            | Only the members of the call.                                                       |
-| Text messages (channels and DMs) | Only the members of the space or DM, now and in the future (via peer history sync). |
-| Your identity key                | Only your device (OS keychain) and whoever holds your recovery key.                 |
+| Asset                            | Who can read it                                                                               |
+| -------------------------------- | --------------------------------------------------------------------------------------------- |
+| Voice                            | Only the members of the call.                                                                 |
+| Text messages (channels and DMs) | Only the members of the space or DM, now and later (via peer-to-peer history sync).           |
+| Your identity key                | Only your linked devices (encrypted with the OS keychain) and whoever holds the recovery key. |
 
 ## What servers see
 
 Coordination servers see **metadata**: public profiles, friend lists, space
-names, channel lists, memberships, who is online, who is in which voice
-channel, and when people connect. They relay signalling (SDP and ICE
-candidates), which includes IP addresses. They never receive voice or message
-content in any form, not even encrypted.
+names, channel lists, memberships, device names, who is online, who is in
+which voice room, and when people connect. They pass on signalling (SDP and
+ICE candidates), which includes IP addresses. They never receive message or
+voice content, except that a user who turned on the **opt-in relay** sends
+their already end-to-end encrypted media through one; that server then also
+sees packet sizes and timing, for at most an hour at a time.
+
+Connections to coordination servers and between servers are encrypted with
+a per-connection hybrid key exchange (X25519 + ML-KEM-768) and AES-256-GCM,
+independent of TLS, so metadata is not exposed to the network even when a
+home-hosted server uses plain `ws://`.
 
 The directory only sees coordination servers.
 
@@ -25,33 +32,47 @@ RFC 6464 audio-level header). It holds the same keys as every other member
 
 ## Adversaries
 
-| Adversary                          | Can                                                                                                                                   | Cannot                                                                                                                                                                  |
-| ---------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Network observer                   | See that you talk to certain IPs.                                                                                                     | Read content (DTLS-SRTP, plus E2E underneath).                                                                                                                          |
-| Malicious coordination server      | Lie about presence, drop or delay signalling, refuse service, log metadata.                                                           | Forge profiles, spaces, invites or memberships (all signed); substitute a user's key (user ids are hashes of keys); MITM WebRTC (SDP is identity-signed); read content. |
-| Malicious mesh peer server         | Same as above.                                                                                                                        | Same as above; clients re-verify every record.                                                                                                                          |
-| Non-member who learns a session id | Nothing: joining requires a signed membership, and members only share sender keys with peers whose membership they verify themselves. |                                                                                                                                                                         |
-| Former member                      | Keep what they already saw.                                                                                                           | Decrypt anything after they left: sender keys rotate on leave.                                                                                                          |
-| Stolen device                      | Everything on it. Use OS disk encryption.                                                                                             |                                                                                                                                                                         |
+| Adversary                          | Can                                                                                    | Cannot                                                                                                                                                                       |
+| ---------------------------------- | -------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Network observer                   | See that you talk to certain IPs, and traffic volume.                                  | Read content or metadata (WebRTC DTLS plus E2E; encrypted server channels). Infer speech from packet sizes (constant-bitrate Opus).                                          |
+| Harvest-now, decrypt-later         | Record traffic today.                                                                  | Decrypt it with a future quantum computer: every key exchange is hybrid with ML-KEM-768.                                                                                     |
+| Malicious coordination server      | Lie about presence, drop or delay signalling, refuse service, log metadata.            | Forge profiles, spaces, invites, memberships or devices (all signed); substitute a user's key (user ids are key hashes); MITM WebRTC (SDP is identity-signed); read content. |
+| Malicious mesh peer server         | Same as above.                                                                         | Same as above; clients re-verify every record.                                                                                                                               |
+| Relay operator (opt-in relay)      | See relayed packet sizes and timing for up to an hour.                                 | Read or alter content.                                                                                                                                                       |
+| Non-member who learns a session id | Nothing: members only share keys with devices whose membership they verify themselves. |                                                                                                                                                                              |
+| Former member                      | Keep what they already saw.                                                            | Decrypt anything after they left: sender keys are replaced on leave.                                                                                                         |
+| Someone who steals a key later     | Decrypt at most the current 30-minute key period of a session.                         | Decrypt earlier messages (hash ratchets, deleted prekeys) or later ones (periodic fresh keys).                                                                               |
+| Removed device                     | Keep what it already had.                                                              | Receive new keys or messages. (It still knows the account seed; see below.)                                                                                                  |
+| Stolen, unlocked device            | Everything on it. Use OS disk encryption and remove the device from another one.       |                                                                                                                                                                              |
 
 ## Cryptography
 
-- Ed25519 signatures and X25519 key agreement (`@noble/curves`).
-- HKDF-SHA256 and AES-256-GCM (`@noble/hashes`, `@noble/ciphers`).
-- Sealed boxes: ephemeral-static X25519 → HKDF → AES-GCM, signed by the
-  sender and bound to the recipient key.
-- Voice: SFrame-style per-frame AES-GCM with a (key id, counter) nonce.
+- Ed25519 signatures, X25519 and ML-KEM-768 (`@noble/curves`,
+  `@noble/post-quantum`), HKDF-SHA256, AES-256-GCM (`@noble/hashes`,
+  `@noble/ciphers`). All audited, pure-TypeScript implementations.
+- Sealed boxes to a device: X25519 and ML-KEM-768 against the device's
+  current prekey (rotated weekly, secret deleted after a grace period), HKDF,
+  AES-GCM; signed by the sender and bound to sender and recipient devices.
+- Sender keys with a per-message text ratchet and a 30-second audio ratchet,
+  replaced every 30 minutes and on leave.
+- Voice: per-frame AES-GCM with an authenticated SFrame-style trailer
+  `(kid, generation, counter)`; constant-bitrate Opus.
+- Text: author-signed, Padmé-padded, encrypted with the text chain.
+- Device linking: short one-time code plus a 6-digit security code compared
+  on both screens, then a hybrid-encrypted, signed transfer.
 - Every signature is domain-separated (`SIG_DOMAIN` in `protocol/constants.ts`).
+- Local data (identity, prekeys, history) is encrypted at rest with a key
+  kept in the OS keychain (Electron `safeStorage`).
 
 ## Known gaps
 
-- Sender keys provide per-session forward secrecy and rekeying on leave, but
-  not the post-compromise security of MLS. Migrating to MLS is planned.
+- Linked devices share the account seed; per-device signing keys certified by
+  the identity (so a removed device can no longer sign) are planned.
+- Sender keys rather than MLS: good forward secrecy and 30-minute healing,
+  but rekeying cost grows with group size.
 - Safety-number verification is manual.
-- Home-hosted coordinators may use plain `ws://`. Server identity is still
-  verified, but metadata is not confidential on the wire. Use TLS for public
-  servers.
-- Messages at rest are protected by the OS account and disk encryption only.
+- The host peer and relay operators see traffic metadata (sizes, timing,
+  speaking activity).
 
 Please report vulnerabilities privately to the maintainers rather than in
 public issues.
