@@ -210,6 +210,9 @@ importers:
       playwright-core:
         specifier: 1.56.0
         version: 1.56.0
+      werift:
+        specifier: 0.24.4
+        version: 0.24.4
 
 packages:
 

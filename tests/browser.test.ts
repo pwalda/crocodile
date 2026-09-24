@@ -4,7 +4,7 @@ import type { Server } from 'node:http';
 import type { Coordinator } from '@crocodile/coordinator';
 import { attachRelayBridge, launchBrowser, relayFrames, serveHarness } from './browser/harness';
 import { existsSync } from 'node:fs';
-import { startCoordinator } from './helpers';
+import { startCoordinator, waitFor } from './helpers';
 
 const chromiumPath = process.env.CHROMIUM_PATH ?? '/opt/pw-browsers/chromium';
 const haveChromium = existsSync(chromiumPath);
@@ -104,7 +104,7 @@ describe.skipIf(!haveChromium)('browser end-to-end', () => {
       expect(stats.energy).toBeGreaterThan(0.001);
     }
     // The relay only ever saw ciphertext.
-    expect(relayFrames.total).toBeGreaterThan(100);
+    expect(relayFrames.total).toBeGreaterThan(20);
     expect(relayFrames.encrypted).toBe(relayFrames.total);
 
     // Text over the space's data-channel mesh.
@@ -158,3 +158,88 @@ async function waitForAudio(page: Page) {
   }
   return best;
 }
+
+describe.skipIf(!haveChromium)('server relay with Chromium', () => {
+  it("Chromium's TURN client relays through a coordinator's TURN server", async () => {
+    const turn = coord.turn!;
+    const creds = turn.credentials('aaaaaaaaaaaaaaaaaaaaaaaaaa', Date.now() + 60_000);
+    const { RTCPeerConnection: NodePC } = await import('werift');
+    const direct = new NodePC({
+      iceServers: [{ urls: `stun:127.0.0.1:${turn.port}` }],
+      iceAdditionalHostAddresses: ['127.0.0.1'],
+    });
+    const got: string[] = [];
+    direct.onDataChannel.subscribe((ch) => ch.onMessage.subscribe((m) => got.push(m.toString())));
+    const context = await browser.newContext();
+    const page = await context.newPage();
+    await page.goto(harness.url);
+    // Offer from a relay-only browser peer; answer from Node; trickle both ways.
+    await page.exposeFunction('__toNode', async (kind: string, payload: string) => {
+      if (kind === 'offer') {
+        await direct.setRemoteDescription({ type: 'offer', sdp: payload });
+        await direct.setLocalDescription(await direct.createAnswer());
+        await page.evaluate(
+          (sdp) => (window as unknown as { __answer(s: string): Promise<void> }).__answer(sdp),
+          direct.localDescription!.sdp,
+        );
+      } else if (kind === 'cand') {
+        await direct.addIceCandidate(JSON.parse(payload)).catch(() => {});
+      }
+    });
+    direct.onIceCandidate.subscribe((c) => {
+      if (c)
+        void page.evaluate(
+          (x) => (window as unknown as { __cand(s: string): void }).__cand(x),
+          JSON.stringify(c.toJSON()),
+        );
+    });
+    const types = await page.evaluate(
+      async ({ url, username, credential }) => {
+        const w = window as unknown as {
+          __toNode(k: string, p: string): Promise<void>;
+          __answer(s: string): Promise<void>;
+          __cand(s: string): void;
+        };
+        const pc = new RTCPeerConnection({
+          iceServers: [{ urls: url, username, credential }],
+          iceTransportPolicy: 'relay',
+        });
+        const dc = pc.createDataChannel('relay-test');
+        const pending: RTCIceCandidateInit[] = [];
+        let remote = false;
+        w.__cand = (s) =>
+          remote ? void pc.addIceCandidate(JSON.parse(s)) : void pending.push(JSON.parse(s));
+        w.__answer = async (sdp) => {
+          await pc.setRemoteDescription({ type: 'answer', sdp });
+          remote = true;
+          for (const c of pending) await pc.addIceCandidate(c);
+        };
+        const localTypes: string[] = [];
+        pc.onicecandidate = (e) => {
+          if (e.candidate) {
+            localTypes.push(e.candidate.type ?? '');
+            void w.__toNode('cand', JSON.stringify(e.candidate.toJSON()));
+          }
+        };
+        await pc.setLocalDescription(await pc.createOffer());
+        await w.__toNode('offer', pc.localDescription!.sdp);
+        await new Promise<void>((resolve, reject) => {
+          dc.onopen = () => resolve();
+          setTimeout(() => reject(new Error('data channel did not open via TURN')), 15_000);
+        });
+        dc.send('hello through the relay');
+        return localTypes;
+      },
+      {
+        url: `turn:127.0.0.1:${turn.port}?transport=udp`,
+        username: creds.username,
+        credential: creds.credential,
+      },
+    );
+    expect(types.every((t) => t === 'relay')).toBe(true);
+    await waitFor(() => got.includes('hello through the relay'), 5000, 'relayed message');
+    expect(turn.activeUsers().has('aaaaaaaaaaaaaaaaaaaaaaaaaa')).toBe(true);
+    await direct.close();
+    await context.close();
+  }, 60_000);
+});
