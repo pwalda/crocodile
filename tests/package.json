@@ -1,0 +1,13 @@
+{
+  "name": "@crocodile/tests",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@crocodile/client-core": "workspace:*",
+    "@crocodile/coordinator": "workspace:*",
+    "@crocodile/crypto": "workspace:*",
+    "@crocodile/directory": "workspace:*",
+    "@crocodile/protocol": "workspace:*"
+  }
+}

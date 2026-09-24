@@ -1,0 +1,23 @@
+{
+  "name": "@crocodile/directory",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Crocodile directory: the list of coordination servers clients pick from.",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "dev": "tsx watch src/bin.ts",
+    "start": "node dist/bin.js",
+    "build": "esbuild src/bin.ts --bundle --platform=node --target=node22 --format=esm --outfile=dist/bin.js --banner:js=\"import { createRequire as __cr } from 'node:module'; const require = __cr(import.meta.url);\""
+  },
+  "dependencies": {
+    "@crocodile/crypto": "workspace:*",
+    "@crocodile/protocol": "workspace:*",
+    "fastify": "^5.6.0"
+  },
+  "devDependencies": {
+    "esbuild": "^0.25.0"
+  }
+}

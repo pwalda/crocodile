@@ -1,0 +1,16 @@
+{
+  "name": "@crocodile/client-core",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Platform-neutral Crocodile client: server selection, identity, sessions, E2EE voice and text.",
+  "exports": {
+    ".": "./src/index.ts",
+    "./frame-worker": "./src/frame-worker.ts"
+  },
+  "dependencies": {
+    "@crocodile/crypto": "workspace:*",
+    "@crocodile/protocol": "workspace:*",
+    "zod": "^4.1.0"
+  }
+}
