@@ -7,6 +7,7 @@ import {
   randomBytes,
   randomId,
   sign,
+  toPublicServerInfo,
   userTag,
   type Identity,
 } from '@crocodile/crypto';
@@ -199,7 +200,8 @@ export class Coordinator {
     app.get('/v1/info', async () => ({
       server: this.info,
       stun: this.stunUrls(),
-      peers: this.mesh.peers(),
+      // Other servers' addresses are only shown obfuscated.
+      peers: this.mesh.peers().map(toPublicServerInfo),
       source: this.config.sourceUrl ?? SOURCE_URL,
     }));
     app.register(async (scope) => {

@@ -1,6 +1,12 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { Directory, isPrivateHost } from '@crocodile/directory';
-import { createIdentity, sign } from '@crocodile/crypto';
+import {
+  createIdentity,
+  decodeServerAddress,
+  encodeServerAddress,
+  openDirectoryEntry,
+  sign,
+} from '@crocodile/crypto';
 import { SIG_DOMAIN } from '@crocodile/protocol';
 import { startCoordinator, waitFor } from './helpers';
 
@@ -21,8 +27,36 @@ describe('directory', () => {
     const c = await startCoordinator({ directoryUrls: [d.url], announce: true });
     cleanup.push(() => c.stop());
     await waitFor(() => d.listing().servers.length === 1, 3000, 'registration');
-    const res = await (await fetch(`${d.url}/v1/servers`)).json();
+    const text = await (await fetch(`${d.url}/v1/servers`)).text();
+    const res = JSON.parse(text);
     expect(res.servers[0].server.id).toBe(c.info.id);
+
+    // The public listing never shows the address in plain text…
+    const { host, port } = new URL(c.url);
+    expect(text).not.toContain(c.url);
+    expect(text).not.toContain(`${host}:${port}`);
+    expect(res.servers[0].server.url).toBeUndefined();
+    // …but apps decode it and verify the server's signature over the real one.
+    expect(openDirectoryEntry(res.servers[0])?.server.url).toBe(c.url);
+    // A swapped address fails the signature check.
+    const swapped = {
+      ...res.servers[0],
+      server: { ...res.servers[0].server, addr: encodeServerAddress('http://203.0.113.66:7443') },
+    };
+    expect(openDirectoryEntry(swapped)).toBeNull();
+  });
+
+  it('obfuscates addresses differently every time and rejects garbage', () => {
+    const url = 'http://203.0.113.9:7443';
+    const a = encodeServerAddress(url);
+    const b = encodeServerAddress(url);
+    expect(a).not.toBe(b);
+    expect(a).not.toContain('203.0.113');
+    expect(decodeServerAddress(a)).toBe(url);
+    expect(decodeServerAddress(b)).toBe(url);
+    expect(decodeServerAddress('a1.not-valid')).toBeNull();
+    expect(decodeServerAddress(url)).toBeNull();
+    expect(decodeServerAddress(a.slice(0, -4) + 'AAAA')).toBeNull();
   });
 
   it('rejects forged and unreachable entries', async () => {
@@ -67,5 +101,9 @@ describe('directory', () => {
       5000,
       'mesh via directory',
     );
+    // A server's public info lists its mesh peers without their addresses.
+    const info = await (await fetch(`${a.url}/v1/info`)).text();
+    expect(info).not.toContain(b.url);
+    expect(JSON.parse(info).peers[0].id).toBe(b.info.id);
   });
 });

@@ -10,6 +10,7 @@ import {
   Platform,
 } from './session';
 import { DeviceId } from './records';
+import type { PublicServerInfo } from './directory';
 import { SealedBox } from './relay';
 
 /** Public identity of a coordination server. */
@@ -263,7 +264,7 @@ export interface RpcMethods {
   'session.report': Record<string, never>;
   'voice.watch': { voice: VoiceOccupancy[] };
   'signal.send': { delivered: boolean };
-  'servers.list': { servers: ServerInfo[] };
+  'servers.list': { servers: PublicServerInfo[] };
   'link.open': { code: string; expiresAt: number };
   'link.claim': { peer: string; key: string; encKey: string };
   'link.send': Record<string, never>;

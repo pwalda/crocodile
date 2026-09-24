@@ -1,3 +1,4 @@
+import { openDirectoryEntry } from '@crocodile/crypto';
 import { DIRECTORY_PATHS, type DirectoryListing } from '@crocodile/protocol';
 import type { Coordinator } from './coordinator';
 
@@ -43,7 +44,11 @@ export class DirectoryClient {
         const listing = (await (
           await fetch(root + DIRECTORY_PATHS.list, { signal: AbortSignal.timeout(10_000) })
         ).json()) as DirectoryListing;
-        this.hub.mesh.addKnown(listing.servers.map((e) => e.server));
+        this.hub.mesh.addKnown(
+          listing.servers
+            .map((raw) => openDirectoryEntry(raw)?.server)
+            .filter((s): s is NonNullable<typeof s> => !!s),
+        );
       } catch (err) {
         this.hub.log.warn('directory unreachable', { directory: root, err: String(err) });
       }

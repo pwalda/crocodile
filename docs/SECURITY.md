@@ -26,7 +26,9 @@ a per-connection hybrid key exchange (X25519 + ML-KEM-768) and AES-256-GCM,
 independent of TLS, so metadata is not exposed to the network even when a
 home-hosted server uses plain `ws://`.
 
-The directory only sees coordination servers.
+The directory only sees coordination servers. Its public listing shows each
+server's address obfuscated rather than in plain text (decodable by the app,
+so not secret) and apps verify each entry's signature before using it.
 
 The **host peer** of a session sees the IP addresses of its members and the
 size and timing of their encrypted frames, plus who is speaking (from the

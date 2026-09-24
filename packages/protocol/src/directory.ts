@@ -17,8 +17,25 @@ export const DirectoryEntry = z.object({
 });
 export type DirectoryEntry = z.infer<typeof DirectoryEntry>;
 
+/**
+ * How a server appears in public listings: its address is not shown in
+ * plain text but as `addr`, an obfuscated form the apps decode (see
+ * encodeServerAddress in @crocodile/crypto). Obfuscation, not secrecy:
+ * it keeps addresses away from search engines and casual scraping.
+ */
+export const PublicServerInfo = ServerInfo.omit({ url: true }).extend({
+  addr: z.string().max(1024),
+});
+export type PublicServerInfo = z.infer<typeof PublicServerInfo>;
+
+export const PublicDirectoryEntry = DirectoryEntry.extend({
+  server: PublicServerInfo,
+  lastSeen: z.number().int(),
+});
+export type PublicDirectoryEntry = z.infer<typeof PublicDirectoryEntry>;
+
 export interface DirectoryListing {
-  servers: (DirectoryEntry & { lastSeen: number })[];
+  servers: PublicDirectoryEntry[];
   generatedAt: number;
 }
 

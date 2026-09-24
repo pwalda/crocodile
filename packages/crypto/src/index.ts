@@ -7,3 +7,4 @@ export * from './seal';
 export * from './senderkey';
 export * from './channel';
 export * from './messages';
+export * from './directory';

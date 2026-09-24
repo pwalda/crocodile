@@ -5,6 +5,7 @@ import {
   randomId,
   SecureChannel,
   sign,
+  toPublicServerInfo,
   userIdFromKey,
   verifyPayload,
   type ChannelKeys,
@@ -293,7 +294,7 @@ export class ClientConnection implements ClientHandle {
         return { delivered: hub.deliverToPeer(to, 'signal', { from: this.peer, sessionId, data }) };
       }
       case 'servers.list':
-        return { servers: [hub.info, ...hub.mesh.knownServers()] };
+        return { servers: [hub.info, ...hub.mesh.knownServers()].map(toPublicServerInfo) };
       case 'link.open': {
         const { encKey } = p as unknown as { encKey: string };
         this.encKey = encKey;

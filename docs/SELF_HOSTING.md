@@ -95,7 +95,8 @@ main server puts the TCP side behind Caddy on 443.
 - **Your public IP address.** It reveals your approximate location and
   internet provider, and makes you a target for denial-of-service attacks
   (someone flooding your connection). If you list the server in the
-  directory, the address is public. Calls already expose IP addresses
+  directory, the listing shows the address only in an obfuscated form (see
+  below), but anyone running the app can still decode it. Calls already expose IP addresses
   between the people in them (that is how peer-to-peer works), but a server
   address is shared with everyone who connects.
 - **A program listening on the internet.** Any bug in it could be attacked.
@@ -110,6 +111,16 @@ main server puts the TCP side behind Caddy on 443.
   talks to whom and when, and public profiles. Never message content. In
   many countries (e.g. the EU's GDPR) this makes you responsible for handling
   that data sensibly.
+
+**How the directory shows addresses.** The public listing
+(`/v1/servers`) and a server's `/v1/info` never contain addresses in plain
+text: each appears as `addr`, encrypted with a key built into the app, padded
+and with a fresh nonce every time, next to the server's ID (a hash of its
+public key). Apps decode it and verify the server's own signature over its
+real details, so a directory cannot redirect them. This keeps IPs out of
+search engines and casual scraping; it is **not** secret from anyone who
+runs the open-source app, and the app necessarily connects to (and so sees)
+the servers it measures and uses.
 
 **Recommendations:**
 
