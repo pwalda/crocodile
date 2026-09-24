@@ -33,7 +33,12 @@ export class DirectoryClient {
             body: JSON.stringify(this.hub.directoryEntry()),
             signal: AbortSignal.timeout(10_000),
           });
-          if (!res.ok) this.hub.log.warn('directory rejected registration', { directory: root, status: res.status, body: await res.text() });
+          if (!res.ok)
+            this.hub.log.warn('directory rejected registration', {
+              directory: root,
+              status: res.status,
+              body: await res.text(),
+            });
         }
         const listing = (await (
           await fetch(root + DIRECTORY_PATHS.list, { signal: AbortSignal.timeout(10_000) })

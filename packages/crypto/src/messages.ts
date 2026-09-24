@@ -40,11 +40,27 @@ export function signSdp(
   ctx: { sessionId: string; epoch: number; to: string },
   sdp: string,
 ): SdpSignal {
-  const payload = { type, sessionId: ctx.sessionId, epoch: ctx.epoch, from: identity.userId, to: ctx.to, sdp };
-  return { type, epoch: ctx.epoch, sdp, key: identity.publicKey, sig: sign(identity, SIG_DOMAIN.signal, payload) };
+  const payload = {
+    type,
+    sessionId: ctx.sessionId,
+    epoch: ctx.epoch,
+    from: identity.userId,
+    to: ctx.to,
+    sdp,
+  };
+  return {
+    type,
+    epoch: ctx.epoch,
+    sdp,
+    key: identity.publicKey,
+    sig: sign(identity, SIG_DOMAIN.signal, payload),
+  };
 }
 
-export function verifySdp(signal: SdpSignal, ctx: { sessionId: string; from: string; to: string }): boolean {
+export function verifySdp(
+  signal: SdpSignal,
+  ctx: { sessionId: string; from: string; to: string },
+): boolean {
   if (!keyMatchesUserId(signal.key, ctx.from)) return false;
   const payload = {
     type: signal.type,

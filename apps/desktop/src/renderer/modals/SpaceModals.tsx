@@ -22,7 +22,11 @@ export function AddSpaceModal() {
       const spaceId = await fn();
       closeModal();
       const space = client.state.spaces[spaceId];
-      navigate({ kind: 'space', spaceId, channelId: space?.channels.find((c) => c.kind === 'text')?.id ?? null });
+      navigate({
+        kind: 'space',
+        spaceId,
+        channelId: space?.channels.find((c) => c.kind === 'text')?.id ?? null,
+      });
     } catch (e) {
       setError((e as Error).message);
     } finally {
@@ -32,8 +36,18 @@ export function AddSpaceModal() {
 
   if (mode === 'choose') {
     return (
-      <Modal title="Add a space" subtitle="A space is where you and your friends hang out: text channels, voice channels, all peer-to-peer." onClose={closeModal}>
-        <button onClick={() => { setName(`${me ?? 'My'}'s space`); setMode('create'); }} className="mb-3 w-full rounded-lg border border-line px-4 py-4 text-left font-semibold text-white hover:bg-hover">
+      <Modal
+        title="Add a space"
+        subtitle="A space is where you and your friends hang out: text channels, voice channels, all peer-to-peer."
+        onClose={closeModal}
+      >
+        <button
+          onClick={() => {
+            setName(`${me ?? 'My'}'s space`);
+            setMode('create');
+          }}
+          className="mb-3 w-full rounded-lg border border-line px-4 py-4 text-left font-semibold text-white hover:bg-hover"
+        >
           Create my own
         </button>
         <div className="mt-4 text-center">
@@ -54,16 +68,32 @@ export function AddSpaceModal() {
         onClose={closeModal}
         footer={
           <>
-            <Button variant="ghost" onClick={() => setMode('choose')}>Back</Button>
-            <Button disabled={!name.trim() || busy} onClick={() => void run(() => client.createSpace(name, icon))}>
+            <Button variant="ghost" onClick={() => setMode('choose')}>
+              Back
+            </Button>
+            <Button
+              disabled={!name.trim() || busy}
+              onClick={() => void run(() => client.createSpace(name, icon))}
+            >
               {busy ? 'Creating…' : 'Create'}
             </Button>
           </>
         }
       >
         <label className="mx-auto mb-5 flex h-20 w-20 cursor-pointer items-center justify-center overflow-hidden rounded-full border-2 border-dashed border-muted text-xl font-bold text-muted hover:border-text">
-          {icon ? <img src={icon} alt="" className="h-full w-full object-cover" /> : initials(name || '?')}
-          <input type="file" accept="image/*" className="hidden" onChange={async (e) => e.target.files?.[0] && setIcon(await imageToDataUrl(e.target.files[0]))} />
+          {icon ? (
+            <img src={icon} alt="" className="h-full w-full object-cover" />
+          ) : (
+            initials(name || '?')
+          )}
+          <input
+            type="file"
+            accept="image/*"
+            className="hidden"
+            onChange={async (e) =>
+              e.target.files?.[0] && setIcon(await imageToDataUrl(e.target.files[0]))
+            }
+          />
         </label>
         <Label>Space name</Label>
         <Input autoFocus maxLength={64} value={name} onChange={(e) => setName(e.target.value)} />
@@ -79,15 +109,25 @@ export function AddSpaceModal() {
       onClose={closeModal}
       footer={
         <>
-          <Button variant="ghost" onClick={() => setMode('choose')}>Back</Button>
-          <Button disabled={!invite.trim() || busy} onClick={() => void run(() => client.joinWithInvite(invite))}>
+          <Button variant="ghost" onClick={() => setMode('choose')}>
+            Back
+          </Button>
+          <Button
+            disabled={!invite.trim() || busy}
+            onClick={() => void run(() => client.joinWithInvite(invite))}
+          >
             {busy ? 'Joining…' : 'Join space'}
           </Button>
         </>
       }
     >
       <Label>Invite code or link</Label>
-      <Input autoFocus value={invite} onChange={(e) => setInvite(e.target.value)} placeholder="croc://join/abcd2345" />
+      <Input
+        autoFocus
+        value={invite}
+        onChange={(e) => setInvite(e.target.value)}
+        placeholder="croc://join/abcd2345"
+      />
       {error && <p className="mt-3 text-sm text-dnd">{error}</p>}
     </Modal>
   );
@@ -99,14 +139,22 @@ export function InviteModal({ spaceId }: { spaceId: string }) {
   const [copied, setCopied] = useState(false);
   const [error, setError] = useState<string | null>(null);
   useEffect(() => {
-    getClient().createInvite(spaceId).then(setCode, (e) => setError(e.message));
+    getClient()
+      .createInvite(spaceId)
+      .then(setCode, (e) => setError(e.message));
   }, [spaceId]);
   const link = code ? `croc://join/${code}` : '';
   return (
-    <Modal title={`Invite friends to ${space?.name ?? 'this space'}`} subtitle="Anyone with this link can join for the next 7 days." onClose={closeModal}>
+    <Modal
+      title={`Invite friends to ${space?.name ?? 'this space'}`}
+      subtitle="Anyone with this link can join for the next 7 days."
+      onClose={closeModal}
+    >
       <Label>Invite link</Label>
       <div className="flex items-center gap-2 rounded bg-float p-1 pl-3">
-        <span className="selectable flex-1 truncate font-mono text-sm">{error ?? (link || 'Creating invite…')}</span>
+        <span className="selectable flex-1 truncate font-mono text-sm">
+          {error ?? (link || 'Creating invite…')}
+        </span>
         <Button
           disabled={!code}
           className={cx(copied && 'bg-online')}
@@ -118,7 +166,9 @@ export function InviteModal({ spaceId }: { spaceId: string }) {
           {copied ? <Check size={16} /> : <Copy size={16} />} {copied ? 'Copied' : 'Copy'}
         </Button>
       </div>
-      <p className="mt-3 text-xs text-muted">Friends can also paste just the code: <b className="selectable text-text">{code}</b></p>
+      <p className="mt-3 text-xs text-muted">
+        Friends can also paste just the code: <b className="selectable text-text">{code}</b>
+      </p>
     </Modal>
   );
 }
@@ -144,8 +194,12 @@ export function CreateChannelModal({ spaceId }: { spaceId: string }) {
       onClose={closeModal}
       footer={
         <>
-          <Button variant="ghost" onClick={closeModal}>Cancel</Button>
-          <Button disabled={!name.trim() || busy} onClick={() => void create()}>Create channel</Button>
+          <Button variant="ghost" onClick={closeModal}>
+            Cancel
+          </Button>
+          <Button disabled={!name.trim() || busy} onClick={() => void create()}>
+            Create channel
+          </Button>
         </>
       }
     >
@@ -154,14 +208,24 @@ export function CreateChannelModal({ spaceId }: { spaceId: string }) {
         <button
           key={k}
           onClick={() => setKind(k)}
-          className={cx('mb-2 flex w-full items-center gap-3 rounded px-3 py-3 text-left', kind === k ? 'bg-active' : 'bg-side hover:bg-hover')}
+          className={cx(
+            'mb-2 flex w-full items-center gap-3 rounded px-3 py-3 text-left',
+            kind === k ? 'bg-active' : 'bg-side hover:bg-hover',
+          )}
         >
           {k === 'text' ? <Hash size={22} /> : <Volume2 size={22} />}
           <div>
             <div className="font-medium text-white">{k === 'text' ? 'Text' : 'Voice'}</div>
-            <div className="text-xs text-muted">{k === 'text' ? 'Messages, emoji and opinions' : 'Hang out together with voice'}</div>
+            <div className="text-xs text-muted">
+              {k === 'text' ? 'Messages, emoji and opinions' : 'Hang out together with voice'}
+            </div>
           </div>
-          <span className={cx('ml-auto h-5 w-5 rounded-full border-2', kind === k ? 'border-croc bg-croc' : 'border-muted')} />
+          <span
+            className={cx(
+              'ml-auto h-5 w-5 rounded-full border-2',
+              kind === k ? 'border-croc bg-croc' : 'border-muted',
+            )}
+          />
         </button>
       ))}
       <div className="mt-3">
@@ -186,7 +250,11 @@ export function SpaceSettingsModal({ spaceId }: { spaceId: string }) {
   const client = getClient();
   if (!space) return null;
   const save = async () => {
-    await client.updateSpace(spaceId, (b) => ({ ...b, name: name.trim() || b.name, ...(icon ? { icon } : {}) }));
+    await client.updateSpace(spaceId, (b) => ({
+      ...b,
+      name: name.trim() || b.name,
+      ...(icon ? { icon } : {}),
+    }));
     closeModal();
   };
   return (
@@ -196,15 +264,26 @@ export function SpaceSettingsModal({ spaceId }: { spaceId: string }) {
       wide
       footer={
         <>
-          <Button variant="ghost" onClick={closeModal}>Cancel</Button>
-          <Button onClick={() => void save().catch((e) => client.reportError(e.message))}>Save changes</Button>
+          <Button variant="ghost" onClick={closeModal}>
+            Cancel
+          </Button>
+          <Button onClick={() => void save().catch((e) => client.reportError(e.message))}>
+            Save changes
+          </Button>
         </>
       }
     >
       <div className="flex gap-6">
         <label className="flex h-24 w-24 shrink-0 cursor-pointer items-center justify-center overflow-hidden rounded-full bg-active text-2xl font-bold text-white">
           {icon ? <img src={icon} alt="" className="h-full w-full object-cover" /> : initials(name)}
-          <input type="file" accept="image/*" className="hidden" onChange={async (e) => e.target.files?.[0] && setIcon(await imageToDataUrl(e.target.files[0]))} />
+          <input
+            type="file"
+            accept="image/*"
+            className="hidden"
+            onChange={async (e) =>
+              e.target.files?.[0] && setIcon(await imageToDataUrl(e.target.files[0]))
+            }
+          />
         </label>
         <div className="flex-1">
           <Label>Space name</Label>
@@ -215,9 +294,18 @@ export function SpaceSettingsModal({ spaceId }: { spaceId: string }) {
         <Label>Channels</Label>
         {space.channels.map((c) => (
           <div key={c.id} className="flex items-center gap-2 rounded px-2 py-1.5 hover:bg-hover">
-            {c.kind === 'text' ? <Hash size={16} className="text-faint" /> : <Volume2 size={16} className="text-faint" />}
+            {c.kind === 'text' ? (
+              <Hash size={16} className="text-faint" />
+            ) : (
+              <Volume2 size={16} className="text-faint" />
+            )}
             <span className="flex-1">{c.name}</span>
-            <button className="text-xs text-dnd hover:underline" onClick={() => void client.removeChannel(spaceId, c.id).catch((e) => client.reportError(e.message))}>
+            <button
+              className="text-xs text-dnd hover:underline"
+              onClick={() =>
+                void client.removeChannel(spaceId, c.id).catch((e) => client.reportError(e.message))
+              }
+            >
               Delete
             </button>
           </div>
@@ -225,7 +313,9 @@ export function SpaceSettingsModal({ spaceId }: { spaceId: string }) {
       </div>
       <div className="mt-6 rounded border border-danger/50 p-4">
         <div className="font-semibold text-white">Delete space</div>
-        <p className="mt-1 text-sm text-muted">Everyone loses access. Messages stay only on members' devices.</p>
+        <p className="mt-1 text-sm text-muted">
+          Everyone loses access. Messages stay only on members' devices.
+        </p>
         <Button
           variant="danger"
           className="mt-3"

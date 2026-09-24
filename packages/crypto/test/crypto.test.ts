@@ -62,7 +62,10 @@ describe('records', () => {
   const mallory = createIdentity();
 
   const profile = (who = alice) =>
-    signRecord(who, 'profile', recordKey.profile(who.userId), { username: 'alice', encKey: who.encPublicKey });
+    signRecord(who, 'profile', recordKey.profile(who.userId), {
+      username: 'alice',
+      encKey: who.encPublicKey,
+    });
 
   it('accepts a self-signed profile and rejects forgeries', () => {
     expect(validateRecord(profile(), ctx([])).ok).toBe(true);
@@ -76,8 +79,17 @@ describe('records', () => {
   });
 
   it('enforces last-writer-wins versions', () => {
-    const v1 = signRecord(alice, 'profile', recordKey.profile(alice.userId), { username: 'a', encKey: alice.encPublicKey }, Date.now() - 1000);
-    const v2 = signRecord(alice, 'profile', recordKey.profile(alice.userId), { username: 'b', encKey: alice.encPublicKey });
+    const v1 = signRecord(
+      alice,
+      'profile',
+      recordKey.profile(alice.userId),
+      { username: 'a', encKey: alice.encPublicKey },
+      Date.now() - 1000,
+    );
+    const v2 = signRecord(alice, 'profile', recordKey.profile(alice.userId), {
+      username: 'b',
+      encKey: alice.encPublicKey,
+    });
     expect(validateRecord(v1, ctx([v2]))).toMatchObject({ ok: false, reason: 'stale version' });
     expect(validateRecord(v2, ctx([v1])).ok).toBe(true);
   });
@@ -95,13 +107,24 @@ describe('records', () => {
     });
     expect(validateRecord(space, ctx([])).ok).toBe(true);
 
-    const hijack = signRecord(mallory, 'space', recordKey.space(spaceId), { ...space.body, owner: mallory.userId });
+    const hijack = signRecord(mallory, 'space', recordKey.space(spaceId), {
+      ...space.body,
+      owner: mallory.userId,
+    });
     expect(validateRecord(hijack, ctx([space])).ok).toBe(false);
 
     const code = randomId(5);
-    const invite = signRecord(alice, 'invite', recordKey.invite(code), { spaceId, code, expiresAt: null });
+    const invite = signRecord(alice, 'invite', recordKey.invite(code), {
+      spaceId,
+      code,
+      expiresAt: null,
+    });
     expect(validateRecord(invite, ctx([space])).ok).toBe(true);
-    const fakeInvite = signRecord(mallory, 'invite', recordKey.invite(code), { spaceId, code, expiresAt: null });
+    const fakeInvite = signRecord(mallory, 'invite', recordKey.invite(code), {
+      spaceId,
+      code,
+      expiresAt: null,
+    });
     expect(validateRecord(fakeInvite, ctx([space])).ok).toBe(false);
 
     const join = signRecord(bob, 'member', recordKey.member(spaceId, bob.userId), {
@@ -147,7 +170,9 @@ describe('sender keys', () => {
     expect(decryptFrame(key, enc)).toEqual(frame);
     enc[3] = enc[3]! ^ 1;
     expect(decryptFrame(key, enc)).toBeNull();
-    expect(decryptFrame(deriveSenderKey(createSenderKey()), encryptFrame(key, 1, frame))).toBeNull();
+    expect(
+      decryptFrame(deriveSenderKey(createSenderKey()), encryptFrame(key, 1, frame)),
+    ).toBeNull();
   });
 
   it('encrypts group text', () => {
@@ -172,7 +197,14 @@ describe('messages and signalling', () => {
     const bob = createIdentity();
     const offer = signSdp(alice, 'offer', { sessionId: 's', epoch: 1, to: bob.userId }, 'v=0...');
     expect(verifySdp(offer, { sessionId: 's', from: alice.userId, to: bob.userId })).toBe(true);
-    expect(verifySdp(offer, { sessionId: 'other', from: alice.userId, to: bob.userId })).toBe(false);
-    expect(verifySdp({ ...offer, sdp: 'v=0 evil' }, { sessionId: 's', from: alice.userId, to: bob.userId })).toBe(false);
+    expect(verifySdp(offer, { sessionId: 'other', from: alice.userId, to: bob.userId })).toBe(
+      false,
+    );
+    expect(
+      verifySdp(
+        { ...offer, sdp: 'v=0 evil' },
+        { sessionId: 's', from: alice.userId, to: bob.userId },
+      ),
+    ).toBe(false);
   });
 });

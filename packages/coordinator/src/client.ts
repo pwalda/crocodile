@@ -47,7 +47,11 @@ export class ClientConnection implements ClientHandle {
       challenge: this.challenge,
       stun: hub.stunUrls(),
       time,
-      sig: sign(hub.identity, SIG_DOMAIN.serverHello, { challenge: this.challenge, server: info.id, time }),
+      sig: sign(hub.identity, SIG_DOMAIN.serverHello, {
+        challenge: this.challenge,
+        server: info.id,
+        time,
+      }),
     });
     const authTimer = setTimeout(() => {
       if (!this.authed) ws.close(4001, 'authentication timeout');
@@ -103,7 +107,12 @@ export class ClientConnection implements ClientHandle {
       return;
     }
     const { key, sig, client } = parsed.data;
-    const ok = verifyPayload(key, SIG_DOMAIN.auth, { challenge: this.challenge, server: this.hub.info.id }, sig);
+    const ok = verifyPayload(
+      key,
+      SIG_DOMAIN.auth,
+      { challenge: this.challenge, server: this.hub.info.id },
+      sig,
+    );
     if (!ok) {
       this.frame({ t: 'error', err: { code: 'unauthorized', message: 'bad signature' } });
       this.ws.close(4003, 'unauthorized');
@@ -125,11 +134,13 @@ export class ClientConnection implements ClientHandle {
       if (!(req.m in RpcParams)) throw new RpcFailure('not_found', `unknown method ${req.m}`);
       const method = req.m as RpcMethod;
       const parsed = RpcParams[method].safeParse(req.p ?? {});
-      if (!parsed.success) throw new RpcFailure('bad_request', parsed.error.issues[0]?.message ?? 'invalid params');
+      if (!parsed.success)
+        throw new RpcFailure('bad_request', parsed.error.issues[0]?.message ?? 'invalid params');
       const result = await this.dispatch(method, parsed.data as never);
       this.frame({ t: 'res', id, ok: result });
     } catch (err) {
-      if (err instanceof RpcFailure) this.frame({ t: 'res', id, err: { code: err.code, message: err.message } });
+      if (err instanceof RpcFailure)
+        this.frame({ t: 'res', id, err: { code: err.code, message: err.message } });
       else {
         this.hub.log.error('rpc failed', { method: req.m, err: String(err) });
         this.frame({ t: 'res', id, err: { code: 'internal', message: 'internal error' } });
@@ -145,7 +156,11 @@ export class ClientConnection implements ClientHandle {
         if (!this.writeLimiter.take()) throw new RpcFailure('rate_limited', 'too many writes');
         const { record } = p as unknown as { record: SignedRecord };
         const r = hub.records.put(record, { fresh: true, origin: null });
-        return { accepted: r.accepted, current: r.current, ...(r.reason ? { reason: r.reason } : {}) };
+        return {
+          accepted: r.accepted,
+          current: r.current,
+          ...(r.reason ? { reason: r.reason } : {}),
+        };
       }
       case 'records.get': {
         const { keys } = p as unknown as { keys: string[] };
@@ -167,7 +182,10 @@ export class ClientConnection implements ClientHandle {
       case 'friends.incoming':
         return { records: store.findByTerm(`friend-of:${this.userId}`, 2000) };
       case 'spaces.mine': {
-        const members = store.findByTerm(`member-user:${this.userId}`, 1000) as SignedRecord<'member'>[];
+        const members = store.findByTerm(
+          `member-user:${this.userId}`,
+          1000,
+        ) as SignedRecord<'member'>[];
         const spaceIds = new Set(members.map((m) => m.body.spaceId));
         const spaces = [...spaceIds]
           .map((id) => store.get(`space:${id}`))
@@ -205,14 +223,20 @@ export class ClientConnection implements ClientHandle {
       case 'voice.watch': {
         const { spaceIds } = p as unknown as { spaceIds: string[] };
         for (const id of spaceIds) {
-          if (!hub.isSpaceMember(id, this.userId)) throw new RpcFailure('forbidden', 'not a member of that space');
+          if (!hub.isSpaceMember(id, this.userId))
+            throw new RpcFailure('forbidden', 'not a member of that space');
         }
         this.voiceWatch = new Set(spaceIds);
         return { voice: hub.sessions.voiceSnapshot(spaceIds) };
       }
       case 'signal.send': {
-        const { to, sessionId, data } = p as unknown as { to: string; sessionId: string; data: never };
-        if (!hub.sessions.inSession(this.userId, sessionId)) throw new RpcFailure('forbidden', 'join the session first');
+        const { to, sessionId, data } = p as unknown as {
+          to: string;
+          sessionId: string;
+          data: never;
+        };
+        if (!hub.sessions.inSession(this.userId, sessionId))
+          throw new RpcFailure('forbidden', 'join the session first');
         return { delivered: hub.deliver(to, 'signal', { from: this.userId, sessionId, data }) };
       }
       case 'servers.list':
@@ -226,4 +250,3 @@ export class ClientConnection implements ClientHandle {
     return false;
   }
 }
-

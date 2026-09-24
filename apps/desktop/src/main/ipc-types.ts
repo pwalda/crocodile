@@ -32,8 +32,19 @@ export interface CoordinatorSettings {
 export type CoordinatorStatus =
   | { state: 'stopped' }
   | { state: 'starting' }
-  | { state: 'running'; url: string; id: string; peers: number; users: number; publicUrl?: string; announced: boolean }
+  | {
+      state: 'running';
+      url: string;
+      id: string;
+      peers: number;
+      users: number;
+      publicUrl?: string;
+      announced: boolean;
+    }
   | { state: 'error'; message: string };
 
-export type CoordinatorProcessIn = { type: 'start'; settings: CoordinatorSettings; dataDir: string; directories: string[] } | { type: 'stop' } | { type: 'status' };
+export type CoordinatorProcessIn =
+  | { type: 'start'; settings: CoordinatorSettings; dataDir: string; directories: string[] }
+  | { type: 'stop' }
+  | { type: 'status' };
 export type CoordinatorProcessOut = { type: 'status'; status: CoordinatorStatus };

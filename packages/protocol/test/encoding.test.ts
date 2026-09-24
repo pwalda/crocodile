@@ -1,5 +1,13 @@
 import { describe, expect, it } from 'vitest';
-import { canonicalJson, fromB32, fromB64u, parseSessionId, sessionIds, toB32, toB64u } from '../src';
+import {
+  canonicalJson,
+  fromB32,
+  fromB64u,
+  parseSessionId,
+  sessionIds,
+  toB32,
+  toB64u,
+} from '../src';
 
 describe('encoding', () => {
   it('round-trips base64url for all lengths', () => {
@@ -33,7 +41,11 @@ describe('session ids', () => {
     expect(sessionIds.dm(b, a)).toBe(`dm:${a}:${b}`);
     expect(parseSessionId(sessionIds.dm(b, a))).toEqual({ kind: 'dm', users: [a, b] });
     expect(parseSessionId(`dm:${b}:${a}`)).toBeNull();
-    expect(parseSessionId(sessionIds.voice(a, b))).toEqual({ kind: 'voice', spaceId: a, channelId: b });
+    expect(parseSessionId(sessionIds.voice(a, b))).toEqual({
+      kind: 'voice',
+      spaceId: a,
+      channelId: b,
+    });
     expect(parseSessionId('space:NOPE')).toBeNull();
   });
 });

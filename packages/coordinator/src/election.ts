@@ -39,7 +39,8 @@ export function elect({ members, host, backup, penalties, now }: ElectionInput):
   host: string | null;
   backup: string | null;
 } {
-  const available = (m: SessionMember) => isHostEligible(m) && (penalties.get(m.userId) ?? 0) <= now;
+  const available = (m: SessionMember) =>
+    isHostEligible(m) && (penalties.get(m.userId) ?? 0) <= now;
   const byId = new Map(members.map((m) => [m.userId, m]));
   const ranked = members
     .filter(available)
@@ -59,7 +60,8 @@ export function elect({ members, host, backup, penalties, now }: ElectionInput):
   let nextBackup: string | null = candidates[0]?.userId ?? null;
   const currentBackup = backup && backup !== nextHost ? byId.get(backup) : undefined;
   if (currentBackup && available(currentBackup) && candidates[0]) {
-    if (hostScore(candidates[0], now) - hostScore(currentBackup, now) < 10) nextBackup = currentBackup.userId;
+    if (hostScore(candidates[0], now) - hostScore(currentBackup, now) < 10)
+      nextBackup = currentBackup.userId;
   }
   return { host: nextHost, backup: nextBackup };
 }

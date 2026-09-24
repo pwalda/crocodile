@@ -15,7 +15,9 @@ export type SessionScope =
   | { kind: 'dm'; users: [string, string] };
 
 const idPart = '[a-z2-7]{8,64}';
-const SESSION_RE = new RegExp(`^(?:space:${idPart}|voice:${idPart}:${idPart}|dm:${idPart}:${idPart})$`);
+const SESSION_RE = new RegExp(
+  `^(?:space:${idPart}|voice:${idPart}:${idPart}|dm:${idPart}:${idPart})$`,
+);
 
 export const SessionId = z.string().regex(SESSION_RE);
 

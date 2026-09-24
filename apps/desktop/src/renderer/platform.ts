@@ -72,9 +72,17 @@ export const messages: MessageStore = {
   },
   async page(channel, { before, limit }) {
     const d = await db();
-    const range = IDBKeyRange.bound([channel, 0], [channel, before === undefined ? Number.MAX_SAFE_INTEGER : before], false, true);
+    const range = IDBKeyRange.bound(
+      [channel, 0],
+      [channel, before === undefined ? Number.MAX_SAFE_INTEGER : before],
+      false,
+      true,
+    );
     const out: ChatMessage[] = [];
-    let cursor = await d.transaction('messages').store.index('byChannelTs').openCursor(range, 'prev');
+    let cursor = await d
+      .transaction('messages')
+      .store.index('byChannelTs')
+      .openCursor(range, 'prev');
     while (cursor && out.length < limit) {
       out.push(cursor.value);
       cursor = await cursor.continue();
@@ -83,7 +91,12 @@ export const messages: MessageStore = {
   },
   async since(channel, after, limit) {
     const d = await db();
-    const range = IDBKeyRange.bound([channel, after], [channel, Number.MAX_SAFE_INTEGER], true, false);
+    const range = IDBKeyRange.bound(
+      [channel, after],
+      [channel, Number.MAX_SAFE_INTEGER],
+      true,
+      false,
+    );
     return (await d.getAllFromIndex('messages', 'byChannelTs', range, limit)) as ChatMessage[];
   },
   async latestTs(channel) {
@@ -112,7 +125,8 @@ function relayAdapter(api: DesktopApi): HostRelayAdapter {
         slots: opts.slots,
         iceServers: opts.iceServers,
       });
-      const pushMembers = () => void api.relay.send({ type: 'members', handle, members: opts.members() });
+      const pushMembers = () =>
+        void api.relay.send({ type: 'members', handle, members: opts.members() });
       pushMembers();
       const timer = setInterval(pushMembers, 2000);
       return {
@@ -132,7 +146,11 @@ function relayAdapter(api: DesktopApi): HostRelayAdapter {
 
 let natCache: { at: number; nat: NatType } | undefined;
 
-export function createPlatform(opts: { version: string; cpuCores?: number; stun: () => string[] }): PlatformAdapter {
+export function createPlatform(opts: {
+  version: string;
+  cpuCores?: number;
+  stun: () => string[];
+}): PlatformAdapter {
   return {
     platform: desktop ? 'desktop' : 'web',
     appVersion: opts.version,
@@ -145,7 +163,10 @@ export function createPlatform(opts: { version: string; cpuCores?: number; stun:
       if (!natCache || Date.now() - natCache.at > 10 * 60_000) {
         const stun = opts.stun();
         const probes = [...stun, 'stun:stun.l.google.com:19302', 'stun:stun.cloudflare.com:3478'];
-        natCache = { at: Date.now(), nat: await detectNat(RTCPeerConnection, probes).catch(() => 'unknown' as const) };
+        natCache = {
+          at: Date.now(),
+          nat: await detectNat(RTCPeerConnection, probes).catch(() => 'unknown' as const),
+        };
       }
       return { ...caps, cpuCores: opts.cpuCores ?? caps.cpuCores, nat: natCache.nat };
     },

@@ -37,7 +37,11 @@ export class RecordService {
   }
 
   put(input: unknown, opts: { fresh: boolean; origin: string | null }): PutResult {
-    const result = validateRecord(input, { get: (k) => this.store.get(k), now: Date.now(), fresh: opts.fresh });
+    const result = validateRecord(input, {
+      get: (k) => this.store.get(k),
+      now: Date.now(),
+      fresh: opts.fresh,
+    });
     const key = (input as { key?: unknown })?.key;
     const current = typeof key === 'string' ? (this.store.get(key) ?? null) : null;
     if (!result.ok) {

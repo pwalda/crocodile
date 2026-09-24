@@ -16,7 +16,10 @@ export async function detectNat(
   const gather = async (url: string) => {
     const pc = new RTCPeerConnectionImpl({ iceServers: [{ urls: url }] });
     pc.createDataChannel('probe');
-    const found: { host: string[]; srflx: { ip: string; port: number }[] } = { host: [], srflx: [] };
+    const found: { host: string[]; srflx: { ip: string; port: number }[] } = {
+      host: [],
+      srflx: [],
+    };
     await new Promise<void>((resolve) => {
       const timer = setTimeout(resolve, timeoutMs);
       pc.onicecandidate = (ev) => {
@@ -49,7 +52,9 @@ export async function detectNat(
 
 /** Browser-side capability hints for host election. */
 export async function browserCapabilities(): Promise<Partial<HostCaps>> {
-  const nav = globalThis.navigator as Navigator & { getBattery?: () => Promise<{ charging: boolean }> };
+  const nav = globalThis.navigator as Navigator & {
+    getBattery?: () => Promise<{ charging: boolean }>;
+  };
   const caps: Partial<HostCaps> = {};
   if (nav?.hardwareConcurrency) caps.cpuCores = nav.hardwareConcurrency;
   try {

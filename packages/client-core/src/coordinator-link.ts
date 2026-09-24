@@ -1,5 +1,12 @@
 import type { Identity } from '@crocodile/crypto';
-import type { Platform, RpcMethod, RpcMethods, RpcParamsOf, ServerEvents, ServerInfo } from '@crocodile/protocol';
+import type {
+  Platform,
+  RpcMethod,
+  RpcMethods,
+  RpcParamsOf,
+  ServerEvents,
+  ServerInfo,
+} from '@crocodile/protocol';
 import { CoordinatorConnection, RpcCallError } from './coordinator-connection';
 import { Emitter } from './emitter';
 import type { KeyValueStore } from './platform';
@@ -50,7 +57,8 @@ export class CoordinatorLink extends Emitter<LinkEvents> {
   private conn?: CoordinatorConnection;
   private current?: RankedServer;
   private stopped = false;
-  private waiters: { resolve: (c: CoordinatorConnection) => void; reject: (e: Error) => void }[] = [];
+  private waiters: { resolve: (c: CoordinatorConnection) => void; reject: (e: Error) => void }[] =
+    [];
   private retryTimer?: ReturnType<typeof setTimeout>;
   private rerankTimer?: ReturnType<typeof setInterval>;
   private attempt = 0;
@@ -85,7 +93,11 @@ export class CoordinatorLink extends Emitter<LinkEvents> {
   }
 
   /** Waits (bounded) for a connection, then performs the call. */
-  async request<M extends RpcMethod>(method: M, params: RpcParamsOf<M>, timeoutMs = 15_000): Promise<RpcMethods[M]> {
+  async request<M extends RpcMethod>(
+    method: M,
+    params: RpcParamsOf<M>,
+    timeoutMs = 15_000,
+  ): Promise<RpcMethods[M]> {
     const conn = await this.ready(timeoutMs);
     return conn.request(method, params, timeoutMs);
   }
@@ -130,7 +142,10 @@ export class CoordinatorLink extends Emitter<LinkEvents> {
     const { servers, loads } = await fetchServerList(this.opts.directories, this.opts.kv, f);
     this.ranked = await rankServers(servers, loads, f);
     this.emit('servers', this.ranked);
-    return [...preferred, ...this.ranked.filter((r) => !preferred.some((p) => p.info.url === r.info.url))];
+    return [
+      ...preferred,
+      ...this.ranked.filter((r) => !preferred.some((p) => p.info.url === r.info.url)),
+    ];
   }
 
   private async refreshRanking() {

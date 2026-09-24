@@ -1,5 +1,10 @@
 import { signSdp, verifySdp, type Identity } from '@crocodile/crypto';
-import { RELAY_CHANNEL_LABEL, type ClientToRelay, type RelayToClient, type SignalData } from '@crocodile/protocol';
+import {
+  RELAY_CHANNEL_LABEL,
+  type ClientToRelay,
+  type RelayToClient,
+  type SignalData,
+} from '@crocodile/protocol';
 import { Emitter } from './emitter';
 
 export interface FrameCryptoHooks {
@@ -93,7 +98,8 @@ export class RelayLink extends Emitter<RelayLinkEvents> {
       const transceivers = this.pc.getTransceivers();
       const index = transceivers.indexOf(ev.transceiver);
       // Transceiver 0 is our microphone; slots follow.
-      if (index >= 1) this.emit('track', { slot: index - 1, track: ev.track, receiver: ev.receiver });
+      if (index >= 1)
+        this.emit('track', { slot: index - 1, track: ev.track, receiver: ev.receiver });
     };
   }
 
@@ -110,14 +116,30 @@ export class RelayLink extends Emitter<RelayLinkEvents> {
     }
     const offer = await this.pc.createOffer();
     await this.pc.setLocalDescription(offer);
-    this.timer = setTimeout(() => this.fail('timed out connecting to host'), opts.connectTimeoutMs ?? 15_000);
-    await opts.sendSignal(signSdp(opts.identity, 'offer', { sessionId: opts.sessionId, epoch: opts.epoch, to: opts.host }, this.pc.localDescription!.sdp));
+    this.timer = setTimeout(
+      () => this.fail('timed out connecting to host'),
+      opts.connectTimeoutMs ?? 15_000,
+    );
+    await opts.sendSignal(
+      signSdp(
+        opts.identity,
+        'offer',
+        { sessionId: opts.sessionId, epoch: opts.epoch, to: opts.host },
+        this.pc.localDescription!.sdp,
+      ),
+    );
   }
 
   async handleSignal(data: SignalData) {
     if (this.closed || data.epoch !== this.opts.epoch) return;
     if (data.type === 'answer') {
-      if (!verifySdp(data, { sessionId: this.opts.sessionId, from: this.opts.host, to: this.opts.identity.userId })) {
+      if (
+        !verifySdp(data, {
+          sessionId: this.opts.sessionId,
+          from: this.opts.host,
+          to: this.opts.identity.userId,
+        })
+      ) {
         this.fail('host answer failed signature check');
         return;
       }
@@ -163,7 +185,9 @@ export class RelayLink extends Emitter<RelayLinkEvents> {
     if (this.closed) return;
     this.closed = true;
     clearTimeout(this.timer);
-    void this.opts.sendSignal({ type: 'bye', epoch: this.opts.epoch, dir: 'toRelay' }).catch(() => {});
+    void this.opts
+      .sendSignal({ type: 'bye', epoch: this.opts.epoch, dir: 'toRelay' })
+      .catch(() => {});
     try {
       this.dc.close();
     } catch {

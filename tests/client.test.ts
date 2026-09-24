@@ -21,7 +21,11 @@ async function server(overrides = {}) {
   return c;
 }
 
-function makeClient(net: FakeRelayNetwork, coordinator: Coordinator, opts: { canHost?: boolean; nat?: 'open' | 'cone' | 'symmetric' } = {}) {
+function makeClient(
+  net: FakeRelayNetwork,
+  coordinator: Coordinator,
+  opts: { canHost?: boolean; nat?: 'open' | 'cone' | 'symmetric' } = {},
+) {
   const platform: PlatformAdapter = {
     platform: opts.canHost === false ? 'web' : 'desktop',
     appVersion: 'test',
@@ -43,11 +47,16 @@ function makeClient(net: FakeRelayNetwork, coordinator: Coordinator, opts: { can
 async function signUp(client: CrocodileClient, name: string) {
   await client.init();
   await client.createAccount(name);
-  await waitFor(() => client.state.link === 'connected' && client.state.me, 5000, `${name} connected`);
+  await waitFor(
+    () => client.state.link === 'connected' && client.state.me,
+    5000,
+    `${name} connected`,
+  );
   return client;
 }
 
-const channelOf = (c: CrocodileClient, spaceId: string) => c.state.spaces[spaceId]!.channels.find((ch) => ch.kind === 'text')!.id;
+const channelOf = (c: CrocodileClient, spaceId: string) =>
+  c.state.spaces[spaceId]!.channels.find((ch) => ch.kind === 'text')!.id;
 const bodies = (c: CrocodileClient, ch: string) => (c.state.messages[ch] ?? []).map((m) => m.body);
 
 describe('client', () => {
@@ -61,7 +70,11 @@ describe('client', () => {
     const found = await bob.searchUsers(`alice#${alice.state.me!.tag}`);
     expect(found.map((p) => p.userId)).toEqual([alice.userId]);
     await bob.addFriend(alice.userId);
-    await waitFor(() => alice.state.friends.incoming.includes(bob.userId), 3000, 'incoming request');
+    await waitFor(
+      () => alice.state.friends.incoming.includes(bob.userId),
+      3000,
+      'incoming request',
+    );
     await alice.addFriend(bob.userId);
     await waitFor(() => bob.state.friends.friends.includes(alice.userId), 3000, 'friendship');
 
@@ -69,13 +82,23 @@ describe('client', () => {
     const spaceId = await alice.createSpace('Swamp');
     const code = await alice.createInvite(spaceId);
     await bob.joinWithInvite(`croc://join/${code}`);
-    await waitFor(() => alice.state.spaces[spaceId]?.members.includes(bob.userId), 3000, 'member visible');
+    await waitFor(
+      () => alice.state.spaces[spaceId]?.members.includes(bob.userId),
+      3000,
+      'member visible',
+    );
     const ch = channelOf(alice, spaceId);
     await alice.openChannel(ch);
     await bob.openChannel(ch);
 
     const sid = sessionIds.space(spaceId);
-    await waitFor(() => alice.state.sessions[sid]?.peers.includes(bob.userId) && bob.state.sessions[sid]?.peers.includes(alice.userId), 5000, 'relay mesh');
+    await waitFor(
+      () =>
+        alice.state.sessions[sid]?.peers.includes(bob.userId) &&
+        bob.state.sessions[sid]?.peers.includes(alice.userId),
+      5000,
+      'relay mesh',
+    );
     expect(alice.state.sessions[sid]!.host).toBe(alice.userId);
     expect(alice.state.sessions[sid]!.iAmHost).toBe(true);
 
@@ -129,7 +152,7 @@ describe('client', () => {
     await waitFor(() => bodies(bob, dm).includes('psst'), 3000, 'dm delivered');
 
     // Bob goes offline; Alice writes; Bob comes back and syncs from Alice.
-    const bobKv = (bob.platform.kv as MemoryKeyValueStore);
+    const bobKv = bob.platform.kv as MemoryKeyValueStore;
     await bob.shutdown();
     await waitFor(() => alice.state.sessions[dm]?.peers.length === 0, 5000, 'bob gone');
     await alice.sendMessage(dm, 'while you were away');
@@ -143,7 +166,11 @@ describe('client', () => {
     await bob2.init();
     await bob2.openDm(alice.userId);
     await bob2.openChannel(dm);
-    await waitFor(() => bodies(bob2, dm).includes('while you were away'), 5000, 'offline dm synced');
+    await waitFor(
+      () => bodies(bob2, dm).includes('while you were away'),
+      5000,
+      'offline dm synced',
+    );
   });
 
   it('fails over to the backup host and keeps chatting', async () => {
@@ -167,7 +194,13 @@ describe('client', () => {
     // Alice's machine drops off the network entirely.
     net.killRelaysOf(alice.userId);
     alice.link!.stop();
-    await waitFor(() => carol.state.sessions[sid]?.host === bob.userId && carol.state.sessions[sid]?.status === 'connected', 8000, 'failover');
+    await waitFor(
+      () =>
+        carol.state.sessions[sid]?.host === bob.userId &&
+        carol.state.sessions[sid]?.status === 'connected',
+      8000,
+      'failover',
+    );
     await carol.sendMessage(ch, 'still here?');
     await waitFor(() => bodies(bob, ch).includes('still here?'), 3000, 'chat after failover');
   });
@@ -186,7 +219,11 @@ describe('client', () => {
     const ch = channelOf(alice, spaceId);
     await bob.openChannel(ch);
     const sid = sessionIds.space(spaceId);
-    await waitFor(() => bob.state.sessions[sid]?.peers.includes(alice.userId), 8000, 'cross-server relay');
+    await waitFor(
+      () => bob.state.sessions[sid]?.peers.includes(alice.userId),
+      8000,
+      'cross-server relay',
+    );
     await alice.sendMessage(ch, 'across the mesh');
     await waitFor(() => bodies(bob, ch).includes('across the mesh'), 3000);
     expect(bob.state.server!.info.id).toBe(b.info.id);

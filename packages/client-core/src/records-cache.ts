@@ -35,7 +35,9 @@ export class RecordCache extends Emitter<{ changed: SignedRecord }> {
   }
 
   ingestAll(records: SignedRecord[], persist = true) {
-    const sorted = [...records].sort((a, b) => RECORD_KIND_ORDER[a.kind] - RECORD_KIND_ORDER[b.kind]);
+    const sorted = [...records].sort(
+      (a, b) => RECORD_KIND_ORDER[a.kind] - RECORD_KIND_ORDER[b.kind],
+    );
     for (const r of sorted) this.ingest(r, persist);
   }
 
@@ -43,7 +45,11 @@ export class RecordCache extends Emitter<{ changed: SignedRecord }> {
   ingest(record: SignedRecord, persist = true): boolean {
     const existing = this.map.get(record.key);
     if (existing && existing.version >= record.version) return false;
-    const res = validateRecord(record, { get: (k) => this.map.get(k), now: Date.now(), fresh: false });
+    const res = validateRecord(record, {
+      get: (k) => this.map.get(k),
+      now: Date.now(),
+      fresh: false,
+    });
     if (!res.ok) {
       if (res.retryable) this.pending.push(record);
       return false;

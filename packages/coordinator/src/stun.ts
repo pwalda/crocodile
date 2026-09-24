@@ -11,7 +11,11 @@ const BINDING_REQUEST = 0x0001;
 const BINDING_SUCCESS = 0x0101;
 const XOR_MAPPED_ADDRESS = 0x0020;
 
-export function buildBindingResponse(request: Buffer, address: string, port: number): Buffer | null {
+export function buildBindingResponse(
+  request: Buffer,
+  address: string,
+  port: number,
+): Buffer | null {
   if (request.length < 20) return null;
   if (request.readUInt16BE(0) !== BINDING_REQUEST || request.readUInt32BE(4) !== MAGIC) return null;
   const txId = request.subarray(8, 20);
@@ -38,7 +42,11 @@ export function buildBindingResponse(request: Buffer, address: string, port: num
 function ipv6ToBuffer(address: string): Buffer {
   const clean = address.split('%')[0]!;
   const mapped = clean.match(/^::ffff:(\d+\.\d+\.\d+\.\d+)$/i);
-  if (mapped) return Buffer.concat([Buffer.from([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff]), Buffer.from(mapped[1]!.split('.').map(Number))]);
+  if (mapped)
+    return Buffer.concat([
+      Buffer.from([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff]),
+      Buffer.from(mapped[1]!.split('.').map(Number)),
+    ]);
   const [head, tail = ''] = clean.split('::') as [string, string?];
   const h = head ? head.split(':') : [];
   const t = tail ? tail.split(':') : [];

@@ -32,4 +32,7 @@ export const SIG_DOMAIN = {
   sealed: 'croc/v1/sealed',
 } as const;
 
-export const DEFAULT_STUN_SERVERS = ['stun:stun.l.google.com:19302', 'stun:stun.cloudflare.com:3478'];
+export const DEFAULT_STUN_SERVERS = [
+  'stun:stun.l.google.com:19302',
+  'stun:stun.cloudflare.com:3478',
+];

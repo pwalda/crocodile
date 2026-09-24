@@ -31,6 +31,7 @@ type Hint = { epoch: number; host: string | null; backup: string | null };
 const PENDING_HOST_GRACE_MS = 4000;
 const HOST_PENALTY_MS = 60_000;
 const OP_TIMEOUT_MS = 8000;
+const MEMBER_RECONNECT_GRACE_MS = 10_000;
 
 /**
  * Sessions and host election.
@@ -51,7 +52,12 @@ export class SessionService {
   private occupancy = new Map<string, { occ: VoiceOccupancy; owner: string }>();
   private pendingOps = new Map<
     string,
-    { server: string; resolve: (v: unknown) => void; reject: (e: Error) => void; timer: ReturnType<typeof setTimeout> }
+    {
+      server: string;
+      resolve: (v: unknown) => void;
+      reject: (e: Error) => void;
+      timer: ReturnType<typeof setTimeout>;
+    }
   >();
 
   constructor(private readonly hub: Coordinator) {}
@@ -77,19 +83,23 @@ export class SessionService {
     if (!scope) throw new RpcFailure('bad_request', 'invalid session id');
     const records = this.hub.records;
     if (scope.kind === 'space' || scope.kind === 'voice') {
-      if (!isSpaceMember(records, scope.spaceId, userId)) throw new RpcFailure('forbidden', 'not a member of this space');
+      if (!isSpaceMember(records, scope.spaceId, userId))
+        throw new RpcFailure('forbidden', 'not a member of this space');
       if (scope.kind === 'voice') {
         const space = records.get(`space:${scope.spaceId}`) as SignedRecord<'space'>;
         const channel = space.body.channels.find((c) => c.id === scope.channelId);
-        if (!channel || channel.kind !== 'voice') throw new RpcFailure('not_found', 'no such voice channel');
+        if (!channel || channel.kind !== 'voice')
+          throw new RpcFailure('not_found', 'no such voice channel');
       }
       return;
     }
     const [a, b] = scope.users;
-    if (userId !== a && userId !== b) throw new RpcFailure('forbidden', 'not part of this conversation');
+    if (userId !== a && userId !== b)
+      throw new RpcFailure('forbidden', 'not part of this conversation');
     const other = userId === a ? b : a;
     const theirs = records.get(`friends:${other}`) as SignedRecord<'friends'> | undefined;
-    if (theirs?.body.blocked.includes(userId)) throw new RpcFailure('forbidden', 'this user is not accepting messages from you');
+    if (theirs?.body.blocked.includes(userId))
+      throw new RpcFailure('forbidden', 'this user is not accepting messages from you');
   }
 
   inSession(userId: string, sessionId: string) {
@@ -133,11 +143,13 @@ export class SessionService {
   }
 
   async report(client: ClientHandle, sessionId: string, epoch: number) {
-    if (!this.inSession(client.userId, sessionId)) throw new RpcFailure('not_found', 'not in session');
+    if (!this.inSession(client.userId, sessionId))
+      throw new RpcFailure('not_found', 'not in session');
     await this.submit(sessionId, client.userId, { op: 'report', epoch, issue: 'host_unreachable' });
   }
 
   private pendingLeaves = new Map<string, ReturnType<typeof setTimeout>>();
+  private orphanTimers = new Map<string, ReturnType<typeof setTimeout>>();
 
   onClientReplaced(userId: string) {
     for (const [sessionId, members] of this.local) {
@@ -161,7 +173,8 @@ export class SessionService {
 
   /** Called when a 'session' event reaches a local member: remember the host. */
   noteState(state: SessionState) {
-    if (this.local.has(state.id)) this.lastKnown.set(state.id, { epoch: state.epoch, host: state.host, backup: state.backup });
+    if (this.local.has(state.id))
+      this.lastKnown.set(state.id, { epoch: state.epoch, host: state.host, backup: state.backup });
   }
 
   /** Sessions the given local user is in (for tests and diagnostics). */
@@ -264,10 +277,13 @@ export class SessionService {
       const existing = s.state.members.find((m) => m.userId === userId);
       if (existing) existing.caps = op.caps;
       else {
-        if (s.state.members.length >= LIMITS.sessionMembersMax) throw new RpcFailure('conflict', 'session is full');
+        if (s.state.members.length >= LIMITS.sessionMembersMax)
+          throw new RpcFailure('conflict', 'session is full');
         s.state.members.push({ userId, joinedAt: now, caps: op.caps });
       }
       s.memberServer.set(userId, serverId);
+      clearTimeout(this.orphanTimers.get(`${sessionId}|${userId}`));
+      this.orphanTimers.delete(`${sessionId}|${userId}`);
       this.recompute(s);
       if (scope.kind === 'dm') {
         const other = scope.users[0] === userId ? scope.users[1] : scope.users[0];
@@ -291,12 +307,16 @@ export class SessionService {
         this.removeMember(s, userId);
         return {};
       case 'report': {
-        if (!member || op.epoch !== s.state.epoch || !s.state.host || userId === s.state.host) return {};
+        if (!member || op.epoch !== s.state.epoch || !s.state.host || userId === s.state.host)
+          return {};
         s.reports.add(userId);
         const others = s.state.members.length - 1;
         if (s.reports.size >= Math.max(1, Math.ceil(others / 2))) {
           s.penalties.set(s.state.host, now + HOST_PENALTY_MS);
-          this.hub.log.info('host reported unreachable; failing over', { sessionId, host: s.state.host });
+          this.hub.log.info('host reported unreachable; failing over', {
+            sessionId,
+            host: s.state.host,
+          });
           this.recompute(s);
         }
         return {};
@@ -347,10 +367,22 @@ export class SessionService {
     let result: { host: string | null; backup: string | null };
     if (st.host && !hostIsMember && s.pendingHostUntil > now) {
       // The adopted host has not re-joined yet; keep it during the grace period.
-      const others = elect({ members: st.members, host: null, backup: st.backup, penalties: s.penalties, now });
+      const others = elect({
+        members: st.members,
+        host: null,
+        backup: st.backup,
+        penalties: s.penalties,
+        now,
+      });
       result = { host: st.host, backup: others.host === st.host ? others.backup : others.host };
     } else {
-      result = elect({ members: st.members, host: st.host, backup: st.backup, penalties: s.penalties, now });
+      result = elect({
+        members: st.members,
+        host: st.host,
+        backup: st.backup,
+        penalties: s.penalties,
+        now,
+      });
     }
     st.host = result.host;
     st.backup = result.backup;
@@ -426,11 +458,27 @@ export class SessionService {
         p.reject(new RpcFailure('unavailable', 'session owner went away'));
       }
     }
+    // Members of the lost server get a grace period to reconnect through
+    // another server before we treat them as gone; this avoids needless host
+    // failovers when only a coordinator (not the peer) went away.
     for (const s of [...this.owned.values()]) {
-      for (const [userId, server] of [...s.memberServer]) if (server === serverId) this.removeMember(s, userId);
+      for (const [userId, server] of [...s.memberServer]) {
+        if (server !== serverId) continue;
+        const key = `${s.state.id}|${userId}`;
+        clearTimeout(this.orphanTimers.get(key));
+        const timer = setTimeout(() => {
+          this.orphanTimers.delete(key);
+          const current = this.owned.get(s.state.id);
+          if (current && current.memberServer.get(userId) === serverId)
+            this.removeMember(current, userId);
+        }, MEMBER_RECONNECT_GRACE_MS);
+        timer.unref?.();
+        this.orphanTimers.set(key, timer);
+      }
     }
     for (const [sessionId, o] of [...this.occupancy]) {
-      if (o.owner === serverId) this.setOccupancy(sessionId, { ...o.occ, members: [], host: null }, serverId);
+      if (o.owner === serverId)
+        this.setOccupancy(sessionId, { ...o.occ, members: [], host: null }, serverId);
     }
     this.rebalance();
   }
@@ -445,8 +493,9 @@ export class SessionService {
       this.lastOwner.set(sessionId, owner);
       const hint = this.lastKnown.get(sessionId);
       for (const [userId, caps] of members) {
-        this.submit(sessionId, userId, { op: 'join', caps, ...(hint ? { hint } : {}) }).catch((err) =>
-          this.hub.log.warn('re-join after owner change failed', { sessionId, err: String(err) }),
+        this.submit(sessionId, userId, { op: 'join', caps, ...(hint ? { hint } : {}) }).catch(
+          (err) =>
+            this.hub.log.warn('re-join after owner change failed', { sessionId, err: String(err) }),
         );
       }
     }
@@ -454,6 +503,7 @@ export class SessionService {
 
   close() {
     for (const t of this.pendingLeaves.values()) clearTimeout(t);
+    for (const t of this.orphanTimers.values()) clearTimeout(t);
     for (const s of this.owned.values()) if (s.timer) clearTimeout(s.timer);
     for (const p of this.pendingOps.values()) clearTimeout(p.timer);
   }

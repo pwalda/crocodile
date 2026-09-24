@@ -1,5 +1,12 @@
 import { SIG_DOMAIN, concatBytes, fromB64u, toB64u, type SealedBox } from '@crocodile/protocol';
-import { aesGcmDecrypt, aesGcmEncrypt, hkdfSha256, randomBytes, verifyPayload, x25519 } from './primitives';
+import {
+  aesGcmDecrypt,
+  aesGcmEncrypt,
+  hkdfSha256,
+  randomBytes,
+  verifyPayload,
+  x25519,
+} from './primitives';
 import { decodeEncKey, sign, userIdFromKey, type Identity } from './identity';
 
 /**
@@ -20,8 +27,18 @@ export function seal(sender: Identity, recipientEncKey: string, plaintext: Uint8
   const shared = x25519.getSharedSecret(ephSecret, recipientEnc);
   const { key, nonce } = deriveBoxKey(shared, epk, recipientEnc);
   const ct = aesGcmEncrypt(key, nonce, plaintext);
-  const unsigned = { epk: toB64u(epk), ct: toB64u(ct), from: sender.publicKey, to: recipientEncKey };
-  return { epk: unsigned.epk, ct: unsigned.ct, from: sender.publicKey, sig: sign(sender, SIG_DOMAIN.sealed, unsigned) };
+  const unsigned = {
+    epk: toB64u(epk),
+    ct: toB64u(ct),
+    from: sender.publicKey,
+    to: recipientEncKey,
+  };
+  return {
+    epk: unsigned.epk,
+    ct: unsigned.ct,
+    from: sender.publicKey,
+    sig: sign(sender, SIG_DOMAIN.sealed, unsigned),
+  };
 }
 
 export interface OpenedBox {

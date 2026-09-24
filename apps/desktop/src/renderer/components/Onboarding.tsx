@@ -56,8 +56,8 @@ export function Onboarding() {
             <Logo size={72} className="mx-auto" />
             <h1 className="mt-4 text-3xl font-bold text-white">Welcome to Crocodile</h1>
             <p className="mt-3 text-[15px] leading-relaxed text-muted">
-              Voice and text chat that goes straight from you to your friends. Everything is end-to-end encrypted and never stored on
-              anyone's server.
+              Voice and text chat that goes straight from you to your friends. Everything is
+              end-to-end encrypted and never stored on anyone's server.
             </p>
             <div className="mt-8 flex flex-col gap-3">
               <Button className="h-11 text-base" onClick={() => setStep('create')}>
@@ -77,12 +77,20 @@ export function Onboarding() {
               if (name.trim()) void create();
             }}
           >
-            <h2 className="text-center text-2xl font-bold text-white">What should everyone call you?</h2>
+            <h2 className="text-center text-2xl font-bold text-white">
+              What should everyone call you?
+            </h2>
             <p className="mt-2 text-center text-sm text-muted">You can change this any time.</p>
             <div className="mt-6 flex items-center gap-4">
               <label className="group relative flex h-20 w-20 shrink-0 cursor-pointer items-center justify-center overflow-hidden rounded-full bg-croc text-3xl font-bold text-white">
-                {avatar ? <img src={avatar} alt="" className="h-full w-full object-cover" /> : (name.trim()[0] ?? '🐊').toUpperCase()}
-                <span className="absolute inset-0 hidden items-center justify-center bg-black/50 text-xs font-bold group-hover:flex">CHANGE</span>
+                {avatar ? (
+                  <img src={avatar} alt="" className="h-full w-full object-cover" />
+                ) : (
+                  (name.trim()[0] ?? '🐊').toUpperCase()
+                )}
+                <span className="absolute inset-0 hidden items-center justify-center bg-black/50 text-xs font-bold group-hover:flex">
+                  CHANGE
+                </span>
                 <input
                   type="file"
                   accept="image/*"
@@ -95,7 +103,13 @@ export function Onboarding() {
               </label>
               <div className="flex-1">
                 <Label>Display name</Label>
-                <Input autoFocus maxLength={32} value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. Wally" />
+                <Input
+                  autoFocus
+                  maxLength={32}
+                  value={name}
+                  onChange={(e) => setName(e.target.value)}
+                  placeholder="e.g. Wally"
+                />
               </div>
             </div>
             {error && <p className="mt-4 text-sm text-dnd">{error}</p>}
@@ -116,8 +130,9 @@ export function Onboarding() {
               <ShieldCheck size={48} className="mx-auto text-croc" />
               <h2 className="mt-3 text-2xl font-bold text-white">Save your recovery key</h2>
               <p className="mt-2 text-sm leading-relaxed text-muted">
-                There are no passwords. This key <b className="text-text">is</b> your account: use it to sign in on another device or if
-                you reinstall. Keep it somewhere safe and never share it.
+                There are no passwords. This key <b className="text-text">is</b> your account: use
+                it to sign in on another device or if you reinstall. Keep it somewhere safe and
+                never share it.
               </p>
             </div>
             <div className="selectable mt-5 break-all rounded-md bg-float p-4 text-center font-mono text-[15px] tracking-wide text-croc-light">
@@ -135,7 +150,12 @@ export function Onboarding() {
               </Button>
             </div>
             <label className="mt-6 flex cursor-pointer items-center gap-2 text-sm text-muted">
-              <input type="checkbox" checked={savedKey} onChange={(e) => setSavedKey(e.target.checked)} className="accent-croc" />
+              <input
+                type="checkbox"
+                checked={savedKey}
+                onChange={(e) => setSavedKey(e.target.checked)}
+                className="accent-croc"
+              />
               I saved my recovery key
             </label>
             <Button className="mt-4 h-11 w-full" disabled={!savedKey} onClick={finish}>
@@ -152,17 +172,28 @@ export function Onboarding() {
             }}
           >
             <h2 className="text-center text-2xl font-bold text-white">Welcome back</h2>
-            <p className="mt-2 text-center text-sm text-muted">Paste the recovery key you saved when you created your account.</p>
+            <p className="mt-2 text-center text-sm text-muted">
+              Paste the recovery key you saved when you created your account.
+            </p>
             <div className="mt-6">
               <Label>Recovery key</Label>
-              <Input autoFocus value={recovery} onChange={(e) => setRecovery(e.target.value)} placeholder="XXXX-XXXX-…" className="font-mono" />
+              <Input
+                autoFocus
+                value={recovery}
+                onChange={(e) => setRecovery(e.target.value)}
+                placeholder="XXXX-XXXX-…"
+                className="font-mono"
+              />
             </div>
             {error && <p className="mt-4 text-sm text-dnd">{error}</p>}
             <div className="mt-8 flex justify-between">
               <Button type="button" variant="ghost" onClick={() => setStep('welcome')}>
                 Back
               </Button>
-              <Button type="submit" disabled={recovery.replace(/[^a-z2-7]/gi, '').length < 50 || busy}>
+              <Button
+                type="submit"
+                disabled={recovery.replace(/[^a-z2-7]/gi, '').length < 50 || busy}
+              >
                 {busy ? 'Restoring…' : 'Restore'}
               </Button>
             </div>
