@@ -147,7 +147,11 @@ describe('client', () => {
     await waitFor(() => bob.state.dms.includes(alice.userId), 12000, 'dm invite');
     await alice.openChannel(dm);
     await bob.openChannel(dm);
-    await waitFor(() => alice.state.sessions[dm]?.peers.includes(bob.userId), 12000, 'dm connected');
+    await waitFor(
+      () => alice.state.sessions[dm]?.peers.includes(bob.userId),
+      12000,
+      'dm connected',
+    );
     await alice.sendMessage(dm, 'psst');
     await waitFor(() => bodies(bob, dm).includes('psst'), 12000, 'dm delivered');
 

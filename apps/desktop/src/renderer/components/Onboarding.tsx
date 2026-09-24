@@ -1,205 +1,432 @@
-import { useState } from 'react';
-import { Check, Copy, KeyRound, ShieldCheck, Sparkles } from 'lucide-react';
-import { getClient } from '../croc';
+import { useEffect, useState, type ReactNode } from 'react';
+import {
+  ArrowLeft,
+  Check,
+  Copy,
+  KeyRound,
+  Laptop,
+  Lock,
+  Radio,
+  ShieldCheck,
+  Sparkles,
+  Users,
+} from 'lucide-react';
+import { getClient, useCroc } from '../croc';
 import { copyText, imageToDataUrl } from '../lib/format';
 import { Button, Input, Label } from './ui';
 import { Logo } from './Logo';
 
-type Step = 'welcome' | 'create' | 'restore' | 'recovery';
+type Step = 'welcome' | 'create' | 'returning' | 'link' | 'restore' | 'recovery';
 
-/** First run: no accounts, passwords or emails. Pick a name and you are in. */
+/** First run: no passwords or emails. Pick a name, or bring your account from another device. */
 export function Onboarding() {
   const [step, setStep] = useState<Step>('welcome');
-  const [name, setName] = useState('');
-  const [avatar, setAvatar] = useState<string | undefined>();
-  const [recovery, setRecovery] = useState('');
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [copied, setCopied] = useState(false);
-  const [savedKey, setSavedKey] = useState(false);
-
-  const client = getClient();
-
-  const create = async () => {
-    setBusy(true);
-    setError(null);
-    try {
-      await client.createAccount(name.trim(), avatar);
-      setRecovery(client.recoveryKey());
-      setStep('recovery');
-    } catch (err) {
-      setError((err as Error).message);
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const restore = async () => {
-    setBusy(true);
-    setError(null);
-    try {
-      await client.restoreAccount(recovery, name.trim() || undefined);
-      client.finishOnboarding();
-    } catch (err) {
-      setError((err as Error).message);
-      setBusy(false);
-    }
-  };
-
-  const finish = () => client.finishOnboarding();
-
   return (
-    <div className="flex h-full items-center justify-center bg-gradient-to-br from-[#0f2a1f] via-rail to-[#1a1033]">
-      <div className="pop-in w-[480px] rounded-xl bg-main p-8 shadow-2xl">
-        {step === 'welcome' && (
-          <div className="text-center">
-            <Logo size={72} className="mx-auto" />
-            <h1 className="mt-4 text-3xl font-bold text-white">Welcome to Crocodile</h1>
-            <p className="mt-3 text-[15px] leading-relaxed text-muted">
-              Voice and text chat that goes straight from you to your friends. Everything is
-              end-to-end encrypted and never stored on anyone's server.
-            </p>
-            <div className="mt-8 flex flex-col gap-3">
-              <Button className="h-11 text-base" onClick={() => setStep('create')}>
-                <Sparkles size={18} /> Get started
-              </Button>
-              <Button variant="secondary" className="h-11" onClick={() => setStep('restore')}>
-                <KeyRound size={18} /> I have a recovery key
-              </Button>
-            </div>
-          </div>
-        )}
-
-        {step === 'create' && (
-          <form
-            onSubmit={(e) => {
-              e.preventDefault();
-              if (name.trim()) void create();
-            }}
-          >
-            <h2 className="text-center text-2xl font-bold text-white">
-              What should everyone call you?
-            </h2>
-            <p className="mt-2 text-center text-sm text-muted">You can change this any time.</p>
-            <div className="mt-6 flex items-center gap-4">
-              <label className="group relative flex h-20 w-20 shrink-0 cursor-pointer items-center justify-center overflow-hidden rounded-full bg-croc text-3xl font-bold text-white">
-                {avatar ? (
-                  <img src={avatar} alt="" className="h-full w-full object-cover" />
-                ) : (
-                  (name.trim()[0] ?? '🐊').toUpperCase()
-                )}
-                <span className="absolute inset-0 hidden items-center justify-center bg-black/50 text-xs font-bold group-hover:flex">
-                  CHANGE
-                </span>
-                <input
-                  type="file"
-                  accept="image/*"
-                  className="hidden"
-                  onChange={async (e) => {
-                    const f = e.target.files?.[0];
-                    if (f) setAvatar(await imageToDataUrl(f));
-                  }}
-                />
-              </label>
-              <div className="flex-1">
-                <Label>Display name</Label>
-                <Input
-                  autoFocus
-                  maxLength={32}
-                  value={name}
-                  onChange={(e) => setName(e.target.value)}
-                  placeholder="e.g. Wally"
-                />
-              </div>
-            </div>
-            {error && <p className="mt-4 text-sm text-dnd">{error}</p>}
-            <div className="mt-8 flex justify-between">
-              <Button type="button" variant="ghost" onClick={() => setStep('welcome')}>
-                Back
-              </Button>
-              <Button type="submit" disabled={!name.trim() || busy}>
-                {busy ? 'Setting up…' : 'Continue'}
-              </Button>
-            </div>
-          </form>
-        )}
-
-        {step === 'recovery' && (
-          <div>
-            <div className="text-center">
-              <ShieldCheck size={48} className="mx-auto text-croc" />
-              <h2 className="mt-3 text-2xl font-bold text-white">Save your recovery key</h2>
-              <p className="mt-2 text-sm leading-relaxed text-muted">
-                There are no passwords. This key <b className="text-text">is</b> your account: use
-                it to sign in on another device or if you reinstall. Keep it somewhere safe and
-                never share it.
-              </p>
-            </div>
-            <div className="selectable mt-5 break-all rounded-md bg-float p-4 text-center font-mono text-[15px] tracking-wide text-croc-light">
-              {recovery}
-            </div>
-            <div className="mt-3 flex justify-center">
-              <Button
-                variant="secondary"
-                onClick={async () => {
-                  await copyText(recovery);
-                  setCopied(true);
-                }}
-              >
-                {copied ? <Check size={16} /> : <Copy size={16} />} {copied ? 'Copied' : 'Copy key'}
-              </Button>
-            </div>
-            <label className="mt-6 flex cursor-pointer items-center gap-2 text-sm text-muted">
-              <input
-                type="checkbox"
-                checked={savedKey}
-                onChange={(e) => setSavedKey(e.target.checked)}
-                className="accent-croc"
-              />
-              I saved my recovery key
-            </label>
-            <Button className="mt-4 h-11 w-full" disabled={!savedKey} onClick={finish}>
-              Start chatting
-            </Button>
-          </div>
-        )}
-
-        {step === 'restore' && (
-          <form
-            onSubmit={(e) => {
-              e.preventDefault();
-              void restore();
-            }}
-          >
-            <h2 className="text-center text-2xl font-bold text-white">Welcome back</h2>
-            <p className="mt-2 text-center text-sm text-muted">
-              Paste the recovery key you saved when you created your account.
-            </p>
-            <div className="mt-6">
-              <Label>Recovery key</Label>
-              <Input
-                autoFocus
-                value={recovery}
-                onChange={(e) => setRecovery(e.target.value)}
-                placeholder="XXXX-XXXX-…"
-                className="font-mono"
-              />
-            </div>
-            {error && <p className="mt-4 text-sm text-dnd">{error}</p>}
-            <div className="mt-8 flex justify-between">
-              <Button type="button" variant="ghost" onClick={() => setStep('welcome')}>
-                Back
-              </Button>
-              <Button
-                type="submit"
-                disabled={recovery.replace(/[^a-z2-7]/gi, '').length < 50 || busy}
-              >
-                {busy ? 'Restoring…' : 'Restore'}
-              </Button>
-            </div>
-          </form>
-        )}
+    <div className="flex h-full gap-3 p-3">
+      <BrandPanel />
+      <div className="island flex flex-1 items-center justify-center">
+        <div key={step} className="rise w-[440px] max-w-[90%]">
+          {step === 'welcome' && <Welcome go={setStep} />}
+          {step === 'create' && <Create go={setStep} />}
+          {step === 'returning' && <Returning go={setStep} />}
+          {step === 'link' && <LinkFromDevice go={setStep} />}
+          {step === 'restore' && <Restore go={setStep} />}
+          {step === 'recovery' && <SaveRecovery />}
+        </div>
       </div>
     </div>
+  );
+}
+
+function BrandPanel() {
+  return (
+    <div
+      className="relative hidden w-[40%] max-w-[520px] flex-col justify-between overflow-hidden rounded-[var(--radius)] p-10 text-[#e7f1ea] md:flex"
+      style={{ background: 'linear-gradient(160deg, #0f3b2b 0%, #082119 55%, #051410 100%)' }}
+    >
+      <svg
+        className="pointer-events-none absolute inset-x-0 bottom-0 w-full opacity-60"
+        viewBox="0 0 400 160"
+        preserveAspectRatio="none"
+        aria-hidden
+      >
+        {[0, 1, 2, 3].map((i) => (
+          <path
+            key={i}
+            d={`M0 ${40 + i * 30} C60 ${25 + i * 30} 100 ${55 + i * 30} 160 ${40 + i * 30} S260 ${25 + i * 30} 320 ${40 + i * 30} S380 ${50 + i * 30} 400 ${40 + i * 30}`}
+            stroke="#5eead4"
+            strokeOpacity={0.35 - i * 0.07}
+            strokeWidth={2}
+            fill="none"
+          />
+        ))}
+      </svg>
+      <div className="flex items-center gap-3">
+        <Logo size={44} />
+        <span className="text-xl font-extrabold tracking-tight">Crocodile</span>
+      </div>
+      <div className="relative">
+        <h1 className="text-[40px] font-extrabold leading-[1.05] tracking-tight">
+          Talk freely.
+          <br />
+          <span className="text-[#7ee2a8]">Nobody in between.</span>
+        </h1>
+        <ul className="mt-8 space-y-4 text-[15px] text-[#b9d3c4]">
+          <Point icon={<Lock size={18} />}>
+            Every word and every voice frame is end-to-end encrypted, with post-quantum key
+            exchange.
+          </Point>
+          <Point icon={<Radio size={18} />}>
+            Voice and messages travel directly between you and your friends — never stored on a
+            server.
+          </Point>
+          <Point icon={<Users size={18} />}>
+            Rooms for your crew, spaces for your community, calls for two.
+          </Point>
+        </ul>
+      </div>
+      <p className="relative text-xs text-[#6f8f80]">
+        Coordination servers are run by volunteers and only help you find each other.
+      </p>
+    </div>
+  );
+}
+
+function Point({ icon, children }: { icon: ReactNode; children: ReactNode }) {
+  return (
+    <li className="flex gap-3">
+      <span className="mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-xl bg-white/10 text-[#7ee2a8]">
+        {icon}
+      </span>
+      <span className="leading-relaxed">{children}</span>
+    </li>
+  );
+}
+
+function Header({ title, text, back }: { title: string; text?: ReactNode; back?: () => void }) {
+  return (
+    <div className="mb-7">
+      {back && (
+        <button
+          className="mb-5 inline-flex items-center gap-1.5 text-sm font-semibold text-muted hover:text-text"
+          onClick={back}
+        >
+          <ArrowLeft size={16} /> Back
+        </button>
+      )}
+      <h2 className="text-[28px] font-extrabold tracking-tight">{title}</h2>
+      {text && <p className="mt-2 text-[15px] leading-relaxed text-muted">{text}</p>}
+    </div>
+  );
+}
+
+function Choice({
+  icon,
+  title,
+  text,
+  onClick,
+}: {
+  icon: ReactNode;
+  title: string;
+  text: string;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      onClick={onClick}
+      className="group flex w-full items-center gap-4 rounded-2xl border border-line bg-island-2 p-4 text-left transition hover:border-accent hover:bg-hover"
+    >
+      <span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-accent-soft text-accent">
+        {icon}
+      </span>
+      <span>
+        <span className="block font-bold">{title}</span>
+        <span className="block text-sm text-muted">{text}</span>
+      </span>
+    </button>
+  );
+}
+
+function Welcome({ go }: { go: (s: Step) => void }) {
+  return (
+    <>
+      <div className="mb-6 md:hidden">
+        <Logo size={56} />
+      </div>
+      <Header
+        title="Welcome"
+        text="No passwords, emails or phone numbers. Your account is a key that lives on your devices."
+      />
+      <div className="space-y-3">
+        <Choice
+          icon={<Sparkles size={20} />}
+          title="I'm new here"
+          text="Pick a name and start talking"
+          onClick={() => go('create')}
+        />
+        <Choice
+          icon={<KeyRound size={20} />}
+          title="I already use Crocodile"
+          text="Bring your account to this device"
+          onClick={() => go('returning')}
+        />
+      </div>
+    </>
+  );
+}
+
+function Create({ go }: { go: (s: Step) => void }) {
+  const [name, setName] = useState('');
+  const [avatar, setAvatar] = useState<string | undefined>();
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const client = getClient();
+  return (
+    <form
+      onSubmit={async (e) => {
+        e.preventDefault();
+        if (!name.trim()) return;
+        setBusy(true);
+        setError(null);
+        try {
+          await client.createAccount(name.trim(), avatar);
+          go('recovery');
+        } catch (err) {
+          setError((err as Error).message);
+          setBusy(false);
+        }
+      }}
+    >
+      <Header
+        title="What should people call you?"
+        text="You can change your name and picture any time."
+        back={() => go('welcome')}
+      />
+      <div className="flex items-center gap-4">
+        <label className="group relative flex h-20 w-20 shrink-0 cursor-pointer items-center justify-center overflow-hidden rounded-[26px] bg-accent text-3xl font-extrabold text-[#062014]">
+          {avatar ? (
+            <img src={avatar} alt="" className="h-full w-full object-cover" />
+          ) : (
+            (name.trim()[0] ?? '🐊').toUpperCase()
+          )}
+          <span className="absolute inset-0 hidden items-center justify-center bg-black/55 text-[11px] font-bold text-white group-hover:flex">
+            Photo
+          </span>
+          <input
+            type="file"
+            accept="image/*"
+            className="hidden"
+            onChange={async (e) => {
+              const f = e.target.files?.[0];
+              if (f) setAvatar(await imageToDataUrl(f));
+            }}
+          />
+        </label>
+        <div className="flex-1">
+          <Label>Display name</Label>
+          <Input
+            autoFocus
+            maxLength={32}
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+            placeholder="e.g. Wally"
+          />
+        </div>
+      </div>
+      {error && <p className="mt-4 text-sm text-danger">{error}</p>}
+      <Button type="submit" className="mt-8 h-12 w-full text-base" disabled={!name.trim() || busy}>
+        {busy ? 'Creating your keys…' : 'Continue'}
+      </Button>
+    </form>
+  );
+}
+
+function Returning({ go }: { go: (s: Step) => void }) {
+  return (
+    <>
+      <Header
+        title="Welcome back"
+        text="How would you like to sign in?"
+        back={() => go('welcome')}
+      />
+      <div className="space-y-3">
+        <Choice
+          icon={<Laptop size={20} />}
+          title="Link from another device"
+          text="Approve this device from one that is signed in"
+          onClick={() => go('link')}
+        />
+        <Choice
+          icon={<KeyRound size={20} />}
+          title="Use my recovery key"
+          text="The key you saved when you created your account"
+          onClick={() => go('restore')}
+        />
+      </div>
+    </>
+  );
+}
+
+function LinkFromDevice({ go }: { go: (s: Step) => void }) {
+  const linking = useCroc((s) => s.linking);
+  const client = getClient();
+  useEffect(() => {
+    void client.startDeviceLink();
+    return () => {
+      if (client.state.linking?.step !== 'done') client.cancelDeviceLink();
+    };
+  }, [client]);
+  useEffect(() => {
+    if (linking?.role === 'new' && linking.step === 'done') {
+      const t = setTimeout(() => client.finishOnboarding(), 600);
+      return () => clearTimeout(t);
+    }
+  }, [linking, client]);
+
+  const l = linking?.role === 'new' ? linking : null;
+  return (
+    <>
+      <Header
+        title="Link this device"
+        text={
+          <>
+            On a device where you're signed in, open your account menu and choose{' '}
+            <b className="text-text">Link another device</b>, then type this code.
+          </>
+        }
+        back={() => go('returning')}
+      />
+      {!l || (l.step === 'waiting' && !l.code) ? (
+        <div className="h-24 animate-pulse rounded-2xl bg-raised" />
+      ) : l.step === 'error' ? (
+        <div className="rounded-2xl border border-danger/40 bg-danger/10 p-4 text-sm">
+          {l.error}
+          <Button
+            variant="secondary"
+            className="mt-3"
+            onClick={() => void client.startDeviceLink()}
+          >
+            Try again
+          </Button>
+        </div>
+      ) : l.step === 'waiting' ? (
+        <div className="selectable rounded-2xl bg-accent-soft py-6 text-center font-mono text-4xl font-bold tracking-[0.25em] text-accent">
+          {l.code}
+        </div>
+      ) : l.step === 'claimed' ? (
+        <div className="text-center">
+          <p className="text-sm text-muted">
+            Make sure your other device shows the same security code, then confirm it there.
+          </p>
+          <div className="selectable mt-4 rounded-2xl bg-accent-soft py-6 font-mono text-4xl font-bold tracking-widest text-accent">
+            {l.securityCode}
+          </div>
+        </div>
+      ) : (
+        <div className="flex flex-col items-center py-4 text-center">
+          <ShieldCheck size={48} className="text-accent" />
+          <p className="mt-3 font-bold">Linked. Welcome back!</p>
+        </div>
+      )}
+      {l?.step === 'waiting' && (
+        <p className="mt-4 text-center text-xs text-faint">
+          The code expires in 10 minutes. Your account is transferred end-to-end encrypted.
+        </p>
+      )}
+    </>
+  );
+}
+
+function Restore({ go }: { go: (s: Step) => void }) {
+  const [key, setKey] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const client = getClient();
+  return (
+    <form
+      onSubmit={async (e) => {
+        e.preventDefault();
+        setBusy(true);
+        setError(null);
+        try {
+          await client.restoreAccount(key);
+          client.finishOnboarding();
+        } catch (err) {
+          setError((err as Error).message);
+          setBusy(false);
+        }
+      }}
+    >
+      <Header
+        title="Recovery key"
+        text="Paste the key you saved when you created your account."
+        back={() => go('returning')}
+      />
+      <Label>Recovery key</Label>
+      <Input
+        autoFocus
+        value={key}
+        onChange={(e) => setKey(e.target.value)}
+        placeholder="XXXX-XXXX-…"
+        className="font-mono"
+      />
+      {error && <p className="mt-4 text-sm text-danger">{error}</p>}
+      <Button
+        type="submit"
+        className="mt-8 h-12 w-full text-base"
+        disabled={key.replace(/[^a-z2-7]/gi, '').length < 50 || busy}
+      >
+        {busy ? 'Restoring…' : 'Restore'}
+      </Button>
+    </form>
+  );
+}
+
+function SaveRecovery() {
+  const client = getClient();
+  const [recovery] = useState(() => client.recoveryKey());
+  const [copied, setCopied] = useState(false);
+  const [saved, setSaved] = useState(false);
+  return (
+    <>
+      <Header
+        title="Keep your recovery key"
+        text={
+          <>
+            This key <b className="text-text">is</b> your account. You'll need it if you lose all
+            your devices. Store it in a password manager or on paper — never share it.
+          </>
+        }
+      />
+      <div className="selectable break-all rounded-2xl border border-dashed border-accent/50 bg-accent-soft p-5 text-center font-mono text-[15px] leading-relaxed tracking-wide text-accent">
+        {recovery}
+      </div>
+      <Button
+        variant="secondary"
+        className="mt-3"
+        onClick={async () => {
+          await copyText(recovery);
+          setCopied(true);
+        }}
+      >
+        {copied ? <Check size={16} /> : <Copy size={16} />} {copied ? 'Copied' : 'Copy key'}
+      </Button>
+      <label className="mt-6 flex cursor-pointer items-center gap-2.5 text-sm text-text-2">
+        <input
+          type="checkbox"
+          checked={saved}
+          onChange={(e) => setSaved(e.target.checked)}
+          className="h-4 w-4 accent-[var(--accent)]"
+        />
+        I saved my recovery key somewhere safe
+      </label>
+      <Button
+        className="mt-5 h-12 w-full text-base"
+        disabled={!saved}
+        onClick={() => client.finishOnboarding()}
+      >
+        Start talking
+      </Button>
+    </>
   );
 }

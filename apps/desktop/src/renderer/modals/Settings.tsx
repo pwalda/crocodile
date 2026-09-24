@@ -1,111 +1,197 @@
-import { useEffect, useState } from 'react';
-import { Check, Copy, Eye, LogOut, Server, X } from 'lucide-react';
-import { closeModal, getClient, saveVoiceSettings, ui, useCroc, useUi } from '../croc';
-import { copyText, imageToDataUrl } from '../lib/format';
-import { desktop, kv } from '../platform';
-import { Avatar, Button, Input, Label, cx } from '../components/ui';
+import { useEffect, useState, type ReactNode } from 'react';
+import {
+  AppWindow,
+  Check,
+  Copy,
+  Eye,
+  Info,
+  Laptop,
+  LogOut,
+  Mic,
+  Monitor,
+  Moon,
+  Palette,
+  Plus,
+  Server,
+  Shield,
+  Smartphone,
+  Sun,
+  Trash2,
+  User,
+  Wifi,
+  X,
+} from 'lucide-react';
+import {
+  ACCENTS,
+  closeModal,
+  getClient,
+  openModal,
+  saveAppearance,
+  saveVoiceSettings,
+  setPttKey,
+  useCroc,
+  useUi,
+} from '../croc';
+import { copyText, imageToDataUrl, keyLabel, stampOf } from '../lib/format';
+import { desktop } from '../platform';
+import { Avatar, Button, Input, Label, Toggle, cx } from '../components/ui';
 import type { CoordinatorSettings, CoordinatorStatus } from '../../main/ipc-types';
 
 const TABS = [
-  ['account', 'My Account'],
-  ['voice', 'Voice & Audio'],
-  ['privacy', 'Privacy & Safety'],
-  ['connection', 'Connection'],
-  ['host', 'Host a Server'],
-  ['about', 'About'],
+  { id: 'account', label: 'Profile', icon: User },
+  { id: 'devices', label: 'Devices', icon: Laptop },
+  { id: 'voice', label: 'Voice', icon: Mic },
+  { id: 'appearance', label: 'Appearance', icon: Palette },
+  { id: 'privacy', label: 'Privacy', icon: Shield },
+  { id: 'connection', label: 'Network', icon: Wifi },
+  { id: 'host', label: 'Host a server', icon: Server },
+  { id: 'about', label: 'About', icon: Info },
 ] as const;
-type Tab = (typeof TABS)[number][0];
+type Tab = (typeof TABS)[number]['id'];
 
 export function SettingsModal({ tab: initial }: { tab?: string }) {
-  const [tab, setTab] = useState<Tab>((initial as Tab) ?? 'account');
+  const [tab, setTab] = useState<Tab>(
+    TABS.some((t) => t.id === initial) ? (initial as Tab) : 'account',
+  );
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => e.key === 'Escape' && closeModal();
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
   }, []);
   return (
-    <div className="pop-in fixed inset-0 z-50 flex bg-main">
-      <div className="flex w-[280px] justify-end bg-side py-14 pr-2">
-        <nav className="w-48">
-          <div className="mb-1 px-2 text-xs font-bold uppercase text-faint">User settings</div>
-          {TABS.map(([id, label]) => (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/55 p-6 backdrop-blur-sm"
+      onMouseDown={closeModal}
+    >
+      <div
+        role="dialog"
+        aria-modal="true"
+        aria-label="Settings"
+        className="island rise flex h-full max-h-[760px] w-full max-w-[1000px] overflow-hidden rounded-3xl"
+        onMouseDown={(e) => e.stopPropagation()}
+      >
+        <nav className="flex w-56 shrink-0 flex-col gap-0.5 border-r border-line bg-island-2 p-3">
+          <div className="px-3 pb-3 pt-2 text-lg font-extrabold">Settings</div>
+          {TABS.map(({ id, label, icon: Icon }) => (
             <button
               key={id}
               onClick={() => setTab(id)}
               className={cx(
-                'mb-0.5 block w-full rounded px-2.5 py-1.5 text-left text-[15px]',
-                tab === id ? 'bg-active text-white' : 'text-muted hover:bg-hover hover:text-text',
+                'flex items-center gap-3 rounded-xl px-3 py-2 text-left text-[14px] font-semibold transition',
+                tab === id
+                  ? 'bg-accent-soft text-accent'
+                  : 'text-text-2 hover:bg-hover hover:text-text',
               )}
             >
-              {label}
+              <Icon size={17} /> {label}
             </button>
           ))}
         </nav>
-      </div>
-      <div className="relative flex-1 overflow-y-auto">
-        <div className="max-w-[740px] px-10 py-14">
-          {tab === 'account' && <AccountTab />}
-          {tab === 'voice' && <VoiceTab />}
-          {tab === 'privacy' && <PrivacyTab />}
-          {tab === 'connection' && <ConnectionTab />}
-          {tab === 'host' && <HostTab />}
-          {tab === 'about' && <AboutTab />}
-        </div>
-        <button
-          onClick={closeModal}
-          className="fixed right-10 top-14 flex flex-col items-center text-muted hover:text-text"
-        >
-          <span className="flex h-9 w-9 items-center justify-center rounded-full border-2 border-current">
+        <div className="relative min-w-0 flex-1 overflow-y-auto">
+          <button
+            onClick={closeModal}
+            aria-label="Close settings"
+            className="absolute right-5 top-5 rounded-full p-2 text-muted hover:bg-hover hover:text-text"
+          >
             <X size={20} />
-          </span>
-          <span className="mt-1 text-xs font-semibold">ESC</span>
-        </button>
+          </button>
+          <div className="max-w-[680px] px-9 py-8">
+            {tab === 'account' && <AccountTab />}
+            {tab === 'devices' && <DevicesTab />}
+            {tab === 'voice' && <VoiceTab />}
+            {tab === 'appearance' && <AppearanceTab />}
+            {tab === 'privacy' && <PrivacyTab />}
+            {tab === 'connection' && <ConnectionTab />}
+            {tab === 'host' && <HostTab />}
+            {tab === 'about' && <AboutTab />}
+          </div>
+        </div>
       </div>
     </div>
   );
 }
 
-function H({ children }: { children: React.ReactNode }) {
-  return <h2 className="mb-5 text-xl font-bold text-white">{children}</h2>;
+function H({ children, sub }: { children: ReactNode; sub?: ReactNode }) {
+  return (
+    <div className="mb-6">
+      <h2 className="text-2xl font-extrabold tracking-tight">{children}</h2>
+      {sub && <p className="mt-1.5 text-[14px] leading-relaxed text-muted">{sub}</p>}
+    </div>
+  );
 }
 
-function Toggle({
+function Card({ children, className }: { children: ReactNode; className?: string }) {
+  return (
+    <div className={cx('rounded-2xl border border-line bg-island-2 p-5', className)}>
+      {children}
+    </div>
+  );
+}
+
+function Row({
   label,
   hint,
-  checked,
-  onChange,
+  children,
 }: {
-  label: string;
-  hint?: string;
-  checked: boolean;
-  onChange: (v: boolean) => void;
+  label: ReactNode;
+  hint?: ReactNode;
+  children: ReactNode;
 }) {
   return (
-    <label className="mb-5 flex cursor-pointer items-start justify-between gap-6 border-b border-line pb-5">
+    <div className="flex items-start justify-between gap-6 border-b border-line py-4 last:border-b-0">
       <div>
-        <div className="font-medium text-text">{label}</div>
-        {hint && <div className="mt-1 text-sm text-muted">{hint}</div>}
+        <div className="font-semibold">{label}</div>
+        {hint && <div className="mt-1 text-[13px] leading-relaxed text-muted">{hint}</div>}
       </div>
-      <button
-        role="switch"
-        aria-checked={checked}
-        onClick={(e) => {
-          e.preventDefault();
-          onChange(!checked);
-        }}
-        className={cx(
-          'relative mt-0.5 h-6 w-10 shrink-0 rounded-full transition-colors',
-          checked ? 'bg-croc' : 'bg-[#80848e]',
-        )}
-      >
-        <span
+      <div className="shrink-0">{children}</div>
+    </div>
+  );
+}
+
+function Select({
+  value,
+  onChange,
+  children,
+}: {
+  value: string;
+  onChange: (v: string) => void;
+  children: ReactNode;
+}) {
+  return (
+    <select
+      value={value}
+      onChange={(e) => onChange(e.target.value)}
+      className="h-11 w-full rounded-xl border border-line bg-field px-3 text-sm text-text outline-none focus:border-accent"
+    >
+      {children}
+    </select>
+  );
+}
+
+function Segmented<T extends string>({
+  value,
+  options,
+  onChange,
+}: {
+  value: T;
+  options: { id: T; label: ReactNode }[];
+  onChange: (v: T) => void;
+}) {
+  return (
+    <div className="inline-flex rounded-full bg-field p-1">
+      {options.map((o) => (
+        <button
+          key={o.id}
+          onClick={() => onChange(o.id)}
           className={cx(
-            'absolute top-0.5 h-5 w-5 rounded-full bg-white transition-all',
-            checked ? 'left-[18px]' : 'left-0.5',
+            'flex items-center gap-1.5 rounded-full px-4 py-1.5 text-sm font-semibold transition',
+            value === o.id ? 'bg-island text-text shadow' : 'text-muted hover:text-text',
           )}
-        />
-      </button>
-    </label>
+        >
+          {o.label}
+        </button>
+      ))}
+    </div>
   );
 }
 
@@ -113,24 +199,31 @@ function AccountTab() {
   const me = useCroc((s) => s.me);
   const [name, setName] = useState(me?.username ?? '');
   const [bio, setBio] = useState(me?.bio ?? '');
-  const [accent, setAccent] = useState(me?.accent ?? '#2fa56f');
+  const [accent, setAccent] = useState(me?.accent ?? '#34c77b');
   const [showKey, setShowKey] = useState(false);
   const [copied, setCopied] = useState(false);
   const client = getClient();
   if (!me) return null;
   const dirty =
-    name !== me.username || bio !== (me.bio ?? '') || accent !== (me.accent ?? '#2fa56f');
+    name !== me.username || bio !== (me.bio ?? '') || accent !== (me.accent ?? '#34c77b');
   return (
     <>
-      <H>My Account</H>
-      <div className="overflow-hidden rounded-lg bg-float">
-        <div className="h-20" style={{ background: accent }} />
-        <div className="flex items-end gap-4 px-4 pb-4">
+      <H sub="How others see you. Your profile is signed with your key, so nobody can change it but you.">
+        Profile
+      </H>
+      <Card className="p-0">
+        <div
+          className="h-24 rounded-t-2xl"
+          style={{
+            background: `linear-gradient(120deg, ${accent}, color-mix(in oklab, ${accent} 40%, #051410))`,
+          }}
+        />
+        <div className="flex items-end gap-4 px-5">
           <label
-            className="-mt-10 cursor-pointer rounded-full border-[6px] border-float"
-            title="Change avatar"
+            className="-mt-10 cursor-pointer rounded-[30px] border-[5px] border-[var(--island-2)]"
+            title="Change picture"
           >
-            <Avatar userId={me.userId} size={80} />
+            <Avatar userId={me.userId} size={84} />
             <input
               type="file"
               accept="image/*"
@@ -144,12 +237,12 @@ function AccountTab() {
               }}
             />
           </label>
-          <div className="pb-1">
-            <div className="text-xl font-bold text-white">{me.username}</div>
+          <div className="pb-2">
+            <div className="text-xl font-extrabold">{me.username}</div>
             <div className="text-sm text-muted">#{me.tag}</div>
           </div>
         </div>
-        <div className="space-y-4 bg-side p-4">
+        <div className="space-y-4 p-5">
           <div>
             <Label>Display name</Label>
             <Input value={name} maxLength={32} onChange={(e) => setName(e.target.value)} />
@@ -160,83 +253,166 @@ function AccountTab() {
               value={bio}
               maxLength={190}
               onChange={(e) => setBio(e.target.value)}
-              className="selectable h-20 w-full resize-none rounded bg-float p-3 text-[15px] outline-none focus:ring-2 focus:ring-croc/60"
+              className="selectable h-20 w-full resize-none rounded-xl border border-line bg-field p-3 text-[15px] outline-none focus:border-accent"
             />
           </div>
-          <div className="flex items-center gap-3">
-            <Label>Banner colour</Label>
-            <input
-              type="color"
-              value={accent}
-              onChange={(e) => setAccent(e.target.value)}
-              className="h-8 w-12 cursor-pointer rounded border-0 bg-transparent"
-            />
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-3">
+              <span className="text-[12px] font-semibold text-muted">Banner</span>
+              <input
+                type="color"
+                value={accent}
+                onChange={(e) => setAccent(e.target.value)}
+                className="h-8 w-12 cursor-pointer rounded-lg border-0 bg-transparent"
+              />
+            </div>
+            <Button
+              disabled={!dirty || !name.trim()}
+              onClick={() =>
+                void client
+                  .saveProfile({ username: name.trim(), bio, accent })
+                  .catch((e) => client.reportError(e.message))
+              }
+            >
+              Save profile
+            </Button>
           </div>
-          <Button
-            disabled={!dirty || !name.trim()}
-            onClick={() =>
-              void client
-                .saveProfile({ username: name.trim(), bio, accent })
-                .catch((e) => client.reportError(e.message))
-            }
-          >
-            Save profile
-          </Button>
         </div>
-      </div>
+      </Card>
 
-      <div className="mt-10">
-        <H>Recovery key</H>
-        <p className="mb-3 text-sm text-muted">
-          Your recovery key is your account. Use it to sign in on another device. Anyone who has it
-          can impersonate you.
-        </p>
-        <div className="flex items-center gap-2 rounded bg-float p-3">
-          <span className="selectable flex-1 break-all font-mono text-sm text-croc-light">
-            {showKey ? client.recoveryKey() : '•••• •••• •••• •••• •••• •••• ••••'}
-          </span>
-          <Button variant="secondary" onClick={() => setShowKey(!showKey)}>
-            <Eye size={16} /> {showKey ? 'Hide' : 'Reveal'}
-          </Button>
-          <Button
-            variant="secondary"
-            onClick={async () => {
-              await copyText(client.recoveryKey());
-              setCopied(true);
-            }}
-          >
-            {copied ? <Check size={16} /> : <Copy size={16} />}
-          </Button>
-        </div>
-        <div className="mt-2 text-xs text-faint">
-          User ID: <span className="selectable font-mono">{me.userId}</span>
-        </div>
-      </div>
-
-      <div className="mt-10">
-        <H>Sign out</H>
-        <p className="mb-3 text-sm text-muted">
-          Removes your identity and local message history from this device. Make sure you saved your
-          recovery key.
-        </p>
+      <h3 className="mb-2 mt-9 text-lg font-bold">Recovery key</h3>
+      <p className="mb-3 text-sm text-muted">
+        Your recovery key is your account. You only need it if you lose every device. Anyone who has
+        it can become you.
+      </p>
+      <Card className="flex items-center gap-2 p-3">
+        <span className="selectable flex-1 break-all px-2 font-mono text-sm text-accent">
+          {showKey ? client.recoveryKey() : '•••• •••• •••• •••• •••• •••• ••••'}
+        </span>
+        <Button variant="secondary" onClick={() => setShowKey(!showKey)}>
+          <Eye size={16} /> {showKey ? 'Hide' : 'Reveal'}
+        </Button>
         <Button
-          variant="danger"
-          onClick={() =>
-            ui.set({
-              modal: {
-                kind: 'confirm',
-                title: 'Sign out of this device?',
-                body: 'Without your recovery key you will not be able to get this account back.',
-                action: 'Sign out',
-                danger: true,
-                onConfirm: () => client.signOut(),
-              },
-            })
-          }
+          variant="secondary"
+          aria-label="Copy recovery key"
+          onClick={async () => {
+            await copyText(client.recoveryKey());
+            setCopied(true);
+          }}
         >
-          <LogOut size={16} /> Sign out
+          {copied ? <Check size={16} /> : <Copy size={16} />}
+        </Button>
+      </Card>
+      <div className="mt-2 text-xs text-faint">
+        User ID: <span className="selectable font-mono">{me.userId}</span>
+      </div>
+
+      <h3 className="mb-2 mt-9 text-lg font-bold">Sign out</h3>
+      <p className="mb-3 text-sm text-muted">
+        Removes this device from your account and deletes your identity and message history from it.
+      </p>
+      <Button
+        variant="danger"
+        onClick={() =>
+          openModal({
+            kind: 'confirm',
+            title: 'Sign out of this device?',
+            body: 'Without your recovery key or another signed-in device you will not be able to get this account back.',
+            action: 'Sign out',
+            danger: true,
+            onConfirm: () => client.signOut(),
+          })
+        }
+      >
+        <LogOut size={16} /> Sign out
+      </Button>
+    </>
+  );
+}
+
+function DevicesTab() {
+  const devices = useCroc((s) => s.devices);
+  const deviceName = useCroc((s) => s.settings.deviceName);
+  const current = devices.find((d) => d.current);
+  const [name, setName] = useState(deviceName ?? current?.name ?? '');
+  const client = getClient();
+  const active = devices.filter((d) => !d.revoked);
+  return (
+    <>
+      <H sub="Every device has its own keys. Messages are encrypted separately to each one, and a removed device can never decrypt anything new.">
+        Devices
+      </H>
+      <div className="mb-6 flex gap-2">
+        <Button onClick={() => openModal({ kind: 'link-device' })}>
+          <Plus size={16} /> Link a new device
         </Button>
       </div>
+      <Card className="py-1">
+        {active.length === 0 && <p className="py-4 text-sm text-muted">Loading…</p>}
+        {active.map((d) => {
+          const Icon = /android|ios|mobile/i.test(d.platform)
+            ? Smartphone
+            : /web/i.test(d.platform)
+              ? AppWindow
+              : Monitor;
+          return (
+            <div
+              key={d.deviceId}
+              className="flex items-center gap-4 border-b border-line py-3.5 last:border-b-0"
+            >
+              <span className="flex h-10 w-10 items-center justify-center rounded-xl bg-raised text-text-2">
+                <Icon size={19} />
+              </span>
+              <div className="min-w-0 flex-1">
+                {d.current ? (
+                  <form
+                    className="flex items-center gap-2"
+                    onSubmit={(e) => {
+                      e.preventDefault();
+                      void client.renameDevice(name);
+                    }}
+                  >
+                    <input
+                      value={name}
+                      maxLength={40}
+                      onChange={(e) => setName(e.target.value)}
+                      onBlur={() => name !== d.name && void client.renameDevice(name)}
+                      className="selectable -ml-1 rounded-md bg-transparent px-1 font-semibold outline-none focus:bg-field"
+                      aria-label="Device name"
+                    />
+                    <span className="rounded-full bg-accent-soft px-2 py-0.5 text-[11px] font-bold text-accent">
+                      This device
+                    </span>
+                  </form>
+                ) : (
+                  <div className="font-semibold">{d.name}</div>
+                )}
+                <div className="text-xs text-muted">
+                  {d.platform} · updated {stampOf(d.lastUpdated)}
+                </div>
+              </div>
+              {!d.current && (
+                <Button
+                  variant="ghost"
+                  className="text-danger"
+                  onClick={() =>
+                    openModal({
+                      kind: 'confirm',
+                      title: `Remove ${d.name}?`,
+                      body: 'It will stop receiving messages and calls immediately. Note: a removed device still knows your account key; if it was lost or stolen, consider it compromised.',
+                      action: 'Remove',
+                      danger: true,
+                      onConfirm: () => client.revokeDevice(d.deviceId),
+                    })
+                  }
+                >
+                  <Trash2 size={15} /> Remove
+                </Button>
+              )}
+            </div>
+          );
+        })}
+      </Card>
     </>
   );
 }
@@ -245,6 +421,7 @@ function VoiceTab() {
   const settings = useUi((s) => s.voiceSettings);
   const level = useUi((s) => s.micLevel);
   const pttKey = useUi((s) => s.pttKey);
+  const pttStatus = useUi((s) => s.pttStatus);
   const [devices, setDevices] = useState<{ inputs: MediaDeviceInfo[]; outputs: MediaDeviceInfo[] }>(
     { inputs: [], outputs: [] },
   );
@@ -258,18 +435,30 @@ function VoiceTab() {
 
   useEffect(() => {
     if (!capturing) return;
+    const done = (code: string) => {
+      setCapturing(false);
+      void setPttKey(code);
+    };
     const onKey = (e: KeyboardEvent) => {
       e.preventDefault();
-      ui.set({ pttKey: e.code });
-      void kv.set('ptt-key', e.code);
-      setCapturing(false);
+      if (e.code !== 'Escape') done(e.code);
+      else setCapturing(false);
     };
-    window.addEventListener('keydown', onKey, { once: true });
-    return () => window.removeEventListener('keydown', onKey);
+    const onMouse = (e: MouseEvent) => {
+      if (e.button >= 3) {
+        e.preventDefault();
+        done(`Mouse${e.button + 1}`);
+      }
+    };
+    window.addEventListener('keydown', onKey, { capture: true });
+    window.addEventListener('mousedown', onMouse, { capture: true });
+    return () => {
+      window.removeEventListener('keydown', onKey, { capture: true });
+      window.removeEventListener('mousedown', onMouse, { capture: true });
+    };
   }, [capturing]);
 
   useEffect(() => {
-    // Metering needs the microphone; open it while this tab is visible.
     if (!testing) return;
     const inVoice = !!getClient().state.voiceSession;
     void engine.start().catch(() => setTesting(false));
@@ -278,108 +467,116 @@ function VoiceTab() {
     };
   }, [testing, engine]);
 
-  const pct = Math.max(0, Math.min(100, ((level + 100) / 100) * 100));
-  const threshold = ((settings.vadThresholdDb + 100) / 100) * 100;
+  const pct = Math.max(0, Math.min(100, level + 100));
+  const threshold = settings.vadThresholdDb + 100;
+  const pttHint = {
+    active: 'Works everywhere, even while a game or another app is focused.',
+    'needs-permission':
+      'Works while Crocodile is focused. To use it everywhere on macOS, allow Crocodile under System Settings → Privacy & Security → Accessibility.',
+    unavailable:
+      'Works while Crocodile is focused. System-wide shortcuts are not available on this system (e.g. Wayland).',
+    off: 'Works while Crocodile is focused.',
+  }[pttStatus];
 
   return (
     <>
-      <H>Voice Settings</H>
+      <H sub="Voice is Opus at a constant bitrate, so packet sizes don't leak what you say.">
+        Voice
+      </H>
       <div className="grid grid-cols-2 gap-4">
         <div>
-          <Label>Input device</Label>
-          <select
+          <Label>Microphone</Label>
+          <Select
             value={settings.inputDeviceId ?? ''}
-            onChange={(e) => void saveVoiceSettings({ inputDeviceId: e.target.value || undefined })}
-            className="h-10 w-full rounded bg-float px-2 text-sm outline-none"
+            onChange={(v) => void saveVoiceSettings({ inputDeviceId: v || undefined })}
           >
-            <option value="">Default</option>
+            <option value="">System default</option>
             {devices.inputs.map((d) => (
               <option key={d.deviceId} value={d.deviceId}>
                 {d.label || 'Microphone'}
               </option>
             ))}
-          </select>
+          </Select>
         </div>
         <div>
-          <Label>Output device</Label>
-          <select
+          <Label>Speakers</Label>
+          <Select
             value={settings.outputDeviceId ?? ''}
-            onChange={(e) =>
-              void saveVoiceSettings({ outputDeviceId: e.target.value || undefined })
-            }
-            className="h-10 w-full rounded bg-float px-2 text-sm outline-none"
+            onChange={(v) => void saveVoiceSettings({ outputDeviceId: v || undefined })}
           >
-            <option value="">Default</option>
+            <option value="">System default</option>
             {devices.outputs.map((d) => (
               <option key={d.deviceId} value={d.deviceId}>
                 {d.label || 'Speakers'}
               </option>
             ))}
-          </select>
+          </Select>
         </div>
       </div>
 
       <div className="mt-6">
-        <Label>Output volume</Label>
+        <Label>Output volume · {Math.round(settings.outputVolume * 100)}%</Label>
         <input
           type="range"
           min={0}
           max={200}
           value={Math.round(settings.outputVolume * 100)}
           onChange={(e) => void saveVoiceSettings({ outputVolume: Number(e.target.value) / 100 })}
-          className="w-full accent-croc"
+          className="w-full accent-[var(--accent)]"
         />
       </div>
 
-      <div className="mt-6 border-t border-line pt-6">
-        <Label>Input mode</Label>
-        {(['vad', 'ptt'] as const).map((m) => (
-          <label
-            key={m}
-            className="mb-2 flex cursor-pointer items-center gap-3 rounded bg-side px-3 py-2.5"
-          >
-            <input
-              type="radio"
-              checked={settings.mode === m}
-              onChange={() => void saveVoiceSettings({ mode: m })}
-              className="accent-croc"
-            />
-            {m === 'vad' ? 'Voice activity' : 'Push to talk'}
-          </label>
-        ))}
-        {settings.mode === 'ptt' && (
-          <div className="mt-3 flex items-center gap-3">
-            <span className="text-sm text-muted">Shortcut</span>
-            <Button variant="secondary" onClick={() => setCapturing(true)}>
-              {capturing ? 'Press any key…' : pttKey}
-            </Button>
-            <span className="text-xs text-faint">Works while Crocodile is focused.</span>
-          </div>
-        )}
-      </div>
-
-      {settings.mode === 'vad' && (
-        <div className="mt-6">
-          <div className="flex items-center justify-between">
-            <Label>Input sensitivity</Label>
-            <Button
-              variant="secondary"
-              className="h-7 text-xs"
-              onClick={() => setTesting(!testing)}
+      <h3 className="mb-3 mt-8 text-lg font-bold">How you talk</h3>
+      <Segmented
+        value={settings.mode}
+        options={[
+          { id: 'vad', label: 'When I speak' },
+          { id: 'ptt', label: 'Push to talk' },
+        ]}
+        onChange={(m) => void saveVoiceSettings({ mode: m })}
+      />
+      {settings.mode === 'ptt' ? (
+        <Card className="mt-4">
+          <div className="flex items-center gap-4">
+            <span className="text-sm font-semibold">Talk key</span>
+            <button
+              onClick={() => setCapturing(true)}
+              className={cx(
+                'min-w-[120px] rounded-xl border px-4 py-2 font-mono text-sm font-bold',
+                capturing ? 'border-accent text-accent' : 'border-line bg-field',
+              )}
             >
-              {testing ? 'Stop mic test' : "Let's check"}
+              {capturing ? 'Press a key or mouse button…' : keyLabel(pttKey)}
+            </button>
+            <span
+              className={cx(
+                'ml-auto rounded-full px-2.5 py-1 text-[11px] font-bold',
+                pttStatus === 'active' ? 'bg-accent-soft text-accent' : 'bg-warn/15 text-warn',
+              )}
+            >
+              {pttStatus === 'active' ? 'System-wide' : 'In app only'}
+            </span>
+          </div>
+          <p className="mt-3 text-[13px] text-muted">{pttHint}</p>
+        </Card>
+      ) : (
+        <Card className="mt-4">
+          <div className="flex items-center justify-between">
+            <span className="text-sm font-semibold">Sensitivity</span>
+            <Button variant="soft" className="h-8 text-xs" onClick={() => setTesting(!testing)}>
+              {testing ? 'Stop test' : 'Test my mic'}
             </Button>
           </div>
-          <div className="relative h-3 overflow-hidden rounded bg-float">
+          <div className="relative mt-3 h-3 overflow-hidden rounded-full bg-field">
             <div
               className={cx(
-                'absolute inset-y-0 left-0 transition-[width]',
-                pct > threshold ? 'bg-online' : 'bg-faint',
+                'absolute inset-y-0 left-0 rounded-full transition-[width]',
+                pct > threshold ? 'bg-accent' : 'bg-faint',
               )}
               style={{ width: `${pct}%` }}
             />
             <div
-              className="absolute inset-y-0 w-1 -translate-x-1/2 bg-warn"
+              className="absolute inset-y-0 w-1 -translate-x-1/2 rounded bg-amber"
               style={{ left: `${threshold}%` }}
             />
           </div>
@@ -389,30 +586,103 @@ function VoiceTab() {
             max={0}
             value={settings.vadThresholdDb}
             onChange={(e) => void saveVoiceSettings({ vadThresholdDb: Number(e.target.value) })}
-            className="mt-2 w-full accent-croc"
+            className="mt-2 w-full accent-[var(--accent)]"
           />
-          <p className="text-xs text-faint">Sound louder than the yellow marker is transmitted.</p>
-        </div>
+          <p className="text-xs text-faint">Sound louder than the amber marker is sent.</p>
+        </Card>
       )}
 
-      <div className="mt-8 border-t border-line pt-6">
-        <H>Voice processing</H>
+      <h3 className="mb-1 mt-8 text-lg font-bold">Processing</h3>
+      <Row label="Echo cancellation">
         <Toggle
-          label="Echo cancellation"
           checked={settings.echoCancellation}
           onChange={(v) => void saveVoiceSettings({ echoCancellation: v })}
+          label="Echo cancellation"
         />
+      </Row>
+      <Row label="Noise suppression">
         <Toggle
-          label="Noise suppression"
           checked={settings.noiseSuppression}
           onChange={(v) => void saveVoiceSettings({ noiseSuppression: v })}
+          label="Noise suppression"
         />
+      </Row>
+      <Row label="Automatic gain control">
         <Toggle
-          label="Automatic gain control"
           checked={settings.autoGainControl}
           onChange={(v) => void saveVoiceSettings({ autoGainControl: v })}
+          label="Automatic gain control"
         />
-      </div>
+      </Row>
+    </>
+  );
+}
+
+function AppearanceTab() {
+  const a = useUi((s) => s.appearance);
+  return (
+    <>
+      <H sub="Make Crocodile yours. These settings stay on this device.">Appearance</H>
+      <Row label="Theme">
+        <Segmented
+          value={a.theme}
+          options={[
+            {
+              id: 'system',
+              label: (
+                <>
+                  <Monitor size={14} /> System
+                </>
+              ),
+            },
+            {
+              id: 'dark',
+              label: (
+                <>
+                  <Moon size={14} /> Lagoon
+                </>
+              ),
+            },
+            {
+              id: 'light',
+              label: (
+                <>
+                  <Sun size={14} /> Reed
+                </>
+              ),
+            },
+          ]}
+          onChange={(theme) => void saveAppearance({ theme })}
+        />
+      </Row>
+      <Row label="Accent colour">
+        <div className="flex gap-2">
+          {ACCENTS.map((c) => (
+            <button
+              key={c}
+              aria-label={`Accent ${c}`}
+              onClick={() => void saveAppearance({ accent: c })}
+              className="flex h-8 w-8 items-center justify-center rounded-full transition hover:scale-110"
+              style={{
+                background: c,
+                boxShadow: a.accent === c ? `0 0 0 2px var(--island), 0 0 0 4px ${c}` : undefined,
+              }}
+            >
+              {a.accent === c && <Check size={15} className="text-[#062014]" />}
+            </button>
+          ))}
+        </div>
+      </Row>
+      <Row label="Messages" hint="Bubbles are roomy and friendly; compact fits more on screen.">
+        <Segmented
+          value={a.density}
+          options={[
+            { id: 'bubbles', label: 'Bubbles' },
+            { id: 'compact', label: 'Compact' },
+          ]}
+          onChange={(density) => void saveAppearance({ density })}
+        />
+      </Row>
     </>
   );
 }
@@ -423,66 +693,47 @@ function PrivacyTab() {
   const client = getClient();
   return (
     <>
-      <H>Privacy & Safety</H>
-      <Label>Status</Label>
-      <div className="mb-8 grid grid-cols-4 gap-2">
-        {(['online', 'idle', 'dnd', 'invisible'] as const).map((st) => (
-          <button
-            key={st}
-            onClick={() => void client.setStatus(st)}
-            className={cx(
-              'rounded px-3 py-2 text-sm capitalize',
-              settings.status === st ? 'bg-croc text-white' : 'bg-side text-muted hover:bg-hover',
-            )}
-          >
-            {st === 'dnd' ? 'Do not disturb' : st}
-          </button>
+      <H sub="Messages and voice are end-to-end encrypted with keys that change constantly. These choices control what you share with others.">
+        Privacy
+      </H>
+      <Row label="Status">
+        <Segmented
+          value={settings.status}
+          options={[
+            { id: 'online', label: 'Online' },
+            { id: 'idle', label: 'Away' },
+            { id: 'dnd', label: 'Busy' },
+            { id: 'invisible', label: 'Hidden' },
+          ]}
+          onChange={(st) => void client.setStatus(st)}
+        />
+      </Row>
+      <Row label="Desktop notifications">
+        <Toggle
+          checked={settings.notifications}
+          onChange={(v) => void client.updateSettings({ notifications: v })}
+          label="Desktop notifications"
+        />
+      </Row>
+      <h3 className="mb-2 mt-8 text-lg font-bold">Blocked</h3>
+      <Card className="py-2">
+        {blocked.length === 0 && (
+          <p className="py-2 text-sm text-muted">You haven't blocked anyone.</p>
+        )}
+        {blocked.map((u) => (
+          <div key={u} className="flex items-center gap-3 py-2">
+            <Avatar userId={u} size={30} />
+            <span className="flex-1 font-semibold">{client.state.profiles[u]?.username ?? u}</span>
+            <Button
+              variant="secondary"
+              className="h-8 text-xs"
+              onClick={() => void client.unblock(u)}
+            >
+              Unblock
+            </Button>
+          </div>
         ))}
-      </div>
-      <Toggle
-        label="Let my device host calls and chats"
-        hint="When your connection is the best in a group, your device relays the group's encrypted voice and text. It can never read them. Turn off on metered or slow connections."
-        checked={settings.allowHosting}
-        onChange={(v) => void client.updateSettings({ allowHosting: v })}
-      />
-      <div className="mb-8">
-        <Label>Upload bandwidth (optional hint for host election)</Label>
-        <select
-          value={settings.uplinkKbps ?? ''}
-          onChange={(e) =>
-            void client.updateSettings({
-              uplinkKbps: e.target.value ? Number(e.target.value) : undefined,
-            })
-          }
-          className="h-10 w-72 rounded bg-float px-2 text-sm outline-none"
-        >
-          <option value="">Unknown</option>
-          <option value="1000">Under 2 Mbit/s</option>
-          <option value="5000">2–10 Mbit/s</option>
-          <option value="20000">10–50 Mbit/s</option>
-          <option value="100000">Over 50 Mbit/s</option>
-        </select>
-      </div>
-      <Toggle
-        label="Desktop notifications"
-        checked={settings.notifications}
-        onChange={(v) => void client.updateSettings({ notifications: v })}
-      />
-      <Label>Blocked users</Label>
-      {blocked.length === 0 && <p className="text-sm text-muted">You haven't blocked anyone.</p>}
-      {blocked.map((u) => (
-        <div key={u} className="flex items-center gap-3 py-1.5">
-          <Avatar userId={u} size={28} />
-          <span className="flex-1">{client.state.profiles[u]?.username ?? u}</span>
-          <Button
-            variant="secondary"
-            className="h-7 text-xs"
-            onClick={() => void client.unblock(u)}
-          >
-            Unblock
-          </Button>
-        </div>
-      ))}
+      </Card>
     </>
   );
 }
@@ -491,91 +742,128 @@ function ConnectionTab() {
   const server = useCroc((s) => s.server);
   const servers = useCroc((s) => s.servers);
   const link = useCroc((s) => s.link);
-  const preferred = useCroc((s) => s.settings.preferredServers);
+  const settings = useCroc((s) => s.settings);
+  const preferred = settings.preferredServers;
   const [url, setUrl] = useState('');
   const client = getClient();
   return (
     <>
-      <H>Connection</H>
-      <p className="mb-5 text-sm text-muted">
-        Coordination servers introduce peers and pick hosts. They are run by volunteers, share
-        metadata among themselves, and never see your messages or voice. Crocodile connects to the
-        fastest one and keeps the runner-up on standby.
-      </p>
-      <div className="rounded-lg bg-side p-4">
-        <div className="flex items-center gap-3">
-          <Server size={20} className={link === 'connected' ? 'text-online' : 'text-warn'} />
-          <div>
-            <div className="font-semibold text-white">
-              {server?.info.name ?? (link === 'offline' ? 'Not connected' : 'Connecting…')}
-            </div>
-            <div className="text-xs text-muted">
-              {server ? `${server.info.url} · ${Math.round(server.rttMs)} ms` : link}
-            </div>
+      <H sub="Coordination servers are run by volunteers. They introduce you to people and pick who hosts a call — they never receive your messages or voice. Crocodile uses the fastest one and keeps the runner-up on standby.">
+        Network
+      </H>
+      <Card className="flex items-center gap-3">
+        <span
+          className={cx(
+            'flex h-10 w-10 items-center justify-center rounded-xl',
+            link === 'connected' ? 'bg-accent-soft text-accent' : 'bg-warn/15 text-warn',
+          )}
+        >
+          <Server size={19} />
+        </span>
+        <div>
+          <div className="font-bold">
+            {server?.info.name ?? (link === 'offline' ? 'Not connected' : 'Connecting…')}
           </div>
-          <Button
-            variant="secondary"
-            className="ml-auto h-8"
-            onClick={() => client.link?.reconnect()}
-          >
-            Reconnect
-          </Button>
+          <div className="text-xs text-muted">
+            {server ? `${server.info.url} · ${Math.round(server.rttMs)} ms` : link}
+          </div>
         </div>
-      </div>
+        <Button
+          variant="secondary"
+          className="ml-auto h-9"
+          onClick={() => client.link?.reconnect()}
+        >
+          Reconnect
+        </Button>
+      </Card>
       {servers.length > 0 && (
-        <div className="mt-6">
-          <Label>Available servers (fastest first)</Label>
+        <Card className="mt-3 py-2">
           {servers.map((s, i) => (
             <div
               key={s.info.id}
-              className="flex items-center gap-3 border-b border-line py-2 text-sm"
+              className="flex items-center gap-3 border-b border-line py-2 text-sm last:border-b-0"
             >
-              <span className="w-24 text-xs font-semibold uppercase text-faint">
-                {i === 0 ? 'Best' : i === 1 ? 'Standby' : ''}
+              <span className="w-20 text-[11px] font-bold uppercase text-faint">
+                {i === 0 ? 'Using' : i === 1 ? 'Standby' : ''}
               </span>
-              <span className="flex-1 text-text">{s.info.name}</span>
+              <span className="flex-1">{s.info.name}</span>
               <span className="text-muted">{Math.round(s.rttMs)} ms</span>
             </div>
           ))}
-        </div>
+        </Card>
       )}
-      <div className="mt-8">
-        <Label>Preferred servers</Label>
-        <p className="mb-2 text-sm text-muted">
-          Tried before the directory's picks. Useful for private or LAN servers.
-        </p>
-        {preferred.map((p) => (
-          <div key={p} className="flex items-center gap-2 py-1 text-sm">
-            <span className="flex-1 font-mono">{p}</span>
-            <button
-              className="text-xs text-dnd hover:underline"
-              onClick={() =>
-                void client.updateSettings({ preferredServers: preferred.filter((x) => x !== p) })
-              }
-            >
-              Remove
-            </button>
-          </div>
-        ))}
-        <form
-          className="mt-2 flex gap-2"
-          onSubmit={(e) => {
-            e.preventDefault();
-            const clean = url.trim().replace(/\/$/, '');
-            if (!/^https?:\/\//.test(clean))
-              return client.reportError('Server URLs start with http:// or https://');
-            void client.updateSettings({ preferredServers: [...preferred, clean] });
-            setUrl('');
-          }}
-        >
-          <Input
-            value={url}
-            onChange={(e) => setUrl(e.target.value)}
-            placeholder="https://croc.example.org"
-          />
-          <Button type="submit">Add</Button>
-        </form>
-      </div>
+
+      <h3 className="mb-1 mt-8 text-lg font-bold">When a direct connection isn't possible</h3>
+      <Row
+        label="Relay through a coordination server"
+        hint="Some networks (strict corporate or mobile carriers) block direct connections. With this on, Crocodile can pass your already-encrypted voice and messages through a volunteer server — it still can't read them. Limited to an hour at a time and to a few people per server."
+      >
+        <Toggle
+          checked={settings.allowServerRelay}
+          onChange={(v) => void client.updateSettings({ allowServerRelay: v })}
+          label="Relay through a coordination server"
+        />
+      </Row>
+      <Row
+        label="Let my device host calls and chats"
+        hint="When your connection is the best in a group, your device forwards the group's encrypted streams. It can never read them. Turn off on metered connections."
+      >
+        <Toggle
+          checked={settings.allowHosting}
+          onChange={(v) => void client.updateSettings({ allowHosting: v })}
+          label="Let my device host"
+        />
+      </Row>
+      <Row label="Upload speed" hint="Helps pick the best host. Leave on unknown if unsure.">
+        <div className="w-48">
+          <Select
+            value={String(settings.uplinkKbps ?? '')}
+            onChange={(v) => void client.updateSettings({ uplinkKbps: v ? Number(v) : undefined })}
+          >
+            <option value="">Unknown</option>
+            <option value="1000">Under 2 Mbit/s</option>
+            <option value="5000">2–10 Mbit/s</option>
+            <option value="20000">10–50 Mbit/s</option>
+            <option value="100000">Over 50 Mbit/s</option>
+          </Select>
+        </div>
+      </Row>
+
+      <h3 className="mb-1 mt-8 text-lg font-bold">Preferred servers</h3>
+      <p className="mb-3 text-sm text-muted">
+        Tried before the public list. Useful for private or LAN servers.
+      </p>
+      {preferred.map((p) => (
+        <div key={p} className="flex items-center gap-2 py-1 text-sm">
+          <span className="flex-1 font-mono">{p}</span>
+          <button
+            className="text-xs font-semibold text-danger hover:underline"
+            onClick={() =>
+              void client.updateSettings({ preferredServers: preferred.filter((x) => x !== p) })
+            }
+          >
+            Remove
+          </button>
+        </div>
+      ))}
+      <form
+        className="mt-2 flex gap-2"
+        onSubmit={(e) => {
+          e.preventDefault();
+          const clean = url.trim().replace(/\/$/, '');
+          if (!/^https?:\/\//.test(clean))
+            return client.reportError('Server addresses start with http:// or https://');
+          void client.updateSettings({ preferredServers: [...preferred, clean] });
+          setUrl('');
+        }}
+      >
+        <Input
+          value={url}
+          onChange={(e) => setUrl(e.target.value)}
+          placeholder="https://croc.example.org"
+        />
+        <Button type="submit">Add</Button>
+      </form>
     </>
   );
 }
@@ -597,19 +885,41 @@ function HostTab() {
     setSettings(await desktop!.coordinator.set(patch));
   return (
     <>
-      <H>Host a coordination server</H>
-      <p className="mb-6 text-sm text-muted">
-        Help the network by running a coordination server on this computer. It stores public
-        profiles and space metadata (signed by their owners), introduces peers and picks call hosts.
-        It never receives messages or voice. To serve the internet, forward the port on your router
-        and set your public address below; otherwise it works on your local network.
-      </p>
-      <Toggle
-        label="Run a coordination server"
-        checked={settings.enabled}
-        onChange={(v) => void update({ enabled: v })}
-      />
-      <div className="grid grid-cols-2 gap-4">
+      <H sub="Help the network by running a coordination server on this computer. It stores public profiles and space settings (signed by their owners), introduces people and picks call hosts. It never receives messages or voice.">
+        Host a server
+      </H>
+      <Card className="mb-6 flex items-center gap-3 text-sm">
+        <span
+          className={cx(
+            'h-2.5 w-2.5 rounded-full',
+            status.state === 'running'
+              ? 'live-dot bg-online'
+              : status.state === 'error'
+                ? 'bg-danger'
+                : 'bg-faint',
+          )}
+        />
+        {status.state === 'running' ? (
+          <span>
+            Running at <span className="font-mono">{status.url}</span> · {status.users}{' '}
+            {status.users === 1 ? 'person' : 'people'} · {status.peers} other server
+            {status.peers === 1 ? '' : 's'}
+            {status.announced ? ' · listed publicly' : ''}
+          </span>
+        ) : status.state === 'error' ? (
+          <span className="text-danger">{status.message}</span>
+        ) : (
+          <span className="capitalize text-muted">{status.state}</span>
+        )}
+      </Card>
+      <Row label="Run a coordination server">
+        <Toggle
+          checked={settings.enabled}
+          onChange={(v) => void update({ enabled: v })}
+          label="Run a coordination server"
+        />
+      </Row>
+      <div className="grid grid-cols-2 gap-4 py-4">
         <div>
           <Label>Server name</Label>
           <Input
@@ -629,7 +939,7 @@ function HostTab() {
           />
         </div>
       </div>
-      <div className="mt-4">
+      <div className="pb-4">
         <Label>Public address (optional)</Label>
         <Input
           value={settings.publicUrl ?? ''}
@@ -637,29 +947,44 @@ function HostTab() {
           onChange={(e) => setSettings({ ...settings, publicUrl: e.target.value })}
           onBlur={() => void update({ publicUrl: settings.publicUrl?.trim() || undefined })}
         />
+        <p className="mt-1.5 text-xs text-faint">
+          To serve the internet, forward the port on your router. Without it, the server works on
+          your local network.
+        </p>
       </div>
-      <div className="mt-4">
+      <Row
+        label="List in the server directory"
+        hint="The directory is the public phone book of coordination servers that apps use to find the fastest one. Requires a public address."
+      >
         <Toggle
-          label="List in the public directory"
-          hint="Lets other Crocodile users find and use your server. Requires a public address."
           checked={settings.announce}
           onChange={(v) => void update({ announce: v })}
+          label="List in the server directory"
         />
-      </div>
-      <div className="rounded-lg bg-side p-4 text-sm">
-        <span className="font-semibold text-white">Status: </span>
-        {status.state === 'running' ? (
-          <span className="text-online">
-            Running at {status.url} · {status.users} user{status.users === 1 ? '' : 's'} ·{' '}
-            {status.peers} mesh peer{status.peers === 1 ? '' : 's'}
-            {status.announced ? ' · listed' : ''}
-          </span>
-        ) : status.state === 'error' ? (
-          <span className="text-dnd">{status.message}</span>
-        ) : (
-          <span className="text-muted">{status.state}</span>
-        )}
-      </div>
+      </Row>
+      <Row
+        label="Offer a relay"
+        hint="Lets people whose networks block direct connections pass their encrypted traffic through you, up to an hour at a time. Uses about 100 kbit/s per person."
+      >
+        <Toggle
+          checked={settings.relay}
+          onChange={(v) => void update({ relay: v })}
+          label="Offer a relay"
+        />
+      </Row>
+      {settings.relay && (
+        <Row label="Relay capacity" hint="Maximum people relaying through this server at once.">
+          <Input
+            type="number"
+            min={1}
+            max={100}
+            className="w-24"
+            value={settings.relayMaxUsers}
+            onChange={(e) => setSettings({ ...settings, relayMaxUsers: Number(e.target.value) })}
+            onBlur={() => void update({ relayMaxUsers: settings.relayMaxUsers })}
+          />
+        </Row>
+      )}
     </>
   );
 }
@@ -669,12 +994,16 @@ function AboutTab() {
   return (
     <>
       <H>About Crocodile</H>
-      <p className="text-sm leading-relaxed text-muted">
-        Crocodile {version}. Voice and text travel only between the people in a conversation,
-        end-to-end encrypted. For groups, the member with the best connection is elected host and
-        relays the encrypted streams; a runner-up stands by to take over instantly. Volunteer
-        coordination servers handle introductions and never see content.
-      </p>
+      <Card className="space-y-3 text-sm leading-relaxed text-text-2">
+        <p>Crocodile {version}.</p>
+        <p>
+          Voice and text travel only between the people in a conversation, end-to-end encrypted with
+          keys that ratchet forward and hybrid post-quantum key exchange. In groups, the member with
+          the best connection is elected host and forwards the encrypted streams; a runner-up stands
+          by to take over.
+        </p>
+        <p>Volunteer coordination servers handle introductions and never see content.</p>
+      </Card>
     </>
   );
 }

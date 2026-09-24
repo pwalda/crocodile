@@ -23,6 +23,7 @@ export type ModalState =
   | { kind: 'settings'; tab?: string }
   | { kind: 'profile'; userId: string }
   | { kind: 'new-dm' }
+  | { kind: 'link-device' }
   | {
       kind: 'confirm';
       title: string;
@@ -32,9 +33,22 @@ export type ModalState =
       onConfirm: () => void | Promise<void>;
     };
 
+export interface Appearance {
+  theme: 'system' | 'dark' | 'light';
+  accent: string;
+  /** Chat layout: speech bubbles or a compact list. */
+  density: 'bubbles' | 'compact';
+}
+
+export const ACCENTS = ['#34c77b', '#2cc5b8', '#5b9cf5', '#a27bf0', '#f07bb3', '#f5a33d'];
+
 export interface UiState {
   view: View;
   modal: ModalState | null;
+  palette: boolean;
+  appearance: Appearance;
+  /** System-wide push-to-talk hook state. */
+  pttStatus: 'active' | 'unavailable' | 'needs-permission' | 'off';
   showMembers: boolean;
   voiceSettings: VoiceSettings;
   pttKey: string;
@@ -45,6 +59,9 @@ export interface UiState {
 export const ui = new StateStore<UiState>({
   view: { kind: 'friends' },
   modal: null,
+  palette: false,
+  appearance: { theme: 'system', accent: ACCENTS[0]!, density: 'bubbles' },
+  pttStatus: 'off',
   showMembers: true,
   voiceSettings: defaultVoiceSettings,
   pttKey: 'Backquote',
@@ -82,6 +99,15 @@ export async function bootClient(): Promise<CrocodileClient> {
 
   const saved = (await kv.get<Partial<VoiceSettings>>('voice-settings')) ?? {};
   const pttKey = (await kv.get<string>('ptt-key')) ?? 'Backquote';
+  const appearance = {
+    ...ui.get().appearance,
+    ...((await kv.get<Partial<Appearance>>('appearance')) ?? {}),
+  };
+  ui.set({ appearance });
+  applyAppearance(appearance);
+  window
+    .matchMedia('(prefers-color-scheme: dark)')
+    .addEventListener('change', () => applyAppearance(ui.get().appearance));
   const voiceSettings = { ...defaultVoiceSettings, ...saved };
   const engine = new VoiceEngine(
     {
@@ -99,6 +125,8 @@ export async function bootClient(): Promise<CrocodileClient> {
   });
   client.voiceEngine = engine;
   ui.set({ voiceSettings, pttKey, appVersion: info.version });
+  desktop?.ptt.onState((down) => engine.setPushToTalk(down));
+  void syncGlobalPtt();
   await client.init();
   return client;
 }
@@ -112,6 +140,37 @@ export async function saveVoiceSettings(patch: Partial<VoiceSettings>) {
   await engine.updateSettings(patch);
   ui.set({ voiceSettings: engine.settings });
   await kv.set('voice-settings', engine.settings);
+  if (patch.mode) await syncGlobalPtt();
+}
+
+export async function setPttKey(code: string) {
+  ui.set({ pttKey: code });
+  await kv.set('ptt-key', code);
+  await syncGlobalPtt();
+}
+
+/** Push-to-talk works system-wide (games focused) when the native hook is available. */
+export async function syncGlobalPtt() {
+  if (!desktop) return;
+  const s = ui.get();
+  const status = await desktop.ptt.configure(s.voiceSettings.mode === 'ptt' ? s.pttKey : null);
+  ui.set({ pttStatus: status });
+}
+
+export async function saveAppearance(patch: Partial<Appearance>) {
+  const appearance = { ...ui.get().appearance, ...patch };
+  ui.set({ appearance });
+  applyAppearance(appearance);
+  await kv.set('appearance', appearance);
+}
+
+export function applyAppearance(a: Appearance) {
+  const dark =
+    a.theme === 'dark' ||
+    (a.theme === 'system' && window.matchMedia('(prefers-color-scheme: dark)').matches);
+  const root = document.documentElement;
+  root.dataset.theme = dark ? 'dark' : 'light';
+  root.style.setProperty('--accent', a.accent);
 }
 
 function shallowEqual(a: unknown, b: unknown) {

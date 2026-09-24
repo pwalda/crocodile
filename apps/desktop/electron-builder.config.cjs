@@ -1,0 +1,71 @@
+// One-click installers for everyone: no admin rights, no configuration.
+// Code signing is used when certificates are provided (CSC_LINK etc.);
+// otherwise macOS builds are ad-hoc signed so they run on Apple Silicon,
+// and Windows builds are unsigned (see docs/DISTRIBUTION.md).
+const signed = !!process.env.CSC_LINK;
+
+/** @type {import('electron-builder').Configuration} */
+module.exports = {
+  appId: 'chat.crocodile.app',
+  productName: 'Crocodile',
+  executableName: 'crocodile',
+  copyright: 'Copyright © Crocodile contributors',
+  directories: { output: 'release', buildResources: 'build' },
+  files: ['dist/**', 'package.json'],
+  // Native push-to-talk hook must live outside the asar.
+  asarUnpack: ['dist/native/**'],
+  extraResources: [{ from: 'resources', to: '.' }],
+  asar: true,
+  // Everything else is bundled by esbuild/Vite; no node_modules ship.
+  npmRebuild: false,
+  nodeGypRebuild: false,
+  protocols: [{ name: 'Crocodile invite', schemes: ['croc'] }],
+  publish: { provider: 'github', owner: 'pwalda', repo: 'crocodile' },
+
+  mac: {
+    category: 'public.app-category.social-networking',
+    target: [
+      { target: 'dmg', arch: ['universal'] },
+      { target: 'zip', arch: ['universal'] },
+    ],
+    // "-" = ad-hoc signature: required for Apple Silicon to launch the app at all.
+    identity: signed ? undefined : '-',
+    hardenedRuntime: signed,
+    gatekeeperAssess: false,
+    entitlements: 'build/entitlements.mac.plist',
+    entitlementsInherit: 'build/entitlements.mac.plist',
+    notarize: signed && !!process.env.APPLE_ID,
+    extendInfo: {
+      NSMicrophoneUsageDescription: 'Crocodile uses your microphone for voice chat.',
+    },
+  },
+  dmg: { title: 'Install Crocodile' },
+
+  win: {
+    target: [{ target: 'nsis', arch: ['x64', 'arm64'] }],
+  },
+  nsis: {
+    // Per-user install, no UAC prompt, launches when done.
+    oneClick: true,
+    perMachine: false,
+    createDesktopShortcut: 'always',
+    createStartMenuShortcut: true,
+    runAfterFinish: true,
+    deleteAppDataOnUninstall: false,
+  },
+
+  linux: {
+    syncDesktopName: true,
+    category: 'Network;Chat;InstantMessaging',
+    synopsis: 'Peer-to-peer, end-to-end encrypted voice and text chat',
+    target: [
+      { target: 'AppImage', arch: ['x64', 'arm64'] },
+      { target: 'deb', arch: ['x64', 'arm64'] },
+      { target: 'rpm', arch: ['x64'] },
+      { target: 'tar.gz', arch: ['x64', 'arm64'] },
+    ],
+    maintainer: 'Crocodile contributors',
+    mimeTypes: ['x-scheme-handler/croc'],
+    desktop: { entry: { StartupWMClass: 'Crocodile' } },
+  },
+};

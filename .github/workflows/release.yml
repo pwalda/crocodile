@@ -44,7 +44,7 @@ jobs:
           APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
           CSC_IDENTITY_AUTO_DISCOVERY: ${{ secrets.CSC_LINK != '' }}
-        run: node scripts/build.mjs && npx electron-builder --publish always
+        run: node scripts/build.mjs && npx electron-builder --config electron-builder.config.cjs --publish always
 
   images:
     name: Server images

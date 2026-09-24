@@ -14,6 +14,7 @@ import {
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { cpus } from 'node:os';
+import { configureGlobalPtt, stopGlobalPtt } from './global-ptt';
 import type {
   CoordinatorProcessOut,
   CoordinatorSettings,
@@ -143,6 +144,8 @@ const defaultCoordSettings: CoordinatorSettings = {
   name: `${process.env.USER ?? process.env.USERNAME ?? 'Someone'}'s coordinator`,
   port: 7443,
   announce: true,
+  relay: false,
+  relayMaxUsers: 10,
 };
 
 function coordSettings(): CoordinatorSettings {
@@ -217,6 +220,8 @@ ipcMain.handle('app:badge', (_e, count: number) => {
   if (process.platform === 'darwin') app.dock?.setBadge(count > 0 ? String(count) : '');
   else app.setBadgeCount(count);
 });
+
+ipcMain.handle('ptt:configure', (e, code: string | null) => configureGlobalPtt(e.sender, code));
 
 ipcMain.handle('app:take-deeplink', () => {
   const link = pendingDeepLink;
@@ -355,6 +360,7 @@ app.whenReady().then(() => {
 app.on('activate', showWindow);
 app.on('before-quit', () => {
   quitting = true;
+  stopGlobalPtt();
   relayProc?.kill();
   coordProc?.postMessage({ type: 'stop' });
   setTimeout(() => coordProc?.kill(), 1500);

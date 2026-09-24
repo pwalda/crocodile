@@ -28,6 +28,10 @@ export interface CoordinatorSettings {
   port: number;
   publicUrl?: string;
   announce: boolean;
+  /** Offer the opt-in relay (TURN) to users without a direct path. */
+  relay: boolean;
+  /** How many users may use the relay at once. */
+  relayMaxUsers: number;
 }
 
 export type CoordinatorStatus =

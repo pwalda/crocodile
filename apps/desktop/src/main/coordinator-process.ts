@@ -58,6 +58,7 @@ port.on('message', async ({ data: msg }) => {
         stunPort: s.port,
         extraStun: [],
         capacity: 500,
+        relay: { enabled: s.relay, maxUsers: Math.max(1, Math.min(100, s.relayMaxUsers || 10)) },
         logLevel: 'warn',
       });
       await coordinator.start();
