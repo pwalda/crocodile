@@ -1,7 +1,8 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import {
   AtSign,
-  CircleAlert,
+  Clock,
+  MailCheck,
   MessageSquareText,
   Pencil,
   Phone,
@@ -323,14 +324,22 @@ function Message({
       <span className="ml-2 inline-flex translate-y-0.5 items-center gap-1 align-baseline text-[10.5px] text-faint">
         {m.edited && 'edited · '}
         {timeOf(m.ts)}
-        {m.pending && (
-          <span
-            title="Nobody else was online. It will be delivered peer-to-peer when they are."
-            className="text-warn"
-          >
-            <CircleAlert size={11} />
-          </span>
-        )}
+        {m.pending &&
+          (m.mailed ? (
+            <span
+              title="The recipient is offline. A coordination server holds this message, sealed so only their devices can read it."
+              className="text-muted"
+            >
+              <MailCheck size={11} />
+            </span>
+          ) : (
+            <span
+              title="Not delivered yet. It goes out peer-to-peer as soon as someone who should have it is online."
+              className="delayed-in text-warn"
+            >
+              <Clock size={11} />
+            </span>
+          ))}
       </span>
     </div>
   );

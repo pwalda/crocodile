@@ -32,6 +32,8 @@ export interface CoordinatorSettings {
   relay: boolean;
   /** How many users may use the relay at once. */
   relayMaxUsers: number;
+  /** Hold sealed messages for offline people (opt-in mailbox). */
+  mailbox: boolean;
 }
 
 export type CoordinatorStatus =

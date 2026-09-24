@@ -31,6 +31,7 @@ import { RecordService } from './records';
 import { SessionService } from './sessions';
 import { openStore, type Store } from './store';
 import { TurnServer } from './turn';
+import { MailboxService, defaultMailboxConfig, type MailboxConfig } from './mailbox';
 import { consoleLogger, RpcFailure, type Logger } from './util';
 import { isIP } from 'node:net';
 import { lookup } from 'node:dns/promises';
@@ -68,6 +69,8 @@ export interface CoordinatorConfig {
    * port. Grants last at most an hour; `maxUsers` caps concurrent users.
    */
   relay: { enabled: boolean; maxUsers: number; publicIp?: string };
+  /** Opt-in mailbox holding sealed messages for offline devices. */
+  mailbox: MailboxConfig;
 }
 
 export const defaultConfig: CoordinatorConfig = {
@@ -82,6 +85,7 @@ export const defaultConfig: CoordinatorConfig = {
   announce: true,
   storage: 'sqlite',
   relay: { enabled: true, maxUsers: 25 },
+  mailbox: defaultMailboxConfig,
 };
 
 /**
@@ -98,6 +102,7 @@ export class Coordinator {
   readonly presence: PresenceService;
   readonly sessions: SessionService;
   readonly mesh: Mesh;
+  readonly mailbox: MailboxService;
   private directory?: DirectoryClient;
   private app?: FastifyInstance;
   turn?: TurnServer;
@@ -129,6 +134,7 @@ export class Coordinator {
     this.presence = new PresenceService(this);
     this.sessions = new SessionService(this);
     this.mesh = new Mesh(this);
+    this.mailbox = new MailboxService(this);
     this.records.onAccepted((record, seq, origin) => {
       this.mesh.onRecord(record, seq, origin);
       this.pushRecordToClients(record);
@@ -474,6 +480,7 @@ export class Coordinator {
     this.directory?.stop();
     this.mesh.close();
     this.sessions.close();
+    this.mailbox.close();
     for (const g of this.relayGrants.values()) clearTimeout(g.timer);
     this.turn?.stop();
     await this.app?.close();

@@ -10,6 +10,7 @@ import {
   Platform,
 } from './session';
 import { DeviceId } from './records';
+import { SealedBox } from './relay';
 
 /** Public identity of a coordination server. */
 export const ServerInfo = z.object({
@@ -59,6 +60,8 @@ export interface ServerHello {
   channel: ChannelOffer;
   /** Server signature over (challenge, server.id, time, channel). */
   sig: string;
+  /** Optional services this server offers (not signed; informational). */
+  features?: { relay?: boolean; mailbox?: { ttlMs: number } };
 }
 
 export const ClientAuth = z.object({
@@ -228,6 +231,20 @@ export const RpcParams = {
   /** Opt-in relay through this coordination server (TURN), max one hour. */
   'relay.request': z.object({ sessionId: SessionId }),
   'relay.release': z.object({}),
+  /**
+   * Opt-in mailbox: hold boxes sealed to offline devices until they connect
+   * or the server's TTL passes. The server only sees ciphertext.
+   */
+  'mail.put': z.object({
+    items: z
+      .array(z.object({ to: PeerId, box: SealedBox }))
+      .min(1)
+      .max(20),
+  }),
+  /** Recipient: deliver mail held for this device anywhere in the mesh. */
+  'mail.fetch': z.object({}),
+  /** Recipient: these mailbox items arrived; delete them everywhere. */
+  'mail.ack': z.object({ ids: z.array(z.string().max(40)).min(1).max(500) }),
 } as const;
 
 export interface RpcMethods {
@@ -252,6 +269,18 @@ export interface RpcMethods {
   'link.send': Record<string, never>;
   'relay.request': { grant: RelayGrant };
   'relay.release': Record<string, never>;
+  'mail.put': { ids: string[]; expiresAt: number };
+  'mail.fetch': Record<string, never>;
+  'mail.ack': Record<string, never>;
+}
+
+/** A mailbox item on its way to the recipient device. */
+export interface MailItem {
+  id: string;
+  /** Sender user id (as authenticated by the depositing server). */
+  from: string;
+  box: SealedBox;
+  createdAt: number;
 }
 
 export type RpcMethod = keyof RpcMethods;
@@ -276,4 +305,6 @@ export interface ServerEvents {
   link_payload: { box: LinkBox };
   /** The relay grant ran out; the relayed connection will stop. */
   relay_expired: { reason: string };
+  /** Mailbox items held for this device while it was offline. Ack with mail.ack. */
+  mail: { items: MailItem[] };
 }

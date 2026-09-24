@@ -48,6 +48,7 @@ const FORWARDED_EVENTS: (keyof ServerEvents)[] = [
   'link_claimed',
   'link_payload',
   'relay_expired',
+  'mail',
 ];
 
 /**

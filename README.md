@@ -17,6 +17,8 @@ the people in the conversation. Servers never see them.
 - **Works on strict networks too.** If a direct connection is impossible you
   can opt in to relaying your (still encrypted) traffic through a volunteer
   server, an hour at a time.
+- **Messages wait for offline friends.** Your device keeps them until you're
+  both online; optionally a server holds them sealed for up to a few days.
 - **Community-run coordination.** Volunteer coordination servers introduce
   peers, elect hosts and replicate _signed_ public metadata among themselves.
   Your app picks the fastest one automatically and keeps a backup.
@@ -93,6 +95,11 @@ Useful extras:
   Electron instances through onboarding, invites, chat, voice, settings and
   linking a second device, and saves screenshots.
 - `pnpm --filter @crocodile/desktop dist` builds installers for the current OS.
+
+## The main server
+
+The product page, the server directory, the install scripts and a first
+coordination server run together from [`deploy/main`](deploy/main/README.md).
 
 ## Self-hosting a coordination server
 

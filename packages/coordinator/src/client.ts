@@ -15,6 +15,7 @@ import {
   SIG_DOMAIN,
   peerIds,
   type LinkBox,
+  type SealedBox,
   type Platform,
   type RpcMethod,
   type ServerEvents,
@@ -56,6 +57,7 @@ export class ClientConnection implements ClientHandle {
   private readonly limiter = new RateLimiter(30, 120);
   private readonly writeLimiter = new RateLimiter(5, 40);
   private readonly linkLimiter = new RateLimiter(0.2, 5);
+  private readonly mailLimiter = new RateLimiter(1, 30);
   private alive = true;
   private pingTimer?: ReturnType<typeof setInterval>;
 
@@ -73,6 +75,10 @@ export class ClientConnection implements ClientHandle {
       stun: hub.stunUrls(),
       time,
       channel,
+      features: {
+        relay: hub.config.relay.enabled && !!hub.turn,
+        ...(hub.config.mailbox.enabled ? { mailbox: { ttlMs: hub.mailbox.ttlMs } } : {}),
+      },
       sig: sign(hub.identity, SIG_DOMAIN.serverHello, {
         challenge: this.challenge,
         server: info.id,
@@ -311,6 +317,20 @@ export class ClientConnection implements ClientHandle {
       case 'relay.release':
         hub.endRelay(this.userId, 'released');
         return {};
+      case 'mail.put': {
+        if (!this.mailLimiter.take())
+          throw new RpcFailure('rate_limited', 'sending mail too fast; slow down');
+        const { items } = p as unknown as { items: { to: string; box: SealedBox }[] };
+        return hub.mailbox.put(this, items);
+      }
+      case 'mail.fetch':
+        hub.mailbox.fetch(this);
+        return {};
+      case 'mail.ack': {
+        const { ids } = p as unknown as { ids: string[] };
+        hub.mailbox.ack(this, ids);
+        return {};
+      }
     }
   }
 

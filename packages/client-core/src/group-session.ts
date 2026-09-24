@@ -47,6 +47,18 @@ export interface SessionContext {
   historyChannels(sessionId: string): string[];
   /** Verify and store a chat message; resolves true if it was new. */
   acceptMessage(sessionId: string, message: ChatMessage): Promise<boolean>;
+  /** This device's unacknowledged messages. */
+  outbox: {
+    pending(sessionId: string): ChatMessage[];
+    /** Another user confirmed these ids. */
+    acked(ids: string[]): void;
+  };
+  /**
+   * Timestamp to sync a channel from: the newest message we did not write
+   * offline ourselves (our own unacknowledged messages can be newer than
+   * messages others wrote meanwhile).
+   */
+  syncCursor(channel: string): Promise<number>;
   /** Opt-in server relay (TURN) when no direct path works. */
   relay: {
     allowed(): boolean;
@@ -124,6 +136,11 @@ export class GroupSession extends Emitter<GroupSessionEvents> {
   private historyServedAt = new Map<string, number[]>();
   private historyAsked = new Set<string>();
   private relayRequested = false;
+  /** Peers we already offered our outbox to on this connection. */
+  private outboxOffered = new Set<string>();
+  /** Delivery confirmations to send, batched per peer. */
+  private ackQueue = new Map<string, Set<string>>();
+  private ackTimer?: ReturnType<typeof setTimeout>;
 
   constructor(
     readonly sessionId: string,
@@ -411,6 +428,7 @@ export class GroupSession extends Emitter<GroupSessionEvents> {
         this.peers = new Map(msg.peers.map((p) => [p.id, p]));
         this.slots = new Array(msg.slots).fill(null);
         this.historyAsked.clear();
+        this.outboxOffered.clear();
         for (const p of msg.peers) this.onPeerPresent(p.id);
         this.requestHistory([...this.peers.keys()]);
         break;
@@ -423,6 +441,7 @@ export class GroupSession extends Emitter<GroupSessionEvents> {
         break;
       case 'peer_leave':
         this.peers.delete(msg.peer);
+        this.outboxOffered.delete(msg.peer);
         this.keyring.peerLeft(msg.peer);
         this.keyring.rotate();
         break;
@@ -455,6 +474,58 @@ export class GroupSession extends Emitter<GroupSessionEvents> {
     }
     await this.sendKeyTo(peer);
     await this.processParkedKeys();
+    await this.offerOutbox(peer);
+  }
+
+  /**
+   * Hand our unacknowledged messages to someone who will keep and spread
+   * them: the other side of a DM, or the host/backup of a space.
+   */
+  private async offerOutbox(peer: string) {
+    if (this.outboxOffered.has(peer) || peerIds.user(peer) === peerIds.user(this.me)) return;
+    const st = this.state;
+    const worthy = this.isDm || peer === st?.host || peer === st?.backup || this.isHost;
+    if (!worthy) return;
+    const pending = this.ctx.outbox.pending(this.sessionId);
+    if (pending.length === 0) return;
+    this.outboxOffered.add(peer);
+    for (let i = 0; i < pending.length; i += 100) {
+      const chunk = pending.slice(i, i + 100);
+      await this.sendSealed(peer, {
+        type: 'history',
+        messages: chunk,
+        done: i + 100 >= pending.length,
+      });
+    }
+  }
+
+  /** Confirm receipt of messages authored by `from`'s user, batched. */
+  private queueAck(from: string, messages: ChatMessage[]) {
+    const author = peerIds.user(from);
+    if (author === peerIds.user(this.me)) return;
+    const ids = messages.filter((m) => m.author === author).map((m) => m.id);
+    if (ids.length === 0) return;
+    let set = this.ackQueue.get(from);
+    if (!set) this.ackQueue.set(from, (set = new Set()));
+    for (const id of ids) set.add(id);
+    this.ackTimer ??= setTimeout(() => {
+      this.ackTimer = undefined;
+      const queue = this.ackQueue;
+      this.ackQueue = new Map();
+      for (const [to, idSet] of queue) {
+        const all = [...idSet];
+        for (let i = 0; i < all.length; i += 500)
+          void this.sendSealed(to, { type: 'ack', ids: all.slice(i, i + 500) });
+      }
+    }, 250);
+  }
+
+  /** Live group messages: DMs always confirm; in spaces the host (or backup) does. */
+  private shouldAckLive(from: string) {
+    if (this.isDm) return true;
+    const st = this.state;
+    if (this.isHost) return true;
+    return st?.host === from && (st.backup === this.me || !st.backup);
   }
 
   /** Called when records change: admit peers that became allowed. */
@@ -574,9 +645,21 @@ export class GroupSession extends Emitter<GroupSessionEvents> {
         return;
       case 'history':
         for (const m of payload.messages) await this.ctx.acceptMessage(this.sessionId, m);
+        this.queueAck(from, payload.messages);
         return;
       case 'message':
         await this.ctx.acceptMessage(this.sessionId, payload.message);
+        this.queueAck(from, [payload.message]);
+        return;
+      case 'ack':
+        // Only another person's confirmation counts, not our own other devices.
+        if (
+          peerIds.user(from) !== peerIds.user(this.me) &&
+          this.ctx.isAllowedPeer(this.sessionId, from)
+        )
+          this.ctx.outbox.acked(payload.ids);
+        return;
+      case 'mail':
         return;
     }
   }
@@ -592,6 +675,7 @@ export class GroupSession extends Emitter<GroupSessionEvents> {
     if (payload.type === 'message') {
       if (payload.message.author !== fromUser) return;
       await this.ctx.acceptMessage(this.sessionId, payload.message);
+      if (this.shouldAckLive(from)) this.queueAck(from, [payload.message]);
     } else if (payload.type === 'typing') {
       this.emit('typing', { userId: fromUser, ch: payload.ch });
     } else if (payload.type === 'call' && this.isDm) {
@@ -625,7 +709,7 @@ export class GroupSession extends Emitter<GroupSessionEvents> {
     if (targets.length === 0) return;
     void (async () => {
       const since: Record<string, number> = {};
-      for (const ch of channels) since[ch] = await this.ctx.messages.latestTs(ch);
+      for (const ch of channels) since[ch] = await this.ctx.syncCursor(ch);
       for (const t of targets) {
         this.historyAsked.add(t);
         await this.sendSealed(t, { type: 'history_req', since });

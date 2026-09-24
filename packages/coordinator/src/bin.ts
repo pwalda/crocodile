@@ -26,6 +26,8 @@ const { values } = parseArgs({
     relay: { type: 'string' },
     'relay-max-users': { type: 'string' },
     'relay-ip': { type: 'string' },
+    mailbox: { type: 'string' },
+    'mailbox-days': { type: 'string' },
     'log-level': { type: 'string' },
     help: { type: 'boolean', short: 'h' },
   },
@@ -51,6 +53,9 @@ Options (environment variable in brackets):
   --relay on|off         opt-in relay for blocked users   [CROC_RELAY]
   --relay-max-users <n>  concurrent relay users (25)      [CROC_RELAY_MAX_USERS]
   --relay-ip <addr>      public IP for relay candidates   [CROC_RELAY_IP]
+  --mailbox on|off       hold sealed mail for offline     [CROC_MAILBOX]
+                         devices (opt-in for users)
+  --mailbox-days <n>     how long mail is kept, max 7 (3) [CROC_MAILBOX_DAYS]
   --log-level <lvl>      debug|info|warn|error            [CROC_LOG_LEVEL]`);
   process.exit(0);
 }
@@ -80,6 +85,12 @@ const coordinator = new Coordinator({
       pick(values['relay-max-users'], 'CROC_RELAY_MAX_USERS') ?? defaultConfig.relay.maxUsers,
     ),
     publicIp: pick(values['relay-ip'], 'CROC_RELAY_IP'),
+  },
+  mailbox: {
+    ...defaultConfig.mailbox,
+    enabled: (pick(values.mailbox, 'CROC_MAILBOX') ?? 'on') !== 'off',
+    ttlMs:
+      Math.min(7, Number(pick(values['mailbox-days'], 'CROC_MAILBOX_DAYS') ?? 3)) * 24 * 3600_000,
   },
   logLevel: (pick(values['log-level'], 'CROC_LOG_LEVEL') as never) ?? 'info',
 });

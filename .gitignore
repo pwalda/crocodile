@@ -12,3 +12,4 @@ coverage/
 .crocodile-data/
 test-results/
 playwright-report/
+!.env.example

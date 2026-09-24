@@ -35,7 +35,10 @@ import {
   type ChatMessage,
   type DeviceBody,
   type LinkBox,
+  type MailItem,
   type RelayGrant,
+  SealedPayload,
+  utf8,
   type SealedBox,
   type FriendsBody,
   type HostCaps,
@@ -57,6 +60,7 @@ import {
   type TransportFactory,
 } from './group-session';
 import type { PlatformAdapter } from './platform';
+import { Outbox } from './outbox';
 import { RecordCache } from './records-cache';
 import type { RankedServer } from './server-selection';
 import { StateStore } from './store';
@@ -85,6 +89,12 @@ export interface Settings {
    * (TURN). Traffic stays end-to-end encrypted; grants last at most an hour.
    */
   allowServerRelay: boolean;
+  /**
+   * When the other side of a DM is offline, let a coordination server hold
+   * the message (sealed to their devices, unreadable to the server) until
+   * they come online or the server's time limit passes.
+   */
+  useMailbox: boolean;
   /** Display name of this device. */
   deviceName?: string;
 }
@@ -95,6 +105,7 @@ export const defaultSettings: Settings = {
   status: 'online',
   notifications: true,
   allowServerRelay: false,
+  useMailbox: false,
 };
 
 export interface ProfileView {
@@ -166,7 +177,10 @@ export type LinkingState =
 
 export interface MessageView extends ChatMessage {
   edited?: boolean;
+  /** Written by us and not yet confirmed by anyone else. */
   pending?: boolean;
+  /** Held by a server mailbox until the recipient comes online. */
+  mailed?: boolean;
 }
 
 export interface ClientState {
@@ -209,6 +223,8 @@ export type ClientEvents = {
 };
 
 const APP_VERSION_FALLBACK = '0.1.0';
+/** How long direct delivery gets before an opted-in DM goes to a mailbox. */
+const MAIL_AFTER_MS = 5000;
 
 /**
  * The whole client behind one object. UIs render `store` and call methods;
@@ -223,6 +239,8 @@ export class CrocodileClient extends Emitter<ClientEvents> {
   link?: CoordinatorLink;
   readonly records: RecordCache;
   private sessions = new Map<string, GroupSession>();
+  private outbox: Outbox;
+  private mailTimer?: ReturnType<typeof setTimeout>;
   private transportFactory?: TransportFactory;
   private stun: string[] = [];
   private errorId = 0;
@@ -234,6 +252,7 @@ export class CrocodileClient extends Emitter<ClientEvents> {
   ) {
     super();
     this.records = new RecordCache(platform.kv);
+    this.outbox = new Outbox(platform.kv);
     this.transportFactory = config.transportFactory ?? defaultTransportFactory(platform);
     this.store = new StateStore<ClientState>({
       phase: 'loading',
@@ -313,6 +332,7 @@ export class CrocodileClient extends Emitter<ClientEvents> {
     };
     const dms = (await this.platform.kv.get<string[]>('dms')) ?? [];
     await this.loadDevice();
+    await this.outbox.load();
     this.store.set({ settings, dms, deviceId: this.deviceId });
     await this.records.load();
     const seed = await this.platform.kv.get<string>('identity-seed');
@@ -413,6 +433,9 @@ export class CrocodileClient extends Emitter<ClientEvents> {
     await this.platform.kv.delete('records-cache');
     await this.platform.kv.delete('prekeys');
     await this.platform.kv.delete('device-id');
+    await this.platform.kv.delete('outbox');
+    this.outbox = new Outbox(this.platform.kv);
+    clearTimeout(this.mailTimer);
     clearInterval(this.prekeyTimer);
     this.prekeys = [];
     await this.loadDevice();
@@ -481,9 +504,16 @@ export class CrocodileClient extends Emitter<ClientEvents> {
         }
       }
     });
-    link.on('presence', (p) =>
-      this.store.set((s) => ({ presence: { ...s.presence, [p.userId]: p.status } })),
-    );
+    link.on('presence', (p) => {
+      const was = this.state.presence[p.userId];
+      this.store.set((s) => ({ presence: { ...s.presence, [p.userId]: p.status } }));
+      // A friend with undelivered DMs came online: invite them to the session.
+      if (p.status !== 'offline' && (was === 'offline' || was === undefined)) {
+        const sid = sessionIds.dm(this.userId, p.userId);
+        if (this.outbox.forSession(sid).length) void this.pokeDm(sid);
+      }
+    });
+    link.on('mail', ({ items }) => void this.onMail(items));
     link.on('session', ({ state }) => this.sessions.get(state.id)?.applyState(state));
     link.on('signal', ({ from, sessionId, data }) =>
       this.sessions.get(sessionId)?.handleSignal(from, data),
@@ -552,8 +582,174 @@ export class CrocodileClient extends Emitter<ClientEvents> {
 
     // (Re)join sessions: every space's text mesh, plus whatever voice/DM we were in.
     for (const id of spaceIds) this.ensureSession(sessionIds.space(id));
+    // DMs with undelivered messages: be in the session so the other side is invited.
+    for (const other of this.state.dms) {
+      const sid = sessionIds.dm(me, other);
+      if (this.outbox.forSession(sid).length) this.ensureSession(sid);
+    }
     for (const s of this.sessions.values())
       void s.join().catch((err) => this.log('join failed', { id: s.sessionId, err: String(err) }));
+    // Mail held for this device while it was offline, anywhere in the mesh.
+    void link.request('mail.fetch', {}).catch(() => {});
+    this.scheduleMail();
+  }
+
+  // ===========================================================================
+  // Outbox and mailbox
+  // ===========================================================================
+
+  /** Newest message of a channel that did not come from our own offline queue. */
+  private async syncCursor(channel: string): Promise<number> {
+    const page = await this.platform.messages.page(channel, { limit: 200 });
+    for (let i = page.length - 1; i >= 0; i--) {
+      if (!this.outbox.has(page[i]!.id)) return page[i]!.ts;
+    }
+    return 0;
+  }
+
+  private withDelivery(page: ChatMessage[]): MessageView[] {
+    return page.map((m) => {
+      const e = this.outbox.get(m.id);
+      return e ? { ...m, pending: true, mailed: !!e.mailed } : m;
+    });
+  }
+
+  private onAcked(ids: string[]) {
+    const done = new Set(this.outbox.ack(ids));
+    if (done.size === 0) return;
+    this.store.set((s) => {
+      const messages = { ...s.messages };
+      let changed = false;
+      for (const [ch, list] of Object.entries(messages)) {
+        if (!list.some((m) => done.has(m.id))) continue;
+        messages[ch] = list.map((m) =>
+          done.has(m.id) ? { ...m, pending: false, mailed: false } : m,
+        );
+        changed = true;
+      }
+      return changed ? { messages } : {};
+    });
+  }
+
+  /** Re-join a DM session so the coordinator invites the other side again. */
+  private async pokeDm(sessionId: string) {
+    if (!this.link || this.link.status !== 'connected') return;
+    const session = this.ensureSession(sessionId);
+    await session.join().catch(() => {});
+  }
+
+  /** Give direct delivery a few seconds before falling back to a mailbox. */
+  private scheduleMail(delayMs = MAIL_AFTER_MS) {
+    if (!this.state.settings.useMailbox) return;
+    clearTimeout(this.mailTimer);
+    this.mailTimer = setTimeout(() => void this.mailOutbox(), delayMs);
+  }
+
+  /**
+   * Deposit unconfirmed DM messages in the coordination server's mailbox,
+   * sealed separately to each of the recipient's devices (and our other
+   * devices). The outbox keeps them until a peer confirms, so direct
+   * delivery still happens if we meet first.
+   */
+  async mailOutbox() {
+    const link = this.link;
+    if (!this.state.settings.useMailbox || !link || link.status !== 'connected' || !this.identity)
+      return;
+    const me = this.userId;
+    const bySession = new Map<string, ChatMessage[]>();
+    for (const e of this.outbox.unmailed(MAIL_AFTER_MS - 500)) {
+      const list = bySession.get(e.sessionId) ?? [];
+      list.push(e.message);
+      bySession.set(e.sessionId, list);
+    }
+    for (const [sessionId, pending] of bySession) {
+      const scope = parseSessionId(sessionId);
+      if (scope?.kind !== 'dm') continue;
+      const other = scope.users.find((u) => u !== me) ?? me;
+      try {
+        const targets = await this.mailTargets([other, me]);
+        if (targets.length === 0) continue;
+        const items: { to: string; box: SealedBox }[] = [];
+        for (let i = 0; i < pending.length; i += 50) {
+          const chunk = pending.slice(i, i + 50);
+          const plaintext = utf8.encode(JSON.stringify({ type: 'mail', messages: chunk }));
+          for (const t of targets) {
+            items.push({
+              to: t.peer,
+              box: sealToDevice(this.identity, this.deviceId, t, plaintext),
+            });
+          }
+        }
+        for (let i = 0; i < items.length; i += 20) {
+          await link.request('mail.put', { items: items.slice(i, i + 20) });
+        }
+        const ids = pending.map((m) => m.id);
+        this.outbox.markMailed(ids);
+        const mailed = new Set(ids);
+        this.store.set((s) => {
+          const list = s.messages[sessionId];
+          if (!list) return {};
+          return {
+            messages: {
+              ...s.messages,
+              [sessionId]: list.map((m) => (mailed.has(m.id) ? { ...m, mailed: true } : m)),
+            },
+          };
+        });
+        this.log('mailed messages', { sessionId, count: ids.length, devices: targets.length });
+      } catch (err) {
+        this.log('mailbox unavailable', { sessionId, err: String(err) });
+      }
+    }
+  }
+
+  /** Current, unrevoked devices of some users, except this one. */
+  private async mailTargets(userIds: string[]) {
+    const out: { peer: string; prekey: DeviceBody['prekey'] }[] = [];
+    for (const userId of new Set(userIds)) {
+      const res = await this.link!.request('records.list', {
+        prefix: recordKey.devicePrefix(userId),
+      });
+      this.records.ingestAll(res.records);
+      for (const r of res.records as SignedRecord<'device'>[]) {
+        const verified = this.records.get(r.key) as SignedRecord<'device'> | undefined;
+        if (!verified || verified.sig !== r.sig || verified.body.revoked) continue;
+        const peer = peerIds.make(userId, verified.body.deviceId);
+        if (peer === this.peer) continue;
+        out.push({ peer, prekey: verified.body.prekey });
+      }
+    }
+    return out.slice(0, 20);
+  }
+
+  /** Mail that waited on a server for this device. */
+  private async onMail(items: MailItem[]) {
+    const done: string[] = [];
+    for (const item of items) {
+      done.push(item.id);
+      const opened = this.openBox(item.box);
+      if (!opened) {
+        this.log('could not open mail', { id: item.id });
+        continue;
+      }
+      let payload: SealedPayload;
+      try {
+        payload = SealedPayload.parse(JSON.parse(utf8.decode(opened.plaintext)));
+      } catch {
+        continue;
+      }
+      if (payload.type !== 'mail') continue;
+      const sender = peerIds.user(opened.from);
+      for (const m of payload.messages) {
+        if (m.author !== sender) continue;
+        const scope = parseSessionId(m.ch);
+        if (scope?.kind !== 'dm' || !scope.users.includes(this.userId)) continue;
+        const other = scope.users.find((u) => u !== this.userId) ?? this.userId;
+        if (this.state.friends.blocked.includes(other)) continue;
+        if (await this.acceptMessage(m.ch, m)) this.addDm(other);
+      }
+    }
+    if (done.length) await this.link?.request('mail.ack', { ids: done }).catch(() => {});
   }
 
   private async ensureProfilePublished() {
@@ -1058,6 +1254,11 @@ export class CrocodileClient extends Emitter<ClientEvents> {
         },
         historyChannels: (sid) => this.historyChannels(sid),
         acceptMessage: (sid, m) => this.acceptMessage(sid, m),
+        outbox: {
+          pending: (sid) => this.outbox.forSession(sid),
+          acked: (ids) => this.onAcked(ids),
+        },
+        syncCursor: (ch) => this.syncCursor(ch),
         log: (m, e) => this.log(m, { session: sessionId, ...e }),
       },
       this.transportFactory,
@@ -1402,7 +1603,9 @@ export class CrocodileClient extends Emitter<ClientEvents> {
     this.store.set((s) => ({ activeChannel: channel, unread: { ...s.unread, [channel]: 0 } }));
     if (!this.state.messages[channel]) {
       const page = await this.platform.messages.page(channel, { limit: 100 });
-      this.store.set((s) => ({ messages: { ...s.messages, [channel]: foldEdits(page) } }));
+      this.store.set((s) => ({
+        messages: { ...s.messages, [channel]: foldEdits(this.withDelivery(page)) },
+      }));
     }
   }
 
@@ -1412,7 +1615,10 @@ export class CrocodileClient extends Emitter<ClientEvents> {
     const page = await this.platform.messages.page(channel, { before, limit: 100 });
     if (page.length === 0) return false;
     this.store.set((s) => ({
-      messages: { ...s.messages, [channel]: foldEdits([...page, ...(s.messages[channel] ?? [])]) },
+      messages: {
+        ...s.messages,
+        [channel]: foldEdits([...this.withDelivery(page), ...(s.messages[channel] ?? [])]),
+      },
     }));
     return true;
   }
@@ -1434,13 +1640,16 @@ export class CrocodileClient extends Emitter<ClientEvents> {
     if (!sessionId) throw new Error('unknown channel');
     const message = createChatMessage(this.identity!, { ch: channel, body: text, ...opts });
     await this.platform.messages.put(message);
+    this.outbox.add(message, sessionId);
     const session = this.sessions.get(sessionId);
     const delivered =
       !!session?.connected &&
       session.peers.size > 0 &&
       session.sendGroup({ type: 'message', message });
-    this.addToTimeline(channel, { ...message, pending: !delivered });
+    this.addToTimeline(channel, { ...message, pending: true });
     this.emit('message', { channel, message, mine: true });
+    if (!delivered && sessionId.startsWith('dm:')) void this.pokeDm(sessionId);
+    this.scheduleMail();
   }
 
   editMessage(channel: string, id: string, body: string) {
@@ -1638,9 +1847,11 @@ export class CrocodileClient extends Emitter<ClientEvents> {
   }
 
   async shutdown() {
+    clearTimeout(this.mailTimer);
     await this.leaveVoice().catch(() => {});
     for (const s of this.sessions.values()) await s.leave().catch(() => {});
     this.link?.stop();
+    await this.outbox.flush().catch(() => {});
   }
 }
 

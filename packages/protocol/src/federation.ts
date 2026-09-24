@@ -39,6 +39,19 @@ export interface FedLinkAnswer {
   found?: { peer: string; key: string; encKey: string };
 }
 
+/** Mailbox: a device connected here; servers holding mail for it send it over. */
+export interface FedMailQuery {
+  t: 'mail_query';
+  peer: string;
+}
+
+/** Mailbox: the device received these items; everyone may delete them. */
+export interface FedMailAck {
+  t: 'mail_ack';
+  peer: string;
+  ids: string[];
+}
+
 export interface FedRecords {
   t: 'records';
   items: { seq: number; record: SignedRecord }[];
@@ -126,6 +139,8 @@ export type FedFrame =
   | FedVoice
   | FedLinkQuery
   | FedLinkAnswer
+  | FedMailQuery
+  | FedMailAck
   | { t: 'x'; n: number; c: string }
   | { t: 'ping' }
   | { t: 'pong' };

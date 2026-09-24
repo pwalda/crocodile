@@ -20,6 +20,11 @@
   per-device keys for message delivery, renaming and removal.
 - Opt-in relay through coordination servers for networks that block direct
   connections (one hour at a time, capped users per server).
+- Offline delivery: a per-device outbox exchanged peer-to-peer with
+  acknowledgements, and an opt-in server mailbox for DMs (sealed per device,
+  up to 7 days, works across the server mesh).
+- Main server deployment: product page, directory, install scripts and a
+  first coordinator (`deploy/main`).
 - Desktop app for Windows, macOS and Linux with its own design (light and
   dark themes, accents), installers, auto-update, one-line install scripts
   and an embedded coordination server.
@@ -45,12 +50,14 @@
 9. **Server-side hardening**: per-IP rate limits, record quotas per user,
    abuse reporting for public directories.
 10. **Web client** (cannot host; joins hosts) from the same renderer.
-11. **Code signing**: SignPath (Windows) and an Apple Developer ID; see
-    [DISTRIBUTION.md](DISTRIBUTION.md).
+11. **Store and signing path** (see [DISTRIBUTION.md](DISTRIBUTION.md)):
+    Microsoft Store listing (MSIX, signed by the Store, with the built-in
+    updater disabled) plus winget; Apple Developer Program for Developer ID
+    signing, notarization and working macOS auto-update; SignPath for the
+    direct Windows download. Until then: the one-line installers.
 
 ## Open questions
 
-- Who runs the default public directory, and under which domain.
-- A store-and-forward option for offline delivery that keeps servers
-  content-blind (e.g. encrypted mailboxes on volunteer servers with short
-  retention), without bending the "only peers" principle by default.
+- The product domain (the main server hosts the directory and product page).
+- Mailbox for spaces (today DMs only): sealing to every member's devices is
+  costly for big spaces; a per-space rotating mailbox key is one option.

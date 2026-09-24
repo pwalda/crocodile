@@ -1,6 +1,13 @@
 import { afterEach, describe, expect, it } from 'vitest';
-import { createIdentity, randomId, signRecord, userTag } from '@crocodile/crypto';
-import { recordKey, sessionIds } from '@crocodile/protocol';
+import {
+  createIdentity,
+  createPrekey,
+  randomId,
+  sealToDevice,
+  signRecord,
+  userTag,
+} from '@crocodile/crypto';
+import { peerIds, recordKey, sessionIds, utf8, type PrekeyBundle } from '@crocodile/protocol';
 import type { Coordinator } from '@crocodile/coordinator';
 import {
   caps,
@@ -395,5 +402,76 @@ describe('encrypted client channel', () => {
     const closed = new Promise<number>((r) => raw.addEventListener('close', (e) => r(e.code)));
     raw.send(JSON.stringify({ t: 'req', id: 99, m: 'servers.list', p: {} }));
     expect(await closed).toBe(1008);
+  });
+});
+
+describe('opt-in mailbox', () => {
+  /** A user with a published device record (so others can mail it). */
+  async function withDevice(c: Coordinator) {
+    const u = await user(c);
+    const prekey = createPrekey().bundle;
+    const device = peerIds.device(u.conn.peer);
+    const rec = signRecord(u.identity, 'device', recordKey.device(u.identity.userId, device), {
+      userId: u.identity.userId,
+      deviceId: device,
+      name: 'test',
+      platform: 'bot',
+      prekey,
+    });
+    expect((await u.conn.request('records.put', { record: rec })).accepted).toBe(true);
+    return { ...u, device, prekey };
+  }
+  const box = (from: TestUser, to: { conn: TestUser['conn']; prekey: PrekeyBundle }) =>
+    sealToDevice(
+      from.identity,
+      peerIds.device(from.conn.peer),
+      { peer: to.conn.peer, prekey: to.prekey },
+      utf8.encode('{"type":"mail","messages":[]}'),
+    );
+
+  it('holds sealed items for a device until it fetches and acknowledges them', async () => {
+    const c = await server();
+    const alice = await withDevice(c);
+    const bob = await withDevice(c);
+    const res = await alice.conn.request('mail.put', {
+      items: [{ to: bob.conn.peer, box: box(alice, bob) }],
+    });
+    expect(res.ids).toHaveLength(1);
+    expect(res.expiresAt).toBeGreaterThan(Date.now());
+    // Bob is online, so it is pushed right away and kept until acknowledged.
+    await waitFor(() => bob.events.some((e) => e.ev === 'mail'), 3000, 'mail event');
+    expect(c.store.mailCount({ toUser: bob.identity.userId })).toBe(1);
+    await bob.conn.request('mail.fetch', {});
+    await bob.conn.request('mail.ack', { ids: res.ids });
+    expect(c.store.mailCount({})).toBe(0);
+  });
+
+  it('rejects boxes that claim another sender, and servers can turn it off', async () => {
+    const c = await server();
+    const alice = await withDevice(c);
+    const bob = await withDevice(c);
+    const mallory = await withDevice(c);
+    await expect(
+      mallory.conn.request('mail.put', { items: [{ to: bob.conn.peer, box: box(alice, bob) }] }),
+    ).rejects.toThrow(/does not match/);
+
+    const off = await server({ mailbox: { ...c.config.mailbox, enabled: false } });
+    const a2 = await withDevice(off);
+    const b2 = await withDevice(off);
+    await expect(
+      a2.conn.request('mail.put', { items: [{ to: b2.conn.peer, box: box(a2, b2) }] }),
+    ).rejects.toThrow(/does not keep mail/);
+  });
+
+  it('forgets items after the time limit', async () => {
+    const c = await server({
+      mailbox: { enabled: true, ttlMs: 50, maxPerRecipient: 10, maxPerSender: 10, maxTotal: 100 },
+    });
+    const alice = await withDevice(c);
+    const bob = await withDevice(c);
+    await alice.conn.request('mail.put', { items: [{ to: bob.conn.peer, box: box(alice, bob) }] });
+    await new Promise((r) => setTimeout(r, 80));
+    expect(c.store.mailFor(bob.conn.peer, Date.now(), 10)).toHaveLength(0);
+    expect(c.store.mailExpire(Date.now())).toBe(1);
   });
 });

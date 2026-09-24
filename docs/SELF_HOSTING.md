@@ -57,6 +57,16 @@ node packages/coordinator/dist/bin.js --help
 | `--relay`           | `CROC_RELAY`           | `on` (`off` to disable)        |
 | `--relay-max-users` | `CROC_RELAY_MAX_USERS` | 25                             |
 | `--relay-ip`        | `CROC_RELAY_IP`        | public IP from `--public-url`  |
+| `--mailbox`         | `CROC_MAILBOX`         | `on` (`off` to disable)        |
+| `--mailbox-days`    | `CROC_MAILBOX_DAYS`    | 3 (max 7)                      |
+
+### The opt-in mailbox
+
+Users who opt in can leave direct messages for friends who are offline. Your
+server stores them as boxes sealed to the recipient's devices (it cannot read
+them) until the recipient connects anywhere in the mesh or `--mailbox-days`
+pass. Quotas per sender and recipient keep storage bounded (a few MB per
+thousand messages). Turn it off with `--mailbox off`.
 
 ### The opt-in relay
 
@@ -68,6 +78,12 @@ it at once, and each allocation is rate-limited (about 100 kbit/s of voice
 per person). Your server only ever sees ciphertext. Turn it off with
 `--relay off` if bandwidth is scarce. The desktop app's built-in server
 leaves it off unless you enable "Offer a relay".
+
+## The main server
+
+`deploy/main/` runs the product page, the directory, the install scripts and
+a first coordinator behind Caddy with automatic HTTPS. See
+[deploy/main/README.md](../deploy/main/README.md).
 
 ## Running a directory
 
