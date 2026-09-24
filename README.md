@@ -2,31 +2,47 @@
 
 # Crocodile
 
-**Peer-to-peer, end-to-end encrypted voice and text chat.** It works like
-Discord or TeamSpeak (spaces, text and voice channels, friends, DMs, calls),
-but your voice and messages go only between the people in the conversation.
-Servers never see them.
+**Peer-to-peer, end-to-end encrypted voice and text chat.** Hang out like on
+Discord or TeamSpeak (spaces, text channels, voice rooms, friends, DMs,
+calls) with the privacy of Signal: your voice and messages go only between
+the people in the conversation. Servers never see them.
 
 - **Always E2E, always P2P.** Voice frames and messages are encrypted on your
-  device with per-sender keys. For groups, the member with the best connection
-  hosts a tiny relay that forwards ciphertext it cannot read, and a runner-up
-  stands by to take over.
+  device with ratcheting keys and post-quantum (ML-KEM) key exchange. For
+  groups, the member with the best connection hosts a tiny relay that
+  forwards ciphertext it cannot read, and a runner-up stands by to take over.
 - **No passwords, no accounts to lose.** Your account is a key pair; you get a
-  recovery key once. Pick a name and you're in.
+  recovery key once. Pick a name and you're in. Add your other computers by
+  typing a short code.
+- **Works on strict networks too.** If a direct connection is impossible you
+  can opt in to relaying your (still encrypted) traffic through a volunteer
+  server, an hour at a time.
 - **Community-run coordination.** Volunteer coordination servers introduce
   peers, elect hosts and replicate _signed_ public metadata among themselves.
   Your app picks the fastest one automatically and keeps a backup.
 - **Anyone can contribute a server.** Tick "Host a coordination server" in the
   app, or run it with Docker.
 
-<p align="center"><img src="docs/screenshots/voice.png" width="720" alt="Voice channel"></p>
+<p align="center"><img src="docs/screenshots/chat.png" width="720" alt="Chat in a space"></p>
+<p align="center"><img src="docs/screenshots/voice.png" width="720" alt="A voice room"></p>
 
 ## Install
 
-Download the installer for your system from
-[Releases](https://github.com/pwalda/crocodile/releases): `Crocodile Setup.exe`
-(Windows), `Crocodile.dmg` (macOS), `.AppImage` / `.deb` / `.rpm` (Linux). Open
-it. There is nothing to configure. Updates install themselves.
+```sh
+# macOS and Linux
+curl -fsSL https://raw.githubusercontent.com/pwalda/crocodile/main/scripts/install.sh | sh
+```
+
+```powershell
+# Windows (PowerShell)
+irm https://raw.githubusercontent.com/pwalda/crocodile/main/scripts/install.ps1 | iex
+```
+
+Or download the installer for your system from
+[Releases](https://github.com/pwalda/crocodile/releases) (`.exe`, `.dmg`,
+`.AppImage` / `.deb` / `.rpm`). There is nothing to configure. Until the builds
+are code-signed, browser downloads show a one-time warning; see
+[docs/DISTRIBUTION.md](docs/DISTRIBUTION.md).
 
 Mobile apps are on the [roadmap](docs/ROADMAP.md).
 
@@ -73,9 +89,9 @@ Useful extras:
 
 - `CROC_USER_DATA=/tmp/croc-b pnpm dev:desktop` starts a second, independent
   instance for local testing.
-- `xvfb-run -a npx tsx tests/electron/smoke.ts /tmp/shots` drives two real
-  Electron instances through onboarding, invites, chat and voice and saves
-  screenshots.
+- `xvfb-run -a npx tsx tests/electron/smoke.ts /tmp/shots` drives real
+  Electron instances through onboarding, invites, chat, voice, settings and
+  linking a second device, and saves screenshots.
 - `pnpm --filter @crocodile/desktop dist` builds installers for the current OS.
 
 ## Self-hosting a coordination server
@@ -86,7 +102,7 @@ CROC_DIRECTORY=https://directory.example.org \
 docker compose up -d coordinator
 ```
 
-It needs TCP and UDP on port 7443. See [docs/SELF_HOSTING.md](docs/SELF_HOSTING.md).
+It needs TCP and UDP on port 7443 (UDP also carries the opt-in relay). See [docs/SELF_HOSTING.md](docs/SELF_HOSTING.md).
 
 ## License
 
