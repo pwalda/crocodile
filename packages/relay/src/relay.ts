@@ -36,6 +36,8 @@ export interface HostRelayOptions {
   includeLoopback?: boolean;
   icePortRange?: [number, number];
   log?: RelayLogger;
+  /** Observer for each upstream audio payload (metrics and tests). */
+  onUpstreamFrame?: (from: string, payload: Uint8Array) => void;
 }
 
 interface Peer {
@@ -272,6 +274,7 @@ export class HostRelay {
 
   private onUpstreamRtp(speaker: Peer, rtp: RtpPacket) {
     if (speaker.state.muted) return;
+    this.opts.onUpstreamFrame?.(speaker.userId, rtp.payload);
     const now = Date.now();
     let level = 127;
     if (speaker.audioLevelExtId !== undefined) {
