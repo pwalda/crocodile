@@ -1,21 +1,40 @@
+# Self-hosting: a coordination server (and, optionally, your own directory).
+#
+#   CROC_PUBLIC_URL=https://croc.example.org docker compose up -d coordinator
+#
+# The coordinator needs TCP and UDP on 7443 (HTTP/WebSocket + STUN). Put it
+# behind a TLS-terminating reverse proxy for https/wss, or expose it directly.
 services:
-  postgres:
-    image: postgres:17-alpine
-    container_name: crocodile-postgres
+  coordinator:
+    build:
+      context: .
+      dockerfile: packages/coordinator/Dockerfile
+    image: ghcr.io/pwalda/crocodile-coordinator:latest
     restart: unless-stopped
-    environment:
-      POSTGRES_USER: crocodile
-      POSTGRES_PASSWORD: crocodile_dev
-      POSTGRES_DB: crocodile
     ports:
-      - "5432:5432"
+      - '7443:7443/tcp'
+      - '7443:7443/udp'
+    environment:
+      CROC_NAME: ${CROC_NAME:-My Crocodile coordinator}
+      CROC_PUBLIC_URL: ${CROC_PUBLIC_URL:-}
+      CROC_REGION: ${CROC_REGION:-}
+      CROC_DIRECTORY: ${CROC_DIRECTORY:-}
+      CROC_PEERS: ${CROC_PEERS:-}
     volumes:
-      - crocodile_pgdata:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U crocodile -d crocodile"]
-      interval: 5s
-      timeout: 5s
-      retries: 10
+      - coordinator-data:/data
+
+  directory:
+    profiles: [directory]
+    build:
+      context: .
+      dockerfile: apps/directory/Dockerfile
+    image: ghcr.io/pwalda/crocodile-directory:latest
+    restart: unless-stopped
+    ports:
+      - '7400:7400'
+    volumes:
+      - directory-data:/data
 
 volumes:
-  crocodile_pgdata:
+  coordinator-data:
+  directory-data:

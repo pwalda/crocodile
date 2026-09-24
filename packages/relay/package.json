@@ -1,0 +1,19 @@
+{
+  "name": "@crocodile/relay",
+  "license": "Apache-2.0",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Host relay: the selective forwarding unit a Crocodile host peer runs for its session. Forwards end-to-end encrypted frames it cannot read.",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@crocodile/crypto": "workspace:*",
+    "@crocodile/protocol": "workspace:*",
+    "werift": "0.24.4"
+  },
+  "devDependencies": {
+    "@crocodile/coordinator": "workspace:*"
+  }
+}

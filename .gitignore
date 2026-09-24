@@ -1,24 +1,15 @@
-/target
-/**/target
-/dist
-Cargo.lock.bak
-*.swp
+node_modules/
+dist/
+out/
+release/
+coverage/
+*.log
 .DS_Store
-.idea/
-.vscode/
-
-# Server identity key — long-lived ed25519 secret. Must never be committed.
-.server_identity.key
-*.identity.key
-
-# Client per-account state directories created by the demo binaries
-# and the GUI (identity seeds, MLS state, text history live here).
-/.crocodile-state-*/
-/crocodile-state*/
-/state-*/
-
-# SQLite cache files used by the client cache module.
+.env
+.env.*
 *.sqlite
-*.sqlite-journal
-*.sqlite-wal
-*.sqlite-shm
+*.sqlite-*
+.crocodile-data/
+test-results/
+playwright-report/
+!.env.example

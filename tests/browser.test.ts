@@ -1,0 +1,245 @@
+import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import type { Browser, Page } from 'playwright-core';
+import type { Server } from 'node:http';
+import type { Coordinator } from '@crocodile/coordinator';
+import { attachRelayBridge, launchBrowser, relayFrames, serveHarness } from './browser/harness';
+import { existsSync } from 'node:fs';
+import { startCoordinator, waitFor } from './helpers';
+
+const chromiumPath = process.env.CHROMIUM_PATH ?? '/opt/pw-browsers/chromium';
+const haveChromium = existsSync(chromiumPath);
+
+/**
+ * Real-browser end-to-end test: Chromium clients, real WebRTC to a real
+ * werift host relay, E2EE voice frames through the encoded-transform worker.
+ */
+let browser: Browser;
+let harness: { url: string; server: Server };
+let coord: Coordinator;
+
+beforeAll(async () => {
+  if (!haveChromium) return;
+  coord = await startCoordinator({ stunPort: 0 });
+  harness = await serveHarness();
+  browser = await launchBrowser();
+}, 60_000);
+
+afterAll(async () => {
+  await browser?.close();
+  harness?.server.close();
+  await coord?.stop();
+});
+
+async function openClient(
+  name: string,
+  canHost: boolean,
+  nat = 'cone',
+): Promise<{ page: Page; userId: string }> {
+  const context = await browser.newContext({ permissions: ['microphone'] });
+  const page = await context.newPage();
+  page.on('console', (m) => {
+    if (process.env.DBG) console.log(`[${name} console] ${m.text()}`);
+  });
+  page.on('pageerror', (e) => console.log(`[${name} pageerror]`, e.message));
+  await attachRelayBridge(
+    page,
+    () => coord.stunUrls().map((urls) => ({ urls })),
+    !!process.env.DBG,
+  );
+  await page.goto(harness.url);
+  const userId = await page.evaluate(
+    ([server, n, h, nt]) =>
+      window.startClient({
+        server: server as string,
+        name: n as string,
+        canHost: h as boolean,
+        nat: nt as string,
+      }),
+    [coord.url, name, canHost, nat] as const,
+  );
+  return { page, userId };
+}
+
+async function until(page: Page, fn: string, timeoutMs = 15_000) {
+  await page.waitForFunction(fn, undefined, { timeout: timeoutMs, polling: 100 });
+}
+
+describe.skipIf(!haveChromium)('browser end-to-end', () => {
+  it('voice and text flow through the elected host relay, end-to-end encrypted', async () => {
+    const alice = await openClient('alice', true, 'open');
+    const bob = await openClient('bob', true, 'cone');
+    const carol = await openClient('carol', false);
+
+    const spaceId = await alice.page.evaluate(() => window.croc.createSpace('Browser Swamp'));
+    const code = await alice.page.evaluate((s) => window.croc.createInvite(s), spaceId);
+    await bob.page.evaluate((c) => window.croc.joinWithInvite(c), code);
+    await carol.page.evaluate((c) => window.croc.joinWithInvite(c), code);
+
+    const voiceChannel = await alice.page.evaluate(
+      (s) => window.croc.state.spaces[s]!.channels.find((c) => c.kind === 'voice')!.id,
+      spaceId,
+    );
+    const voiceSession = `voice:${spaceId}:${voiceChannel}`;
+    for (const c of [alice, bob, carol]) {
+      await c.page.evaluate(([s, ch]) => window.croc.joinVoice(s as string, ch as string), [
+        spaceId,
+        voiceChannel,
+      ] as const);
+    }
+    for (const c of [alice, bob, carol]) {
+      await until(
+        c.page,
+        `window.croc.state.sessions['${voiceSession}']?.status === 'connected' && window.croc.state.sessions['${voiceSession}'].peers.length === 2`,
+        25_000,
+      );
+    }
+    const view = await carol.page.evaluate((s) => window.croc.state.sessions[s], voiceSession);
+    expect(view!.host).toBe(alice.userId);
+    expect(view!.backup).toBe(bob.userId);
+
+    // Everyone's fake microphone emits a tone; listeners must decode real
+    // audio, which only happens if frame decryption succeeded.
+    for (const c of [bob, carol]) {
+      const stats = await waitForAudio(c.page);
+      expect(stats.energy).toBeGreaterThan(0.001);
+    }
+    // The relay only ever saw ciphertext.
+    expect(relayFrames.total).toBeGreaterThan(20);
+    expect(relayFrames.encrypted).toBe(relayFrames.total);
+
+    // Text over the space's data-channel mesh.
+    const textChannel = await alice.page.evaluate(
+      (s) => window.croc.state.spaces[s]!.channels.find((c) => c.kind === 'text')!.id,
+      spaceId,
+    );
+    await carol.page.evaluate((ch) => window.croc.openChannel(ch), textChannel);
+    await until(
+      carol.page,
+      `window.croc.state.sessions['space:${spaceId}']?.peers.length === 2`,
+      20_000,
+    );
+    await alice.page.evaluate(
+      (ch) => window.croc.sendMessage(ch, 'hello from a real browser'),
+      textChannel,
+    );
+    await until(
+      carol.page,
+      `(window.croc.state.messages['${textChannel}'] ?? []).some(m => m.body === 'hello from a real browser')`,
+    );
+
+    // Host leaves: the backup takes over and voice resumes.
+    await alice.page.evaluate(() => window.croc.shutdown());
+    await until(
+      carol.page,
+      `window.croc.state.sessions['${voiceSession}']?.host === '${bob.userId}' && window.croc.state.sessions['${voiceSession}']?.status === 'connected' && window.croc.state.sessions['${voiceSession}'].peers.length === 1`,
+      30_000,
+    );
+    const after = await waitForAudio(carol.page);
+    expect(after.energy).toBeGreaterThan(0.001);
+  }, 120_000);
+});
+
+async function waitForAudio(page: Page) {
+  const deadline = Date.now() + 20_000;
+  let best = { packets: 0, energy: 0, concealed: 0, samples: 0 };
+  let baseline: number | null = null;
+  while (Date.now() < deadline) {
+    const all = await page.evaluate(() => window.audioStats());
+    const energy = all.reduce((n, s) => n + s.energy, 0);
+    if (baseline === null) baseline = energy;
+    best = {
+      packets: all.reduce((n, s) => n + s.packets, 0),
+      energy: energy - baseline,
+      concealed: 0,
+      samples: 0,
+    };
+    if (best.energy > 0.001) return best;
+    await new Promise((r) => setTimeout(r, 250));
+  }
+  return best;
+}
+
+describe.skipIf(!haveChromium)('server relay with Chromium', () => {
+  it("Chromium's TURN client relays through a coordinator's TURN server", async () => {
+    const turn = coord.turn!;
+    const creds = turn.credentials('aaaaaaaaaaaaaaaaaaaaaaaaaa', Date.now() + 60_000);
+    const { RTCPeerConnection: NodePC } = await import('werift');
+    const direct = new NodePC({
+      iceServers: [{ urls: `stun:127.0.0.1:${turn.port}` }],
+      iceAdditionalHostAddresses: ['127.0.0.1'],
+    });
+    const got: string[] = [];
+    direct.onDataChannel.subscribe((ch) => ch.onMessage.subscribe((m) => got.push(m.toString())));
+    const context = await browser.newContext();
+    const page = await context.newPage();
+    await page.goto(harness.url);
+    // Offer from a relay-only browser peer; answer from Node; trickle both ways.
+    await page.exposeFunction('__toNode', async (kind: string, payload: string) => {
+      if (kind === 'offer') {
+        await direct.setRemoteDescription({ type: 'offer', sdp: payload });
+        await direct.setLocalDescription(await direct.createAnswer());
+        await page.evaluate(
+          (sdp) => (window as unknown as { __answer(s: string): Promise<void> }).__answer(sdp),
+          direct.localDescription!.sdp,
+        );
+      } else if (kind === 'cand') {
+        await direct.addIceCandidate(JSON.parse(payload)).catch(() => {});
+      }
+    });
+    direct.onIceCandidate.subscribe((c) => {
+      if (c)
+        void page.evaluate(
+          (x) => (window as unknown as { __cand(s: string): void }).__cand(x),
+          JSON.stringify(c.toJSON()),
+        );
+    });
+    const types = await page.evaluate(
+      async ({ url, username, credential }) => {
+        const w = window as unknown as {
+          __toNode(k: string, p: string): Promise<void>;
+          __answer(s: string): Promise<void>;
+          __cand(s: string): void;
+        };
+        const pc = new RTCPeerConnection({
+          iceServers: [{ urls: url, username, credential }],
+          iceTransportPolicy: 'relay',
+        });
+        const dc = pc.createDataChannel('relay-test');
+        const pending: RTCIceCandidateInit[] = [];
+        let remote = false;
+        w.__cand = (s) =>
+          remote ? void pc.addIceCandidate(JSON.parse(s)) : void pending.push(JSON.parse(s));
+        w.__answer = async (sdp) => {
+          await pc.setRemoteDescription({ type: 'answer', sdp });
+          remote = true;
+          for (const c of pending) await pc.addIceCandidate(c);
+        };
+        const localTypes: string[] = [];
+        pc.onicecandidate = (e) => {
+          if (e.candidate) {
+            localTypes.push(e.candidate.type ?? '');
+            void w.__toNode('cand', JSON.stringify(e.candidate.toJSON()));
+          }
+        };
+        await pc.setLocalDescription(await pc.createOffer());
+        await w.__toNode('offer', pc.localDescription!.sdp);
+        await new Promise<void>((resolve, reject) => {
+          dc.onopen = () => resolve();
+          setTimeout(() => reject(new Error('data channel did not open via TURN')), 15_000);
+        });
+        dc.send('hello through the relay');
+        return localTypes;
+      },
+      {
+        url: `turn:127.0.0.1:${turn.port}?transport=udp`,
+        username: creds.username,
+        credential: creds.credential,
+      },
+    );
+    expect(types.every((t) => t === 'relay')).toBe(true);
+    await waitFor(() => got.includes('hello through the relay'), 5000, 'relayed message');
+    expect(turn.activeUsers().has('aaaaaaaaaaaaaaaaaaaaaaaaaa')).toBe(true);
+    await direct.close();
+    await context.close();
+  }, 60_000);
+});

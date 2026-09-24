@@ -1,0 +1,7 @@
+pnpm-lock.yaml
+dist
+out
+release
+node_modules
+*.png
+apps/desktop/build/*.plist

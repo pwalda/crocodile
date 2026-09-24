@@ -1,0 +1,760 @@
+import { type Identity } from '@crocodile/crypto';
+import {
+  E2EEnvelope,
+  GroupPayload,
+  SealedPayload,
+  peerIds,
+  utf8,
+  type ChatMessage,
+  type HostCaps,
+  type PeerState,
+  type RelayGrant,
+  type RelayToClient,
+  type SealedBox,
+  type SessionState,
+  type SignalData,
+} from '@crocodile/protocol';
+import type { CoordinatorLink } from './coordinator-link';
+import { Emitter } from './emitter';
+import { GroupKeyring } from './keyring';
+import type { MessageStore, PlatformAdapter, RelayHandle } from './platform';
+import {
+  RelayLink,
+  type FrameCryptoHooks,
+  type RelayLinkEvents,
+  type RelayLinkOptions,
+} from './relay-link';
+
+/** What a GroupSession needs from the client around it. */
+export interface SessionContext {
+  identity: Identity;
+  /** This device's peer id. */
+  peer: string;
+  link: CoordinatorLink;
+  platform: PlatformAdapter;
+  messages: MessageStore;
+  iceServers(): { urls: string }[];
+  caps(): Promise<HostCaps>;
+  /** Seal a payload to one device (hybrid PQ box); null if we lack its prekey. */
+  seal(toPeer: string, plaintext: Uint8Array): Promise<SealedBox | null>;
+  /** Open a box addressed to this device. */
+  open(box: SealedBox): { from: string; plaintext: Uint8Array } | null;
+  /** Whether a peer may take part in the session (membership, blocks, revocation). */
+  isAllowedPeer(sessionId: string, peer: string): boolean;
+  /** Fetch the records needed to judge a peer we know nothing about yet. */
+  refreshPeer(sessionId: string, peer: string): Promise<void>;
+  /** Channels whose history belongs to the session. */
+  historyChannels(sessionId: string): string[];
+  /** Verify and store a chat message; resolves true if it was new. */
+  acceptMessage(sessionId: string, message: ChatMessage): Promise<boolean>;
+  /** This device's unacknowledged messages. */
+  outbox: {
+    pending(sessionId: string): ChatMessage[];
+    /** Another user confirmed these ids. */
+    acked(ids: string[]): void;
+  };
+  /**
+   * Timestamp to sync a channel from: the newest message we did not write
+   * offline ourselves (our own unacknowledged messages can be newer than
+   * messages others wrote meanwhile).
+   */
+  syncCursor(channel: string): Promise<number>;
+  /** Opt-in server relay (TURN) when no direct path works. */
+  relay: {
+    allowed(): boolean;
+    request(sessionId: string): Promise<RelayGrant>;
+  };
+  log(msg: string, extra?: Record<string, unknown>): void;
+}
+
+export interface VoiceHooks {
+  micTrack(): MediaStreamTrack | null;
+  frameCrypto(keyring: GroupKeyring): FrameCryptoHooks | undefined;
+}
+
+/** Transport to the host relay; RelayLink in real clients, fakes in tests. */
+export interface RelayTransport extends Emitter<RelayLinkEvents> {
+  connect(): Promise<void>;
+  handleSignal(data: SignalData): Promise<void>;
+  send(msg: Parameters<RelayLink['send']>[0]): boolean;
+  close(): void;
+  readonly isOpen: boolean;
+  setMicTrack?(track: MediaStreamTrack | null): Promise<void>;
+}
+
+export type TransportFactory = (
+  opts: Omit<RelayLinkOptions, 'RTCPeerConnection'>,
+) => RelayTransport;
+
+export type RelayStatus =
+  'idle' | 'joining' | 'connecting' | 'connected' | 'reconnecting' | 'no-host' | 'left';
+
+export type GroupSessionEvents = {
+  update: void;
+  track: { slot: number; track: MediaStreamTrack; receiver: RTCRtpReceiver };
+  typing: { userId: string; ch: string };
+  call: { userId: string; action: 'ring' | 'accept' | 'decline' | 'end' };
+  error: { message: string };
+};
+
+const HISTORY_CHUNK_BYTES = 96 * 1024;
+const PENDING_TTL_MS = 15_000;
+
+/**
+ * One live P2P session (a space's text mesh, a voice channel or a DM).
+ *
+ * Follows the coordinator's session state: hosts the relay when elected,
+ * connects to whoever hosts otherwise, reconnects on failover and, if the
+ * user opted in, falls back to a coordination server's relay when no direct
+ * path to the host exists. On top runs the end-to-end layer: ratcheting
+ * sender keys sealed per device with hybrid post-quantum boxes, group-
+ * encrypted chat, and history sync between peers.
+ */
+export class GroupSession extends Emitter<GroupSessionEvents> {
+  state: SessionState | null = null;
+  status: RelayStatus = 'idle';
+  /** Peers connected to the relay, by peer id. */
+  peers = new Map<string, PeerState>();
+  /** Speaking peers (peer ids). */
+  speaking: string[] = [];
+  /** Peer id occupying each of our speaker slots. */
+  slots: (string | null)[] = [];
+  readonly keyring: GroupKeyring;
+  /** Negotiate audio with the relay (voice channels, DM calls). */
+  isVoice = false;
+  /** Active server-relay grant, if we fell back to one. */
+  relayGrant: RelayGrant | null = null;
+
+  private hosting?: { epoch: number; handle: Promise<RelayHandle | null> };
+  private transport?: { epoch: number; host: string; t: RelayTransport };
+  private failures = 0;
+  private reportedEpoch = -1;
+  private retryTimer?: ReturnType<typeof setTimeout>;
+  private left = false;
+  private pendingGroup: { from: string; env: Extract<E2EEnvelope, { k: 'group' }>; at: number }[] =
+    [];
+  private historyServedAt = new Map<string, number[]>();
+  private historyAsked = new Set<string>();
+  private relayRequested = false;
+  /** Peers we already offered our outbox to on this connection. */
+  private outboxOffered = new Set<string>();
+  /** Delivery confirmations to send, batched per peer. */
+  private ackQueue = new Map<string, Set<string>>();
+  private ackTimer?: ReturnType<typeof setTimeout>;
+
+  constructor(
+    readonly sessionId: string,
+    private readonly ctx: SessionContext,
+    private readonly transportFactory: TransportFactory,
+    private readonly voice?: VoiceHooks,
+    keyringOpts?: { autoRatchet?: boolean },
+  ) {
+    super();
+    this.keyring = new GroupKeyring(keyringOpts);
+    this.keyring.on('rotated', () => this.distributeKey());
+  }
+
+  get me() {
+    return this.ctx.peer;
+  }
+
+  get isHost() {
+    return this.state?.host === this.me;
+  }
+
+  get connected() {
+    return this.status === 'connected';
+  }
+
+  get isDm() {
+    return this.sessionId.startsWith('dm:');
+  }
+
+  async join() {
+    this.left = false;
+    if (this.status === 'idle' || this.status === 'left') this.setStatus('joining');
+    const caps = await this.ctx.caps();
+    const { state } = await this.ctx.link.request('session.join', {
+      sessionId: this.sessionId,
+      caps,
+    });
+    this.applyState(state);
+  }
+
+  async updateCaps() {
+    if (this.left) return;
+    const caps = await this.ctx.caps();
+    await this.ctx.link
+      .request('session.update', { sessionId: this.sessionId, caps })
+      .catch(() => {});
+  }
+
+  async leave() {
+    if (this.left) return;
+    this.left = true;
+    clearTimeout(this.retryTimer);
+    this.closeTransport();
+    this.stopHosting();
+    this.keyring.dispose();
+    this.setStatus('left');
+    await this.ctx.link.request('session.leave', { sessionId: this.sessionId }).catch(() => {});
+  }
+
+  // -------------------------------------------------------------------------
+  // Session state from the coordinator
+  // -------------------------------------------------------------------------
+
+  applyState(state: SessionState) {
+    if (this.left || state.id !== this.sessionId) return;
+    if (this.state && state.epoch < this.state.epoch) return;
+    this.state = state;
+    if (state.host === this.me) {
+      if (!this.hosting || this.hosting.epoch !== state.epoch) this.startHosting(state);
+    } else if (this.hosting) {
+      this.stopHosting();
+    }
+    if (!state.host) {
+      this.closeTransport();
+      this.setStatus('no-host');
+    } else if (
+      !this.transport ||
+      this.transport.epoch !== state.epoch ||
+      this.transport.host !== state.host
+    ) {
+      this.failures = 0;
+      this.connectTransport();
+    }
+    this.emit('update', undefined);
+  }
+
+  private startHosting(state: SessionState) {
+    this.stopHosting();
+    const adapter = this.ctx.platform.relay;
+    if (!adapter) return;
+    const sessionId = this.sessionId;
+    const handle = adapter
+      .start({
+        sessionId,
+        epoch: state.epoch,
+        identity: this.ctx.identity,
+        hostPeer: this.me,
+        slots: state.relaySlots,
+        iceServers: this.ctx.iceServers(),
+        members: () =>
+          (this.state?.members ?? [])
+            .map((m) => m.peer)
+            .filter((p) => this.ctx.isAllowedPeer(sessionId, p)),
+        sendSignal: (to, data) => {
+          void this.ctx.link.request('signal.send', { to, sessionId, data }).catch(() => {});
+        },
+      })
+      .catch((err) => {
+        this.ctx.log('failed to start relay', { err: String(err) });
+        return null;
+      });
+    this.hosting = { epoch: state.epoch, handle };
+    this.ctx.log('hosting relay', { sessionId, epoch: state.epoch });
+    const early = this.earlyRelaySignals.filter((s) => s.data.epoch === state.epoch);
+    this.earlyRelaySignals = [];
+    for (const s of early) void handle.then((r) => r?.handleSignal(s.from, s.data));
+  }
+
+  private stopHosting() {
+    const h = this.hosting;
+    this.hosting = undefined;
+    void h?.handle.then((r) => r?.close());
+  }
+
+  /** Offers can beat our own copy of the session state that makes us host. */
+  private earlyRelaySignals: { from: string; data: SignalData; at: number }[] = [];
+
+  handleSignal(from: string, data: SignalData) {
+    const toRelay =
+      data.type === 'offer' ||
+      ((data.type === 'candidate' || data.type === 'bye') && data.dir === 'toRelay');
+    if (toRelay) {
+      const h = this.hosting;
+      if (h && h.epoch === data.epoch) void h.handle.then((r) => r?.handleSignal(from, data));
+      else if (!h || h.epoch < data.epoch) {
+        const now = Date.now();
+        this.earlyRelaySignals = this.earlyRelaySignals
+          .filter((s) => now - s.at < 5000)
+          .slice(-200);
+        this.earlyRelaySignals.push({ from, data, at: now });
+      }
+      return;
+    }
+    const t = this.transport;
+    if (t && t.host === from && t.epoch === data.epoch) void t.t.handleSignal(data);
+  }
+
+  // -------------------------------------------------------------------------
+  // Connection to the host relay
+  // -------------------------------------------------------------------------
+
+  private connectTransport() {
+    this.closeTransport();
+    const state = this.state;
+    if (!state?.host || this.left) return;
+    const slots = this.voice && this.isVoice ? state.relaySlots : 0;
+    const grant =
+      this.relayGrant && this.relayGrant.expiresAt > Date.now() ? this.relayGrant : null;
+    const iceServers: RTCIceServer[] = [
+      ...this.ctx.iceServers(),
+      ...(grant
+        ? [{ urls: grant.urls, username: grant.username, credential: grant.credential }]
+        : []),
+    ];
+    const t = this.transportFactory({
+      identity: this.ctx.identity,
+      self: this.me,
+      sessionId: this.sessionId,
+      epoch: state.epoch,
+      host: state.host,
+      iceServers,
+      slots,
+      micTrack: this.voice?.micTrack() ?? null,
+      crypto: slots > 0 ? this.voice?.frameCrypto(this.keyring) : undefined,
+      sendSignal: (data) =>
+        this.ctx.link.request('signal.send', { to: state.host!, sessionId: this.sessionId, data }),
+    });
+    const entry = { epoch: state.epoch, host: state.host, t };
+    this.transport = entry;
+    this.peers.clear();
+    this.slots = [];
+    this.speaking = [];
+    this.setStatus(this.failures > 0 ? 'reconnecting' : 'connecting');
+
+    t.on('open', () => {
+      if (this.transport !== entry) return;
+      this.failures = 0;
+      this.setStatus('connected');
+      t.send({ t: 'state', muted: this.voiceState.muted, deafened: this.voiceState.deafened });
+    });
+    t.on('message', (msg) => {
+      if (this.transport === entry) this.onRelayMessage(msg);
+    });
+    t.on('track', (ev) => this.emit('track', ev));
+    t.on('failed', ({ reason }) => {
+      if (this.transport !== entry) return;
+      this.transport = undefined;
+      this.ctx.log('relay connection failed', { sessionId: this.sessionId, reason });
+      this.failures += 1;
+      this.setStatus('reconnecting');
+      if (this.failures >= 2 && this.reportedEpoch !== entry.epoch && entry.host !== this.me) {
+        this.reportedEpoch = entry.epoch;
+        void this.ctx.link
+          .request('session.report', {
+            sessionId: this.sessionId,
+            epoch: entry.epoch,
+            issue: 'host_unreachable',
+          })
+          .catch(() => {});
+      }
+      if (
+        this.failures >= 2 &&
+        !this.relayGrant &&
+        !this.relayRequested &&
+        this.ctx.relay.allowed()
+      ) {
+        void this.useServerRelay();
+      }
+      clearTimeout(this.retryTimer);
+      this.retryTimer = setTimeout(
+        () => {
+          if (!this.left && this.state?.epoch === entry.epoch) this.connectTransport();
+        },
+        Math.min(10_000, 500 * 2 ** this.failures),
+      );
+    });
+    t.connect().catch((err) => {
+      this.ctx.log('relay connect error', { err: String(err) });
+      t.emit('failed', { reason: String(err) });
+    });
+  }
+
+  /** Ask our coordination server for a relay grant and reconnect through it. */
+  async useServerRelay() {
+    this.relayRequested = true;
+    try {
+      this.relayGrant = await this.ctx.relay.request(this.sessionId);
+      this.ctx.log('using server relay', {
+        server: this.relayGrant.server,
+        until: this.relayGrant.expiresAt,
+      });
+      this.emit('update', undefined);
+      this.failures = 1;
+      this.connectTransport();
+    } catch (err) {
+      this.ctx.log('server relay unavailable', { err: String(err) });
+      this.emit('error', { message: `Relay unavailable: ${(err as Error).message}` });
+    } finally {
+      this.relayRequested = false;
+    }
+  }
+
+  /** The grant ended: go back to direct connections only. */
+  dropServerRelay() {
+    if (!this.relayGrant) return;
+    this.relayGrant = null;
+    this.emit('update', undefined);
+    if (this.transport) this.connectTransport();
+  }
+
+  private closeTransport() {
+    const t = this.transport;
+    this.transport = undefined;
+    t?.t.close();
+  }
+
+  voiceState = { muted: false, deafened: false };
+
+  setVoiceState(muted: boolean, deafened: boolean) {
+    this.voiceState = { muted, deafened };
+    this.transport?.t.send({ t: 'state', muted, deafened });
+  }
+
+  async setMicTrack(track: MediaStreamTrack | null) {
+    await this.transport?.t.setMicTrack?.(track);
+  }
+
+  // -------------------------------------------------------------------------
+  // Relay messages and the end-to-end layer
+  // -------------------------------------------------------------------------
+
+  private onRelayMessage(msg: RelayToClient) {
+    switch (msg.t) {
+      case 'hello':
+        this.peers = new Map(msg.peers.map((p) => [p.id, p]));
+        this.slots = new Array(msg.slots).fill(null);
+        this.historyAsked.clear();
+        this.outboxOffered.clear();
+        for (const p of msg.peers) this.onPeerPresent(p.id);
+        this.requestHistory([...this.peers.keys()]);
+        break;
+      case 'peer_join':
+        this.peers.set(msg.peer.id, msg.peer);
+        this.onPeerPresent(msg.peer.id);
+        // DMs and our own other devices sync history from each newcomer.
+        if (this.isDm || peerIds.user(msg.peer.id) === peerIds.user(this.me))
+          this.requestHistory([msg.peer.id]);
+        break;
+      case 'peer_leave':
+        this.peers.delete(msg.peer);
+        this.outboxOffered.delete(msg.peer);
+        this.keyring.peerLeft(msg.peer);
+        this.keyring.rotate();
+        break;
+      case 'peer_state':
+        if (this.peers.has(msg.peer.id)) this.peers.set(msg.peer.id, msg.peer);
+        break;
+      case 'slots':
+        this.slots = msg.map;
+        break;
+      case 'speaking':
+        this.speaking = msg.users;
+        break;
+      case 'msg':
+        void this.onEnvelope(msg.from, msg.d);
+        return;
+      case 'pong':
+        return;
+    }
+    this.emit('update', undefined);
+  }
+
+  private async onPeerPresent(peer: string) {
+    if (!this.ctx.isAllowedPeer(this.sessionId, peer)) {
+      // Their membership may simply not have reached us yet.
+      await this.ctx.refreshPeer(this.sessionId, peer).catch(() => {});
+      if (!this.ctx.isAllowedPeer(this.sessionId, peer)) {
+        this.ctx.log('ignoring peer that is not allowed in this session', { peer });
+        return;
+      }
+    }
+    await this.sendKeyTo(peer);
+    await this.processParkedKeys();
+    await this.offerOutbox(peer);
+  }
+
+  /**
+   * Hand our unacknowledged messages to someone who will keep and spread
+   * them: the other side of a DM, or the host/backup of a space.
+   */
+  private async offerOutbox(peer: string) {
+    if (this.outboxOffered.has(peer) || peerIds.user(peer) === peerIds.user(this.me)) return;
+    const st = this.state;
+    const worthy = this.isDm || peer === st?.host || peer === st?.backup || this.isHost;
+    if (!worthy) return;
+    const pending = this.ctx.outbox.pending(this.sessionId);
+    if (pending.length === 0) return;
+    this.outboxOffered.add(peer);
+    for (let i = 0; i < pending.length; i += 100) {
+      const chunk = pending.slice(i, i + 100);
+      await this.sendSealed(peer, {
+        type: 'history',
+        messages: chunk,
+        done: i + 100 >= pending.length,
+      });
+    }
+  }
+
+  /** Confirm receipt of messages authored by `from`'s user, batched. */
+  private queueAck(from: string, messages: ChatMessage[]) {
+    const author = peerIds.user(from);
+    if (author === peerIds.user(this.me)) return;
+    const ids = messages.filter((m) => m.author === author).map((m) => m.id);
+    if (ids.length === 0) return;
+    let set = this.ackQueue.get(from);
+    if (!set) this.ackQueue.set(from, (set = new Set()));
+    for (const id of ids) set.add(id);
+    this.ackTimer ??= setTimeout(() => {
+      this.ackTimer = undefined;
+      const queue = this.ackQueue;
+      this.ackQueue = new Map();
+      for (const [to, idSet] of queue) {
+        const all = [...idSet];
+        for (let i = 0; i < all.length; i += 500)
+          void this.sendSealed(to, { type: 'ack', ids: all.slice(i, i + 500) });
+      }
+    }, 250);
+  }
+
+  /** Live group messages: DMs always confirm; in spaces the host (or backup) does. */
+  private shouldAckLive(from: string) {
+    if (this.isDm) return true;
+    const st = this.state;
+    if (this.isHost) return true;
+    return st?.host === from && (st.backup === this.me || !st.backup);
+  }
+
+  /** Called when records change: admit peers that became allowed. */
+  recheckPeers() {
+    for (const peer of this.peers.keys()) {
+      if (
+        this.keySentTo.get(peer) !== this.keyring.kid &&
+        this.ctx.isAllowedPeer(this.sessionId, peer)
+      ) {
+        void this.sendKeyTo(peer);
+      }
+    }
+    void this.processParkedKeys();
+  }
+
+  private keySentTo = new Map<string, number>();
+  /** Sender keys from peers we could not verify yet (bounded, short-lived). */
+  private parkedKeys: {
+    from: string;
+    payload: Extract<SealedPayload, { type: 'sender_key' }>;
+    at: number;
+  }[] = [];
+
+  private async processParkedKeys() {
+    const now = Date.now();
+    const parked = this.parkedKeys.filter((p) => now - p.at < 30_000);
+    this.parkedKeys = [];
+    for (const p of parked) {
+      if (this.ctx.isAllowedPeer(this.sessionId, p.from)) {
+        this.keyring.addPeerKey(p.from, {
+          kid: p.payload.kid,
+          text: p.payload.text,
+          audio: p.payload.audio,
+        });
+        await this.flushPending();
+      } else this.parkedKeys.push(p);
+    }
+  }
+
+  private distributeKey() {
+    for (const peer of this.peers.keys()) {
+      if (this.ctx.isAllowedPeer(this.sessionId, peer)) void this.sendKeyTo(peer);
+    }
+  }
+
+  private async sendKeyTo(peer: string) {
+    const chains = this.keyring.exportMine();
+    if (await this.sendSealed(peer, { type: 'sender_key', sessionId: this.sessionId, ...chains })) {
+      this.keySentTo.set(peer, chains.kid);
+    }
+  }
+
+  private async sendSealed(to: string, payload: SealedPayload): Promise<boolean> {
+    const box = await this.ctx.seal(to, utf8.encode(JSON.stringify(payload)));
+    if (!box || !this.transport) {
+      this.ctx.log('could not seal to peer', { to, type: payload.type, noBox: !box });
+      return false;
+    }
+    return this.transport.t.send({ t: 'direct', to, d: { k: 'sealed', box } });
+  }
+
+  sendGroup(payload: GroupPayload): boolean {
+    if (!this.transport?.t.isOpen) return false;
+    const env = this.keyring.encrypt(utf8.encode(JSON.stringify(payload)));
+    return this.transport.t.send({ t: 'bcast', d: { k: 'group', ...env } });
+  }
+
+  private async onEnvelope(from: string, raw: unknown) {
+    const parsed = E2EEnvelope.safeParse(raw);
+    if (!parsed.success) return;
+    const env = parsed.data;
+    if (env.k === 'sealed') {
+      const opened = this.ctx.open(env.box);
+      if (!opened || opened.from !== from) {
+        this.ctx.log('dropped sealed box', { from, opened: !!opened, claimed: opened?.from });
+        return;
+      }
+      let payload: SealedPayload;
+      try {
+        payload = SealedPayload.parse(JSON.parse(utf8.decode(opened.plaintext)));
+      } catch {
+        return;
+      }
+      await this.onSealed(from, payload);
+      return;
+    }
+    const result = this.keyring.decrypt(env.kid, env.g, env.ct);
+    if (!result) {
+      this.pendingGroup.push({ from, env, at: Date.now() });
+      if (this.pendingGroup.length > 500) this.pendingGroup.shift();
+      return;
+    }
+    if (result.peer !== from) return;
+    await this.onGroupPlaintext(from, result.plaintext);
+  }
+
+  private async onSealed(from: string, payload: SealedPayload) {
+    switch (payload.type) {
+      case 'sender_key':
+        if (payload.sessionId !== this.sessionId) return;
+        if (!this.ctx.isAllowedPeer(this.sessionId, from)) {
+          this.parkedKeys.push({ from, payload, at: Date.now() });
+          if (this.parkedKeys.length > 100) this.parkedKeys.shift();
+          await this.ctx.refreshPeer(this.sessionId, from).catch(() => {});
+          await this.processParkedKeys();
+          return;
+        }
+        this.keyring.addPeerKey(from, {
+          kid: payload.kid,
+          text: payload.text,
+          audio: payload.audio,
+        });
+        await this.flushPending();
+        return;
+      case 'history_req':
+        await this.serveHistory(from, payload.since);
+        return;
+      case 'history':
+        for (const m of payload.messages) await this.ctx.acceptMessage(this.sessionId, m);
+        this.queueAck(from, payload.messages);
+        return;
+      case 'message':
+        await this.ctx.acceptMessage(this.sessionId, payload.message);
+        this.queueAck(from, [payload.message]);
+        return;
+      case 'ack':
+        // Only another person's confirmation counts, not our own other devices.
+        if (
+          peerIds.user(from) !== peerIds.user(this.me) &&
+          this.ctx.isAllowedPeer(this.sessionId, from)
+        )
+          this.ctx.outbox.acked(payload.ids);
+        return;
+      case 'mail':
+        return;
+    }
+  }
+
+  private async onGroupPlaintext(from: string, plaintext: Uint8Array) {
+    let payload: GroupPayload;
+    try {
+      payload = GroupPayload.parse(JSON.parse(utf8.decode(plaintext)));
+    } catch {
+      return;
+    }
+    const fromUser = peerIds.user(from);
+    if (payload.type === 'message') {
+      if (payload.message.author !== fromUser) return;
+      await this.ctx.acceptMessage(this.sessionId, payload.message);
+      if (this.shouldAckLive(from)) this.queueAck(from, [payload.message]);
+    } else if (payload.type === 'typing') {
+      this.emit('typing', { userId: fromUser, ch: payload.ch });
+    } else if (payload.type === 'call' && this.isDm) {
+      this.emit('call', { userId: fromUser, action: payload.action });
+    }
+  }
+
+  private async flushPending() {
+    const now = Date.now();
+    const queue = this.pendingGroup.filter((p) => now - p.at < PENDING_TTL_MS);
+    this.pendingGroup = [];
+    for (const p of queue) {
+      const result = this.keyring.decrypt(p.env.kid, p.env.g, p.env.ct);
+      if (!result) this.pendingGroup.push(p);
+      else if (result.peer === p.from) await this.onGroupPlaintext(p.from, result.plaintext);
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // History sync
+  // -------------------------------------------------------------------------
+
+  private requestHistory(candidates: string[]) {
+    const channels = this.ctx.historyChannels(this.sessionId);
+    if (channels.length === 0) return;
+    const st = this.state;
+    const preferred = [st?.host, st?.backup, ...candidates].filter(
+      (u): u is string => !!u && u !== this.me && this.peers.has(u) && !this.historyAsked.has(u),
+    );
+    const targets = [...new Set(preferred)].slice(0, 2);
+    if (targets.length === 0) return;
+    void (async () => {
+      const since: Record<string, number> = {};
+      for (const ch of channels) since[ch] = await this.ctx.syncCursor(ch);
+      for (const t of targets) {
+        this.historyAsked.add(t);
+        await this.sendSealed(t, { type: 'history_req', since });
+      }
+    })();
+  }
+
+  private async serveHistory(to: string, since: Record<string, number>) {
+    if (!this.ctx.isAllowedPeer(this.sessionId, to)) return;
+    // Throttle: at most 5 history replies per peer per 10 seconds.
+    const now = Date.now();
+    const recent = (this.historyServedAt.get(to) ?? []).filter((t) => now - t < 10_000);
+    if (recent.length >= 5) return;
+    this.historyServedAt.set(to, [...recent, now]);
+    const allowed = new Set(this.ctx.historyChannels(this.sessionId));
+    const out: ChatMessage[] = [];
+    for (const [ch, after] of Object.entries(since)) {
+      if (!allowed.has(ch)) continue;
+      out.push(...(await this.ctx.messages.since(ch, after, 500)));
+    }
+    let chunk: ChatMessage[] = [];
+    let size = 0;
+    const flush = async (done: boolean) => {
+      await this.sendSealed(to, { type: 'history', messages: chunk, done });
+      chunk = [];
+      size = 0;
+    };
+    for (const m of out) {
+      const bytes = m.body.length * 3 + 400;
+      if (size + bytes > HISTORY_CHUNK_BYTES && chunk.length) await flush(false);
+      chunk.push(m);
+      size += bytes;
+    }
+    await flush(true);
+  }
+
+  private setStatus(status: RelayStatus) {
+    if (this.status === status) return;
+    this.status = status;
+    this.emit('update', undefined);
+  }
+}
+
+export function defaultTransportFactory(platform: PlatformAdapter): TransportFactory | undefined {
+  const rtc = platform.rtc;
+  if (!rtc) return undefined;
+  return (opts) => new RelayLink({ ...opts, RTCPeerConnection: rtc.RTCPeerConnection });
+}

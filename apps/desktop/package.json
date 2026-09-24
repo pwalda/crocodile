@@ -1,0 +1,46 @@
+{
+  "name": "@crocodile/desktop",
+  "productName": "Crocodile",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Crocodile: peer-to-peer, end-to-end encrypted voice and text chat",
+  "author": {
+    "name": "Crocodile contributors",
+    "email": "pawel.walda@gmail.com"
+  },
+  "license": "AGPL-3.0-only",
+  "type": "module",
+  "main": "dist/main/main.cjs",
+  "scripts": {
+    "dev": "node scripts/build.mjs --dev",
+    "build": "node scripts/build.mjs",
+    "start": "electron .",
+    "dist": "node scripts/build.mjs && electron-builder --config electron-builder.config.cjs --publish never",
+    "dist:dir": "node scripts/build.mjs && electron-builder --config electron-builder.config.cjs --dir --publish never"
+  },
+  "devDependencies": {
+    "@crocodile/client-core": "workspace:*",
+    "@crocodile/coordinator": "workspace:*",
+    "@crocodile/crypto": "workspace:*",
+    "@crocodile/protocol": "workspace:*",
+    "@crocodile/relay": "workspace:*",
+    "@fontsource-variable/manrope": "^5.3.0",
+    "@tailwindcss/vite": "^4.3.3",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "@vitejs/plugin-react": "^6.1.1",
+    "electron": "^44.4.5",
+    "electron-builder": "^26.15.3",
+    "electron-updater": "^6.8.9",
+    "esbuild": "^0.25.0",
+    "idb": "^8.0.3",
+    "lucide-react": "^1.47.0",
+    "react": "^19.3.0",
+    "react-dom": "^19.3.0",
+    "tailwindcss": "^4.3.3",
+    "uiohook-napi": "^1.5.5",
+    "vite": "^8.3.0"
+  },
+  "homepage": "https://github.com/pwalda/crocodile",
+  "desktopName": "crocodile.desktop"
+}

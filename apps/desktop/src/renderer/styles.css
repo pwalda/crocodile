@@ -1,0 +1,198 @@
+@import 'tailwindcss';
+@import '@fontsource-variable/manrope';
+
+/*
+ * Crocodile design tokens. Two themes ("Lagoon" dark, "Reed" light) and a
+ * user-selectable accent. Components use semantic names only.
+ */
+@custom-variant dark (&:where([data-theme='dark'], [data-theme='dark'] *));
+
+:root,
+[data-theme='dark'] {
+  --app: #07110d;
+  --app-glow: #0e2a1f;
+  --island: #0f1b16;
+  --island-2: #13231c;
+  --raised: #182c24;
+  --hover: #1d352b;
+  --active: #234032;
+  --line: #22382e;
+  --field: #0b1511;
+  --text: #e7f1ea;
+  --text-2: #a9bdb2;
+  --muted: #7e978a;
+  --faint: #587266;
+  --bubble-me: color-mix(in oklab, var(--accent) 22%, #13231c);
+  --bubble: #172a22;
+  --shadow: 0 10px 30px rgb(0 0 0 / 0.35);
+}
+
+[data-theme='light'] {
+  --app: #e9efe9;
+  --app-glow: #d6e7da;
+  --island: #ffffff;
+  --island-2: #f5f8f4;
+  --raised: #eef3ee;
+  --hover: #e8efe8;
+  --active: #dce8dd;
+  --line: #dbe5dc;
+  --field: #f2f6f2;
+  --text: #13221b;
+  --text-2: #3b5247;
+  --muted: #5f766a;
+  --faint: #8aa095;
+  --bubble-me: color-mix(in oklab, var(--accent) 16%, #ffffff);
+  --bubble: #f1f5f1;
+  --shadow: 0 10px 30px rgb(20 50 35 / 0.12);
+}
+
+:root {
+  --accent: #34c77b;
+  --accent-strong: color-mix(in oklab, var(--accent) 80%, black);
+  --accent-soft: color-mix(in oklab, var(--accent) 18%, transparent);
+  --amber: #f5b53d;
+  --danger: #ef5b5b;
+  --warn: #f5b53d;
+  --online: #34c77b;
+  --idle: #f5b53d;
+  --dnd: #ef5b5b;
+  --radius: 18px;
+}
+
+@theme inline {
+  --color-app: var(--app);
+  --color-island: var(--island);
+  --color-island-2: var(--island-2);
+  --color-raised: var(--raised);
+  --color-hover: var(--hover);
+  --color-active: var(--active);
+  --color-line: var(--line);
+  --color-field: var(--field);
+  --color-text: var(--text);
+  --color-text-2: var(--text-2);
+  --color-muted: var(--muted);
+  --color-faint: var(--faint);
+  --color-accent: var(--accent);
+  --color-accent-strong: var(--accent-strong);
+  --color-accent-soft: var(--accent-soft);
+  --color-amber: var(--amber);
+  --color-danger: var(--danger);
+  --color-warn: var(--warn);
+  --color-online: var(--online);
+  --color-idle: var(--idle);
+  --color-dnd: var(--dnd);
+  --color-bubble: var(--bubble);
+  --color-bubble-me: var(--bubble-me);
+  --font-sans: 'Manrope Variable', 'Segoe UI', system-ui, -apple-system, sans-serif;
+  --font-mono:
+    ui-monospace, 'Cascadia Mono', 'SF Mono', Menlo, 'DejaVu Sans Mono', Consolas, monospace;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  background:
+    radial-gradient(1200px 600px at 10% -10%, var(--app-glow), transparent 60%), var(--app);
+  color: var(--text);
+  font-family: var(--font-sans);
+  font-feature-settings: 'ss01', 'cv05';
+  -webkit-font-smoothing: antialiased;
+  user-select: none;
+  overflow: hidden;
+}
+
+.selectable {
+  user-select: text;
+}
+
+.island {
+  background: var(--island);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+}
+
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--line);
+  border: 3px solid transparent;
+  background-clip: padding-box;
+  border-radius: 8px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+@keyframes rise {
+  from {
+    transform: translateY(6px) scale(0.98);
+    opacity: 0;
+  }
+  to {
+    transform: none;
+    opacity: 1;
+  }
+}
+.rise {
+  animation: rise 160ms cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+
+/* Speaking: ripples spreading from the avatar, like rings on water. */
+@keyframes ripple {
+  from {
+    transform: scale(1);
+    opacity: 0.55;
+  }
+  to {
+    transform: scale(1.55);
+    opacity: 0;
+  }
+}
+.ripples {
+  position: relative;
+}
+.ripples::before,
+.ripples::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: 9999px;
+  border: 2px solid var(--accent);
+  animation: ripple 1.4s ease-out infinite;
+  pointer-events: none;
+}
+.ripples::after {
+  animation-delay: 0.7s;
+}
+
+@keyframes live {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.35;
+  }
+}
+.live-dot {
+  animation: live 1.6s ease-in-out infinite;
+}
+
+/* Appear only after a delay, e.g. "not delivered yet" markers. */
+@keyframes delayed-in {
+  to {
+    opacity: 1;
+  }
+}
+.delayed-in {
+  opacity: 0;
+  animation: delayed-in 200ms ease-out 3s forwards;
+}

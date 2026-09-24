@@ -1,0 +1,29 @@
+{
+  "name": "crocodile",
+  "private": true,
+  "description": "Crocodile: peer-to-peer, end-to-end encrypted voice and text communicator",
+  "license": "AGPL-3.0-only",
+  "type": "module",
+  "packageManager": "pnpm@10.33.0",
+  "engines": {
+    "node": ">=22.13"
+  },
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "dev:directory": "pnpm --filter @crocodile/directory dev",
+    "dev:coordinator": "pnpm --filter @crocodile/coordinator dev",
+    "dev:desktop": "pnpm --filter @crocodile/desktop dev",
+    "build": "pnpm -r --filter ./apps/** --filter @crocodile/coordinator build",
+    "format": "prettier --write .",
+    "format:check": "prettier --check ."
+  },
+  "devDependencies": {
+    "@types/node": "^22.19.0",
+    "prettier": "^3.6.0",
+    "tsx": "^4.23.15",
+    "typescript": "^5.9.3",
+    "vitest": "^4.0.0"
+  }
+}
