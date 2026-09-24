@@ -34,7 +34,10 @@ const coordinator = await new Coordinator({
 }).start();
 await new Promise((r) => setTimeout(r, 1000));
 
-async function launch(name: string): Promise<{ app: ElectronApplication; page: Page }> {
+async function launch(
+  name: string,
+  opts: { noDirectory?: boolean } = {},
+): Promise<{ app: ElectronApplication; page: Page }> {
   // CROC_APP_EXEC points at a packaged build (e.g. release/linux-unpacked/crocodile).
   const packaged = process.env.CROC_APP_EXEC;
   const app = await electron.launch({
@@ -48,7 +51,7 @@ async function launch(name: string): Promise<{ app: ElectronApplication; page: P
     env: {
       ...process.env,
       CROC_USER_DATA: mkdtempSync(join(tmpdir(), `croc-${name}-`)),
-      CROC_DIRECTORIES_OVERRIDE: directory.url,
+      CROC_DIRECTORIES_OVERRIDE: opts.noDirectory ? '' : directory.url,
     },
   });
   const page = await app.firstWindow();
@@ -196,6 +199,21 @@ await a.page.getByText('They match').click();
 await c.page.getByText('The Swamp').first().waitFor({ timeout: 30_000 });
 await a.page.getByRole('button', { name: 'Done' }).click();
 await shot(c.page, '18-linked-device');
+
+// A first tester with no server list: signs up offline, then connects by address.
+const d = await launch('newcomer', { noDirectory: true });
+await onboard(d.page, 'Dora');
+await finishOnboarding(d.page);
+await d.page.getByText("Can't reach a coordination server").waitFor({ timeout: 20_000 });
+await shot(d.page, '19-no-server');
+await d.page.getByLabel('Server address').fill(coordinator.url.replace('http://', ''));
+await d.page.getByRole('button', { name: 'Connect' }).click();
+await d.page.waitForFunction(() => /Dora#\d+/.test(document.body.innerText), undefined, {
+  timeout: 20_000,
+});
+await d.page.getByText("Can't reach a coordination server").waitFor({ state: 'detached' });
+await shot(d.page, '20-connected-by-address');
+await d.app.close();
 
 console.log('SMOKE OK');
 await a.app.close();

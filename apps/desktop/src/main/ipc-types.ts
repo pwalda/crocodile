@@ -47,6 +47,8 @@ export type CoordinatorStatus =
       users: number;
       publicUrl?: string;
       announced: boolean;
+      /** Addresses others on the local network can use. */
+      lanUrls: string[];
     }
   | { state: 'error'; message: string };
 

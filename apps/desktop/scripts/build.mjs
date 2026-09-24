@@ -5,7 +5,7 @@ import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { createRequire } from 'node:module';
-import { cpSync, rmSync } from 'node:fs';
+import { cpSync, readdirSync, rmSync } from 'node:fs';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 const dev = process.argv.includes('--dev');
@@ -35,11 +35,20 @@ function copyNative() {
   );
   for (const [src, dst] of [
     [join(uiohook, 'dist'), 'uiohook-napi/dist'],
-    [join(uiohook, 'prebuilds'), 'uiohook-napi/prebuilds'],
     [join(uiohook, 'package.json'), 'uiohook-napi/package.json'],
     [gypBuild, 'node_modules/node-gyp-build'],
   ]) {
     cpSync(src, join(out, dst), { recursive: true, dereference: true });
+  }
+  // Only this OS's prebuilt binaries (all its CPU architectures, for
+  // universal macOS and cross-arch Linux/Windows packages).
+  const prebuilds = join(uiohook, 'prebuilds');
+  for (const dir of readdirSync(prebuilds)) {
+    if (!dir.startsWith(`${process.platform}-`)) continue;
+    cpSync(join(prebuilds, dir), join(out, 'uiohook-napi/prebuilds', dir), {
+      recursive: true,
+      dereference: true,
+    });
   }
 }
 

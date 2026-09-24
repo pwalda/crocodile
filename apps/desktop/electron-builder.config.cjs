@@ -38,6 +38,8 @@ module.exports = {
     gatekeeperAssess: false,
     entitlements: 'build/entitlements.mac.plist',
     entitlementsInherit: 'build/entitlements.mac.plist',
+    // Push-to-talk binaries are per-arch files already; don't try to lipo them.
+    x64ArchFiles: 'Contents/Resources/app.asar.unpacked/dist/native/**',
     notarize: signed && !!process.env.APPLE_ID,
     extendInfo: {
       NSMicrophoneUsageDescription: 'Crocodile uses your microphone for voice chat.',

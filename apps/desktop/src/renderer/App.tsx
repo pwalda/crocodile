@@ -1,5 +1,5 @@
-import { useEffect } from 'react';
-import { Phone, PhoneOff, Server } from 'lucide-react';
+import { useEffect, useState } from 'react';
+import { Phone, PhoneOff, Server, WifiOff } from 'lucide-react';
 import { sessionIds } from '@crocodile/protocol';
 import { closeModal, getClient, navigate, openModal, ui, useCroc, useUi } from './croc';
 import { desktop } from './platform';
@@ -101,6 +101,7 @@ function Shell() {
   return (
     <div className="flex h-full flex-col">
       <TopBar />
+      <NoServerBanner />
       <div className={`flex min-h-0 flex-1 gap-2.5 px-2.5 ${inCall ? 'pb-[84px]' : 'pb-2.5'}`}>
         {sidebar}
         {main}
@@ -111,6 +112,67 @@ function Shell() {
       <CommandPalette />
       <CallPrompts />
       <Toasts />
+    </div>
+  );
+}
+
+/** Shown when no coordination server can be reached for a while. */
+function NoServerBanner() {
+  const link = useCroc((s) => s.link);
+  const [late, setLate] = useState(false);
+  const [url, setUrl] = useState('');
+  const client = getClient();
+  useEffect(() => {
+    setLate(false);
+    if (link === 'connected') return;
+    const t = setTimeout(() => setLate(true), 8000);
+    return () => clearTimeout(t);
+  }, [link]);
+  if (link === 'connected' || !late) return null;
+  const add = () => {
+    let clean = url.trim().replace(/\/$/, '');
+    if (!clean) return;
+    if (!/^https?:\/\//.test(clean)) clean = `http://${clean}`;
+    if (!/:\d+$/.test(new URL(clean).host) && clean.startsWith('http://')) clean += ':7443';
+    void client.updateSettings({
+      preferredServers: [...new Set([clean, ...client.state.settings.preferredServers])],
+    });
+    setUrl('');
+  };
+  return (
+    <div className="island rise mx-2.5 mb-2.5 flex flex-wrap items-center gap-3 px-4 py-3">
+      <WifiOff size={18} className="text-warn" />
+      <div className="min-w-[220px] flex-1 text-sm">
+        <div className="font-bold">Can't reach a coordination server</div>
+        <div className="text-muted">
+          Enter the address of a server a friend runs, or host one on this computer.
+        </div>
+      </div>
+      <form
+        className="flex items-center gap-2"
+        onSubmit={(e) => {
+          e.preventDefault();
+          add();
+        }}
+      >
+        <input
+          value={url}
+          onChange={(e) => setUrl(e.target.value)}
+          placeholder="192.168.1.20:7443 or https://…"
+          aria-label="Server address"
+          className="selectable h-9 w-64 rounded-full border border-line bg-field px-4 text-sm outline-none focus:border-accent"
+        />
+        <Button type="submit" className="h-9">
+          Connect
+        </Button>
+      </form>
+      <Button
+        variant="secondary"
+        className="h-9"
+        onClick={() => openModal({ kind: 'settings', tab: 'host' })}
+      >
+        <Server size={15} /> Host one here
+      </Button>
     </div>
   );
 }
