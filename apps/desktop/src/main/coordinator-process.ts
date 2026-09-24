@@ -2,6 +2,7 @@
  * Utility process running an embedded coordination server, for users who opt
  * in to contributing one to the mesh (or want a private LAN server).
  */
+import { networkInterfaces } from 'node:os';
 import { Coordinator } from '@crocodile/coordinator';
 import type { CoordinatorProcessIn, CoordinatorProcessOut, CoordinatorStatus } from './ipc-types';
 
@@ -79,6 +80,7 @@ port.on('message', async ({ data: msg }) => {
         users: 0,
         publicUrl: s.publicUrl,
         announced,
+        lanUrls: lanUrls(s.port),
       });
     } catch (err) {
       coordinator = undefined;
@@ -89,3 +91,14 @@ port.on('message', async ({ data: msg }) => {
     }
   }
 });
+
+/** http://<address>:<port> for every non-internal IPv4 interface. */
+function lanUrls(port: number): string[] {
+  const out: string[] = [];
+  for (const list of Object.values(networkInterfaces())) {
+    for (const a of list ?? []) {
+      if (a.family === 'IPv4' && !a.internal) out.push(`http://${a.address}:${port}`);
+    }
+  }
+  return out;
+}

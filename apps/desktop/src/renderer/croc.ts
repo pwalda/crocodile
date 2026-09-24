@@ -124,6 +124,10 @@ export async function bootClient(): Promise<CrocodileClient> {
     if (id) void client.sessionFor(id)?.setMicTrack(track);
   });
   client.voiceEngine = engine;
+  // A coordination server hosted on this computer is used as soon as it runs.
+  desktop?.coordinator.onStatus((st) => {
+    client.setExtraServers(st.state === 'running' ? [st.url] : []);
+  });
   ui.set({ voiceSettings, pttKey, appVersion: info.version });
   desktop?.ptt.onState((down) => engine.setPushToTalk(down));
   void syncGlobalPtt();

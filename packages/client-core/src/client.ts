@@ -51,7 +51,7 @@ import {
   type VoiceOccupancy,
 } from '@crocodile/protocol';
 import { CoordinatorLink, type LinkStatus } from './coordinator-link';
-import { CoordinatorConnection } from './coordinator-connection';
+import { CoordinatorConnection, RpcCallError } from './coordinator-connection';
 import { Emitter } from './emitter';
 import {
   GroupSession,
@@ -346,11 +346,30 @@ export class CrocodileClient extends Emitter<ClientEvents> {
     this.connect();
   }
 
-  /** First run: create an identity and publish the profile. */
+  /**
+   * First run: create an identity and publish the profile. Works offline: the
+   * signed profile is kept locally and published once a server is reachable.
+   */
   async createAccount(username: string, avatar?: string) {
     const identity = createIdentity();
     await this.adoptIdentity(identity);
-    await this.saveProfile({ username: username.trim(), ...(avatar ? { avatar } : {}) });
+    await this.saveProfile({ username: username.trim(), ...(avatar ? { avatar } : {}) }).catch(
+      (err) => {
+        if (!(err instanceof RpcCallError) || err.code !== 'unavailable') throw err;
+        this.refreshDerivedState();
+      },
+    );
+  }
+
+  /**
+   * Servers tried before the directory's picks that are not user settings,
+   * e.g. a coordination server running on this computer.
+   */
+  setExtraServers(urls: string[]) {
+    const current = this.config.preferredServers ?? [];
+    if (current.length === urls.length && current.every((u, i) => u === urls[i])) return;
+    this.config.preferredServers = urls;
+    if (this.identity && this.state.link !== 'connected') this.connect();
   }
 
   /** Restore an existing identity from its recovery key. */

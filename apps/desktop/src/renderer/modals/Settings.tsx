@@ -926,6 +926,28 @@ function HostTab() {
           <span className="capitalize text-muted">{status.state}</span>
         )}
       </Card>
+      {status.state === 'running' && (
+        <Card className="mb-4 text-sm">
+          <div className="font-bold">Share this address</div>
+          <p className="mt-1 text-muted">
+            People on your network add it under Settings → Network → Preferred servers (or when the
+            app says it can't find a server). For people elsewhere, forward TCP+UDP {settings.port}{' '}
+            on your router and share your public address.
+          </p>
+          <div className="mt-2 space-y-1">
+            {(status.publicUrl ? [status.publicUrl, ...status.lanUrls] : status.lanUrls).map(
+              (u) => (
+                <div key={u} className="flex items-center gap-2">
+                  <span className="selectable flex-1 font-mono">{u}</span>
+                  <Button variant="ghost" className="h-8 text-xs" onClick={() => void copyText(u)}>
+                    <Copy size={14} /> Copy
+                  </Button>
+                </div>
+              ),
+            )}
+          </div>
+        </Card>
+      )}
       <Row label="Run a coordination server">
         <Toggle
           checked={settings.enabled}

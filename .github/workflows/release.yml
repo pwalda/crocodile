@@ -26,11 +26,14 @@ jobs:
         with:
           node-version: 22
           cache: pnpm
+      - name: Linux packaging tools
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y rpm
       - run: pnpm install --frozen-lockfile
       - name: Set version from tag
         working-directory: apps/desktop
         shell: bash
-        run: npm version --no-git-tag-version "${GITHUB_REF_NAME#v}"
+        run: npm version --no-git-tag-version --allow-same-version "${GITHUB_REF_NAME#v}"
       - name: Build and publish
         working-directory: apps/desktop
         env:
@@ -45,6 +48,22 @@ jobs:
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
           CSC_IDENTITY_AUTO_DISCOVERY: ${{ secrets.CSC_LINK != '' }}
         run: node scripts/build.mjs && npx electron-builder --config electron-builder.config.cjs --publish always
+
+  # electron-builder uploads into a draft; publish it once every platform is in.
+  publish:
+    name: Publish release
+    needs: installers
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Publish with notes
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          notes="docs/releases/${GITHUB_REF_NAME}.md"
+          args=(--draft=false --latest --title "Crocodile ${GITHUB_REF_NAME#v}")
+          if [ -f "$notes" ]; then args+=(--notes-file "$notes"); fi
+          gh release edit "$GITHUB_REF_NAME" "${args[@]}"
 
   images:
     name: Server images
