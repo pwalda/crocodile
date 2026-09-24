@@ -126,6 +126,10 @@ export interface ClientState {
   typing: Record<string, Record<string, number>>;
   activeChannel: string | null;
   voiceSession: string | null;
+  /** Someone is ringing us in a DM. */
+  incomingCall: { sessionId: string; from: string; at: number } | null;
+  /** We are ringing someone and they have not answered yet. */
+  outgoingCall: { sessionId: string; to: string; at: number } | null;
   muted: boolean;
   deafened: boolean;
   settings: Settings;
@@ -179,6 +183,8 @@ export class CrocodileClient extends Emitter<ClientEvents> {
       typing: {},
       activeChannel: null,
       voiceSession: null,
+      incomingCall: null,
+      outgoingCall: null,
       muted: false,
       deafened: false,
       settings: defaultSettings,
@@ -189,6 +195,11 @@ export class CrocodileClient extends Emitter<ClientEvents> {
 
   get state() {
     return this.store.get();
+  }
+
+  /** STUN servers handed out by the current coordination server. */
+  get stunUrls(): string[] {
+    return this.stun;
   }
 
   get userId(): string {
@@ -247,8 +258,12 @@ export class CrocodileClient extends Emitter<ClientEvents> {
   private async adoptIdentity(identity: Identity) {
     this.identity = identity;
     await this.platform.kv.set('identity-seed', toB64u(identity.seed));
-    this.store.set({ phase: 'ready' });
     this.connect();
+  }
+
+  /** Onboarding UIs call this once the user has seen their recovery key. */
+  finishOnboarding() {
+    if (this.identity) this.store.set({ phase: 'ready' });
   }
 
   recoveryKey(): string {
@@ -714,6 +729,7 @@ export class CrocodileClient extends Emitter<ClientEvents> {
     );
     session.on('update', () => this.publishSession(session!));
     session.on('track', (ev) => this.voiceEngine?.playSlot(sessionId, ev.slot, ev.track, () => session!.slots[ev.slot] ?? null));
+    session.on('call', ({ userId, action }) => this.onCallSignal(sessionId, userId, action));
     session.on('typing', ({ userId, ch }) => {
       const until = Date.now() + 6000;
       this.store.set((s) => ({ typing: { ...s.typing, [ch]: { ...(s.typing[ch] ?? {}), [userId]: until } } }));
@@ -924,10 +940,68 @@ export class CrocodileClient extends Emitter<ClientEvents> {
     return this.joinVoiceSession(sessionIds.voice(spaceId, channelId));
   }
 
-  /** Voice call inside a DM. */
+  /** Voice call inside a DM: joins the call and rings the other side. */
   async callDm(userId: string) {
     const sessionId = await this.openDm(userId);
-    return this.joinVoiceSession(sessionId);
+    const answering = this.state.incomingCall?.sessionId === sessionId;
+    await this.joinVoiceSession(sessionId);
+    if (answering) {
+      this.store.set({ incomingCall: null });
+      this.sendCallSignal(sessionId, 'accept');
+      return;
+    }
+    this.store.set({ outgoingCall: { sessionId, to: userId, at: Date.now() } });
+    this.ringLoop(sessionId);
+  }
+
+  private ringTimer?: ReturnType<typeof setInterval>;
+
+  private ringLoop(sessionId: string) {
+    clearInterval(this.ringTimer);
+    const started = Date.now();
+    const ring = () => {
+      const out = this.state.outgoingCall;
+      if (!out || out.sessionId !== sessionId || Date.now() - started > 45_000) {
+        clearInterval(this.ringTimer);
+        if (out?.sessionId === sessionId) this.store.set({ outgoingCall: null });
+        return;
+      }
+      this.sendCallSignal(sessionId, 'ring');
+    };
+    ring();
+    this.ringTimer = setInterval(ring, 2500);
+  }
+
+  private sendCallSignal(sessionId: string, action: 'ring' | 'accept' | 'decline' | 'end') {
+    this.sessions.get(sessionId)?.sendGroup({ type: 'call', action });
+  }
+
+  declineCall() {
+    const call = this.state.incomingCall;
+    if (!call) return;
+    this.store.set({ incomingCall: null });
+    this.sendCallSignal(call.sessionId, 'decline');
+  }
+
+  private onCallSignal(sessionId: string, from: string, action: 'ring' | 'accept' | 'decline' | 'end') {
+    if (from === this.userId) return;
+    if (action === 'ring') {
+      if (this.state.voiceSession === sessionId) {
+        this.sendCallSignal(sessionId, 'accept');
+        return;
+      }
+      if (!this.state.incomingCall) this.store.set({ incomingCall: { sessionId, from, at: Date.now() } });
+    } else if (action === 'accept') {
+      if (this.state.outgoingCall?.sessionId === sessionId) this.store.set({ outgoingCall: null });
+    } else if (action === 'decline') {
+      if (this.state.outgoingCall?.sessionId === sessionId) {
+        this.store.set({ outgoingCall: null });
+        this.reportError('Call declined');
+        void this.leaveVoice();
+      }
+    } else if (action === 'end') {
+      if (this.state.incomingCall?.sessionId === sessionId) this.store.set({ incomingCall: null });
+    }
   }
 
   private async joinVoiceSession(sessionId: string) {
@@ -952,6 +1026,10 @@ export class CrocodileClient extends Emitter<ClientEvents> {
   async leaveVoice() {
     const sessionId = this.state.voiceSession;
     if (!sessionId) return;
+    if (this.state.outgoingCall?.sessionId === sessionId) {
+      this.store.set({ outgoingCall: null });
+      this.sendCallSignal(sessionId, 'end');
+    }
     this.store.set({ voiceSession: null });
     const session = this.sessions.get(sessionId);
     this.voiceEngine?.stopSession(sessionId);

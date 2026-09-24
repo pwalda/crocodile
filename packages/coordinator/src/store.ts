@@ -1,6 +1,5 @@
 import { mkdirSync, readFileSync, renameSync, writeFileSync, existsSync } from 'node:fs';
 import { dirname } from 'node:path';
-import { createRequire } from 'node:module';
 import type { SignedRecord } from '@crocodile/protocol';
 
 export interface StoredRecord {
@@ -169,8 +168,10 @@ export class SqliteStore implements Store {
   private stmts;
 
   constructor(path: string) {
-    const require = createRequire(import.meta.url);
-    const { DatabaseSync } = require('node:sqlite') as { DatabaseSync: new (p: string) => SqliteDb };
+    // getBuiltinModule works in ESM, CJS bundles and Electron utility processes alike.
+    const sqlite = process.getBuiltinModule?.('node:sqlite') as { DatabaseSync: new (p: string) => SqliteDb } | undefined;
+    if (!sqlite) throw new Error('node:sqlite is not available in this runtime');
+    const { DatabaseSync } = sqlite;
     if (path !== ':memory:') mkdirSync(dirname(path), { recursive: true });
     this.db = new DatabaseSync(path);
     this.db.exec(`

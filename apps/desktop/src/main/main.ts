@@ -1,0 +1,339 @@
+import {
+  app,
+  BrowserWindow,
+  ipcMain,
+  Menu,
+  nativeImage,
+  safeStorage,
+  session,
+  shell,
+  Tray,
+  utilityProcess,
+  type UtilityProcess,
+} from 'electron';
+import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { cpus } from 'node:os';
+import type {
+  CoordinatorProcessOut,
+  CoordinatorSettings,
+  CoordinatorStatus,
+  RelayProcessIn,
+  RelayProcessOut,
+} from './ipc-types';
+
+const isDev = !!process.env.CROC_RENDERER_URL;
+const APP_PROTOCOL = 'croc';
+
+// Separate profiles (e.g. two instances on one machine for testing).
+if (process.env.CROC_USER_DATA) app.setPath('userData', process.env.CROC_USER_DATA);
+
+// WebRTC: expose real host candidates so peers on the same LAN (and this
+// machine's own relay) connect directly instead of through NAT hairpinning.
+app.commandLine.appendSwitch('disable-features', 'WebRtcHideLocalIpsWithMdns');
+app.setAppUserModelId('chat.crocodile.app');
+
+if (!app.requestSingleInstanceLock()) {
+  app.quit();
+  process.exit(0);
+}
+
+let win: BrowserWindow | null = null;
+let tray: Tray | null = null;
+let quitting = false;
+let pendingDeepLink: string | null = null;
+
+const userData = () => app.getPath('userData');
+const resource = (...p: string[]) => (app.isPackaged ? join(process.resourcesPath, ...p) : join(__dirname, '../../resources', ...p));
+
+// ---------------------------------------------------------------------------
+// Secure storage (identity seed): encrypted with the OS keychain via safeStorage.
+// ---------------------------------------------------------------------------
+
+const securePath = () => join(userData(), 'secure.json');
+
+function readSecure(): Record<string, string> {
+  if (!existsSync(securePath())) return {};
+  try {
+    return JSON.parse(readFileSync(securePath(), 'utf8')) as Record<string, string>;
+  } catch {
+    return {};
+  }
+}
+
+function writeSecure(data: Record<string, string>) {
+  mkdirSync(userData(), { recursive: true });
+  writeFileSync(`${securePath()}.tmp`, JSON.stringify(data), { mode: 0o600 });
+  renameSync(`${securePath()}.tmp`, securePath());
+}
+
+function encrypt(value: string): string {
+  if (safeStorage.isEncryptionAvailable()) return `enc:${safeStorage.encryptString(value).toString('base64')}`;
+  return `raw:${value}`;
+}
+
+function decrypt(stored: string): string | undefined {
+  if (stored.startsWith('enc:')) {
+    try {
+      return safeStorage.decryptString(Buffer.from(stored.slice(4), 'base64'));
+    } catch {
+      return undefined;
+    }
+  }
+  return stored.startsWith('raw:') ? stored.slice(4) : undefined;
+}
+
+ipcMain.handle('secure:get', (_e, key: string) => {
+  const v = readSecure()[key];
+  return v === undefined ? undefined : decrypt(v);
+});
+ipcMain.handle('secure:set', (_e, key: string, value: string) => {
+  const data = readSecure();
+  data[key] = encrypt(value);
+  writeSecure(data);
+});
+ipcMain.handle('secure:delete', (_e, key: string) => {
+  const data = readSecure();
+  delete data[key];
+  writeSecure(data);
+});
+
+// ---------------------------------------------------------------------------
+// Host relay utility process
+// ---------------------------------------------------------------------------
+
+let relayProc: UtilityProcess | null = null;
+
+function relayProcess(): UtilityProcess {
+  if (relayProc) return relayProc;
+  const proc = utilityProcess.fork(join(__dirname, 'relay-process.cjs'), [], { serviceName: 'Crocodile Relay' });
+  proc.on('message', (msg: RelayProcessOut) => {
+    if (msg.type === 'log') console.log(`[relay] ${msg.msg}`, msg.extra ?? '');
+    else win?.webContents.send('relay:event', msg);
+  });
+  proc.on('exit', () => {
+    relayProc = null;
+    win?.webContents.send('relay:event', { type: 'error', handle: '*', message: 'relay process exited' });
+  });
+  relayProc = proc;
+  return proc;
+}
+
+ipcMain.handle('relay:send', (_e, msg: RelayProcessIn) => {
+  relayProcess().postMessage(msg);
+});
+
+// ---------------------------------------------------------------------------
+// Embedded coordination server (opt-in)
+// ---------------------------------------------------------------------------
+
+let coordProc: UtilityProcess | null = null;
+let coordStatus: CoordinatorStatus = { state: 'stopped' };
+const coordSettingsPath = () => join(userData(), 'coordinator.json');
+const defaultCoordSettings: CoordinatorSettings = {
+  enabled: false,
+  name: `${process.env.USER ?? process.env.USERNAME ?? 'Someone'}'s coordinator`,
+  port: 7443,
+  announce: true,
+};
+
+function coordSettings(): CoordinatorSettings {
+  try {
+    return { ...defaultCoordSettings, ...JSON.parse(readFileSync(coordSettingsPath(), 'utf8')) };
+  } catch {
+    return defaultCoordSettings;
+  }
+}
+
+function directories(): string[] {
+  const raw = process.env.CROC_DIRECTORIES_OVERRIDE ?? process.env.CROC_DIRECTORIES ?? '';
+  return raw.split(',').map((s) => s.trim()).filter(Boolean);
+}
+
+function applyCoordinator() {
+  const s = coordSettings();
+  if (!s.enabled) {
+    coordProc?.postMessage({ type: 'stop' });
+    return;
+  }
+  if (!coordProc) {
+    coordProc = utilityProcess.fork(join(__dirname, 'coordinator-process.cjs'), [], { serviceName: 'Crocodile Coordinator' });
+    coordProc.on('message', (msg: CoordinatorProcessOut) => {
+      coordStatus = msg.status;
+      win?.webContents.send('coordinator:status', coordStatus);
+    });
+    coordProc.on('exit', () => {
+      coordProc = null;
+      coordStatus = { state: 'stopped' };
+      win?.webContents.send('coordinator:status', coordStatus);
+    });
+  }
+  coordProc.postMessage({ type: 'start', settings: s, dataDir: join(userData(), 'coordinator'), directories: directories() });
+}
+
+ipcMain.handle('coordinator:get', () => ({ settings: coordSettings(), status: coordStatus }));
+ipcMain.handle('coordinator:set', (_e, patch: Partial<CoordinatorSettings>) => {
+  const next = { ...coordSettings(), ...patch };
+  mkdirSync(userData(), { recursive: true });
+  writeFileSync(coordSettingsPath(), JSON.stringify(next, null, 2));
+  applyCoordinator();
+  return next;
+});
+
+// ---------------------------------------------------------------------------
+// Misc app services
+// ---------------------------------------------------------------------------
+
+ipcMain.handle('app:info', () => ({
+  version: app.getVersion(),
+  platform: process.platform,
+  directories: directories(),
+  cpuCores: cpus().length,
+}));
+
+ipcMain.handle('app:open-external', (_e, url: string) => {
+  if (/^https?:\/\//i.test(url)) void shell.openExternal(url);
+});
+
+ipcMain.handle('app:badge', (_e, count: number) => {
+  if (process.platform === 'darwin') app.dock?.setBadge(count > 0 ? String(count) : '');
+  else app.setBadgeCount(count);
+});
+
+ipcMain.handle('app:take-deeplink', () => {
+  const link = pendingDeepLink;
+  pendingDeepLink = null;
+  return link;
+});
+
+function handleDeepLink(url: string | undefined) {
+  if (!url?.startsWith(`${APP_PROTOCOL}://`)) return;
+  pendingDeepLink = url;
+  win?.webContents.send('app:deeplink', url);
+  showWindow();
+}
+
+// ---------------------------------------------------------------------------
+// Window, tray, lifecycle
+// ---------------------------------------------------------------------------
+
+function appIcon(name = 'icon.png') {
+  const file = resource(name);
+  return existsSync(file) ? nativeImage.createFromPath(file) : undefined;
+}
+
+function showWindow() {
+  if (!win) return createWindow();
+  if (win.isMinimized()) win.restore();
+  win.show();
+  win.focus();
+}
+
+function createWindow() {
+  win = new BrowserWindow({
+    width: 1280,
+    height: 800,
+    minWidth: 940,
+    minHeight: 560,
+    backgroundColor: '#1e1f22',
+    title: 'Crocodile',
+    icon: appIcon(),
+    autoHideMenuBar: true,
+    show: false,
+    webPreferences: {
+      preload: join(__dirname, '../preload/preload.cjs'),
+      contextIsolation: true,
+      sandbox: true,
+      nodeIntegration: false,
+      spellcheck: true,
+    },
+  });
+  win.once('ready-to-show', () => win?.show());
+  win.on('close', (e) => {
+    // Like Discord: closing keeps you reachable in the tray.
+    if (!quitting && tray && process.platform !== 'darwin') {
+      e.preventDefault();
+      win?.hide();
+    }
+  });
+  win.on('closed', () => {
+    win = null;
+  });
+  win.webContents.setWindowOpenHandler(({ url }) => {
+    if (/^https?:\/\//i.test(url)) void shell.openExternal(url);
+    return { action: 'deny' };
+  });
+  win.webContents.on('will-navigate', (e, url) => {
+    if (!url.startsWith('file://') && !(isDev && url.startsWith(process.env.CROC_RENDERER_URL!))) e.preventDefault();
+  });
+  if (isDev) void win.loadURL(process.env.CROC_RENDERER_URL!);
+  else void win.loadFile(join(__dirname, '../renderer/index.html'));
+}
+
+function createTray() {
+  const icon = appIcon('tray.png');
+  if (!icon) return;
+  tray = new Tray(process.platform === 'darwin' ? icon.resize({ width: 18, height: 18 }) : icon);
+  tray.setToolTip('Crocodile');
+  tray.setContextMenu(
+    Menu.buildFromTemplate([
+      { label: 'Open Crocodile', click: showWindow },
+      { type: 'separator' },
+      {
+        label: 'Quit',
+        click: () => {
+          quitting = true;
+          app.quit();
+        },
+      },
+    ]),
+  );
+  tray.on('click', showWindow);
+}
+
+app.on('second-instance', (_e, argv) => {
+  handleDeepLink(argv.find((a) => a.startsWith(`${APP_PROTOCOL}://`)));
+  showWindow();
+});
+
+app.on('open-url', (e, url) => {
+  e.preventDefault();
+  handleDeepLink(url);
+});
+
+app.whenReady().then(() => {
+  if (process.defaultApp && process.argv.length >= 2) {
+    app.setAsDefaultProtocolClient(APP_PROTOCOL, process.execPath, [process.argv[1]!]);
+  } else {
+    app.setAsDefaultProtocolClient(APP_PROTOCOL);
+  }
+  handleDeepLink(process.argv.find((a) => a.startsWith(`${APP_PROTOCOL}://`)));
+
+  session.defaultSession.setPermissionRequestHandler((_wc, permission, callback) => {
+    callback(['media', 'notifications', 'clipboard-sanitized-write', 'speaker-selection'].includes(permission));
+  });
+  session.defaultSession.setPermissionCheckHandler((_wc, permission) =>
+    ['media', 'notifications', 'clipboard-sanitized-write', 'speaker-selection'].includes(permission),
+  );
+
+  createWindow();
+  createTray();
+  applyCoordinator();
+
+  if (app.isPackaged) {
+    import('electron-updater')
+      .then(({ autoUpdater }) => autoUpdater.checkForUpdatesAndNotify())
+      .catch((err) => console.warn('auto-update unavailable', err));
+  }
+});
+
+app.on('activate', showWindow);
+app.on('before-quit', () => {
+  quitting = true;
+  relayProc?.kill();
+  coordProc?.postMessage({ type: 'stop' });
+  setTimeout(() => coordProc?.kill(), 1500);
+});
+app.on('window-all-closed', () => {
+  if (process.platform !== 'darwin') app.quit();
+});
