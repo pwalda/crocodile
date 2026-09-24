@@ -134,6 +134,16 @@ importers:
       '@crocodile/protocol':
         specifier: workspace:*
         version: link:../packages/protocol
+      '@crocodile/relay':
+        specifier: workspace:*
+        version: link:../packages/relay
+    devDependencies:
+      esbuild:
+        specifier: ^0.25.0
+        version: 0.25.12
+      playwright-core:
+        specifier: 1.56.0
+        version: 1.56.0
 
 packages:
 
@@ -1005,6 +1015,11 @@ packages:
 
   pino@10.3.1:
     resolution: {integrity: sha512-r34yH/GlQpKZbU1BvFFqOjhISRo1MNx1tWYsYvmj6KIRHSPMT2+yHOEb1SG6NMvRoHRF0a07kCOox/9yakl1vg==}
+    hasBin: true
+
+  playwright-core@1.56.0:
+    resolution: {integrity: sha512-1SXl7pMfemAMSDn5rkPeZljxOCYAmQnYLBTExuh6E8USHXGSX3dx6lYZN/xPpTz1vimXmPA9CDnILvmJaB8aSQ==}
+    engines: {node: '>=18'}
     hasBin: true
 
   postcss@8.5.28:
@@ -2029,6 +2044,8 @@ snapshots:
       safe-stable-stringify: 2.5.0
       sonic-boom: 4.2.1
       thread-stream: 4.2.0
+
+  playwright-core@1.56.0: {}
 
   postcss@8.5.28:
     dependencies:

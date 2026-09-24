@@ -8,6 +8,11 @@
     "@crocodile/coordinator": "workspace:*",
     "@crocodile/crypto": "workspace:*",
     "@crocodile/directory": "workspace:*",
-    "@crocodile/protocol": "workspace:*"
+    "@crocodile/protocol": "workspace:*",
+    "@crocodile/relay": "workspace:*"
+  },
+  "devDependencies": {
+    "playwright-core": "1.56.0",
+    "esbuild": "^0.25.0"
   }
 }

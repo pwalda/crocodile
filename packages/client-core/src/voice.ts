@@ -61,6 +61,7 @@ export class VoiceEngine extends Emitter<VoiceEvents> {
   settings: VoiceSettings;
   private stream?: MediaStream;
   private track?: MediaStreamTrack;
+  private meterTrack?: MediaStreamTrack;
   private ctx?: AudioContext;
   private meterTimer?: ReturnType<typeof setInterval>;
   private gateOpen = false;
@@ -132,7 +133,12 @@ export class VoiceEngine extends Emitter<VoiceEvents> {
     this.stream = stream;
     this.track = stream.getAudioTracks()[0];
     this.applyGate();
-    this.startMeter(stream);
+    // Meter a clone: the gated track itself goes silent while disabled.
+    this.meterTrack?.stop();
+    this.meterTrack = this.track?.clone();
+    // Clones inherit `enabled`; the meter must always hear the microphone.
+    if (this.meterTrack) this.meterTrack.enabled = true;
+    this.startMeter(new MediaStream(this.meterTrack ? [this.meterTrack] : []));
     this.emit('track', this.track ?? null);
   }
 
@@ -145,10 +151,24 @@ export class VoiceEngine extends Emitter<VoiceEvents> {
     }
     const ctx = new AudioContext();
     this.ctx = ctx;
+    if (ctx.state !== 'running') {
+      void ctx.resume().catch(() => {});
+      // Without a running context we cannot measure; fail open rather than mute.
+      setTimeout(() => {
+        if (this.ctx === ctx && ctx.state !== 'running' && this.settings.mode === 'vad') {
+          this.gateOpen = true;
+          this.applyGate();
+        }
+      }, 500);
+    }
     const source = ctx.createMediaStreamSource(stream);
     const analyser = ctx.createAnalyser();
     analyser.fftSize = 1024;
     source.connect(analyser);
+    // Chromium only pulls audio through graphs that reach the destination.
+    const sink = ctx.createGain();
+    sink.gain.value = 0;
+    analyser.connect(sink).connect(ctx.destination);
     const buf = new Float32Array(analyser.fftSize);
     this.meterTimer = setInterval(() => {
       analyser.getFloatTimeDomainData(buf);
@@ -289,6 +309,8 @@ export class VoiceEngine extends Emitter<VoiceEvents> {
     void this.ctx?.close().catch(() => {});
     this.ctx = undefined;
     this.stream?.getTracks().forEach((t) => t.stop());
+    this.meterTrack?.stop();
+    this.meterTrack = undefined;
     this.stream = undefined;
     this.track = undefined;
     this.emit('track', null);
