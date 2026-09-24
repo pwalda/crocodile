@@ -1,5 +1,5 @@
-The first test release of Crocodile: peer-to-peer, end-to-end encrypted voice
-and text chat.
+A test release of Crocodile: peer-to-peer, end-to-end encrypted voice and
+text chat.
 
 ## Download
 
@@ -36,7 +36,7 @@ coordination server and the others connect to it:
 
 Alternatively, run the server with Docker on any machine with a public
 address: `docker run -d -p 7443:7443/tcp -p 7443:7443/udp -e
-CROC_PUBLIC_URL=http://<address>:7443 ghcr.io/pwalda/crocodile-coordinator:v0.1.0`.
+CROC_PUBLIC_URL=http://<address>:7443 ghcr.io/pwalda/crocodile-coordinator`.
 
 ## What to try
 

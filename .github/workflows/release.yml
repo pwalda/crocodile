@@ -16,31 +16,41 @@ permissions:
 env:
   TAG: ${{ github.event.release.tag_name || github.ref_name }}
 
-# Publishing a release in the UI also pushes its tag; build only once.
+# Publishing a release in the UI fires both a tag push and a release event;
+# the push run skips itself (see prepare), so each tag builds once.
 concurrency:
   group: release-${{ github.event.release.tag_name || github.ref_name }}
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
-  # Make sure a *draft* release exists for the tag, so every platform uploads
-  # into the same one (electron-builder only uploads into drafts).
   prepare:
-    name: Prepare draft release
+    name: Prepare release
     runs-on: ubuntu-latest
+    outputs:
+      skip: ${{ steps.check.outputs.skip }}
     steps:
       - uses: actions/checkout@v4
-      - env:
+        with:
+          ref: ${{ env.TAG }}
+      - id: check
+        env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          EVENT: ${{ github.event_name }}
         run: |
           if gh release view "$TAG" >/dev/null 2>&1; then
-            gh release edit "$TAG" --draft=true
+            # Published in the UI: its own 'release' run does the work.
+            if [ "$EVENT" = push ]; then echo "skip=true" >> "$GITHUB_OUTPUT"; fi
           else
-            gh release create "$TAG" --draft --verify-tag --title "Crocodile ${TAG#v}" --notes "Building…"
+            # Plain tag push: create a draft that every platform uploads into.
+            notes="docs/releases/${TAG}.md"
+            [ -f "$notes" ] || notes=docs/releases/default.md
+            gh release create "$TAG" --draft --verify-tag --title "Crocodile ${TAG#v}" --notes-file "$notes"
           fi
 
   installers:
     name: Installers (${{ matrix.os }})
     needs: prepare
+    if: needs.prepare.outputs.skip != 'true'
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60
     strategy:
@@ -66,8 +76,11 @@ jobs:
         run: npm version --no-git-tag-version --allow-same-version "${TAG#v}"
       - name: Build and publish
         working-directory: apps/desktop
+        shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Upload into the release even if it was published a while ago.
+          EP_GH_IGNORE_TIME: 'true'
           # Directory services baked into the app (comma-separated URLs).
           CROC_DIRECTORIES: ${{ vars.CROC_DIRECTORIES }}
           # Code signing is optional; without these secrets builds are unsigned.
@@ -76,29 +89,45 @@ jobs:
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-          CSC_IDENTITY_AUTO_DISCOVERY: ${{ secrets.CSC_LINK != '' }}
-        run: node scripts/build.mjs && npx electron-builder --config electron-builder.config.cjs --publish always
+        run: |
+          # Missing secrets arrive as empty strings, which electron-builder
+          # would take as a certificate path. Unset them instead.
+          for v in CSC_LINK CSC_KEY_PASSWORD APPLE_ID APPLE_APP_SPECIFIC_PASSWORD APPLE_TEAM_ID; do
+            if [ -z "${!v}" ]; then unset "$v"; fi
+          done
+          if [ -z "${CSC_LINK:-}" ]; then export CSC_IDENTITY_AUTO_DISCOVERY=false; fi
+          node scripts/build.mjs
+          npx electron-builder --config electron-builder.config.cjs --publish always
 
-  # electron-builder uploads into a draft; publish it once every platform is in.
+  # Make a draft (tag-push) release public once every platform is in; keep
+  # whatever title, notes and pre-release choice a UI-published release has.
   publish:
     name: Publish release
-    needs: installers
+    needs: [prepare, installers]
+    if: needs.prepare.outputs.skip != 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
           ref: ${{ env.TAG }}
-      - name: Publish with notes
-        env:
+      - env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          notes="docs/releases/${TAG}.md"
-          args=(--draft=false --latest --title "Crocodile ${TAG#v}")
-          if [ -f "$notes" ]; then args+=(--notes-file "$notes"); fi
-          gh release edit "$TAG" "${args[@]}"
+          args=()
+          if [ "$(gh release view "$TAG" --json isDraft -q .isDraft)" = true ]; then
+            args+=(--draft=false)
+          fi
+          if [ -z "$(gh release view "$TAG" --json body -q .body | tr -d '[:space:]')" ]; then
+            notes="docs/releases/${TAG}.md"
+            [ -f "$notes" ] || notes=docs/releases/default.md
+            args+=(--notes-file "$notes")
+          fi
+          if [ ${#args[@]} -gt 0 ]; then gh release edit "$TAG" "${args[@]}"; fi
 
   images:
     name: Server images
+    needs: prepare
+    if: needs.prepare.outputs.skip != 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
