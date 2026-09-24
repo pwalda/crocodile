@@ -5,6 +5,7 @@ import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { createRequire } from 'node:module';
+import { cpSync, rmSync } from 'node:fs';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 const dev = process.argv.includes('--dev');
@@ -20,6 +21,28 @@ const nodeTargets = [
   { entry: 'src/preload/preload.ts', out: 'dist/preload/preload.cjs' },
 ];
 
+/**
+ * Native modules are copied (not bundled) into dist/native and unpacked from
+ * the asar at runtime: libuiohook for system-wide push-to-talk.
+ */
+function copyNative() {
+  const require = createRequire(join(root, 'package.json'));
+  const out = join(root, 'dist/native');
+  rmSync(out, { recursive: true, force: true });
+  const uiohook = dirname(require.resolve('uiohook-napi/package.json'));
+  const gypBuild = dirname(
+    createRequire(join(uiohook, 'package.json')).resolve('node-gyp-build/package.json'),
+  );
+  for (const [src, dst] of [
+    [join(uiohook, 'dist'), 'uiohook-napi/dist'],
+    [join(uiohook, 'prebuilds'), 'uiohook-napi/prebuilds'],
+    [join(uiohook, 'package.json'), 'uiohook-napi/package.json'],
+    [gypBuild, 'node_modules/node-gyp-build'],
+  ]) {
+    cpSync(src, join(out, dst), { recursive: true, dereference: true });
+  }
+}
+
 const nodeOptions = (t) => ({
   absWorkingDir: root,
   entryPoints: [t.entry],
@@ -34,6 +57,8 @@ const nodeOptions = (t) => ({
   define,
   logLevel: 'info',
 });
+
+copyNative();
 
 if (dev) {
   for (const t of nodeTargets) (await context(nodeOptions(t))).watch();

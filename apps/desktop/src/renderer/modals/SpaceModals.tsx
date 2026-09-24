@@ -46,12 +46,12 @@ export function AddSpaceModal() {
             setName(`${me ?? 'My'}'s space`);
             setMode('create');
           }}
-          className="mb-3 w-full rounded-lg border border-line px-4 py-4 text-left font-semibold text-white hover:bg-hover"
+          className="mb-3 w-full rounded-2xl border border-line bg-island-2 px-4 py-4 transition hover:border-accent text-left font-semibold text-text hover:bg-hover"
         >
           Create my own
         </button>
         <div className="mt-4 text-center">
-          <h3 className="font-semibold text-white">Have an invite already?</h3>
+          <h3 className="font-semibold text-text">Have an invite already?</h3>
           <Button variant="secondary" className="mt-2 w-full" onClick={() => setMode('join')}>
             Join a space
           </Button>
@@ -97,7 +97,7 @@ export function AddSpaceModal() {
         </label>
         <Label>Space name</Label>
         <Input autoFocus maxLength={64} value={name} onChange={(e) => setName(e.target.value)} />
-        {error && <p className="mt-3 text-sm text-dnd">{error}</p>}
+        {error && <p className="mt-3 text-sm text-danger">{error}</p>}
       </Modal>
     );
   }
@@ -128,7 +128,7 @@ export function AddSpaceModal() {
         onChange={(e) => setInvite(e.target.value)}
         placeholder="croc://join/abcd2345"
       />
-      {error && <p className="mt-3 text-sm text-dnd">{error}</p>}
+      {error && <p className="mt-3 text-sm text-danger">{error}</p>}
     </Modal>
   );
 }
@@ -151,7 +151,7 @@ export function InviteModal({ spaceId }: { spaceId: string }) {
       onClose={closeModal}
     >
       <Label>Invite link</Label>
-      <div className="flex items-center gap-2 rounded bg-float p-1 pl-3">
+      <div className="flex items-center gap-2 rounded-xl bg-field p-1 pl-3">
         <span className="selectable flex-1 truncate font-mono text-sm">
           {error ?? (link || 'Creating invite…')}
         </span>
@@ -209,13 +209,13 @@ export function CreateChannelModal({ spaceId }: { spaceId: string }) {
           key={k}
           onClick={() => setKind(k)}
           className={cx(
-            'mb-2 flex w-full items-center gap-3 rounded px-3 py-3 text-left',
-            kind === k ? 'bg-active' : 'bg-side hover:bg-hover',
+            'mb-2 flex w-full items-center gap-3 rounded-2xl border px-4 py-3 text-left transition',
+            kind === k ? 'border-accent bg-accent-soft' : 'border-line bg-island-2 hover:bg-hover',
           )}
         >
           {k === 'text' ? <Hash size={22} /> : <Volume2 size={22} />}
           <div>
-            <div className="font-medium text-white">{k === 'text' ? 'Text' : 'Voice'}</div>
+            <div className="font-medium text-text">{k === 'text' ? 'Text' : 'Voice'}</div>
             <div className="text-xs text-muted">
               {k === 'text' ? 'Messages, emoji and opinions' : 'Hang out together with voice'}
             </div>
@@ -223,7 +223,7 @@ export function CreateChannelModal({ spaceId }: { spaceId: string }) {
           <span
             className={cx(
               'ml-auto h-5 w-5 rounded-full border-2',
-              kind === k ? 'border-croc bg-croc' : 'border-muted',
+              kind === k ? 'border-accent bg-accent' : 'border-muted',
             )}
           />
         </button>
@@ -274,7 +274,7 @@ export function SpaceSettingsModal({ spaceId }: { spaceId: string }) {
       }
     >
       <div className="flex gap-6">
-        <label className="flex h-24 w-24 shrink-0 cursor-pointer items-center justify-center overflow-hidden rounded-full bg-active text-2xl font-bold text-white">
+        <label className="flex h-24 w-24 shrink-0 cursor-pointer items-center justify-center overflow-hidden rounded-[28px] bg-active text-2xl font-bold text-text">
           {icon ? <img src={icon} alt="" className="h-full w-full object-cover" /> : initials(name)}
           <input
             type="file"
@@ -293,7 +293,7 @@ export function SpaceSettingsModal({ spaceId }: { spaceId: string }) {
       <div className="mt-6">
         <Label>Channels</Label>
         {space.channels.map((c) => (
-          <div key={c.id} className="flex items-center gap-2 rounded px-2 py-1.5 hover:bg-hover">
+          <div key={c.id} className="flex items-center gap-2 rounded-xl px-2 py-1.5 hover:bg-hover">
             {c.kind === 'text' ? (
               <Hash size={16} className="text-faint" />
             ) : (
@@ -301,7 +301,7 @@ export function SpaceSettingsModal({ spaceId }: { spaceId: string }) {
             )}
             <span className="flex-1">{c.name}</span>
             <button
-              className="text-xs text-dnd hover:underline"
+              className="text-xs text-danger hover:underline"
               onClick={() =>
                 void client.removeChannel(spaceId, c.id).catch((e) => client.reportError(e.message))
               }
@@ -311,8 +311,8 @@ export function SpaceSettingsModal({ spaceId }: { spaceId: string }) {
           </div>
         ))}
       </div>
-      <div className="mt-6 rounded border border-danger/50 p-4">
-        <div className="font-semibold text-white">Delete space</div>
+      <div className="mt-6 rounded-2xl border border-danger/40 p-4">
+        <div className="font-semibold text-text">Delete space</div>
         <p className="mt-1 text-sm text-muted">
           Everyone loses access. Messages stay only on members' devices.
         </p>

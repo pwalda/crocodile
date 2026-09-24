@@ -40,6 +40,20 @@ const api = {
       };
     },
   },
+  ptt: {
+    /** Enable system-wide push-to-talk for a key code (null disables). */
+    configure: (code: string | null) =>
+      ipcRenderer.invoke('ptt:configure', code) as Promise<
+        'active' | 'unavailable' | 'needs-permission' | 'off'
+      >,
+    onState: (fn: (down: boolean) => void) => {
+      const listener = (_e: unknown, down: boolean) => fn(down);
+      ipcRenderer.on('ptt:state', listener);
+      return () => {
+        ipcRenderer.off('ptt:state', listener);
+      };
+    },
+  },
   app: {
     info: () =>
       ipcRenderer.invoke('app:info') as Promise<{

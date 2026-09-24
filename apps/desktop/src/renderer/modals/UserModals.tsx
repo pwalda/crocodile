@@ -16,22 +16,20 @@ export function ProfileModal({ userId }: { userId: string }) {
   const pending = friends.outgoing.includes(userId);
   return (
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/70"
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/55 backdrop-blur-sm"
       onMouseDown={closeModal}
     >
       <div
-        className="pop-in w-[380px] overflow-hidden rounded-lg bg-float shadow-2xl"
+        className="island rise w-[380px] overflow-hidden rounded-3xl"
         onMouseDown={(e) => e.stopPropagation()}
       >
         <div className="h-24" style={{ background: profile?.accent ?? colorFor(userId) }} />
         <div className="px-4 pb-4">
-          <div className="-mt-12 mb-2 inline-block rounded-full border-[6px] border-float">
+          <div className="-mt-12 mb-2 inline-block rounded-[32px] border-[6px] border-[var(--island)]">
             <Avatar userId={userId} size={84} status="auto" />
           </div>
-          <div className="rounded-lg bg-side p-3">
-            <div className="text-xl font-bold text-white">
-              {profile?.username ?? 'Unknown user'}
-            </div>
+          <div className="rounded-2xl bg-island-2 p-4">
+            <div className="text-xl font-bold text-text">{profile?.username ?? 'Unknown user'}</div>
             <div className="text-sm text-muted">#{profile?.tag}</div>
             {profile?.bio && (
               <p className="selectable mt-3 whitespace-pre-wrap border-t border-line pt-3 text-sm">
@@ -44,11 +42,11 @@ export function ProfileModal({ userId }: { userId: string }) {
                   className="flex items-center gap-1 text-xs font-semibold uppercase text-muted hover:text-text"
                   onClick={() => setShowSafety(!showSafety)}
                 >
-                  <ShieldCheck size={14} className="text-croc" /> Verify safety number
+                  <ShieldCheck size={14} className="text-accent" /> Verify safety number
                 </button>
                 {showSafety && (
                   <div className="mt-2">
-                    <div className="selectable rounded bg-float p-2 text-center font-mono text-sm tracking-wider text-croc-light">
+                    <div className="selectable rounded-xl bg-field p-2 text-center font-mono text-sm tracking-wider text-accent">
                       {safetyNumber(me.publicKey, profile.publicKey)}
                     </div>
                     <p className="mt-1 text-[11px] text-muted">
@@ -124,14 +122,14 @@ export function NewDmModal() {
         {list.map((u) => (
           <button
             key={u}
-            className="flex w-full items-center gap-3 rounded px-2 py-2 hover:bg-hover"
+            className="flex w-full items-center gap-3 rounded-xl px-2 py-2 hover:bg-hover"
             onClick={() => {
               closeModal();
               navigate({ kind: 'dm', userId: u });
             }}
           >
             <Avatar userId={u} size={32} status="auto" />
-            <UserName userId={u} className="text-white" />
+            <UserName userId={u} className="text-text" />
           </button>
         ))}
       </div>

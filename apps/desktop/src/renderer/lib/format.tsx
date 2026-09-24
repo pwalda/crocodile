@@ -40,7 +40,7 @@ export function renderMessage(text: string): ReactNode[] {
       out.push(
         <pre
           key={`b${i}`}
-          className="selectable my-1 overflow-x-auto rounded border border-line bg-panel p-2 font-mono text-[13px]"
+          className="selectable my-1 overflow-x-auto rounded-xl border border-line bg-field p-3 font-mono text-[13px]"
         >
           {block.replace(/^\w*\n/, '')}
         </pre>,
@@ -65,7 +65,7 @@ function renderInline(text: string, key: string): ReactNode[] {
     const k = `${key}-${n++}`;
     if (token.startsWith('`'))
       nodes.push(
-        <code key={k} className="rounded bg-panel px-1 py-0.5 font-mono text-[13px]">
+        <code key={k} className="rounded-md bg-raised px-1.5 py-0.5 font-mono text-[13px]">
           {token.slice(1, -1)}
         </code>,
       );
@@ -76,7 +76,7 @@ function renderInline(text: string, key: string): ReactNode[] {
       nodes.push(
         <a
           key={k}
-          className="text-sky-400 hover:underline"
+          className="font-semibold text-accent underline-offset-2 hover:underline"
           href={token}
           onClick={(e) => {
             e.preventDefault();
@@ -133,4 +133,16 @@ export async function imageToDataUrl(file: File, size = 256): Promise<string> {
 
 export async function copyText(text: string) {
   await navigator.clipboard.writeText(text).catch(() => {});
+}
+
+/** Human label for a push-to-talk binding (a KeyboardEvent.code or Mouse4/Mouse5). */
+export function keyLabel(code: string) {
+  if (code === 'Mouse4') return 'Mouse back';
+  if (code === 'Mouse5') return 'Mouse forward';
+  if (code === 'Backquote') return '`';
+  return code
+    .replace(/^Key|^Digit/, '')
+    .replace(/Left$/, '')
+    .replace(/Right$/, ' (right)')
+    .replace(/^Control/, 'Ctrl');
 }
