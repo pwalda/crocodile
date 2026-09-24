@@ -12,7 +12,7 @@ import {
 } from 'lucide-react';
 import type { ProfileView } from '@crocodile/client-core';
 import { getClient, navigate, openModal, useCroc } from '../croc';
-import { EyeMark } from './Logo';
+import { CrocMark } from './Logo';
 import { Avatar, Button, IconButton, UserName, cx } from './ui';
 
 type Tab = 'all' | 'online' | 'requests' | 'blocked';
@@ -80,7 +80,7 @@ export function PeopleView() {
         <AddPeople />
         {rows.length === 0 ? (
           <div className="mt-16 flex flex-col items-center text-center text-muted">
-            <EyeMark size={56} className="text-accent" />
+            <CrocMark size={56} className="text-accent" />
             <p className="mt-3 font-semibold text-text-2">
               {tab === 'requests'
                 ? 'No pending requests.'

@@ -71,7 +71,15 @@ export interface CoordinatorConfig {
   relay: { enabled: boolean; maxUsers: number; publicIp?: string };
   /** Opt-in mailbox holding sealed messages for offline devices. */
   mailbox: MailboxConfig;
+  /**
+   * Where users can get this server's source code (AGPL-3.0 section 13).
+   * Operators running a modified version must point this at their changes.
+   */
+  sourceUrl?: string;
 }
+
+/** Source of the unmodified coordinator (AGPL-3.0). */
+export const SOURCE_URL = 'https://github.com/pwalda/crocodile';
 
 export const defaultConfig: CoordinatorConfig = {
   name: 'Crocodile coordinator',
@@ -167,11 +175,13 @@ export class Coordinator {
       capacity: this.config.capacity,
       peers: this.mesh.peerIds().length,
       time: Date.now(),
+      source: this.config.sourceUrl ?? SOURCE_URL,
     }));
     app.get('/v1/info', async () => ({
       server: this.info,
       stun: this.stunUrls(),
       peers: this.mesh.peers(),
+      source: this.config.sourceUrl ?? SOURCE_URL,
     }));
     app.register(async (scope) => {
       scope.get('/v1/client', { websocket: true }, (socket) => {

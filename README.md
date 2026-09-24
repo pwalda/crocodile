@@ -113,4 +113,14 @@ It needs TCP and UDP on port 7443 (UDP also carries the opt-in relay). See [docs
 
 ## License
 
-Apache-2.0 OR MIT.
+Crocodile is free software.
+
+- The desktop app, coordination server, directory, product page and scripts
+  are licensed under the [GNU Affero General Public License v3.0](LICENSE).
+- The libraries other clients need — `packages/protocol`, `packages/crypto`,
+  `packages/client-core` and `packages/relay` — are licensed under
+  [Apache-2.0](packages/protocol/LICENSE).
+
+"Crocodile" and the logo are trademarks; see [TRADEMARKS.md](TRADEMARKS.md).
+Contributions require signing the [CLA](CLA.md); see
+[CONTRIBUTING.md](CONTRIBUTING.md).

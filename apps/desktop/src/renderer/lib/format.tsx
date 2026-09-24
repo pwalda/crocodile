@@ -23,7 +23,7 @@ export function stampOf(ts: number) {
       : `${day} ${timeOf(ts)}`;
 }
 
-function openLink(url: string) {
+export function openLink(url: string) {
   if (desktop) void desktop.app.openExternal(url);
   else window.open(url, '_blank', 'noopener');
 }
