@@ -1,0 +1,41 @@
+{
+	email {$CROC_EMAIL}
+}
+
+# Product page, directory API and install scripts.
+{$CROC_DOMAIN} {
+	encode zstd gzip
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		X-Content-Type-Options nosniff
+		Referrer-Policy no-referrer
+		Content-Security-Policy "default-src 'self'; img-src 'self' data:; connect-src 'self' https://api.github.com; style-src 'self'; script-src 'self'; font-src 'self'; frame-ancestors 'none'"
+	}
+
+	# Server directory (what the apps query to find coordination servers).
+	handle /v1/* {
+		reverse_proxy directory:7400
+	}
+	handle /health {
+		reverse_proxy directory:7400
+	}
+
+	# curl -fsSL https://{$CROC_DOMAIN}/install.sh | sh
+	@install path /install.sh /install.ps1
+	handle @install {
+		root * /srv/scripts
+		header Content-Type "text/plain; charset=utf-8"
+		file_server
+	}
+
+	handle {
+		root * /srv/site
+		try_files {path} {path}/ /index.html
+		file_server
+	}
+}
+
+# The main coordination server (WebSocket). STUN/relay use UDP 7443 directly.
+coord.{$CROC_DOMAIN} {
+	reverse_proxy coordinator:7443
+}

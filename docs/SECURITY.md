@@ -16,7 +16,10 @@ which voice room, and when people connect. They pass on signalling (SDP and
 ICE candidates), which includes IP addresses. They never receive message or
 voice content, except that a user who turned on the **opt-in relay** sends
 their already end-to-end encrypted media through one; that server then also
-sees packet sizes and timing, for at most an hour at a time.
+sees packet sizes and timing, for at most an hour at a time. Users who turn
+on the **mailbox** let their server hold direct messages for offline friends
+as boxes sealed to the friend's devices; the server sees sender, recipient,
+size and time, keeps them at most 7 days, and cannot read them.
 
 Connections to coordination servers and between servers are encrypted with
 a per-connection hybrid key exchange (X25519 + ML-KEM-768) and AES-256-GCM,
@@ -38,6 +41,7 @@ RFC 6464 audio-level header). It holds the same keys as every other member
 | Harvest-now, decrypt-later         | Record traffic today.                                                                  | Decrypt it with a future quantum computer: every key exchange is hybrid with ML-KEM-768.                                                                                     |
 | Malicious coordination server      | Lie about presence, drop or delay signalling, refuse service, log metadata.            | Forge profiles, spaces, invites, memberships or devices (all signed); substitute a user's key (user ids are key hashes); MITM WebRTC (SDP is identity-signed); read content. |
 | Malicious mesh peer server         | Same as above.                                                                         | Same as above; clients re-verify every record.                                                                                                                               |
+| Mailbox operator (opt-in mailbox)  | See who left how many messages for whom, and when; drop them.                          | Read, alter or forge them (sealed to the recipient's device, signed by the sender).                                                                                          |
 | Relay operator (opt-in relay)      | See relayed packet sizes and timing for up to an hour.                                 | Read or alter content.                                                                                                                                                       |
 | Non-member who learns a session id | Nothing: members only share keys with devices whose membership they verify themselves. |                                                                                                                                                                              |
 | Former member                      | Keep what they already saw.                                                            | Decrypt anything after they left: sender keys are replaced on leave.                                                                                                         |

@@ -185,3 +185,14 @@ body {
 .live-dot {
   animation: live 1.6s ease-in-out infinite;
 }
+
+/* Appear only after a delay, e.g. "not delivered yet" markers. */
+@keyframes delayed-in {
+  to {
+    opacity: 1;
+  }
+}
+.delayed-in {
+  opacity: 0;
+  animation: delayed-in 200ms ease-out 3s forwards;
+}

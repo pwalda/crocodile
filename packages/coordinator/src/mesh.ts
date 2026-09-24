@@ -356,6 +356,12 @@ export class Mesh {
       case 'ping':
         this.send(link, { t: 'pong' });
         return;
+      case 'mail_query':
+        this.hub.mailbox.onQuery(peerId, frame.peer);
+        return;
+      case 'mail_ack':
+        this.hub.mailbox.onRemoteAck(frame.peer, frame.ids);
+        return;
       case 'link_query': {
         const found = this.hub.findLink(frame.code);
         this.send(link, {

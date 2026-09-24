@@ -147,6 +147,7 @@ const defaultCoordSettings: CoordinatorSettings = {
   announce: true,
   relay: false,
   relayMaxUsers: 10,
+  mailbox: false,
 };
 
 function coordSettings(): CoordinatorSettings {

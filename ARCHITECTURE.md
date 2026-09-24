@@ -201,15 +201,37 @@ effort. Everything below is automatic.
 - **Transport.** DTLS-SRTP and SCTP-over-DTLS underneath, as in all WebRTC;
   SDP is identity-signed so nobody can splice into the connection.
 
-## 8. Text history without servers
+## 8. Text history and offline delivery without servers
 
-Messages live only on members' devices (IndexedDB). When a member connects to
-a session, it asks the host and backup (or the DM partner) for everything
-newer than its latest message per channel. Replies are sealed to the
-requester and every message is signature-checked. Messages written while
-nobody else was online are marked "waiting for peers" and are delivered by
-this same sync when a peer appears. This is how DMs reach friends who were
-offline.
+Messages live only on members' devices (encrypted IndexedDB). Three
+mechanisms get them everywhere they belong:
+
+1. **Live.** Group-encrypted to everyone connected to the session.
+2. **Outbox.** Every device keeps a queue of the messages it wrote that no
+   other person has confirmed yet (`client-core/src/outbox.ts`). Whenever a
+   peer who should have them appears — the other side of a DM, or the host
+   or backup of a space — the queue is handed over, sealed to that device,
+   and the receiver answers with an acknowledgement that clears it. This
+   works no matter who was online when, or whose clock is ahead. Messages
+   show a small clock until confirmed. A DM with undelivered messages
+   re-invites the friend as soon as they come online.
+3. **History sync.** On connecting, a member asks the host and backup (or the
+   DM partner) for everything newer than the newest message it did not write
+   offline itself. Replies are sealed to the requester and every message is
+   signature-checked.
+
+**Mailbox (opt-in, DMs).** If the user turns on "Hold my messages on a server
+until they're back", DM messages still unconfirmed after a few seconds are
+also deposited with the coordination server: one hybrid post-quantum box per
+recipient device (and per own other device), sealed to that device's prekey.
+The server keeps them at most `--mailbox-days` (≤ 7), enforces quotas per
+sender and recipient, and pushes them when the device connects to any server
+in the mesh (`mail_query`/`mail_ack` between servers). The recipient confirms
+with `mail.ack`, which deletes the item everywhere. Prekey secrets are deleted
+only two days after the device itself replaced them, so mail sealed to a
+device that was away for weeks can still be opened when it returns. Servers
+operated from the desktop app keep mail only if their operator enables it,
+with small quotas.
 
 ## 9. Client structure
 
@@ -238,10 +260,10 @@ relay runner, WebRTC, capabilities), so the same core serves desktop, web
 
 See [docs/ROADMAP.md](docs/ROADMAP.md). The main ones:
 
-- **Offline delivery is peer-to-peer.** A message reaches someone who was
-  offline only once a member who has it is online at the same time as them
-  (any of their devices counts). Servers never store content, so there is no
-  guaranteed store-and-forward as in Signal or Telegram.
+- **Offline delivery.** Without the opt-in mailbox, a message reaches someone
+  who was offline once a member who has it is online at the same time. The
+  mailbox covers DMs for up to 7 days; spaces rely on their members (usually
+  someone is online).
 - **Sender keys, not MLS.** Ratchets and periodic rekeying give forward
   secrecy and post-compromise healing within 30 minutes; MLS (RFC 9420) would
   make rekeying very large groups cheaper.

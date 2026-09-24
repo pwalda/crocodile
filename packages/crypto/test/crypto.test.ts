@@ -219,6 +219,20 @@ describe('hybrid post-quantum sealed boxes', () => {
     expect(much.keys.map((k) => k.id)).not.toContain(first.keys[0]!.id);
   });
 
+  it("keeps an offline device's prekey until the grace period after it comes back", () => {
+    const t0 = 1_000_000_000_000;
+    const first = rotatePrekeys([], t0);
+    const id = first.keys[0]!.id;
+    // Offline for 30 days: on return the old key is replaced but kept for mail.
+    const back = rotatePrekeys(first.keys, t0 + 30 * 24 * 3600_000);
+    expect(back.rotated).toBe(true);
+    expect(back.keys.map((k) => k.id)).toContain(id);
+    const soon = rotatePrekeys(back.keys, t0 + 31 * 24 * 3600_000);
+    expect(soon.keys.map((k) => k.id)).toContain(id);
+    const after = rotatePrekeys(back.keys, t0 + 33 * 24 * 3600_000);
+    expect(after.keys.map((k) => k.id)).not.toContain(id);
+  });
+
   it('links devices: only the new device opens, and the security codes agree', () => {
     const account = createIdentity();
     const temp = createIdentity();

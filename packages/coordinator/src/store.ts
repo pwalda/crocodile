@@ -2,6 +2,21 @@ import { mkdirSync, readFileSync, renameSync, writeFileSync, existsSync } from '
 import { dirname } from 'node:path';
 import type { SignedRecord } from '@crocodile/protocol';
 
+/** A sealed box held for an offline device (opt-in mailbox). */
+export interface StoredMail {
+  id: string;
+  /** Recipient peer id. */
+  to: string;
+  /** Recipient user id (for per-recipient quotas). */
+  toUser: string;
+  /** Sender user id. */
+  from: string;
+  /** SealedBox JSON; opaque to the server. */
+  box: string;
+  createdAt: number;
+  expiresAt: number;
+}
+
 export interface StoredRecord {
   seq: number;
   record: SignedRecord;
@@ -24,6 +39,13 @@ export interface Store {
   findByTerm(term: string, limit: number): SignedRecord[];
   getMeta(key: string): string | undefined;
   setMeta(key: string, value: string): void;
+  mailPut(item: StoredMail): void;
+  /** Unexpired items for a recipient device, oldest first. */
+  mailFor(peer: string, now: number, limit: number): StoredMail[];
+  /** Deletes the given items addressed to `peer`; returns how many. */
+  mailDelete(peer: string, ids: string[]): number;
+  mailExpire(now: number): number;
+  mailCount(filter: { toUser?: string; from?: string }): number;
   close(): void;
 }
 
@@ -53,6 +75,7 @@ export class MemoryStore implements Store {
   private bySeq = new Map<number, string>();
   private terms = new Map<string, Set<string>>();
   private meta = new Map<string, string>();
+  private mail = new Map<string, StoredMail>();
   private seq = 0;
   private dirty = false;
   private timer: ReturnType<typeof setInterval> | undefined;
@@ -63,7 +86,9 @@ export class MemoryStore implements Store {
       const data = JSON.parse(readFileSync(snapshotPath, 'utf8')) as {
         records: StoredRecord[];
         meta: [string, string][];
+        mail?: StoredMail[];
       };
+      for (const m of data.mail ?? []) this.mail.set(m.id, m);
       for (const r of data.records.sort((a, b) => a.seq - b.seq)) this.insert(r.record, r.seq);
       this.meta = new Map(data.meta);
     }
@@ -136,6 +161,44 @@ export class MemoryStore implements Store {
     this.dirty = true;
   }
 
+  mailPut(item: StoredMail) {
+    this.mail.set(item.id, item);
+    this.dirty = true;
+  }
+
+  mailFor(peer: string, now: number, limit: number) {
+    return [...this.mail.values()]
+      .filter((m) => m.to === peer && m.expiresAt > now)
+      .sort((a, b) => a.createdAt - b.createdAt)
+      .slice(0, limit);
+  }
+
+  mailDelete(peer: string, ids: string[]) {
+    let n = 0;
+    for (const id of ids) {
+      if (this.mail.get(id)?.to === peer && this.mail.delete(id)) n++;
+    }
+    if (n) this.dirty = true;
+    return n;
+  }
+
+  mailExpire(now: number) {
+    let n = 0;
+    for (const [id, m] of this.mail) if (m.expiresAt <= now && this.mail.delete(id)) n++;
+    if (n) this.dirty = true;
+    return n;
+  }
+
+  mailCount(filter: { toUser?: string; from?: string }) {
+    let n = 0;
+    for (const m of this.mail.values()) {
+      if (filter.toUser && m.toUser !== filter.toUser) continue;
+      if (filter.from && m.from !== filter.from) continue;
+      n++;
+    }
+    return n;
+  }
+
   flush() {
     if (!this.snapshotPath || !this.dirty) return;
     this.dirty = false;
@@ -143,7 +206,11 @@ export class MemoryStore implements Store {
     const tmp = `${this.snapshotPath}.tmp`;
     writeFileSync(
       tmp,
-      JSON.stringify({ records: [...this.records.values()], meta: [...this.meta] }),
+      JSON.stringify({
+        records: [...this.records.values()],
+        meta: [...this.meta],
+        mail: [...this.mail.values()],
+      }),
     );
     renameSync(tmp, this.snapshotPath);
   }
@@ -158,7 +225,7 @@ type Row = Record<string, unknown>;
 interface SqliteDb {
   exec(sql: string): void;
   prepare(sql: string): {
-    run(...args: unknown[]): { lastInsertRowid: number | bigint };
+    run(...args: unknown[]): { lastInsertRowid: number | bigint; changes?: number | bigint };
     get(...args: unknown[]): Row | undefined;
     all(...args: unknown[]): Row[];
   };
@@ -195,6 +262,19 @@ export class SqliteStore implements Store {
       );
       CREATE INDEX IF NOT EXISTS terms_by_key ON terms(key);
       CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS mail (
+        id TEXT PRIMARY KEY,
+        recipient TEXT NOT NULL,
+        recipient_user TEXT NOT NULL,
+        sender TEXT NOT NULL,
+        box TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        expires_at INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS mail_by_recipient ON mail(recipient, created_at);
+      CREATE INDEX IF NOT EXISTS mail_by_user ON mail(recipient_user);
+      CREATE INDEX IF NOT EXISTS mail_by_sender ON mail(sender);
+      CREATE INDEX IF NOT EXISTS mail_by_expiry ON mail(expires_at);
     `);
     this.stmts = {
       get: this.db.prepare('SELECT json FROM records WHERE key = ?'),
@@ -216,6 +296,20 @@ export class SqliteStore implements Store {
       setMeta: this.db.prepare(
         'INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value',
       ),
+      mailPut: this.db.prepare(
+        'INSERT OR REPLACE INTO mail (id, recipient, recipient_user, sender, box, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
+      ),
+      mailFor: this.db.prepare(
+        'SELECT * FROM mail WHERE recipient = ? AND expires_at > ? ORDER BY created_at LIMIT ?',
+      ),
+      mailDelete: this.db.prepare('DELETE FROM mail WHERE id = ? AND recipient = ?'),
+      mailExpire: this.db.prepare('DELETE FROM mail WHERE expires_at <= ?'),
+      mailCountUser: this.db.prepare('SELECT COUNT(*) AS n FROM mail WHERE recipient_user = ?'),
+      mailCountFrom: this.db.prepare('SELECT COUNT(*) AS n FROM mail WHERE sender = ?'),
+      mailCountBoth: this.db.prepare(
+        'SELECT COUNT(*) AS n FROM mail WHERE recipient_user = ? AND sender = ?',
+      ),
+      mailCountAll: this.db.prepare('SELECT COUNT(*) AS n FROM mail'),
     };
     this.seq = Number(this.stmts.maxSeq.get()!.s);
   }
@@ -273,6 +367,44 @@ export class SqliteStore implements Store {
 
   setMeta(key: string, value: string) {
     this.stmts.setMeta.run(key, value);
+  }
+
+  mailPut(m: StoredMail) {
+    this.stmts.mailPut.run(m.id, m.to, m.toUser, m.from, m.box, m.createdAt, m.expiresAt);
+  }
+
+  mailFor(peer: string, now: number, limit: number): StoredMail[] {
+    return this.stmts.mailFor.all(peer, now, limit).map((r) => ({
+      id: r.id as string,
+      to: r.recipient as string,
+      toUser: r.recipient_user as string,
+      from: r.sender as string,
+      box: r.box as string,
+      createdAt: Number(r.created_at),
+      expiresAt: Number(r.expires_at),
+    }));
+  }
+
+  mailDelete(peer: string, ids: string[]) {
+    let n = 0;
+    for (const id of ids) n += Number(this.stmts.mailDelete.run(id, peer).changes ?? 0);
+    return n;
+  }
+
+  mailExpire(now: number) {
+    return Number(this.stmts.mailExpire.run(now).changes ?? 0);
+  }
+
+  mailCount(filter: { toUser?: string; from?: string }) {
+    const row =
+      filter.toUser && filter.from
+        ? this.stmts.mailCountBoth.get(filter.toUser, filter.from)
+        : filter.toUser
+          ? this.stmts.mailCountUser.get(filter.toUser)
+          : filter.from
+            ? this.stmts.mailCountFrom.get(filter.from)
+            : this.stmts.mailCountAll.get();
+    return Number(row?.n ?? 0);
   }
 
   close() {

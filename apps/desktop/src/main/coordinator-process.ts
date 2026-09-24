@@ -59,6 +59,14 @@ port.on('message', async ({ data: msg }) => {
         extraStun: [],
         capacity: 500,
         relay: { enabled: s.relay, maxUsers: Math.max(1, Math.min(100, s.relayMaxUsers || 10)) },
+        // Small quotas: a home computer is not a mail server.
+        mailbox: {
+          enabled: !!s.mailbox,
+          ttlMs: 3 * 24 * 3600_000,
+          maxPerRecipient: 200,
+          maxPerSender: 500,
+          maxTotal: 20_000,
+        },
         logLevel: 'warn',
       });
       await coordinator.start();

@@ -67,6 +67,7 @@ export async function connectUser(
     'replaced',
     'session_closed',
     'relay_expired',
+    'mail',
   ] as const) {
     conn.on(ev, (d) => events.push({ ev, d }));
   }

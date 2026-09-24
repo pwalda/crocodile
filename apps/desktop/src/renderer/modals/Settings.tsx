@@ -793,6 +793,18 @@ function ConnectionTab() {
         </Card>
       )}
 
+      <h3 className="mb-1 mt-8 text-lg font-bold">When someone is offline</h3>
+      <Row
+        label="Hold my messages on a server until they're back"
+        hint="Your messages always wait on your device and go out peer-to-peer when you and the other person are online at the same time. With this on, a direct message can also wait on a coordination server, sealed so only the recipient's devices can open it, for up to a few days. The server sees who wrote to whom and when, never what."
+      >
+        <Toggle
+          checked={settings.useMailbox}
+          onChange={(v) => void client.updateSettings({ useMailbox: v })}
+          label="Hold my messages on a server"
+        />
+      </Row>
+
       <h3 className="mb-1 mt-8 text-lg font-bold">When a direct connection isn't possible</h3>
       <Row
         label="Relay through a coordination server"
@@ -985,6 +997,16 @@ function HostTab() {
           />
         </Row>
       )}
+      <Row
+        label="Keep mail for offline people"
+        hint="Holds sealed direct messages for people who opted in, until the recipient comes online (at most 3 days). Uses a little disk space; content is unreadable to you."
+      >
+        <Toggle
+          checked={settings.mailbox}
+          onChange={(v) => void update({ mailbox: v })}
+          label="Keep mail for offline people"
+        />
+      </Row>
     </>
   );
 }

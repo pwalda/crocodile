@@ -119,6 +119,10 @@ export const SealedPayload = z.discriminatedUnion('type', [
     done: z.boolean(),
   }),
   z.object({ type: z.literal('message'), message: ChatMessage }),
+  /** Outbox delivery confirmations: the sender may forget these message ids. */
+  z.object({ type: z.literal('ack'), ids: z.array(z.string().max(40)).max(500) }),
+  /** Messages delivered through a server mailbox while the recipient was offline. */
+  z.object({ type: z.literal('mail'), messages: z.array(ChatMessage).max(50) }),
 ]);
 export type SealedPayload = z.infer<typeof SealedPayload>;
 
