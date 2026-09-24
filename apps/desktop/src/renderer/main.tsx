@@ -15,4 +15,5 @@ bootClient()
     );
   });
 
-if (typeof Notification !== 'undefined' && Notification.permission === 'default') void Notification.requestPermission();
+if (typeof Notification !== 'undefined' && Notification.permission === 'default')
+  void Notification.requestPermission();

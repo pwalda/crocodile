@@ -34,7 +34,8 @@ export class FakeRelayNetwork {
   }
 
   transportFactory(): TransportFactory {
-    return (opts) => new FakeTransport(this, `${opts.sessionId}|${opts.epoch}|${opts.host}`, opts.identity.userId);
+    return (opts) =>
+      new FakeTransport(this, `${opts.sessionId}|${opts.epoch}|${opts.host}`, opts.identity.userId);
   }
 
   find(key: string) {
@@ -63,8 +64,15 @@ class FakeRelay {
     if (!this.members().includes(t.userId)) return false;
     const others = [...this.peers.values()];
     this.peers.set(t.userId, { t, state: { userId: t.userId, muted: false, deafened: false } });
-    t.deliver({ t: 'hello', you: t.userId, host: this.host, peers: others.map((o) => o.state), slots: 0 });
-    for (const o of others) o.t.deliver({ t: 'peer_join', peer: { userId: t.userId, muted: false, deafened: false } });
+    t.deliver({
+      t: 'hello',
+      you: t.userId,
+      host: this.host,
+      peers: others.map((o) => o.state),
+      slots: 0,
+    });
+    for (const o of others)
+      o.t.deliver({ t: 'peer_join', peer: { userId: t.userId, muted: false, deafened: false } });
     return true;
   }
 
@@ -75,7 +83,8 @@ class FakeRelay {
 
   route(from: string, msg: { t: string; to?: string; d?: unknown }) {
     if (msg.t === 'bcast') {
-      for (const [id, o] of this.peers) if (id !== from) o.t.deliver({ t: 'msg', from, direct: false, d: msg.d });
+      for (const [id, o] of this.peers)
+        if (id !== from) o.t.deliver({ t: 'msg', from, direct: false, d: msg.d });
     } else if (msg.t === 'direct' && msg.to) {
       this.peers.get(msg.to)?.t.deliver({ t: 'msg', from, direct: true, d: msg.d });
     }

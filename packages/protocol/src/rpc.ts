@@ -92,7 +92,8 @@ export interface RpcEvent {
   d: unknown;
 }
 
-export type ServerFrame = ServerHello | AuthOk | RpcResponse | RpcEvent | { t: 'error'; err: RpcError };
+export type ServerFrame =
+  ServerHello | AuthOk | RpcResponse | RpcEvent | { t: 'error'; err: RpcError };
 export type ClientFrame = ClientAuth | RpcRequest;
 
 // ---------------------------------------------------------------------------
@@ -143,7 +144,10 @@ const userId = z.string().regex(/^[a-z2-7]{8,64}$/);
 export const RpcParams = {
   'records.put': z.object({ record: SignedRecordEnvelope }),
   'records.get': z.object({ keys: z.array(z.string().max(200)).max(500) }),
-  'records.list': z.object({ prefix: z.string().min(3).max(200), limit: z.number().int().max(5000).optional() }),
+  'records.list': z.object({
+    prefix: z.string().min(3).max(200),
+    limit: z.number().int().max(5000).optional(),
+  }),
   'records.subscribe': z.object({ prefixes: z.array(z.string().min(3).max(200)).max(2000) }),
   'users.search': z.object({ query: z.string().min(1).max(64) }),
   'friends.incoming': z.object({}),

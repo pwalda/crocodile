@@ -7,7 +7,10 @@ export interface Logger {
   error(msg: string, extra?: Record<string, unknown>): void;
 }
 
-export function consoleLogger(name: string, level: 'debug' | 'info' | 'warn' | 'error' | 'silent' = 'info'): Logger {
+export function consoleLogger(
+  name: string,
+  level: 'debug' | 'info' | 'warn' | 'error' | 'silent' = 'info',
+): Logger {
   const order = { debug: 0, info: 1, warn: 2, error: 3, silent: 4 };
   const min = order[level];
   const out = (lvl: keyof typeof order, msg: string, extra?: Record<string, unknown>) => {
@@ -60,7 +63,15 @@ export function toWsUrl(httpUrl: string, path: string): string {
 
 export class RpcFailure extends Error {
   constructor(
-    readonly code: 'bad_request' | 'unauthorized' | 'forbidden' | 'not_found' | 'conflict' | 'rate_limited' | 'unavailable' | 'internal',
+    readonly code:
+      | 'bad_request'
+      | 'unauthorized'
+      | 'forbidden'
+      | 'not_found'
+      | 'conflict'
+      | 'rate_limited'
+      | 'unavailable'
+      | 'internal',
     message: string,
   ) {
     super(message);

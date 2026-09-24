@@ -17,7 +17,11 @@ export async function startCoordinator(overrides: Partial<CoordinatorConfig> = {
   return c.start();
 }
 
-export async function waitFor<T>(fn: () => T | undefined | null | false, timeoutMs = 5000, label = 'condition'): Promise<T> {
+export async function waitFor<T>(
+  fn: () => T | undefined | null | false,
+  timeoutMs = 5000,
+  label = 'condition',
+): Promise<T> {
   const start = Date.now();
   for (;;) {
     const v = fn();
@@ -33,7 +37,11 @@ export interface TestUser {
   events: { ev: string; d: unknown }[];
 }
 
-export async function connectUser(server: Coordinator, identity = createIdentity(), username = `user${randomId(2)}`): Promise<TestUser> {
+export async function connectUser(
+  server: Coordinator,
+  identity = createIdentity(),
+  username = `user${randomId(2)}`,
+): Promise<TestUser> {
   const conn = await CoordinatorConnection.connect({
     url: server.url,
     identity,
@@ -41,7 +49,15 @@ export async function connectUser(server: Coordinator, identity = createIdentity
     version: 'test',
   });
   const events: TestUser['events'] = [];
-  for (const ev of ['record', 'presence', 'session', 'signal', 'voice', 'replaced', 'session_closed'] as const) {
+  for (const ev of [
+    'record',
+    'presence',
+    'session',
+    'signal',
+    'voice',
+    'replaced',
+    'session_closed',
+  ] as const) {
     conn.on(ev, (d) => events.push({ ev, d }));
   }
   const profile = signRecord(identity, 'profile', recordKey.profile(identity.userId), {
@@ -70,23 +86,37 @@ export async function createSpace(user: TestUser, name = 'Swamp') {
     ],
   });
   expectAccepted(await user.conn.request('records.put', { record: space }));
-  const member = signRecord(user.identity, 'member', recordKey.member(spaceId, user.identity.userId), {
-    spaceId,
-    userId: user.identity.userId,
-  });
+  const member = signRecord(
+    user.identity,
+    'member',
+    recordKey.member(spaceId, user.identity.userId),
+    {
+      spaceId,
+      userId: user.identity.userId,
+    },
+  );
   expectAccepted(await user.conn.request('records.put', { record: member }));
   const code = randomId(6);
-  const invite = signRecord(user.identity, 'invite', recordKey.invite(code), { spaceId, code, expiresAt: null });
+  const invite = signRecord(user.identity, 'invite', recordKey.invite(code), {
+    spaceId,
+    code,
+    expiresAt: null,
+  });
   expectAccepted(await user.conn.request('records.put', { record: invite }));
   return { spaceId, textChannel: text, voiceChannel: voice, code, space };
 }
 
 export async function joinSpace(user: TestUser, spaceId: string, code: string) {
-  const member = signRecord(user.identity, 'member', recordKey.member(spaceId, user.identity.userId), {
-    spaceId,
-    userId: user.identity.userId,
-    inviteCode: code,
-  });
+  const member = signRecord(
+    user.identity,
+    'member',
+    recordKey.member(spaceId, user.identity.userId),
+    {
+      spaceId,
+      userId: user.identity.userId,
+      inviteCode: code,
+    },
+  );
   expectAccepted(await user.conn.request('records.put', { record: member }));
 }
 
@@ -104,7 +134,9 @@ export const caps = (overrides: Partial<HostCaps> = {}): HostCaps => ({
 });
 
 export function lastSession(user: TestUser, sessionId: string) {
-  const ev = [...user.events].reverse().find((e) => e.ev === 'session' && (e.d as { state: { id: string } }).state.id === sessionId);
+  const ev = [...user.events]
+    .reverse()
+    .find((e) => e.ev === 'session' && (e.d as { state: { id: string } }).state.id === sessionId);
   return (ev?.d as { state: import('@crocodile/protocol').SessionState } | undefined)?.state;
 }
 

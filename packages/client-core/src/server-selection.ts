@@ -26,7 +26,9 @@ export async function fetchServerList(
   await Promise.all(
     directories.map(async (base) => {
       try {
-        const res = await fetchImpl(base.replace(/\/$/, '') + DIRECTORY_PATHS.list, { signal: AbortSignal.timeout(6000) });
+        const res = await fetchImpl(base.replace(/\/$/, '') + DIRECTORY_PATHS.list, {
+          signal: AbortSignal.timeout(6000),
+        });
         if (!res.ok) return;
         const listing = (await res.json()) as DirectoryListing;
         any = true;
@@ -48,7 +50,11 @@ export async function fetchServerList(
 }
 
 /** Median HTTP round-trip to a server's /health, or Infinity if unreachable. */
-export async function probeLatency(url: string, fetchImpl: typeof fetch = fetch, samples = 3): Promise<number> {
+export async function probeLatency(
+  url: string,
+  fetchImpl: typeof fetch = fetch,
+  samples = 3,
+): Promise<number> {
   const times: number[] = [];
   for (let i = 0; i < samples; i++) {
     const start = performance.now();
@@ -78,7 +84,11 @@ export async function rankServers(
   fetchImpl: typeof fetch = fetch,
 ): Promise<RankedServer[]> {
   const probed = await Promise.all(
-    servers.map(async (info) => ({ info, rttMs: await probeLatency(info.url, fetchImpl), load: loads.get(info.id) ?? 0 })),
+    servers.map(async (info) => ({
+      info,
+      rttMs: await probeLatency(info.url, fetchImpl),
+      load: loads.get(info.id) ?? 0,
+    })),
   );
   const score = (s: RankedServer) => s.rttMs * (s.load > 0.9 ? 3 : s.load > 0.75 ? 1.5 : 1);
   return probed.filter((s) => Number.isFinite(s.rttMs)).sort((a, b) => score(a) - score(b));

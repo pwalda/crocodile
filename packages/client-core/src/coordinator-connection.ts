@@ -51,7 +51,14 @@ function wsUrl(httpUrl: string) {
  */
 export class CoordinatorConnection extends Emitter<ConnectionEvents> {
   private nextId = 1;
-  private pending = new Map<number, { resolve: (v: unknown) => void; reject: (e: Error) => void; timer: ReturnType<typeof setTimeout> }>();
+  private pending = new Map<
+    number,
+    {
+      resolve: (v: unknown) => void;
+      reject: (e: Error) => void;
+      timer: ReturnType<typeof setTimeout>;
+    }
+  >();
   private closed = false;
 
   private constructor(
@@ -79,7 +86,10 @@ export class CoordinatorConnection extends Emitter<ConnectionEvents> {
         }
         reject(err);
       };
-      const timer = setTimeout(() => fail(new Error(`timed out connecting to ${opts.url}`)), opts.timeoutMs ?? 10_000);
+      const timer = setTimeout(
+        () => fail(new Error(`timed out connecting to ${opts.url}`)),
+        opts.timeoutMs ?? 10_000,
+      );
       ws.onerror = () => fail(new Error(`cannot reach ${opts.url}`));
       ws.onclose = (ev) => fail(new Error(`connection closed: ${ev.reason || ev.code}`));
       ws.onmessage = (ev) => {
@@ -105,7 +115,10 @@ export class CoordinatorConnection extends Emitter<ConnectionEvents> {
             JSON.stringify({
               t: 'auth',
               key: opts.identity.publicKey,
-              sig: sign(opts.identity, SIG_DOMAIN.auth, { challenge: frame.challenge, server: frame.server.id }),
+              sig: sign(opts.identity, SIG_DOMAIN.auth, {
+                challenge: frame.challenge,
+                server: frame.server.id,
+              }),
               client: { platform: opts.platform, version: opts.version },
             }),
           );
@@ -124,7 +137,11 @@ export class CoordinatorConnection extends Emitter<ConnectionEvents> {
     return !this.closed;
   }
 
-  request<M extends RpcMethod>(method: M, params: RpcParamsOf<M>, timeoutMs = 15_000): Promise<RpcMethods[M]> {
+  request<M extends RpcMethod>(
+    method: M,
+    params: RpcParamsOf<M>,
+    timeoutMs = 15_000,
+  ): Promise<RpcMethods[M]> {
     if (this.closed) return Promise.reject(new RpcCallError('unavailable', 'not connected'));
     const id = this.nextId++;
     return new Promise((resolve, reject) => {

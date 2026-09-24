@@ -17,7 +17,11 @@ const appDir = join(import.meta.dirname, '../../apps/desktop');
 const require = createRequire(join(appDir, 'package.json'));
 const electronPath = require('electron') as unknown as string;
 
-const directory = await new Directory({ host: '127.0.0.1', port: 0, allowPrivateUrls: true }).start();
+const directory = await new Directory({
+  host: '127.0.0.1',
+  port: 0,
+  allowPrivateUrls: true,
+}).start();
 const coordinator = await new Coordinator({
   name: 'Local test coordinator',
   host: '127.0.0.1',
@@ -35,7 +39,12 @@ async function launch(name: string): Promise<{ app: ElectronApplication; page: P
   const packaged = process.env.CROC_APP_EXEC;
   const app = await electron.launch({
     executablePath: packaged ?? electronPath,
-    args: [...(packaged ? [] : [appDir]), '--no-sandbox', '--use-fake-ui-for-media-stream', '--use-fake-device-for-media-stream'],
+    args: [
+      ...(packaged ? [] : [appDir]),
+      '--no-sandbox',
+      '--use-fake-ui-for-media-stream',
+      '--use-fake-device-for-media-stream',
+    ],
     env: {
       ...process.env,
       CROC_USER_DATA: mkdtempSync(join(tmpdir(), `croc-${name}-`)),
@@ -69,7 +78,9 @@ await shot(a.page, '02-recovery-key');
 await a.page.getByText('I saved my recovery key').click();
 await a.page.getByRole('button', { name: 'Start chatting' }).click();
 await a.page.getByText('Add Friend').waitFor();
-await a.page.waitForFunction(() => document.body.innerText.includes('#'), undefined, { timeout: 15_000 });
+await a.page.waitForFunction(() => document.body.innerText.includes('#'), undefined, {
+  timeout: 15_000,
+});
 await shot(a.page, '03-home');
 
 // Create a space.
@@ -83,8 +94,14 @@ await shot(a.page, '04-space');
 // Invite.
 await a.page.getByText('The Swamp').first().click();
 await a.page.getByText('Invite people').click();
-await a.page.waitForFunction(() => /croc:\/\/join\/[a-z2-7]+/.test(document.body.innerText), undefined, { timeout: 15_000 });
-const inviteText = await a.page.evaluate(() => document.body.innerText.match(/croc:\/\/join\/[a-z2-7]+/)![0]);
+await a.page.waitForFunction(
+  () => /croc:\/\/join\/[a-z2-7]+/.test(document.body.innerText),
+  undefined,
+  { timeout: 15_000 },
+);
+const inviteText = await a.page.evaluate(
+  () => document.body.innerText.match(/croc:\/\/join\/[a-z2-7]+/)![0],
+);
 await shot(a.page, '05-invite');
 await a.page.keyboard.press('Escape');
 
@@ -100,11 +117,17 @@ await b.page.getByRole('button', { name: 'Join space' }).click();
 await b.page.getByText('Welcome to #general!').waitFor({ timeout: 15_000 });
 
 // Chat both ways.
-await a.page.waitForFunction(() => /2 peers? online|1 peer online/.test(document.body.innerText), undefined, { timeout: 20_000 });
+await a.page.waitForFunction(
+  () => /2 peers? online|1 peer online/.test(document.body.innerText),
+  undefined,
+  { timeout: 20_000 },
+);
 await a.page.getByPlaceholder('Message #general').fill('Hi Bob! This never touches a server 🐊');
 await a.page.keyboard.press('Enter');
 await b.page.getByText('This never touches a server').waitFor({ timeout: 15_000 });
-await b.page.getByPlaceholder('Message #general').fill('Wow, **end-to-end** and peer-to-peer. `nice`');
+await b.page
+  .getByPlaceholder('Message #general')
+  .fill('Wow, **end-to-end** and peer-to-peer. `nice`');
 await b.page.keyboard.press('Enter');
 await a.page.getByText('peer-to-peer.').waitFor({ timeout: 15_000 });
 await shot(a.page, '06-chat');
@@ -112,8 +135,12 @@ await shot(a.page, '06-chat');
 // Voice.
 await a.page.getByText('General', { exact: true }).click();
 await b.page.getByText('General', { exact: true }).click();
-await a.page.waitForFunction(() => document.body.innerText.includes('Voice Connected'), undefined, { timeout: 30_000 });
-await b.page.waitForFunction(() => document.body.innerText.includes('Voice Connected'), undefined, { timeout: 30_000 });
+await a.page.waitForFunction(() => document.body.innerText.includes('Voice Connected'), undefined, {
+  timeout: 30_000,
+});
+await b.page.waitForFunction(() => document.body.innerText.includes('Voice Connected'), undefined, {
+  timeout: 30_000,
+});
 await a.page.waitForTimeout(2000);
 await shot(a.page, '07-voice');
 await shot(b.page, '08-voice-bob');

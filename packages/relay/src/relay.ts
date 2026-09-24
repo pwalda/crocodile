@@ -166,7 +166,11 @@ export class HostRelay {
         type: 'candidate',
         epoch: this.opts.epoch,
         dir: 'toClient',
-        candidate: { candidate: c.candidate, sdpMid: c.sdpMid ?? null, sdpMLineIndex: c.sdpMLineIndex ?? null },
+        candidate: {
+          candidate: c.candidate,
+          sdpMid: c.sdpMid ?? null,
+          sdpMLineIndex: c.sdpMLineIndex ?? null,
+        },
       });
     });
     pc.connectionStateChange.subscribe((state) => {
@@ -186,7 +190,8 @@ export class HostRelay {
       dc.stateChanged.subscribe((s) => {
         if (s === 'open') onOpen();
         // A closed control channel means the member hung up.
-        else if (s === 'closed' && this.peers.get(from) === peer) this.removePeer(from, 'channel closed');
+        else if (s === 'closed' && this.peers.get(from) === peer)
+          this.removePeer(from, 'channel closed');
       });
       dc.onMessage.subscribe((raw) => this.onDataMessage(peer, raw));
     });
@@ -214,9 +219,13 @@ export class HostRelay {
       const answer = await pc.createAnswer();
       // Send the answer before gathering finishes; candidates trickle after it.
       // (Gathering can stall for seconds when a STUN server is unreachable.)
-      this.opts.sendSignal(from, signSdp(identity, 'answer', { sessionId, epoch: this.opts.epoch, to: from }, answer.sdp));
+      this.opts.sendSignal(
+        from,
+        signSdp(identity, 'answer', { sessionId, epoch: this.opts.epoch, to: from }, answer.sdp),
+      );
       await pc.setLocalDescription(answer);
-      for (const c of peer.pendingCandidates.splice(0)) await pc.addIceCandidate(c as never).catch(() => {});
+      for (const c of peer.pendingCandidates.splice(0))
+        await pc.addIceCandidate(c as never).catch(() => {});
     } catch (err) {
       this.opts.log?.warn('failed to answer offer', { from, err: String(err) });
       this.removePeer(from, 'error');
@@ -257,7 +266,8 @@ export class HostRelay {
       }
       case 'direct': {
         const target = this.peers.get(msg.to);
-        if (target?.ready) this.send(target, { t: 'msg', from: peer.userId, direct: true, d: msg.d });
+        if (target?.ready)
+          this.send(target, { t: 'msg', from: peer.userId, direct: true, d: msg.d });
         return;
       }
       case 'ping':
@@ -266,7 +276,8 @@ export class HostRelay {
       case 'state': {
         peer.state = { userId: peer.userId, muted: msg.muted, deafened: msg.deafened };
         if (msg.muted) this.lastLoud.delete(peer.userId);
-        for (const p of this.peers.values()) if (p.ready) this.send(p, { t: 'peer_state', peer: peer.state });
+        for (const p of this.peers.values())
+          if (p.ready) this.send(p, { t: 'peer_state', peer: peer.state });
         return;
       }
     }
@@ -302,7 +313,12 @@ export class HostRelay {
       if (!sender) continue;
       raw ??= rtp.serialize();
       const pkt = RtpPacket.deSerialize(raw);
-      const { seq, ts, marker } = listener.rewriters[slot]!.rewrite(speaker.userId, pkt.header.sequenceNumber, pkt.header.timestamp, now);
+      const { seq, ts, marker } = listener.rewriters[slot]!.rewrite(
+        speaker.userId,
+        pkt.header.sequenceNumber,
+        pkt.header.timestamp,
+        now,
+      );
       pkt.header.sequenceNumber = seq;
       pkt.header.timestamp = ts;
       pkt.header.marker = pkt.header.marker || marker;
@@ -318,7 +334,8 @@ export class HostRelay {
       if (now - t < 400) current.add(id);
       else if (now - t > 60_000) this.lastLoud.delete(id);
     }
-    const same = current.size === this.speaking.size && [...current].every((id) => this.speaking.has(id));
+    const same =
+      current.size === this.speaking.size && [...current].every((id) => this.speaking.has(id));
     if (same) return;
     this.speaking = current;
     const msg: RelayToClient = { t: 'speaking', users: [...current] };
@@ -361,6 +378,8 @@ export class HostRelay {
 }
 
 function parseExtId(sdp: string, uri: string): number | undefined {
-  const m = sdp.match(new RegExp(`a=extmap:(\\d+)(?:/\\w+)? ${uri.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`));
+  const m = sdp.match(
+    new RegExp(`a=extmap:(\\d+)(?:/\\w+)? ${uri.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`),
+  );
   return m ? Number(m[1]) : undefined;
 }

@@ -1,4 +1,9 @@
-import { useEffect, type ButtonHTMLAttributes, type InputHTMLAttributes, type ReactNode } from 'react';
+import {
+  useEffect,
+  type ButtonHTMLAttributes,
+  type InputHTMLAttributes,
+  type ReactNode,
+} from 'react';
 import { X } from 'lucide-react';
 import { colorFor, initials } from '../lib/format';
 import { useCroc } from '../croc';
@@ -10,7 +15,11 @@ export function cx(...parts: (string | false | null | undefined)[]) {
 
 type Variant = 'primary' | 'secondary' | 'danger' | 'ghost';
 
-export function Button({ variant = 'primary', className, ...props }: ButtonHTMLAttributes<HTMLButtonElement> & { variant?: Variant }) {
+export function Button({
+  variant = 'primary',
+  className,
+  ...props
+}: ButtonHTMLAttributes<HTMLButtonElement> & { variant?: Variant }) {
   const styles: Record<Variant, string> = {
     primary: 'bg-croc text-white hover:bg-croc-dark',
     secondary: 'bg-active text-text hover:bg-[#4e5058]',
@@ -42,7 +51,9 @@ export function Input({ className, ...props }: InputHTMLAttributes<HTMLInputElem
 }
 
 export function Label({ children }: { children: ReactNode }) {
-  return <div className="mb-2 text-xs font-bold uppercase tracking-wide text-muted">{children}</div>;
+  return (
+    <div className="mb-2 text-xs font-bold uppercase tracking-wide text-muted">{children}</div>
+  );
 }
 
 export function Modal({
@@ -66,12 +77,22 @@ export function Modal({
     return () => window.removeEventListener('keydown', onKey);
   }, [onClose]);
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70" onMouseDown={onClose}>
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/70"
+      onMouseDown={onClose}
+    >
       <div
-        className={cx('pop-in relative max-h-[90vh] overflow-hidden rounded-lg bg-main shadow-2xl', wide ? 'w-[640px]' : 'w-[440px]')}
+        className={cx(
+          'pop-in relative max-h-[90vh] overflow-hidden rounded-lg bg-main shadow-2xl',
+          wide ? 'w-[640px]' : 'w-[440px]',
+        )}
         onMouseDown={(e) => e.stopPropagation()}
       >
-        <button className="absolute right-3 top-3 text-muted hover:text-text" onClick={onClose} aria-label="Close">
+        <button
+          className="absolute right-3 top-3 text-muted hover:text-text"
+          onClick={onClose}
+          aria-label="Close"
+        >
           <X size={22} />
         </button>
         {title && (
@@ -94,7 +115,15 @@ const STATUS_COLOR: Record<PresenceStatus, string> = {
   offline: 'bg-faint',
 };
 
-export function StatusDot({ status, className, size = 14 }: { status: PresenceStatus; className?: string; size?: number }) {
+export function StatusDot({
+  status,
+  className,
+  size = 14,
+}: {
+  status: PresenceStatus;
+  className?: string;
+  size?: number;
+}) {
   return (
     <span
       className={cx('block rounded-full border-side', STATUS_COLOR[status], className)}
@@ -117,19 +146,46 @@ export function Avatar({
   className?: string;
 }) {
   const profile = useCroc((s) => s.profiles[userId]);
-  const presence = useCroc((s) => (userId === s.me?.userId ? (s.link === 'connected' ? (s.settings.status === 'invisible' ? 'offline' : s.settings.status) : 'offline') : (s.presence[userId] ?? 'offline')));
+  const presence = useCroc((s) =>
+    userId === s.me?.userId
+      ? s.link === 'connected'
+        ? s.settings.status === 'invisible'
+          ? 'offline'
+          : s.settings.status
+        : 'offline'
+      : (s.presence[userId] ?? 'offline'),
+  );
   const name = profile?.username ?? '…';
   const shown = status === 'auto' ? (presence as PresenceStatus) : status;
   return (
     <div className={cx('relative shrink-0', className)} style={{ width: size, height: size }}>
       <div
-        className={cx('flex h-full w-full items-center justify-center overflow-hidden rounded-full text-white', speaking && 'speaking-ring')}
-        style={{ background: profile?.avatar ? undefined : colorFor(userId), fontSize: size * 0.38 }}
+        className={cx(
+          'flex h-full w-full items-center justify-center overflow-hidden rounded-full text-white',
+          speaking && 'speaking-ring',
+        )}
+        style={{
+          background: profile?.avatar ? undefined : colorFor(userId),
+          fontSize: size * 0.38,
+        }}
       >
-        {profile?.avatar ? <img src={profile.avatar} alt="" className="h-full w-full object-cover" draggable={false} /> : initials(name)}
+        {profile?.avatar ? (
+          <img
+            src={profile.avatar}
+            alt=""
+            className="h-full w-full object-cover"
+            draggable={false}
+          />
+        ) : (
+          initials(name)
+        )}
       </div>
       {shown && (
-        <StatusDot status={shown} size={Math.max(10, Math.round(size * 0.38))} className="absolute -bottom-0.5 -right-0.5" />
+        <StatusDot
+          status={shown}
+          size={Math.max(10, Math.round(size * 0.38))}
+          className="absolute -bottom-0.5 -right-0.5"
+        />
       )}
     </div>
   );
@@ -176,7 +232,10 @@ export function Toasts() {
   return (
     <div className="pointer-events-none fixed bottom-6 left-1/2 z-[60] flex -translate-x-1/2 flex-col items-center gap-2">
       {errors.map((e) => (
-        <div key={e.id} className="pop-in pointer-events-auto rounded-md bg-danger px-4 py-2 text-sm font-medium text-white shadow-lg">
+        <div
+          key={e.id}
+          className="pop-in pointer-events-auto rounded-md bg-danger px-4 py-2 text-sm font-medium text-white shadow-lg"
+        >
           {e.message}
         </div>
       ))}

@@ -1,7 +1,14 @@
 import { afterEach, beforeAll, describe, expect, it } from 'vitest';
 import type { AddressInfo } from 'node:net';
 import { startStunServer } from '@crocodile/coordinator';
-import { RTCPeerConnection, RTCRtpCodecParameters, RtpHeader, RtpPacket, useAudioLevelIndication, type RTCDataChannel } from 'werift';
+import {
+  RTCPeerConnection,
+  RTCRtpCodecParameters,
+  RtpHeader,
+  RtpPacket,
+  useAudioLevelIndication,
+  type RTCDataChannel,
+} from 'werift';
 import { createIdentity, signSdp, verifySdp, type Identity } from '@crocodile/crypto';
 import type { RelayToClient, SignalData } from '@crocodile/protocol';
 import { HostRelay } from '../src';
@@ -43,9 +50,16 @@ async function waitFor<T>(fn: () => T | undefined | false, ms = 8000): Promise<T
   }
 }
 
-async function joinRelay(relay: HostRelay, host: Identity, identity: Identity, deliver: Map<string, (d: SignalData) => void>): Promise<TestPeer> {
+async function joinRelay(
+  relay: HostRelay,
+  host: Identity,
+  identity: Identity,
+  deliver: Map<string, (d: SignalData) => void>,
+): Promise<TestPeer> {
   const pc = new RTCPeerConnection({
-    codecs: { audio: [new RTCRtpCodecParameters({ mimeType: 'audio/opus', clockRate: 48000, channels: 2 })] },
+    codecs: {
+      audio: [new RTCRtpCodecParameters({ mimeType: 'audio/opus', clockRate: 48000, channels: 2 })],
+    },
     headerExtensions: { audio: [useAudioLevelIndication()] },
     iceAdditionalHostAddresses: ['127.0.0.1'],
     iceServers: stun(),
@@ -55,7 +69,9 @@ async function joinRelay(relay: HostRelay, host: Identity, identity: Identity, d
   const received: TestPeer['received'] = [];
   for (let i = 0; i < SLOTS; i++) {
     const t = pc.addTransceiver('audio', { direction: 'recvonly' });
-    t.onTrack.subscribe((track) => track.onReceiveRtp.subscribe((rtp) => received.push({ slot: i, payload: rtp.payload })));
+    t.onTrack.subscribe((track) =>
+      track.onReceiveRtp.subscribe((rtp) => received.push({ slot: i, payload: rtp.payload })),
+    );
   }
   const dc = pc.createDataChannel('croc');
   const inbox: RelayToClient[] = [];
@@ -65,7 +81,9 @@ async function joinRelay(relay: HostRelay, host: Identity, identity: Identity, d
   let answered = false;
   deliver.set(identity.userId, async (data) => {
     if (data.type === 'answer') {
-      expect(verifySdp(data, { sessionId: SESSION, from: host.userId, to: identity.userId })).toBe(true);
+      expect(verifySdp(data, { sessionId: SESSION, from: host.userId, to: identity.userId })).toBe(
+        true,
+      );
       await pc.setRemoteDescription({ type: 'answer', sdp: data.sdp });
       answered = true;
       for (const c of early.splice(0)) await pc.addIceCandidate(c as never);
@@ -80,16 +98,32 @@ async function joinRelay(relay: HostRelay, host: Identity, identity: Identity, d
         type: 'candidate',
         epoch: 1,
         dir: 'toRelay',
-        candidate: { candidate: c.candidate, sdpMid: c.sdpMid ?? null, sdpMLineIndex: c.sdpMLineIndex ?? null },
+        candidate: {
+          candidate: c.candidate,
+          sdpMid: c.sdpMid ?? null,
+          sdpMLineIndex: c.sdpMLineIndex ?? null,
+        },
       });
     }
   });
   const offer = await pc.createOffer();
   await pc.setLocalDescription(offer);
-  await relay.handleSignal(identity.userId, signSdp(identity, 'offer', { sessionId: SESSION, epoch: 1, to: host.userId }, pc.localDescription!.sdp));
+  await relay.handleSignal(
+    identity.userId,
+    signSdp(
+      identity,
+      'offer',
+      { sessionId: SESSION, epoch: 1, to: host.userId },
+      pc.localDescription!.sdp,
+    ),
+  );
   await waitFor(() => dc.readyState === 'open' && inbox.some((m) => m.t === 'hello'));
 
-  const extId = Number(pc.localDescription!.sdp.match(/a=extmap:(\d+) urn:ietf:params:rtp-hdrext:ssrc-audio-level/)![1]);
+  const extId = Number(
+    pc.localDescription!.sdp.match(
+      /a=extmap:(\d+) urn:ietf:params:rtp-hdrext:ssrc-audio-level/,
+    )![1],
+  );
   let seq = 1;
   let ts = 0;
   return {
@@ -99,7 +133,12 @@ async function joinRelay(relay: HostRelay, host: Identity, identity: Identity, d
     inbox,
     received,
     send(payload, level) {
-      const header = new RtpHeader({ sequenceNumber: seq++, timestamp: (ts += 960), payloadType: 111, marker: false });
+      const header = new RtpHeader({
+        sequenceNumber: seq++,
+        timestamp: (ts += 960),
+        payloadType: 111,
+        marker: false,
+      });
       header.extensions = [{ id: extId, payload: Buffer.from([level]) }];
       void up.sender.sendRtp(new RtpPacket(header, payload));
     },
@@ -126,7 +165,9 @@ describe('HostRelay', () => {
     const c = await joinRelay(relay, host, createIdentity(), deliver);
     expect(relay.connectedPeerIds()).toHaveLength(3);
     const helloC = c.inbox.find((m) => m.t === 'hello') as Extract<RelayToClient, { t: 'hello' }>;
-    expect(helloC.peers.map((p) => p.userId).sort()).toEqual([a.identity.userId, b.identity.userId].sort());
+    expect(helloC.peers.map((p) => p.userId).sort()).toEqual(
+      [a.identity.userId, b.identity.userId].sort(),
+    );
     expect(helloC.host).toBe(host.userId);
 
     b.dc.send(JSON.stringify({ t: 'bcast', d: { k: 'x' } }));
@@ -143,9 +184,14 @@ describe('HostRelay', () => {
     });
     expect(b.received.at(-1)!.payload.equals(frame)).toBe(true);
     expect(a.received).toHaveLength(0);
-    const slots = b.inbox.filter((m) => m.t === 'slots').at(-1) as Extract<RelayToClient, { t: 'slots' }>;
+    const slots = b.inbox.filter((m) => m.t === 'slots').at(-1) as Extract<
+      RelayToClient,
+      { t: 'slots' }
+    >;
     expect(slots.map).toContain(a.identity.userId);
-    await waitFor(() => b.inbox.some((m) => m.t === 'speaking' && m.users.includes(a.identity.userId)));
+    await waitFor(() =>
+      b.inbox.some((m) => m.t === 'speaking' && m.users.includes(a.identity.userId)),
+    );
 
     // Silence from a speaker without a slot is not forwarded.
     const before = a.received.length;
@@ -164,7 +210,9 @@ describe('HostRelay', () => {
     // Leaving members say goodbye through signalling (crashes are caught by ICE consent checks).
     await relay.handleSignal(c.identity.userId, { type: 'bye', epoch: 1, dir: 'toRelay' });
     await c.pc.close();
-    await waitFor(() => a.inbox.some((m) => m.t === 'peer_leave' && m.userId === c.identity.userId));
+    await waitFor(() =>
+      a.inbox.some((m) => m.t === 'peer_leave' && m.userId === c.identity.userId),
+    );
   });
 
   it('rejects offers whose signature does not match the sender', async () => {
@@ -181,7 +229,12 @@ describe('HostRelay', () => {
       sendSignal: (_to, d) => sent.push(d),
     });
     closers.push(() => relay.close());
-    const offer = signSdp(mallory, 'offer', { sessionId: SESSION, epoch: 1, to: host.userId }, 'v=0');
+    const offer = signSdp(
+      mallory,
+      'offer',
+      { sessionId: SESSION, epoch: 1, to: host.userId },
+      'v=0',
+    );
     await relay.handleSignal(victim.userId, offer);
     expect(relay.peerIds()).toEqual([]);
     expect(sent).toEqual([]);

@@ -15,7 +15,12 @@ import type { CoordinatorLink } from './coordinator-link';
 import { Emitter } from './emitter';
 import { GroupKeyring } from './keyring';
 import type { MessageStore, PlatformAdapter, RelayHandle } from './platform';
-import { RelayLink, type FrameCryptoHooks, type RelayLinkEvents, type RelayLinkOptions } from './relay-link';
+import {
+  RelayLink,
+  type FrameCryptoHooks,
+  type RelayLinkEvents,
+  type RelayLinkOptions,
+} from './relay-link';
 
 /** What a GroupSession needs from the client around it. */
 export interface SessionContext {
@@ -51,9 +56,12 @@ export interface RelayTransport extends Emitter<RelayLinkEvents> {
   setMicTrack?(track: MediaStreamTrack | null): Promise<void>;
 }
 
-export type TransportFactory = (opts: Omit<RelayLinkOptions, 'RTCPeerConnection'>) => RelayTransport;
+export type TransportFactory = (
+  opts: Omit<RelayLinkOptions, 'RTCPeerConnection'>,
+) => RelayTransport;
 
-export type RelayStatus = 'idle' | 'joining' | 'connecting' | 'connected' | 'reconnecting' | 'no-host' | 'left';
+export type RelayStatus =
+  'idle' | 'joining' | 'connecting' | 'connected' | 'reconnecting' | 'no-host' | 'left';
 
 export type GroupSessionEvents = {
   update: void;
@@ -90,7 +98,8 @@ export class GroupSession extends Emitter<GroupSessionEvents> {
   private reportedEpoch = -1;
   private retryTimer?: ReturnType<typeof setTimeout>;
   private left = false;
-  private pendingGroup: { from: string; env: Extract<E2EEnvelope, { k: 'group' }>; at: number }[] = [];
+  private pendingGroup: { from: string; env: Extract<E2EEnvelope, { k: 'group' }>; at: number }[] =
+    [];
   private historyServedAt = new Map<string, number[]>();
   private historyAsked = new Set<string>();
 
@@ -120,14 +129,19 @@ export class GroupSession extends Emitter<GroupSessionEvents> {
     this.left = false;
     if (this.status === 'idle' || this.status === 'left') this.setStatus('joining');
     const caps = await this.ctx.caps();
-    const { state } = await this.ctx.link.request('session.join', { sessionId: this.sessionId, caps });
+    const { state } = await this.ctx.link.request('session.join', {
+      sessionId: this.sessionId,
+      caps,
+    });
     this.applyState(state);
   }
 
   async updateCaps() {
     if (this.left) return;
     const caps = await this.ctx.caps();
-    await this.ctx.link.request('session.update', { sessionId: this.sessionId, caps }).catch(() => {});
+    await this.ctx.link
+      .request('session.update', { sessionId: this.sessionId, caps })
+      .catch(() => {});
   }
 
   async leave() {
@@ -156,7 +170,11 @@ export class GroupSession extends Emitter<GroupSessionEvents> {
     if (!state.host) {
       this.closeTransport();
       this.setStatus('no-host');
-    } else if (!this.transport || this.transport.epoch !== state.epoch || this.transport.host !== state.host) {
+    } else if (
+      !this.transport ||
+      this.transport.epoch !== state.epoch ||
+      this.transport.host !== state.host
+    ) {
       this.failures = 0;
       this.connectTransport();
     }
@@ -175,7 +193,10 @@ export class GroupSession extends Emitter<GroupSessionEvents> {
         identity: this.ctx.identity,
         slots: state.relaySlots,
         iceServers: this.ctx.iceServers(),
-        members: () => (this.state?.members ?? []).map((m) => m.userId).filter((u) => this.ctx.isAllowedPeer(sessionId, u)),
+        members: () =>
+          (this.state?.members ?? [])
+            .map((m) => m.userId)
+            .filter((u) => this.ctx.isAllowedPeer(sessionId, u)),
         sendSignal: (to, data) => {
           void this.ctx.link.request('signal.send', { to, sessionId, data }).catch(() => {});
         },
@@ -201,13 +222,17 @@ export class GroupSession extends Emitter<GroupSessionEvents> {
   private earlyRelaySignals: { from: string; data: SignalData; at: number }[] = [];
 
   handleSignal(from: string, data: SignalData) {
-    const toRelay = data.type === 'offer' || ((data.type === 'candidate' || data.type === 'bye') && data.dir === 'toRelay');
+    const toRelay =
+      data.type === 'offer' ||
+      ((data.type === 'candidate' || data.type === 'bye') && data.dir === 'toRelay');
     if (toRelay) {
       const h = this.hosting;
       if (h && h.epoch === data.epoch) void h.handle.then((r) => r?.handleSignal(from, data));
       else if (!h || h.epoch < data.epoch) {
         const now = Date.now();
-        this.earlyRelaySignals = this.earlyRelaySignals.filter((s) => now - s.at < 5000).slice(-200);
+        this.earlyRelaySignals = this.earlyRelaySignals
+          .filter((s) => now - s.at < 5000)
+          .slice(-200);
         this.earlyRelaySignals.push({ from, data, at: now });
       }
       return;
@@ -234,7 +259,8 @@ export class GroupSession extends Emitter<GroupSessionEvents> {
       slots,
       micTrack: this.voice?.micTrack() ?? null,
       crypto: slots > 0 ? this.voice?.frameCrypto(this.keyring) : undefined,
-      sendSignal: (data) => this.ctx.link.request('signal.send', { to: state.host!, sessionId: this.sessionId, data }),
+      sendSignal: (data) =>
+        this.ctx.link.request('signal.send', { to: state.host!, sessionId: this.sessionId, data }),
     });
     const entry = { epoch: state.epoch, host: state.host, t };
     this.transport = entry;
@@ -262,13 +288,20 @@ export class GroupSession extends Emitter<GroupSessionEvents> {
       if (this.failures >= 2 && this.reportedEpoch !== entry.epoch && entry.host !== this.me) {
         this.reportedEpoch = entry.epoch;
         void this.ctx.link
-          .request('session.report', { sessionId: this.sessionId, epoch: entry.epoch, issue: 'host_unreachable' })
+          .request('session.report', {
+            sessionId: this.sessionId,
+            epoch: entry.epoch,
+            issue: 'host_unreachable',
+          })
           .catch(() => {});
       }
       clearTimeout(this.retryTimer);
-      this.retryTimer = setTimeout(() => {
-        if (!this.left && this.state?.epoch === entry.epoch) this.connectTransport();
-      }, Math.min(10_000, 500 * 2 ** this.failures));
+      this.retryTimer = setTimeout(
+        () => {
+          if (!this.left && this.state?.epoch === entry.epoch) this.connectTransport();
+        },
+        Math.min(10_000, 500 * 2 ** this.failures),
+      );
     });
     t.connect().catch((err) => {
       this.ctx.log('relay connect error', { err: String(err) });
@@ -399,7 +432,8 @@ export class GroupSession extends Emitter<GroupSessionEvents> {
   private async onSealed(from: string, payload: SealedPayload) {
     switch (payload.type) {
       case 'sender_key':
-        if (payload.sessionId !== this.sessionId || !this.ctx.isAllowedPeer(this.sessionId, from)) return;
+        if (payload.sessionId !== this.sessionId || !this.ctx.isAllowedPeer(this.sessionId, from))
+          return;
         this.keyring.addPeerKey(from, payload.kid, payload.key);
         await this.flushPending();
         return;

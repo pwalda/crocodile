@@ -17,13 +17,26 @@ import { toB64u, type SignalData } from '@crocodile/protocol';
 declare global {
   interface Window {
     croc: CrocodileClient;
-    __relayStart(opts: { seed: string; sessionId: string; epoch: number; slots: number; iceServers: { urls: string }[] }): Promise<string>;
+    __relayStart(opts: {
+      seed: string;
+      sessionId: string;
+      epoch: number;
+      slots: number;
+      iceServers: { urls: string }[];
+    }): Promise<string>;
     __relaySignalIn(handle: string, from: string, data: SignalData): Promise<void>;
     __relayMembers(handle: string, members: string[]): Promise<void>;
     __relayClose(handle: string): Promise<void>;
     __relaySignalOut(handle: string, to: string, data: SignalData): void;
-    startClient(opts: { server: string; name: string; canHost: boolean; nat: string }): Promise<string>;
-    audioStats(): Promise<{ packets: number; energy: number; concealed: number; samples: number }[]>;
+    startClient(opts: {
+      server: string;
+      name: string;
+      canHost: boolean;
+      nat: string;
+    }): Promise<string>;
+    audioStats(): Promise<
+      { packets: number; energy: number; concealed: number; samples: number }[]
+    >;
   }
 }
 
@@ -87,10 +100,17 @@ window.startClient = async ({ server, name, canHost, nat }) => {
       kv: new MemoryKeyValueStore(),
       messages: new MemoryMessageStore(),
       ...(canHost ? { relay } : {}),
-      rtc: { RTCPeerConnection: TrackedPC, getUserMedia: (c) => navigator.mediaDevices.getUserMedia(c) },
+      rtc: {
+        RTCPeerConnection: TrackedPC,
+        getUserMedia: (c) => navigator.mediaDevices.getUserMedia(c),
+      },
       capabilities: async () => ({ nat: nat as never, cpuCores: 8 }),
     },
-    { directories: [], preferredServers: [server], log: (m, e) => console.log(`[${name}] ${m} ${JSON.stringify(e ?? {})}`) },
+    {
+      directories: [],
+      preferredServers: [server],
+      log: (m, e) => console.log(`[${name}] ${m} ${JSON.stringify(e ?? {})}`),
+    },
   );
   client.voiceEngine = new VoiceEngine(
     {

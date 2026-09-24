@@ -2,7 +2,14 @@ import Fastify, { type FastifyInstance } from 'fastify';
 import websocket from '@fastify/websocket';
 import type { Socket } from 'node:dgram';
 import type { AddressInfo } from 'node:net';
-import { identityFromSeed, isSpaceMember, randomBytes, sign, userTag, type Identity } from '@crocodile/crypto';
+import {
+  identityFromSeed,
+  isSpaceMember,
+  randomBytes,
+  sign,
+  userTag,
+  type Identity,
+} from '@crocodile/crypto';
 import {
   fromB64u,
   LIMITS,
@@ -133,7 +140,11 @@ export class Coordinator {
       peers: this.mesh.peerIds().length,
       time: Date.now(),
     }));
-    app.get('/v1/info', async () => ({ server: this.info, stun: this.stunUrls(), peers: this.mesh.peers() }));
+    app.get('/v1/info', async () => ({
+      server: this.info,
+      stun: this.stunUrls(),
+      peers: this.mesh.peers(),
+    }));
     app.register(async (scope) => {
       scope.get('/v1/client', { websocket: true }, (socket) => {
         new ClientConnection(this, socket);
@@ -145,7 +156,9 @@ export class Coordinator {
 
     await app.listen({ host: this.config.host, port: this.config.port });
     const port = (app.server.address() as AddressInfo).port;
-    const publicUrl = (this.config.publicUrl ?? `http://${hostForUrl(this.config.host)}:${port}`).replace(/\/$/, '');
+    const publicUrl = (
+      this.config.publicUrl ?? `http://${hostForUrl(this.config.host)}:${port}`
+    ).replace(/\/$/, '');
     this._info = {
       id: this.identity.userId,
       key: this.identity.publicKey,
@@ -158,7 +171,10 @@ export class Coordinator {
     if (this.config.stunPort !== null) {
       const stunPort = this.config.stunPort === 0 ? 0 : this.config.stunPort;
       try {
-        this.stun = await startStunServer(stunPort, this.config.host.includes(':') ? '::' : '0.0.0.0');
+        this.stun = await startStunServer(
+          stunPort,
+          this.config.host.includes(':') ? '::' : '0.0.0.0',
+        );
         const bound = (this.stun.address() as AddressInfo).port;
         this.stunPortBound = bound;
       } catch (err) {
@@ -171,7 +187,11 @@ export class Coordinator {
       this.directory = new DirectoryClient(this, this.config.directoryUrls);
       this.directory.start();
     }
-    this.log.info('coordination server listening', { url: publicUrl, id: this.info.id, store: this.store.kind });
+    this.log.info('coordination server listening', {
+      url: publicUrl,
+      id: this.info.id,
+      store: this.store.kind,
+    });
     return this;
   }
 
@@ -179,7 +199,8 @@ export class Coordinator {
 
   stunUrls(): string[] {
     const urls = [...this.config.extraStun];
-    if (this.stunPortBound) urls.unshift(`stun:${new URL(this.info.url).hostname}:${this.stunPortBound}`);
+    if (this.stunPortBound)
+      urls.unshift(`stun:${new URL(this.info.url).hostname}:${this.stunPortBound}`);
     return urls;
   }
 
@@ -216,7 +237,8 @@ export class Coordinator {
 
   private pushRecordToClients(record: SignedRecord) {
     let friendOf: Set<string> | undefined;
-    if (record.kind === 'friends') friendOf = new Set((record as SignedRecord<'friends'>).body.friends);
+    if (record.kind === 'friends')
+      friendOf = new Set((record as SignedRecord<'friends'>).body.friends);
     for (const client of this.presence.local.values()) {
       if ((client as ClientConnection).wants(record) || friendOf?.has(client.userId)) {
         client.send('record', { record });

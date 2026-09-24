@@ -72,8 +72,14 @@ const coordinator = new Coordinator({
 });
 
 await coordinator.start();
-if (!coordinator.config.publicUrl && coordinator.config.announce && coordinator.config.directoryUrls.length) {
-  coordinator.log.warn('no --public-url set; the directory will list a loopback URL that others cannot reach');
+if (
+  !coordinator.config.publicUrl &&
+  coordinator.config.announce &&
+  coordinator.config.directoryUrls.length
+) {
+  coordinator.log.warn(
+    'no --public-url set; the directory will list a loopback URL that others cannot reach',
+  );
 }
 
 const shutdown = async () => {

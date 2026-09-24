@@ -19,7 +19,10 @@ export function FriendsView() {
       : tab === 'all'
         ? friends.friends.map((userId) => ({ userId, kind: 'friend' as const }))
         : tab === 'pending'
-          ? [...friends.incoming.map((userId) => ({ userId, kind: 'incoming' as const })), ...friends.outgoing.map((userId) => ({ userId, kind: 'outgoing' as const }))]
+          ? [
+              ...friends.incoming.map((userId) => ({ userId, kind: 'incoming' as const })),
+              ...friends.outgoing.map((userId) => ({ userId, kind: 'outgoing' as const })),
+            ]
           : friends.blocked.map((userId) => ({ userId, kind: 'blocked' as const }));
 
   return (
@@ -33,17 +36,25 @@ export function FriendsView() {
           <button
             key={t}
             onClick={() => setTab(t)}
-            className={cx('rounded px-2 py-0.5 text-[15px] font-medium capitalize', tab === t ? 'bg-active text-white' : 'text-muted hover:bg-hover hover:text-text')}
+            className={cx(
+              'rounded px-2 py-0.5 text-[15px] font-medium capitalize',
+              tab === t ? 'bg-active text-white' : 'text-muted hover:bg-hover hover:text-text',
+            )}
           >
             {t}
             {t === 'pending' && friends.incoming.length > 0 && (
-              <span className="ml-1.5 rounded-full bg-dnd px-1.5 text-[11px] font-bold text-white">{friends.incoming.length}</span>
+              <span className="ml-1.5 rounded-full bg-dnd px-1.5 text-[11px] font-bold text-white">
+                {friends.incoming.length}
+              </span>
             )}
           </button>
         ))}
         <button
           onClick={() => setTab('add')}
-          className={cx('rounded px-2 py-0.5 text-[15px] font-medium', tab === 'add' ? 'text-croc-light' : 'bg-croc text-white')}
+          className={cx(
+            'rounded px-2 py-0.5 text-[15px] font-medium',
+            tab === 'add' ? 'text-croc-light' : 'bg-croc text-white',
+          )}
         >
           Add Friend
         </button>
@@ -57,50 +68,94 @@ export function FriendsView() {
           </div>
           {rows.length === 0 && (
             <p className="mt-16 text-center text-muted">
-              {tab === 'pending' ? 'There are no pending friend requests.' : tab === 'online' ? 'None of your friends are online right now.' : 'Nobody here yet.'}
+              {tab === 'pending'
+                ? 'There are no pending friend requests.'
+                : tab === 'online'
+                  ? 'None of your friends are online right now.'
+                  : 'Nobody here yet.'}
             </p>
           )}
           {rows.map(({ userId, kind }) => (
-            <div key={userId} className="group flex items-center gap-3 border-t border-line px-2 py-3 hover:rounded-lg hover:border-transparent hover:bg-hover">
+            <div
+              key={userId}
+              className="group flex items-center gap-3 border-t border-line px-2 py-3 hover:rounded-lg hover:border-transparent hover:bg-hover"
+            >
               <button onClick={() => openModal({ kind: 'profile', userId })}>
                 <Avatar userId={userId} size={36} status="auto" />
               </button>
               <div className="min-w-0 flex-1">
                 <UserName userId={userId} className="font-semibold text-white" />
                 <div className="text-xs text-muted">
-                  {kind === 'incoming' ? 'Incoming friend request' : kind === 'outgoing' ? 'Outgoing friend request' : kind === 'blocked' ? 'Blocked' : (presence[userId] ?? 'offline')}
+                  {kind === 'incoming'
+                    ? 'Incoming friend request'
+                    : kind === 'outgoing'
+                      ? 'Outgoing friend request'
+                      : kind === 'blocked'
+                        ? 'Blocked'
+                        : (presence[userId] ?? 'offline')}
                 </div>
               </div>
               {kind === 'friend' && (
                 <>
-                  <IconButton label="Message" className="rounded-full bg-side" onClick={() => navigate({ kind: 'dm', userId })}>
+                  <IconButton
+                    label="Message"
+                    className="rounded-full bg-side"
+                    onClick={() => navigate({ kind: 'dm', userId })}
+                  >
                     <MessageCircle size={18} />
                   </IconButton>
-                  <IconButton label="Call" className="rounded-full bg-side" onClick={() => { navigate({ kind: 'dm', userId }); void client.callDm(userId).catch((e) => client.reportError(e.message)); }}>
+                  <IconButton
+                    label="Call"
+                    className="rounded-full bg-side"
+                    onClick={() => {
+                      navigate({ kind: 'dm', userId });
+                      void client.callDm(userId).catch((e) => client.reportError(e.message));
+                    }}
+                  >
                     <Phone size={18} />
                   </IconButton>
-                  <IconButton label="Remove friend" className="rounded-full bg-side" onClick={() => void client.removeFriend(userId)}>
+                  <IconButton
+                    label="Remove friend"
+                    className="rounded-full bg-side"
+                    onClick={() => void client.removeFriend(userId)}
+                  >
                     <UserMinus size={18} />
                   </IconButton>
                 </>
               )}
               {kind === 'incoming' && (
                 <>
-                  <IconButton label="Accept" className="rounded-full bg-side text-online" onClick={() => void client.addFriend(userId)}>
+                  <IconButton
+                    label="Accept"
+                    className="rounded-full bg-side text-online"
+                    onClick={() => void client.addFriend(userId)}
+                  >
                     <Check size={18} />
                   </IconButton>
-                  <IconButton label="Ignore and block" className="rounded-full bg-side" onClick={() => void client.block(userId)}>
+                  <IconButton
+                    label="Ignore and block"
+                    className="rounded-full bg-side"
+                    onClick={() => void client.block(userId)}
+                  >
                     <X size={18} />
                   </IconButton>
                 </>
               )}
               {kind === 'outgoing' && (
-                <IconButton label="Cancel request" className="rounded-full bg-side" onClick={() => void client.removeFriend(userId)}>
+                <IconButton
+                  label="Cancel request"
+                  className="rounded-full bg-side"
+                  onClick={() => void client.removeFriend(userId)}
+                >
                   <X size={18} />
                 </IconButton>
               )}
               {kind === 'blocked' && (
-                <IconButton label="Unblock" className="rounded-full bg-side" onClick={() => void client.unblock(userId)}>
+                <IconButton
+                  label="Unblock"
+                  className="rounded-full bg-side"
+                  onClick={() => void client.unblock(userId)}
+                >
                   <ShieldBan size={18} />
                 </IconButton>
               )}
@@ -133,7 +188,8 @@ function AddFriend() {
     <div className="px-8 py-6">
       <h2 className="font-semibold uppercase text-white">Add friend</h2>
       <p className="mt-1 text-sm text-muted">
-        Search by name and tag, like <b className="text-text">{me ? `${me.username}#${me.tag}` : 'name#1234'}</b> (that's you).
+        Search by name and tag, like{' '}
+        <b className="text-text">{me ? `${me.username}#${me.tag}` : 'name#1234'}</b> (that's you).
       </p>
       <form
         className="mt-4 flex items-center rounded-lg bg-float px-3 py-2 focus-within:ring-2 focus-within:ring-croc/60"
@@ -153,12 +209,17 @@ function AddFriend() {
           Search
         </Button>
       </form>
-      {results && results.length === 0 && <p className="mt-6 text-muted">Nobody found. Check the spelling and the #tag.</p>}
+      {results && results.length === 0 && (
+        <p className="mt-6 text-muted">Nobody found. Check the spelling and the #tag.</p>
+      )}
       <div className="mt-4">
         {results?.map((p) => {
           const already = friends.friends.includes(p.userId) || friends.outgoing.includes(p.userId);
           return (
-            <div key={p.userId} className="flex items-center gap-3 rounded-lg px-2 py-2 hover:bg-hover">
+            <div
+              key={p.userId}
+              className="flex items-center gap-3 rounded-lg px-2 py-2 hover:bg-hover"
+            >
               <Avatar userId={p.userId} size={36} />
               <div className="flex-1">
                 <span className="font-semibold text-white">{p.username}</span>

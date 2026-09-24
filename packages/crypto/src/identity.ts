@@ -28,7 +28,14 @@ export function identityFromSeed(seed: Uint8Array): Identity {
   const publicKey = toB64u(ed25519.getPublicKey(signSecret));
   const encSecret = hkdfSha256(seed, new Uint8Array(0), 'croc/v1/enc', 32);
   const encPublicKey = toB64u(x25519.getPublicKey(encSecret));
-  return { seed: seed.slice(), signSecret, publicKey, encSecret, encPublicKey, userId: userIdFromKey(publicKey) };
+  return {
+    seed: seed.slice(),
+    signSecret,
+    publicKey,
+    encSecret,
+    encPublicKey,
+    userId: userIdFromKey(publicKey),
+  };
 }
 
 export function createIdentity(): Identity {
@@ -54,7 +61,11 @@ export function userTag(userId: string): string {
   return String(n % 10_000).padStart(4, '0');
 }
 
-export function sign(identity: Pick<Identity, 'signSecret'>, domain: string, payload: unknown): string {
+export function sign(
+  identity: Pick<Identity, 'signSecret'>,
+  domain: string,
+  payload: unknown,
+): string {
   return signPayload(identity.signSecret, domain, payload);
 }
 

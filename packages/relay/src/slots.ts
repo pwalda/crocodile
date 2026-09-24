@@ -64,10 +64,17 @@ export class StreamRewriter {
   constructor(private readonly clockRate = 48_000) {}
 
   /** Returns rewritten (seq, ts, marker) for a packet from `source`. */
-  rewrite(source: string, seq: number, ts: number, now: number): { seq: number; ts: number; marker: boolean } {
+  rewrite(
+    source: string,
+    seq: number,
+    ts: number,
+    now: number,
+  ): { seq: number; ts: number; marker: boolean } {
     let marker = false;
     if (source !== this.source) {
-      const elapsedTicks = this.lastAt ? Math.max(960, Math.round(((now - this.lastAt) / 1000) * this.clockRate)) : 0;
+      const elapsedTicks = this.lastAt
+        ? Math.max(960, Math.round(((now - this.lastAt) / 1000) * this.clockRate))
+        : 0;
       this.seqOffset = (this.lastSeq + 1 - seq) & 0xffff;
       this.tsOffset = (this.lastTs + elapsedTicks - ts) >>> 0;
       this.source = source;

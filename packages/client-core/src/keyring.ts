@@ -64,7 +64,8 @@ export class GroupKeyring extends Emitter<{ changed: FrameKeys; rotated: SenderK
     const now = Date.now();
     // A newer key from the same peer supersedes older ones after a grace period.
     for (const p of this.peers.values()) {
-      if (p.userId === userId && p.derived.kid !== kid && p.expiresAt === null) p.expiresAt = now + GRACE_MS;
+      if (p.userId === userId && p.derived.kid !== kid && p.expiresAt === null)
+        p.expiresAt = now + GRACE_MS;
     }
     this.peers.set(kid, { userId, secret: sk, derived: deriveSenderKey(sk), expiresAt: null });
     this.emitChanged();
@@ -72,13 +73,15 @@ export class GroupKeyring extends Emitter<{ changed: FrameKeys; rotated: SenderK
   }
 
   hasKeyFrom(userId: string) {
-    for (const p of this.peers.values()) if (p.userId === userId && p.expiresAt === null) return true;
+    for (const p of this.peers.values())
+      if (p.userId === userId && p.expiresAt === null) return true;
     return false;
   }
 
   peerLeft(userId: string) {
     const at = Date.now() + GRACE_MS;
-    for (const p of this.peers.values()) if (p.userId === userId && p.expiresAt === null) p.expiresAt = at;
+    for (const p of this.peers.values())
+      if (p.userId === userId && p.expiresAt === null) p.expiresAt = at;
   }
 
   encrypt(plaintext: Uint8Array) {
@@ -97,7 +100,11 @@ export class GroupKeyring extends Emitter<{ changed: FrameKeys; rotated: SenderK
     this.prune();
     return {
       mine: { kid: this.mine.key.kid, secret: exportSenderKey(this.mine.key) },
-      peers: [...this.peers.values()].map((p) => ({ kid: p.derived.kid, userId: p.userId, secret: exportSenderKey(p.secret) })),
+      peers: [...this.peers.values()].map((p) => ({
+        kid: p.derived.kid,
+        userId: p.userId,
+        secret: exportSenderKey(p.secret),
+      })),
     };
   }
 

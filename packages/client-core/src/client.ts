@@ -34,7 +34,12 @@ import {
 } from '@crocodile/protocol';
 import { CoordinatorLink, type LinkStatus } from './coordinator-link';
 import { Emitter } from './emitter';
-import { GroupSession, defaultTransportFactory, type RelayStatus, type TransportFactory } from './group-session';
+import {
+  GroupSession,
+  defaultTransportFactory,
+  type RelayStatus,
+  type TransportFactory,
+} from './group-session';
 import type { PlatformAdapter } from './platform';
 import { RecordCache } from './records-cache';
 import type { RankedServer } from './server-selection';
@@ -215,7 +220,10 @@ export class CrocodileClient extends Emitter<ClientEvents> {
     const id = ++this.errorId;
     this.store.set((s) => ({ errors: [...s.errors.slice(-4), { id, message }] }));
     this.emit('error', { message });
-    setTimeout(() => this.store.set((s) => ({ errors: s.errors.filter((e) => e.id !== id) })), 8000);
+    setTimeout(
+      () => this.store.set((s) => ({ errors: s.errors.filter((e) => e.id !== id) })),
+      8000,
+    );
   }
 
   // ===========================================================================
@@ -224,7 +232,10 @@ export class CrocodileClient extends Emitter<ClientEvents> {
 
   /** Loads the saved identity; if there is none the UI shows onboarding. */
   async init() {
-    const settings = { ...defaultSettings, ...((await this.platform.kv.get<Partial<Settings>>('settings')) ?? {}) };
+    const settings = {
+      ...defaultSettings,
+      ...((await this.platform.kv.get<Partial<Settings>>('settings')) ?? {}),
+    };
     const dms = (await this.platform.kv.get<string[]>('dms')) ?? [];
     this.store.set({ settings, dms });
     await this.records.load();
@@ -250,7 +261,9 @@ export class CrocodileClient extends Emitter<ClientEvents> {
   async restoreAccount(recoveryKey: string, usernameIfNew?: string) {
     const identity = identityFromSeed(decodeRecoveryKey(recoveryKey));
     await this.adoptIdentity(identity);
-    const existing = await this.link!.request('records.get', { keys: [recordKey.profile(identity.userId)] }).catch(() => null);
+    const existing = await this.link!.request('records.get', {
+      keys: [recordKey.profile(identity.userId)],
+    }).catch(() => null);
     if (existing?.records[0]) this.records.ingest(existing.records[0]);
     else if (usernameIfNew) await this.saveProfile({ username: usernameIfNew });
   }
@@ -287,7 +300,8 @@ export class CrocodileClient extends Emitter<ClientEvents> {
     const settings = { ...this.state.settings, ...patch };
     this.store.set({ settings });
     await this.platform.kv.set('settings', settings);
-    if (patch.status) void this.link?.request('presence.set', { status: patch.status }).catch(() => {});
+    if (patch.status)
+      void this.link?.request('presence.set', { status: patch.status }).catch(() => {});
     if (patch.allowHosting !== undefined || patch.uplinkKbps !== undefined) {
       for (const s of this.sessions.values()) void s.updateCaps();
     }
@@ -310,7 +324,10 @@ export class CrocodileClient extends Emitter<ClientEvents> {
       version: this.platform.appVersion || APP_VERSION_FALLBACK,
       kv: this.platform.kv,
       directories: this.config.directories,
-      preferredServers: [...this.state.settings.preferredServers, ...(this.config.preferredServers ?? [])],
+      preferredServers: [
+        ...this.state.settings.preferredServers,
+        ...(this.config.preferredServers ?? []),
+      ],
       fetchImpl: this.platform.fetch,
       WebSocketImpl: this.platform.WebSocketImpl,
     });
@@ -320,16 +337,24 @@ export class CrocodileClient extends Emitter<ClientEvents> {
     link.on('connected', ({ server, rttMs, stun }) => {
       this.stun = stun;
       this.store.set({ server: { info: server, rttMs } });
-      void this.onConnected().catch((err) => this.log('post-connect sync failed', { err: String(err) }));
+      void this.onConnected().catch((err) =>
+        this.log('post-connect sync failed', { err: String(err) }),
+      );
     });
     link.on('disconnected', () => this.store.set({ server: null }));
     link.on('record', ({ record }) => this.records.ingest(record));
-    link.on('presence', (p) => this.store.set((s) => ({ presence: { ...s.presence, [p.userId]: p.status } })));
+    link.on('presence', (p) =>
+      this.store.set((s) => ({ presence: { ...s.presence, [p.userId]: p.status } })),
+    );
     link.on('session', ({ state }) => this.sessions.get(state.id)?.applyState(state));
-    link.on('signal', ({ from, sessionId, data }) => this.sessions.get(sessionId)?.handleSignal(from, data));
+    link.on('signal', ({ from, sessionId, data }) =>
+      this.sessions.get(sessionId)?.handleSignal(from, data),
+    );
     link.on('voice', (occ) => this.setOccupancy(occ));
     link.on('session_invite', ({ sessionId, from }) => void this.onSessionInvite(sessionId, from));
-    link.on('replaced', () => this.reportError('Signed in from another window or device; this one is now offline.'));
+    link.on('replaced', () =>
+      this.reportError('Signed in from another window or device; this one is now offline.'),
+    );
     link.start();
   }
 
@@ -358,13 +383,17 @@ export class CrocodileClient extends Emitter<ClientEvents> {
       ],
     });
     await this.syncProfiles();
-    if (this.state.settings.status !== 'online') await link.request('presence.set', { status: this.state.settings.status });
+    if (this.state.settings.status !== 'online')
+      await link.request('presence.set', { status: this.state.settings.status });
     const { voice } = await link.request('voice.watch', { spaceIds });
-    this.store.set({ voice: Object.fromEntries(voice.map((v) => [sessionIds.voice(v.spaceId, v.channelId), v])) });
+    this.store.set({
+      voice: Object.fromEntries(voice.map((v) => [sessionIds.voice(v.spaceId, v.channelId), v])),
+    });
 
     // (Re)join sessions: every space's text mesh, plus whatever voice/DM we were in.
     for (const id of spaceIds) this.ensureSession(sessionIds.space(id));
-    for (const s of this.sessions.values()) void s.join().catch((err) => this.log('join failed', { id: s.sessionId, err: String(err) }));
+    for (const s of this.sessions.values())
+      void s.join().catch((err) => this.log('join failed', { id: s.sessionId, err: String(err) }));
   }
 
   private async ensureProfilePublished() {
@@ -373,7 +402,8 @@ export class CrocodileClient extends Emitter<ClientEvents> {
     const remote = res.records[0];
     if (remote) this.records.ingest(remote);
     const local = this.records.get(recordKey.profile(me));
-    if (local && (!remote || remote.version < local.version)) await this.link!.request('records.put', { record: local });
+    if (local && (!remote || remote.version < local.version))
+      await this.link!.request('records.put', { record: local });
   }
 
   /** Fetch profiles of everyone we show: friends, requests, space members. */
@@ -385,14 +415,21 @@ export class CrocodileClient extends Emitter<ClientEvents> {
       const res = await this.link!.request('records.get', { keys });
       this.records.ingestAll(res.records);
     }
-    await this.link!.request('records.subscribe', { prefixes: missing.map((id) => recordKey.profile(id)) });
+    await this.link!.request('records.subscribe', {
+      prefixes: missing.map((id) => recordKey.profile(id)),
+    });
     const { presence } = await this.link!.request('presence.subscribe', { userIds: missing });
     this.store.set({ presence: Object.fromEntries(presence.map((p) => [p.userId, p.status])) });
   }
 
   private relevantUsers(): string[] {
     const s = this.state;
-    const set = new Set<string>([...s.friends.friends, ...s.friends.incoming, ...s.friends.outgoing, ...s.dms]);
+    const set = new Set<string>([
+      ...s.friends.friends,
+      ...s.friends.incoming,
+      ...s.friends.outgoing,
+      ...s.dms,
+    ]);
     for (const space of Object.values(s.spaces)) for (const m of space.members) set.add(m);
     return [...set];
   }
@@ -400,11 +437,21 @@ export class CrocodileClient extends Emitter<ClientEvents> {
   private async fetchProfiles(userIds: string[]) {
     const missing = userIds.filter((id) => !this.records.get(recordKey.profile(id)));
     if (!missing.length || !this.link) return;
-    const res = await this.link.request('records.get', { keys: missing.map((id) => recordKey.profile(id)) }).catch(() => null);
+    const res = await this.link
+      .request('records.get', { keys: missing.map((id) => recordKey.profile(id)) })
+      .catch(() => null);
     if (res) this.records.ingestAll(res.records);
-    await this.link.request('records.subscribe', { prefixes: missing.map((id) => recordKey.profile(id)) }).catch(() => {});
+    await this.link
+      .request('records.subscribe', { prefixes: missing.map((id) => recordKey.profile(id)) })
+      .catch(() => {});
     const p = await this.link.request('presence.subscribe', { userIds: missing }).catch(() => null);
-    if (p) this.store.set((s) => ({ presence: { ...s.presence, ...Object.fromEntries(p.presence.map((e) => [e.userId, e.status])) } }));
+    if (p)
+      this.store.set((s) => ({
+        presence: {
+          ...s.presence,
+          ...Object.fromEntries(p.presence.map((e) => [e.userId, e.status])),
+        },
+      }));
   }
 
   // ===========================================================================
@@ -448,7 +495,8 @@ export class CrocodileClient extends Emitter<ClientEvents> {
       patch.me = profiles[me] ?? null;
     }
     if (!changed || changed.kind === 'friends') {
-      const mine = (this.records.get(recordKey.friends(me)) as SignedRecord<'friends'> | undefined)?.body ?? {
+      const mine = (this.records.get(recordKey.friends(me)) as SignedRecord<'friends'> | undefined)
+        ?.body ?? {
         friends: [],
         blocked: [],
       };
@@ -525,15 +573,24 @@ export class CrocodileClient extends Emitter<ClientEvents> {
 
   async saveProfile(update: Partial<Omit<ProfileBody, 'encKey'>>) {
     const id = this.identity!;
-    const current = (this.records.get(recordKey.profile(id.userId)) as SignedRecord<'profile'> | undefined)?.body;
+    const current = (
+      this.records.get(recordKey.profile(id.userId)) as SignedRecord<'profile'> | undefined
+    )?.body;
     const body: ProfileBody = {
       ...(current ?? { username: 'crocodile' }),
       ...update,
       encKey: id.encPublicKey,
     };
-    for (const k of Object.keys(body) as (keyof ProfileBody)[]) if (body[k] === undefined || body[k] === '') delete body[k];
+    for (const k of Object.keys(body) as (keyof ProfileBody)[])
+      if (body[k] === undefined || body[k] === '') delete body[k];
     if (!body.username) body.username = current?.username ?? 'crocodile';
-    const record = signRecord(id, 'profile', recordKey.profile(id.userId), body, this.nextVersion(recordKey.profile(id.userId)));
+    const record = signRecord(
+      id,
+      'profile',
+      recordKey.profile(id.userId),
+      body,
+      this.nextVersion(recordKey.profile(id.userId)),
+    );
     this.records.ingest(record);
     await this.putRecord(record).catch((err) => {
       if (this.link?.status === 'connected') throw err;
@@ -557,7 +614,10 @@ export class CrocodileClient extends Emitter<ClientEvents> {
   private async writeFriends(mutate: (b: FriendsBody) => FriendsBody) {
     const id = this.identity!;
     const key = recordKey.friends(id.userId);
-    const current = (this.records.get(key) as SignedRecord<'friends'> | undefined)?.body ?? { friends: [], blocked: [] };
+    const current = (this.records.get(key) as SignedRecord<'friends'> | undefined)?.body ?? {
+      friends: [],
+      blocked: [],
+    };
     const next = mutate({ friends: [...current.friends], blocked: [...current.blocked] });
     next.friends = [...new Set(next.friends)].filter((f) => f !== id.userId);
     next.blocked = [...new Set(next.blocked)];
@@ -566,7 +626,10 @@ export class CrocodileClient extends Emitter<ClientEvents> {
 
   /** Sends a friend request, or accepts one if they already asked. */
   addFriend(userId: string) {
-    return this.writeFriends((b) => ({ friends: [...b.friends, userId], blocked: b.blocked.filter((x) => x !== userId) }));
+    return this.writeFriends((b) => ({
+      friends: [...b.friends, userId],
+      blocked: b.blocked.filter((x) => x !== userId),
+    }));
   }
 
   removeFriend(userId: string) {
@@ -574,7 +637,10 @@ export class CrocodileClient extends Emitter<ClientEvents> {
   }
 
   block(userId: string) {
-    return this.writeFriends((b) => ({ friends: b.friends.filter((x) => x !== userId), blocked: [...b.blocked, userId] }));
+    return this.writeFriends((b) => ({
+      friends: b.friends.filter((x) => x !== userId),
+      blocked: [...b.blocked, userId],
+    }));
   }
 
   unblock(userId: string) {
@@ -607,22 +673,31 @@ export class CrocodileClient extends Emitter<ClientEvents> {
     };
     await this.putRecord(signRecord(id, 'space', recordKey.space(spaceId), body));
     await this.putRecord(
-      signRecord(id, 'member', recordKey.member(spaceId, id.userId), { spaceId, userId: id.userId }),
+      signRecord(id, 'member', recordKey.member(spaceId, id.userId), {
+        spaceId,
+        userId: id.userId,
+      }),
     );
     await this.afterSpaceJoined(spaceId);
     return spaceId;
   }
 
   private async afterSpaceJoined(spaceId: string) {
-    await this.link!.request('records.subscribe', { prefixes: [recordKey.space(spaceId), recordKey.memberPrefix(spaceId)] });
-    const members = await this.link!.request('records.list', { prefix: recordKey.memberPrefix(spaceId) });
+    await this.link!.request('records.subscribe', {
+      prefixes: [recordKey.space(spaceId), recordKey.memberPrefix(spaceId)],
+    });
+    const members = await this.link!.request('records.list', {
+      prefix: recordKey.memberPrefix(spaceId),
+    });
     this.records.ingestAll(members.records);
     const spaceIds = Object.keys(this.state.spaces);
     const { voice } = await this.link!.request('voice.watch', { spaceIds });
     for (const v of voice) this.setOccupancy(v);
     await this.fetchProfiles(this.state.spaces[spaceId]?.members ?? []);
     const session = this.ensureSession(sessionIds.space(spaceId));
-    await session.join().catch((err) => this.log('space session join failed', { err: String(err) }));
+    await session
+      .join()
+      .catch((err) => this.log('space session join failed', { err: String(err) }));
   }
 
   private spaceBody(spaceId: string): SpaceBody {
@@ -640,7 +715,10 @@ export class CrocodileClient extends Emitter<ClientEvents> {
 
   addChannel(spaceId: string, name: string, kind: ChannelKind) {
     const clean = kind === 'text' ? name.trim().toLowerCase().replace(/\s+/g, '-') : name.trim();
-    return this.updateSpace(spaceId, (b) => ({ ...b, channels: [...b.channels, { id: randomId(), name: clean, kind }] }));
+    return this.updateSpace(spaceId, (b) => ({
+      ...b,
+      channels: [...b.channels, { id: randomId(), name: clean, kind }],
+    }));
   }
 
   renameChannel(spaceId: string, channelId: string, name: string) {
@@ -651,7 +729,10 @@ export class CrocodileClient extends Emitter<ClientEvents> {
   }
 
   removeChannel(spaceId: string, channelId: string) {
-    return this.updateSpace(spaceId, (b) => ({ ...b, channels: b.channels.filter((c) => c.id !== channelId) }));
+    return this.updateSpace(spaceId, (b) => ({
+      ...b,
+      channels: b.channels.filter((c) => c.id !== channelId),
+    }));
   }
 
   banMember(spaceId: string, userId: string) {
@@ -663,7 +744,10 @@ export class CrocodileClient extends Emitter<ClientEvents> {
   }
 
   /** Creates an invite code others can use to join. */
-  async createInvite(spaceId: string, expiresInMs: number | null = 7 * 24 * 3600_000): Promise<string> {
+  async createInvite(
+    spaceId: string,
+    expiresInMs: number | null = 7 * 24 * 3600_000,
+  ): Promise<string> {
     const code = randomId(5);
     await this.putRecord(
       signRecord(this.identity!, 'invite', recordKey.invite(code), {
@@ -677,7 +761,12 @@ export class CrocodileClient extends Emitter<ClientEvents> {
 
   /** Accepts "abcd1234", "croc://join/abcd1234" or "https://…/join/abcd1234". */
   async joinWithInvite(input: string): Promise<string> {
-    const code = input.trim().toLowerCase().split('/').pop()!.replace(/[^a-z2-7]/g, '');
+    const code = input
+      .trim()
+      .toLowerCase()
+      .split('/')
+      .pop()!
+      .replace(/[^a-z2-7]/g, '');
     const res = await this.link!.request('records.get', { keys: [recordKey.invite(code)] });
     const invite = res.records[0] as SignedRecord<'invite'> | undefined;
     if (!invite) throw new Error('That invite does not exist (yet). Check the code and try again.');
@@ -687,7 +776,13 @@ export class CrocodileClient extends Emitter<ClientEvents> {
     const me = this.userId;
     const key = recordKey.member(spaceId, me);
     await this.putRecord(
-      signRecord(this.identity!, 'member', key, { spaceId, userId: me, inviteCode: code }, this.nextVersion(key)),
+      signRecord(
+        this.identity!,
+        'member',
+        key,
+        { spaceId, userId: me, inviteCode: code },
+        this.nextVersion(key),
+      ),
     );
     await this.afterSpaceJoined(spaceId);
     return spaceId;
@@ -696,7 +791,15 @@ export class CrocodileClient extends Emitter<ClientEvents> {
   async leaveSpace(spaceId: string) {
     const me = this.userId;
     const key = recordKey.member(spaceId, me);
-    await this.putRecord(signRecord(this.identity!, 'member', key, { spaceId, userId: me, left: true }, this.nextVersion(key)));
+    await this.putRecord(
+      signRecord(
+        this.identity!,
+        'member',
+        key,
+        { spaceId, userId: me, left: true },
+        this.nextVersion(key),
+      ),
+    );
   }
 
   // ===========================================================================
@@ -708,7 +811,8 @@ export class CrocodileClient extends Emitter<ClientEvents> {
     if (session) return session;
     if (!this.transportFactory) throw new Error('This device cannot open peer-to-peer connections');
     const scope = parseSessionId(sessionId);
-    const withVoice = scope?.kind === 'voice' || scope?.kind === 'dm' ? this.voiceEngine : undefined;
+    const withVoice =
+      scope?.kind === 'voice' || scope?.kind === 'dm' ? this.voiceEngine : undefined;
     session = new GroupSession(
       sessionId,
       {
@@ -725,14 +829,25 @@ export class CrocodileClient extends Emitter<ClientEvents> {
         log: (m, e) => this.log(m, { session: sessionId, ...e }),
       },
       this.transportFactory,
-      withVoice ? { micTrack: () => withVoice.micTrack(), frameCrypto: (k) => withVoice.frameCrypto(k) } : undefined,
+      withVoice
+        ? { micTrack: () => withVoice.micTrack(), frameCrypto: (k) => withVoice.frameCrypto(k) }
+        : undefined,
     );
     session.on('update', () => this.publishSession(session!));
-    session.on('track', (ev) => this.voiceEngine?.playSlot(sessionId, ev.slot, ev.track, () => session!.slots[ev.slot] ?? null));
+    session.on('track', (ev) =>
+      this.voiceEngine?.playSlot(
+        sessionId,
+        ev.slot,
+        ev.track,
+        () => session!.slots[ev.slot] ?? null,
+      ),
+    );
     session.on('call', ({ userId, action }) => this.onCallSignal(sessionId, userId, action));
     session.on('typing', ({ userId, ch }) => {
       const until = Date.now() + 6000;
-      this.store.set((s) => ({ typing: { ...s.typing, [ch]: { ...(s.typing[ch] ?? {}), [userId]: until } } }));
+      this.store.set((s) => ({
+        typing: { ...s.typing, [ch]: { ...(s.typing[ch] ?? {}), [userId]: until } },
+      }));
     });
     if (scope?.kind === 'voice') session.isVoice = true;
     this.sessions.set(sessionId, session);
@@ -769,7 +884,9 @@ export class CrocodileClient extends Emitter<ClientEvents> {
       canHost: !!this.platform.relay && settings.allowHosting && (extra.canHost ?? true),
       platform: this.platform.platform,
       nat: extra.nat ?? 'unknown',
-      ...(settings.uplinkKbps ?? extra.uplinkKbps ? { uplinkKbps: settings.uplinkKbps ?? extra.uplinkKbps } : {}),
+      ...((settings.uplinkKbps ?? extra.uplinkKbps)
+        ? { uplinkKbps: settings.uplinkKbps ?? extra.uplinkKbps }
+        : {}),
       ...(extra.cpuCores ? { cpuCores: extra.cpuCores } : {}),
       ...(extra.onBattery !== undefined ? { onBattery: extra.onBattery } : {}),
       ...(this.state.server ? { rttMs: Math.round(this.state.server.rttMs) } : {}),
@@ -800,7 +917,9 @@ export class CrocodileClient extends Emitter<ClientEvents> {
     if (!scope) return [];
     if (scope.kind === 'dm') return [sessionId];
     if (scope.kind === 'space') {
-      return (this.state.spaces[scope.spaceId]?.channels ?? []).filter((c) => c.kind === 'text').map((c) => c.id);
+      return (this.state.spaces[scope.spaceId]?.channels ?? [])
+        .filter((c) => c.kind === 'text')
+        .map((c) => c.id);
     }
     return [];
   }
@@ -827,7 +946,10 @@ export class CrocodileClient extends Emitter<ClientEvents> {
     const sessionId = sessionIds.dm(this.userId, userId);
     this.addDm(userId);
     const session = this.ensureSession(sessionId);
-    if (!session.state) await session.join().catch((err) => this.reportError(`Could not open conversation: ${err.message}`));
+    if (!session.state)
+      await session
+        .join()
+        .catch((err) => this.reportError(`Could not open conversation: ${err.message}`));
     return sessionId;
   }
 
@@ -867,7 +989,9 @@ export class CrocodileClient extends Emitter<ClientEvents> {
     const before = current[0]?.ts;
     const page = await this.platform.messages.page(channel, { before, limit: 100 });
     if (page.length === 0) return false;
-    this.store.set((s) => ({ messages: { ...s.messages, [channel]: foldEdits([...page, ...(s.messages[channel] ?? [])]) } }));
+    this.store.set((s) => ({
+      messages: { ...s.messages, [channel]: foldEdits([...page, ...(s.messages[channel] ?? [])]) },
+    }));
     return true;
   }
 
@@ -875,16 +999,24 @@ export class CrocodileClient extends Emitter<ClientEvents> {
     this.store.set({ activeChannel: null });
   }
 
-  async sendMessage(channel: string, body: string, opts: { replyTo?: string; edits?: string; deleted?: boolean } = {}) {
+  async sendMessage(
+    channel: string,
+    body: string,
+    opts: { replyTo?: string; edits?: string; deleted?: boolean } = {},
+  ) {
     const text = body.trim();
     if (!text && !opts.deleted) return;
-    if (text.length > LIMITS.messageMaxChars) throw new Error(`Messages are limited to ${LIMITS.messageMaxChars} characters`);
+    if (text.length > LIMITS.messageMaxChars)
+      throw new Error(`Messages are limited to ${LIMITS.messageMaxChars} characters`);
     const sessionId = this.sessionOfChannel(channel);
     if (!sessionId) throw new Error('unknown channel');
     const message = createChatMessage(this.identity!, { ch: channel, body: text, ...opts });
     await this.platform.messages.put(message);
     const session = this.sessions.get(sessionId);
-    const delivered = !!session?.connected && session.peers.size > 0 && session.sendGroup({ type: 'message', message });
+    const delivered =
+      !!session?.connected &&
+      session.peers.size > 0 &&
+      session.sendGroup({ type: 'message', message });
     this.addToTimeline(channel, { ...message, pending: !delivered });
     this.emit('message', { channel, message, mine: true });
   }
@@ -905,14 +1037,17 @@ export class CrocodileClient extends Emitter<ClientEvents> {
   private async acceptMessage(sessionId: string, message: ChatMessage): Promise<boolean> {
     if (!verifyChatMessage(message)) return false;
     if (!this.historyChannels(sessionId).includes(message.ch)) return false;
-    if (message.author !== this.userId && !this.isAllowedPeer(sessionId, message.author)) return false;
+    if (message.author !== this.userId && !this.isAllowedPeer(sessionId, message.author))
+      return false;
     if (message.ts > Date.now() + 5 * 60_000) return false;
     const fresh = await this.platform.messages.put(message);
     if (!fresh) return false;
     this.addToTimeline(message.ch, message);
     const mine = message.author === this.userId;
     if (!mine && this.state.activeChannel !== message.ch) {
-      this.store.set((s) => ({ unread: { ...s.unread, [message.ch]: (s.unread[message.ch] ?? 0) + 1 } }));
+      this.store.set((s) => ({
+        unread: { ...s.unread, [message.ch]: (s.unread[message.ch] ?? 0) + 1 },
+      }));
     }
     this.store.set((s) => {
       const typing = s.typing[message.ch];
@@ -928,7 +1063,12 @@ export class CrocodileClient extends Emitter<ClientEvents> {
     this.store.set((s) => {
       const list = s.messages[channel];
       if (!list) return {};
-      return { messages: { ...s.messages, [channel]: foldEdits([...list.filter((m) => m.id !== message.id), message]) } };
+      return {
+        messages: {
+          ...s.messages,
+          [channel]: foldEdits([...list.filter((m) => m.id !== message.id), message]),
+        },
+      };
     });
   }
 
@@ -983,14 +1123,19 @@ export class CrocodileClient extends Emitter<ClientEvents> {
     this.sendCallSignal(call.sessionId, 'decline');
   }
 
-  private onCallSignal(sessionId: string, from: string, action: 'ring' | 'accept' | 'decline' | 'end') {
+  private onCallSignal(
+    sessionId: string,
+    from: string,
+    action: 'ring' | 'accept' | 'decline' | 'end',
+  ) {
     if (from === this.userId) return;
     if (action === 'ring') {
       if (this.state.voiceSession === sessionId) {
         this.sendCallSignal(sessionId, 'accept');
         return;
       }
-      if (!this.state.incomingCall) this.store.set({ incomingCall: { sessionId, from, at: Date.now() } });
+      if (!this.state.incomingCall)
+        this.store.set({ incomingCall: { sessionId, from, at: Date.now() } });
     } else if (action === 'accept') {
       if (this.state.outgoingCall?.sessionId === sessionId) this.store.set({ outgoingCall: null });
     } else if (action === 'decline') {
@@ -1086,7 +1231,12 @@ export function foldEdits(messages: MessageView[]): MessageView[] {
     if (m.edits) {
       const original = byId.get(m.edits);
       if (original && original.author === m.author) {
-        const updated: MessageView = { ...original, body: m.deleted ? '' : m.body, edited: !m.deleted, deleted: m.deleted };
+        const updated: MessageView = {
+          ...original,
+          body: m.deleted ? '' : m.body,
+          edited: !m.deleted,
+          deleted: m.deleted,
+        };
         byId.set(original.id, updated);
         out[out.indexOf(original)] = updated;
       }

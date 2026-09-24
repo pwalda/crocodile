@@ -74,5 +74,7 @@ body {
 }
 
 .speaking-ring {
-  box-shadow: 0 0 0 2px var(--color-main), 0 0 0 4px var(--color-online);
+  box-shadow:
+    0 0 0 2px var(--color-main),
+    0 0 0 4px var(--color-online);
 }

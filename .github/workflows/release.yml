@@ -1,0 +1,71 @@
+name: Release
+
+# Push a tag like v0.2.0 to build installers for every platform and publish
+# them (plus auto-update metadata) to a GitHub release, and server images to GHCR.
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+  packages: write
+
+jobs:
+  installers:
+    name: Installers (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Set version from tag
+        working-directory: apps/desktop
+        shell: bash
+        run: npm version --no-git-tag-version "${GITHUB_REF_NAME#v}"
+      - name: Build and publish
+        working-directory: apps/desktop
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Directory services baked into the app (comma-separated URLs).
+          CROC_DIRECTORIES: ${{ vars.CROC_DIRECTORIES }}
+          # Code signing is optional; without these secrets builds are unsigned.
+          CSC_LINK: ${{ secrets.CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          CSC_IDENTITY_AUTO_DISCOVERY: ${{ secrets.CSC_LINK != '' }}
+        run: node scripts/build.mjs && npx electron-builder --publish always
+
+  images:
+    name: Server images
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: packages/coordinator/Dockerfile
+          push: true
+          tags: ghcr.io/${{ github.repository_owner }}/crocodile-coordinator:${{ github.ref_name }},ghcr.io/${{ github.repository_owner }}/crocodile-coordinator:latest
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: apps/directory/Dockerfile
+          push: true
+          tags: ghcr.io/${{ github.repository_owner }}/crocodile-directory:${{ github.ref_name }},ghcr.io/${{ github.repository_owner }}/crocodile-directory:latest

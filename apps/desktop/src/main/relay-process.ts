@@ -7,7 +7,14 @@ import { identityFromSeed } from '@crocodile/crypto';
 import { fromB64u } from '@crocodile/protocol';
 import type { RelayProcessIn, RelayProcessOut } from './ipc-types';
 
-const port = (process as unknown as { parentPort: { on(ev: 'message', fn: (e: { data: RelayProcessIn }) => void): void; postMessage(m: RelayProcessOut): void } }).parentPort;
+const port = (
+  process as unknown as {
+    parentPort: {
+      on(ev: 'message', fn: (e: { data: RelayProcessIn }) => void): void;
+      postMessage(m: RelayProcessOut): void;
+    };
+  }
+).parentPort;
 const relays = new Map<string, { relay: HostRelay; members: Set<string> }>();
 const send = (m: RelayProcessOut) => port.postMessage(m);
 

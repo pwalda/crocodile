@@ -3,7 +3,15 @@ import { getClient, useCroc } from '../croc';
 import { Avatar, Button, UserName, cx } from './ui';
 
 /** Main area for a voice channel: participant tiles like Discord's call view. */
-export function VoiceStage({ sessionId, title, onJoin }: { sessionId: string; title: string; onJoin: () => void }) {
+export function VoiceStage({
+  sessionId,
+  title,
+  onJoin,
+}: {
+  sessionId: string;
+  title: string;
+  onJoin: () => void;
+}) {
   const session = useCroc((s) => s.sessions[sessionId]);
   const occ = useCroc((s) => s.voice[sessionId]);
   const joined = useCroc((s) => s.voiceSession === sessionId);
@@ -43,7 +51,10 @@ export function VoiceStage({ sessionId, title, onJoin }: { sessionId: string; ti
                 {deaf ? <HeadphoneOff size={14} /> : muted ? <MicOff size={14} /> : null}
               </div>
               {u === host && (
-                <div className="absolute right-2 top-2 flex items-center gap-1 rounded bg-black/50 px-2 py-0.5 text-xs text-croc-light" title="This member's device relays the channel's encrypted audio">
+                <div
+                  className="absolute right-2 top-2 flex items-center gap-1 rounded bg-black/50 px-2 py-0.5 text-xs text-croc-light"
+                  title="This member's device relays the channel's encrypted audio"
+                >
                   <Radio size={12} /> Host
                 </div>
               )}
@@ -60,7 +71,9 @@ export function VoiceStage({ sessionId, title, onJoin }: { sessionId: string; ti
       )}
       {joined && session && session.status !== 'connected' && (
         <p className="pb-6 text-center text-sm text-warn">
-          {session.status === 'no-host' ? 'Waiting for a member who can host the call…' : 'Connecting to the host…'}
+          {session.status === 'no-host'
+            ? 'Waiting for a member who can host the call…'
+            : 'Connecting to the host…'}
         </p>
       )}
       {joined && <VoiceControls />}
@@ -77,7 +90,10 @@ function VoiceControls() {
       <Button variant={muted ? 'danger' : 'secondary'} onClick={() => client.setMuted(!muted)}>
         <MicOff size={18} /> {muted ? 'Unmute' : 'Mute'}
       </Button>
-      <Button variant={deafened ? 'danger' : 'secondary'} onClick={() => client.setDeafened(!deafened)}>
+      <Button
+        variant={deafened ? 'danger' : 'secondary'}
+        onClick={() => client.setDeafened(!deafened)}
+      >
         <HeadphoneOff size={18} /> {deafened ? 'Undeafen' : 'Deafen'}
       </Button>
       <Button variant="danger" onClick={() => void client.leaveVoice()}>

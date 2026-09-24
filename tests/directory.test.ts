@@ -28,12 +28,23 @@ describe('directory', () => {
   it('rejects forged and unreachable entries', async () => {
     const d = await directory();
     const id = createIdentity();
-    const server = { id: id.userId, key: id.publicKey, name: 'ghost', url: 'http://127.0.0.1:1', version: '0' };
+    const server = {
+      id: id.userId,
+      key: id.publicKey,
+      name: 'ghost',
+      url: 'http://127.0.0.1:1',
+      version: '0',
+    };
     const load = { users: 0, capacity: 1 };
     const signedAt = Date.now();
     const sig = sign(id, SIG_DOMAIN.directory, { server, load, signedAt });
-    expect(await d.register({ server, load, signedAt, sig })).toMatchObject({ ok: false, status: 422 });
-    expect(await d.register({ server: { ...server, name: 'evil' }, load, signedAt, sig })).toMatchObject({ ok: false, status: 401 });
+    expect(await d.register({ server, load, signedAt, sig })).toMatchObject({
+      ok: false,
+      status: 422,
+    });
+    expect(
+      await d.register({ server: { ...server, name: 'evil' }, load, signedAt, sig }),
+    ).toMatchObject({ ok: false, status: 401 });
   });
 
   it('refuses private URLs on a public directory', () => {
@@ -51,6 +62,10 @@ describe('directory', () => {
     const b = await startCoordinator({ name: 'B', directoryUrls: [d.url], announce: true });
     cleanup.push(() => b.stop());
     // A registered before B existed; B's first tick sees A and dials it.
-    await waitFor(() => a.mesh.peerIds().includes(b.info.id) && b.mesh.peerIds().includes(a.info.id), 5000, 'mesh via directory');
+    await waitFor(
+      () => a.mesh.peerIds().includes(b.info.id) && b.mesh.peerIds().includes(a.info.id),
+      5000,
+      'mesh via directory',
+    );
   });
 });

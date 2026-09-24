@@ -90,7 +90,9 @@ export class MemoryMessageStore implements MessageStore {
   }
 
   async page(channel: string, opts: { before?: number; limit: number }) {
-    const list = (this.byChannel.get(channel) ?? []).filter((m) => opts.before === undefined || m.ts < opts.before);
+    const list = (this.byChannel.get(channel) ?? []).filter(
+      (m) => opts.before === undefined || m.ts < opts.before,
+    );
     return list.slice(-opts.limit);
   }
 

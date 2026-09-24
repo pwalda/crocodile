@@ -1,6 +1,12 @@
 import { WebSocket } from 'ws';
 import { keyMatchesUserId, randomId, sign, verifyPayload } from '@crocodile/crypto';
-import { LIMITS, ServerInfo, SIG_DOMAIN, type FedFrame, type SignedRecord } from '@crocodile/protocol';
+import {
+  LIMITS,
+  ServerInfo,
+  SIG_DOMAIN,
+  type FedFrame,
+  type SignedRecord,
+} from '@crocodile/protocol';
 import type { Coordinator } from './coordinator';
 import { sendJson, toWsUrl } from './util';
 
@@ -97,7 +103,10 @@ export class Mesh {
     this.dialing.set(url, state);
     let ws: WebSocket;
     try {
-      ws = new WebSocket(toWsUrl(url, '/v1/federation'), { maxPayload: LIMITS.wsMessageMaxBytes * 8, handshakeTimeout: 10_000 });
+      ws = new WebSocket(toWsUrl(url, '/v1/federation'), {
+        maxPayload: LIMITS.wsMessageMaxBytes * 8,
+        handshakeTimeout: 10_000,
+      });
     } catch {
       this.scheduleRedial(url);
       return;
@@ -111,12 +120,15 @@ export class Mesh {
     if (this.closed) return;
     const state = this.dialing.get(url) ?? { attempts: 0 };
     state.attempts += 1;
-    const isKnown = [...this.known.values()].some((s) => s.url === url) || this.hub.config.meshPeers.includes(url);
+    const isKnown =
+      [...this.known.values()].some((s) => s.url === url) ||
+      this.hub.config.meshPeers.includes(url);
     if (!isKnown && state.attempts > 5) {
       this.dialing.delete(url);
       return;
     }
-    const delay = Math.min(60_000, 1000 * 2 ** Math.min(state.attempts, 6)) * (0.75 + Math.random() * 0.5);
+    const delay =
+      Math.min(60_000, 1000 * 2 ** Math.min(state.attempts, 6)) * (0.75 + Math.random() * 0.5);
     state.timer = setTimeout(() => this.dial(url), delay);
     state.timer.unref?.();
     this.dialing.set(url, state);
@@ -175,7 +187,11 @@ export class Mesh {
         this.hub.log.info('mesh link down', { peer: peerId });
         this.hub.onServerDown(peerId);
       }
-      const redialUrl = link.initiator ? url : link.peer && this.known.has(link.peer.id) ? link.peer.url : undefined;
+      const redialUrl = link.initiator
+        ? url
+        : link.peer && this.known.has(link.peer.id)
+          ? link.peer.url
+          : undefined;
       if (redialUrl && !link.replaced && !this.closed) this.scheduleRedial(redialUrl);
     });
     return link;
@@ -184,7 +200,11 @@ export class Mesh {
   private onFrame(link: Link, frame: FedFrame) {
     if (frame.t === 'fed_hello') {
       const parsed = ServerInfo.safeParse(frame.server);
-      if (!parsed.success || !keyMatchesUserId(frame.server.key, frame.server.id) || frame.server.id === this.hub.info.id) {
+      if (
+        !parsed.success ||
+        !keyMatchesUserId(frame.server.key, frame.server.id) ||
+        frame.server.id === this.hub.info.id
+      ) {
         link.ws.close(1008, 'invalid server identity');
         return;
       }
@@ -216,7 +236,8 @@ export class Mesh {
     const peerId = link.peer.id;
     switch (frame.t) {
       case 'records':
-        for (const item of frame.items) this.hub.records.put(item.record, { fresh: false, origin: peerId });
+        for (const item of frame.items)
+          this.hub.records.put(item.record, { fresh: false, origin: peerId });
         this.setCursor(peerId, frame.upTo);
         return;
       case 'presence':

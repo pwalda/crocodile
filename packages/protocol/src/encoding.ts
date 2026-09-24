@@ -12,7 +12,8 @@ export function toB64u(bytes: Uint8Array): string {
   let i = 0;
   for (; i + 2 < bytes.length; i += 3) {
     const n = (bytes[i]! << 16) | (bytes[i + 1]! << 8) | bytes[i + 2]!;
-    out += B64URL[(n >> 18) & 63]! + B64URL[(n >> 12) & 63]! + B64URL[(n >> 6) & 63]! + B64URL[n & 63]!;
+    out +=
+      B64URL[(n >> 18) & 63]! + B64URL[(n >> 12) & 63]! + B64URL[(n >> 6) & 63]! + B64URL[n & 63]!;
   }
   const rest = bytes.length - i;
   if (rest === 1) {

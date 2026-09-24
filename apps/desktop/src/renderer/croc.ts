@@ -1,5 +1,11 @@
 import { useRef, useSyncExternalStore } from 'react';
-import { CrocodileClient, VoiceEngine, defaultVoiceSettings, type ClientState, type VoiceSettings } from '@crocodile/client-core';
+import {
+  CrocodileClient,
+  VoiceEngine,
+  defaultVoiceSettings,
+  type ClientState,
+  type VoiceSettings,
+} from '@crocodile/client-core';
 import { StateStore } from '@crocodile/client-core';
 import { createPlatform, desktop, kv } from './platform';
 import FrameWorker from '@crocodile/client-core/frame-worker?worker';
@@ -17,7 +23,14 @@ export type ModalState =
   | { kind: 'settings'; tab?: string }
   | { kind: 'profile'; userId: string }
   | { kind: 'new-dm' }
-  | { kind: 'confirm'; title: string; body: string; action: string; danger?: boolean; onConfirm: () => void | Promise<void> };
+  | {
+      kind: 'confirm';
+      title: string;
+      body: string;
+      action: string;
+      danger?: boolean;
+      onConfirm: () => void | Promise<void>;
+    };
 
 export interface UiState {
   view: View;
@@ -42,10 +55,20 @@ export const ui = new StateStore<UiState>({
 let client: CrocodileClient;
 
 export async function bootClient(): Promise<CrocodileClient> {
-  const info = (await desktop?.app.info()) ?? { version: '0.1.0-web', platform: 'web', directories: [], cpuCores: navigator.hardwareConcurrency };
-  const builtIn = (process.env.CROC_DIRECTORIES as string | undefined)?.split(',').filter(Boolean) ?? [];
+  const info = (await desktop?.app.info()) ?? {
+    version: '0.1.0-web',
+    platform: 'web',
+    directories: [],
+    cpuCores: navigator.hardwareConcurrency,
+  };
+  const builtIn =
+    (process.env.CROC_DIRECTORIES as string | undefined)?.split(',').filter(Boolean) ?? [];
   const directories = info.directories.length ? info.directories : builtIn;
-  const platform = createPlatform({ version: info.version, cpuCores: info.cpuCores, stun: () => client?.stunUrls ?? [] });
+  const platform = createPlatform({
+    version: info.version,
+    cpuCores: info.cpuCores,
+    stun: () => client?.stunUrls ?? [],
+  });
 
   // A locally running coordination server (if the user enabled one) is preferred.
   const local = await desktop?.coordinator.get();
@@ -98,7 +121,9 @@ function shallowEqual(a: unknown, b: unknown) {
   const ka = Object.keys(a);
   const kb = Object.keys(b);
   if (ka.length !== kb.length) return false;
-  return ka.every((k) => Object.is((a as Record<string, unknown>)[k], (b as Record<string, unknown>)[k]));
+  return ka.every((k) =>
+    Object.is((a as Record<string, unknown>)[k], (b as Record<string, unknown>)[k]),
+  );
 }
 
 function useStore<S extends object, T>(store: StateStore<S>, selector: (s: S) => T): T {

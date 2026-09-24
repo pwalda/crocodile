@@ -44,12 +44,20 @@ export type VoiceEvents = {
 
 type WorkerMessage =
   | { type: 'keys'; scope: string; keys: FrameKeys }
-  | { type: 'stream'; scope: string; role: 'encrypt' | 'decrypt'; readable: ReadableStream; writable: WritableStream }
+  | {
+      type: 'stream';
+      scope: string;
+      role: 'encrypt' | 'decrypt';
+      readable: ReadableStream;
+      writable: WritableStream;
+    }
   | { type: 'drop'; scope: string };
 
-declare const RTCRtpScriptTransform: {
-  new (worker: Worker, options?: unknown, transfer?: unknown[]): unknown;
-} | undefined;
+declare const RTCRtpScriptTransform:
+  | {
+      new (worker: Worker, options?: unknown, transfer?: unknown[]): unknown;
+    }
+  | undefined;
 
 /**
  * Microphone capture with Chromium's echo cancellation / noise suppression,
@@ -71,7 +79,10 @@ export class VoiceEngine extends Emitter<VoiceEvents> {
   private pttDown = false;
   private worker?: Worker;
   private scopes = new Map<string, () => void>();
-  private players = new Map<string, { el: HTMLAudioElement; owner: () => string | null; timer: ReturnType<typeof setInterval> }>();
+  private players = new Map<
+    string,
+    { el: HTMLAudioElement; owner: () => string | null; timer: ReturnType<typeof setInterval> }
+  >();
 
   constructor(
     private readonly platform: VoicePlatform,
@@ -84,7 +95,8 @@ export class VoiceEngine extends Emitter<VoiceEvents> {
   static supportsE2EE(): boolean {
     const hasScript = typeof RTCRtpScriptTransform !== 'undefined';
     const hasLegacy =
-      typeof RTCRtpSender !== 'undefined' && 'createEncodedStreams' in (RTCRtpSender.prototype as object);
+      typeof RTCRtpSender !== 'undefined' &&
+      'createEncodedStreams' in (RTCRtpSender.prototype as object);
     return hasScript || hasLegacy;
   }
 
@@ -215,12 +227,13 @@ export class VoiceEngine extends Emitter<VoiceEvents> {
     this.settings = { ...prev, ...patch };
     const needsNewMic =
       this.track &&
-      (patch.inputDeviceId !== undefined && patch.inputDeviceId !== prev.inputDeviceId ||
+      ((patch.inputDeviceId !== undefined && patch.inputDeviceId !== prev.inputDeviceId) ||
         ['echoCancellation', 'noiseSuppression', 'autoGainControl'].some(
           (k) => k in patch && patch[k as keyof VoiceSettings] !== prev[k as keyof VoiceSettings],
         ));
     if (needsNewMic) await this.acquire();
-    if (patch.outputDeviceId !== undefined) for (const p of this.players.values()) void this.setSink(p.el);
+    if (patch.outputDeviceId !== undefined)
+      for (const p of this.players.values()) void this.setSink(p.el);
     if (patch.mode) {
       this.gateOpen = patch.mode === 'vad';
       this.applyGate();
@@ -229,13 +242,17 @@ export class VoiceEngine extends Emitter<VoiceEvents> {
 
   async devices(): Promise<{ inputs: MediaDeviceInfo[]; outputs: MediaDeviceInfo[] }> {
     const all = (await this.platform.enumerateDevices?.()) ?? [];
-    return { inputs: all.filter((d) => d.kind === 'audioinput'), outputs: all.filter((d) => d.kind === 'audiooutput') };
+    return {
+      inputs: all.filter((d) => d.kind === 'audioinput'),
+      outputs: all.filter((d) => d.kind === 'audiooutput'),
+    };
   }
 
   frameCrypto(keyring: GroupKeyring): FrameCryptoHooks {
     const worker = (this.worker ??= this.platform.createFrameWorker());
     const scope = Math.random().toString(36).slice(2);
-    const post = (msg: WorkerMessage, transfer: Transferable[] = []) => worker.postMessage(msg, transfer);
+    const post = (msg: WorkerMessage, transfer: Transferable[] = []) =>
+      worker.postMessage(msg, transfer);
     post({ type: 'keys', scope, keys: keyring.frameKeys() });
     const off = keyring.on('changed', (keys) => post({ type: 'keys', scope, keys }));
     this.scopes.set(scope, () => {
@@ -245,12 +262,20 @@ export class VoiceEngine extends Emitter<VoiceEvents> {
     const useScript = typeof RTCRtpScriptTransform !== 'undefined';
     const install = (target: RTCRtpSender | RTCRtpReceiver, role: 'encrypt' | 'decrypt') => {
       if (useScript) {
-        (target as unknown as { transform: unknown }).transform = new RTCRtpScriptTransform!(worker, { role, scope });
+        (target as unknown as { transform: unknown }).transform = new RTCRtpScriptTransform!(
+          worker,
+          { role, scope },
+        );
       } else {
-        const { readable, writable } = (target as unknown as {
-          createEncodedStreams(): { readable: ReadableStream; writable: WritableStream };
-        }).createEncodedStreams();
-        post({ type: 'stream', scope, role, readable, writable }, [readable as unknown as Transferable, writable as unknown as Transferable]);
+        const { readable, writable } = (
+          target as unknown as {
+            createEncodedStreams(): { readable: ReadableStream; writable: WritableStream };
+          }
+        ).createEncodedStreams();
+        post({ type: 'stream', scope, role, readable, writable }, [
+          readable as unknown as Transferable,
+          writable as unknown as Transferable,
+        ]);
       }
     };
     return {

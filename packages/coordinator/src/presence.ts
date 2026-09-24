@@ -26,7 +26,10 @@ export interface ClientHandle {
  */
 export class PresenceService {
   readonly local = new Map<string, ClientHandle>();
-  private remote = new Map<string, Map<string, { status: FedEntry['status']; text?: string; since: number }>>();
+  private remote = new Map<
+    string,
+    Map<string, { status: FedEntry['status']; text?: string; since: number }>
+  >();
   private watchers = new Map<string, Set<ClientHandle>>();
 
   constructor(private readonly hub: Coordinator) {}
@@ -61,7 +64,8 @@ export class PresenceService {
         : { userId, status: local.status, ...(local.statusText ? { text: local.statusText } : {}) };
     }
     const best = this.newestRemote(userId);
-    if (!best || best.status === 'invisible' || best.status === 'offline') return { userId, status: 'offline' };
+    if (!best || best.status === 'invisible' || best.status === 'offline')
+      return { userId, status: 'offline' };
     return { userId, status: best.status, ...(best.text ? { text: best.text } : {}) };
   }
 
@@ -74,7 +78,12 @@ export class PresenceService {
   private newestRemote(userId: string) {
     const entries = this.remote.get(userId);
     if (!entries) return null;
-    let best: { serverId: string; status: FedEntry['status']; text?: string; since: number } | null = null;
+    let best: {
+      serverId: string;
+      status: FedEntry['status'];
+      text?: string;
+      since: number;
+    } | null = null;
     for (const [serverId, e] of entries) {
       if (e.status === 'offline') continue;
       if (!best || e.since > best.since) best = { serverId, ...e };
@@ -139,7 +148,12 @@ export class PresenceService {
     if (local) {
       const c = this.local.get(userId);
       const entry: FedEntry = c
-        ? { userId, status: c.status, ...(c.statusText ? { text: c.statusText } : {}), since: c.connectedAt }
+        ? {
+            userId,
+            status: c.status,
+            ...(c.statusText ? { text: c.statusText } : {}),
+            since: c.connectedAt,
+          }
         : { userId, status: 'offline', since: Date.now() };
       this.hub.mesh.broadcast({ t: 'presence', full: false, entries: [entry] });
     }

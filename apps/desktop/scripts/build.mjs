@@ -43,7 +43,11 @@ if (dev) {
   const require = createRequire(import.meta.url);
   const electron = require('electron');
   const args = ['.', ...(process.getuid?.() === 0 ? ['--no-sandbox'] : [])];
-  const child = spawn(electron, args, { cwd: root, stdio: 'inherit', env: { ...process.env, CROC_RENDERER_URL: url } });
+  const child = spawn(electron, args, {
+    cwd: root,
+    stdio: 'inherit',
+    env: { ...process.env, CROC_RENDERER_URL: url },
+  });
   child.on('exit', (code) => {
     void server.close();
     process.exit(code ?? 0);

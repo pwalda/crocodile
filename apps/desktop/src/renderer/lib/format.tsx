@@ -16,7 +16,11 @@ export function dayOf(ts: number) {
 
 export function stampOf(ts: number) {
   const day = dayOf(ts);
-  return day === 'Today' ? `Today at ${timeOf(ts)}` : day === 'Yesterday' ? `Yesterday at ${timeOf(ts)}` : `${day} ${timeOf(ts)}`;
+  return day === 'Today'
+    ? `Today at ${timeOf(ts)}`
+    : day === 'Yesterday'
+      ? `Yesterday at ${timeOf(ts)}`
+      : `${day} ${timeOf(ts)}`;
 }
 
 function openLink(url: string) {
@@ -34,7 +38,10 @@ export function renderMessage(text: string): ReactNode[] {
   blocks.forEach((block, i) => {
     if (i % 2 === 1) {
       out.push(
-        <pre key={`b${i}`} className="selectable my-1 overflow-x-auto rounded border border-line bg-panel p-2 font-mono text-[13px]">
+        <pre
+          key={`b${i}`}
+          className="selectable my-1 overflow-x-auto rounded border border-line bg-panel p-2 font-mono text-[13px]"
+        >
           {block.replace(/^\w*\n/, '')}
         </pre>,
       );
@@ -45,7 +52,8 @@ export function renderMessage(text: string): ReactNode[] {
   return out;
 }
 
-const INLINE = /(`[^`\n]+`|\*\*[^*\n]+\*\*|\*[^*\n]+\*|~~[^~\n]+~~|https?:\/\/[^\s<]+[^\s<.,:;"')\]!?])/g;
+const INLINE =
+  /(`[^`\n]+`|\*\*[^*\n]+\*\*|\*[^*\n]+\*|~~[^~\n]+~~|https?:\/\/[^\s<]+[^\s<.,:;"')\]!?])/g;
 
 function renderInline(text: string, key: string): ReactNode[] {
   const nodes: ReactNode[] = [];
@@ -55,13 +63,26 @@ function renderInline(text: string, key: string): ReactNode[] {
     const token = m[0];
     if (m.index! > last) nodes.push(text.slice(last, m.index));
     const k = `${key}-${n++}`;
-    if (token.startsWith('`')) nodes.push(<code key={k} className="rounded bg-panel px-1 py-0.5 font-mono text-[13px]">{token.slice(1, -1)}</code>);
+    if (token.startsWith('`'))
+      nodes.push(
+        <code key={k} className="rounded bg-panel px-1 py-0.5 font-mono text-[13px]">
+          {token.slice(1, -1)}
+        </code>,
+      );
     else if (token.startsWith('**')) nodes.push(<strong key={k}>{token.slice(2, -2)}</strong>);
     else if (token.startsWith('~~')) nodes.push(<s key={k}>{token.slice(2, -2)}</s>);
     else if (token.startsWith('*')) nodes.push(<em key={k}>{token.slice(1, -1)}</em>);
     else
       nodes.push(
-        <a key={k} className="text-sky-400 hover:underline" href={token} onClick={(e) => { e.preventDefault(); openLink(token); }}>
+        <a
+          key={k}
+          className="text-sky-400 hover:underline"
+          href={token}
+          onClick={(e) => {
+            e.preventDefault();
+            openLink(token);
+          }}
+        >
           {token}
         </a>,
       );
@@ -71,7 +92,17 @@ function renderInline(text: string, key: string): ReactNode[] {
   return nodes;
 }
 
-const PALETTE = ['#5865f2', '#3ba55d', '#faa61a', '#ed4245', '#eb459e', '#2fa56f', '#9b59b6', '#1abc9c', '#e67e22'];
+const PALETTE = [
+  '#5865f2',
+  '#3ba55d',
+  '#faa61a',
+  '#ed4245',
+  '#eb459e',
+  '#2fa56f',
+  '#9b59b6',
+  '#1abc9c',
+  '#e67e22',
+];
 
 export function colorFor(id: string) {
   let h = 0;

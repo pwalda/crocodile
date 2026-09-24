@@ -47,12 +47,20 @@ export function ServerRail() {
   const view = useUi((s) => s.view);
   const spaces = useCroc((s) => s.spaces);
   const unread = useCroc((s) => s.unread);
-  const dmUnread = useCroc((s) => Object.entries(s.unread).some(([ch, n]) => ch.startsWith('dm:') && n > 0));
+  const dmUnread = useCroc((s) =>
+    Object.entries(s.unread).some(([ch, n]) => ch.startsWith('dm:') && n > 0),
+  );
   const list = Object.values(spaces).sort((a, b) => a.name.localeCompare(b.name));
 
   return (
     <nav className="thin-scroll flex w-[72px] shrink-0 flex-col items-center gap-2 overflow-y-auto bg-rail py-3">
-      <RailItem active={view.kind !== 'space'} unread={dmUnread} label="Direct messages" onClick={() => navigate({ kind: 'friends' })} color={view.kind !== 'space' ? '#2fa56f' : '#313338'}>
+      <RailItem
+        active={view.kind !== 'space'}
+        unread={dmUnread}
+        label="Direct messages"
+        onClick={() => navigate({ kind: 'friends' })}
+        color={view.kind !== 'space' ? '#2fa56f' : '#313338'}
+      >
         <Logo size={30} />
       </RailItem>
       <div className="mx-auto h-0.5 w-8 rounded bg-line" />
@@ -71,11 +79,20 @@ export function ServerRail() {
               navigate({ kind: 'space', spaceId: space.id, channelId: first?.id ?? null });
             }}
           >
-            {space.icon ? <img src={space.icon} alt="" className="h-full w-full object-cover" /> : initials(space.name)}
+            {space.icon ? (
+              <img src={space.icon} alt="" className="h-full w-full object-cover" />
+            ) : (
+              initials(space.name)
+            )}
           </RailItem>
         );
       })}
-      <RailItem active={false} label="Add a space" onClick={() => openModal({ kind: 'add-space' })} color="#313338">
+      <RailItem
+        active={false}
+        label="Add a space"
+        onClick={() => openModal({ kind: 'add-space' })}
+        color="#313338"
+      >
         <Plus className="text-croc transition-colors group-hover:text-white" size={24} />
       </RailItem>
     </nav>

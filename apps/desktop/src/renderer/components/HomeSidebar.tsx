@@ -25,15 +25,25 @@ export function HomeSidebar() {
           onClick={() => navigate({ kind: 'friends' })}
           className={cx(
             'flex w-full items-center gap-3 rounded px-2 py-2.5 text-[15px] font-medium',
-            view.kind === 'friends' ? 'bg-active text-white' : 'text-muted hover:bg-hover hover:text-text',
+            view.kind === 'friends'
+              ? 'bg-active text-white'
+              : 'text-muted hover:bg-hover hover:text-text',
           )}
         >
           <Users size={22} /> Friends
-          {incoming > 0 && <span className="ml-auto rounded-full bg-dnd px-1.5 text-[11px] font-bold text-white">{incoming}</span>}
+          {incoming > 0 && (
+            <span className="ml-auto rounded-full bg-dnd px-1.5 text-[11px] font-bold text-white">
+              {incoming}
+            </span>
+          )}
         </button>
         <div className="mb-1 mt-4 flex items-center justify-between px-2 text-xs font-semibold uppercase tracking-wide text-faint">
           Direct messages
-          <button title="New message" className="hover:text-text" onClick={() => openModal({ kind: 'new-dm' })}>
+          <button
+            title="New message"
+            className="hover:text-text"
+            onClick={() => openModal({ kind: 'new-dm' })}
+          >
             <Plus size={16} />
           </button>
         </div>
@@ -50,8 +60,18 @@ export function HomeSidebar() {
               onClick={() => navigate({ kind: 'dm', userId })}
             >
               <Avatar userId={userId} size={32} status="auto" />
-              <UserName userId={userId} className={cx('flex-1 truncate text-[15px]', count > 0 && 'font-semibold text-white')} />
-              {count > 0 && <span className="rounded-full bg-dnd px-1.5 text-[11px] font-bold text-white">{count}</span>}
+              <UserName
+                userId={userId}
+                className={cx(
+                  'flex-1 truncate text-[15px]',
+                  count > 0 && 'font-semibold text-white',
+                )}
+              />
+              {count > 0 && (
+                <span className="rounded-full bg-dnd px-1.5 text-[11px] font-bold text-white">
+                  {count}
+                </span>
+              )}
               <button
                 title="Close conversation"
                 className="hidden text-faint hover:text-text group-hover:block"

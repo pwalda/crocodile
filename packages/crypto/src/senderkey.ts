@@ -32,7 +32,8 @@ export interface DerivedSenderKey {
 
 export function createSenderKey(): SenderKey {
   const kidBytes = randomBytes(4);
-  const kid = ((kidBytes[0]! << 24) | (kidBytes[1]! << 16) | (kidBytes[2]! << 8) | kidBytes[3]!) >>> 0;
+  const kid =
+    ((kidBytes[0]! << 24) | (kidBytes[1]! << 16) | (kidBytes[2]! << 8) | kidBytes[3]!) >>> 0;
   return { kid, secret: randomBytes(32) };
 }
 
@@ -68,13 +69,22 @@ function nonceFor(salt: Uint8Array, kid: number, counter: number): Uint8Array {
   return nonce;
 }
 
-export function encryptFrame(key: DerivedSenderKey, counter: number, frame: Uint8Array): Uint8Array {
+export function encryptFrame(
+  key: DerivedSenderKey,
+  counter: number,
+  frame: Uint8Array,
+): Uint8Array {
   const trailer = new Uint8Array(FRAME_TRAILER_BYTES);
   const tv = new DataView(trailer.buffer);
   tv.setUint32(0, key.kid);
   tv.setUint32(4, counter >>> 0);
   trailer[8] = FRAME_MAGIC;
-  const ct = aesGcmEncrypt(key.audioKey, nonceFor(key.audioSalt, key.kid, counter >>> 0), frame, trailer);
+  const ct = aesGcmEncrypt(
+    key.audioKey,
+    nonceFor(key.audioSalt, key.kid, counter >>> 0),
+    frame,
+    trailer,
+  );
   const out = new Uint8Array(ct.length + FRAME_TRAILER_BYTES);
   out.set(ct, 0);
   out.set(trailer, ct.length);
@@ -84,11 +94,16 @@ export function encryptFrame(key: DerivedSenderKey, counter: number, frame: Uint
 export function peekFrameKid(data: Uint8Array): number | null {
   if (data.length < FRAME_TRAILER_BYTES + TAG_BYTES) return null;
   if (data[data.length - 1] !== FRAME_MAGIC) return null;
-  return new DataView(data.buffer, data.byteOffset + data.length - FRAME_TRAILER_BYTES, 4).getUint32(0);
+  return new DataView(
+    data.buffer,
+    data.byteOffset + data.length - FRAME_TRAILER_BYTES,
+    4,
+  ).getUint32(0);
 }
 
 export function decryptFrame(key: DerivedSenderKey, data: Uint8Array): Uint8Array | null {
-  if (data.length < FRAME_TRAILER_BYTES + TAG_BYTES || data[data.length - 1] !== FRAME_MAGIC) return null;
+  if (data.length < FRAME_TRAILER_BYTES + TAG_BYTES || data[data.length - 1] !== FRAME_MAGIC)
+    return null;
   const trailer = data.subarray(data.length - FRAME_TRAILER_BYTES);
   const tv = new DataView(trailer.buffer, trailer.byteOffset, FRAME_TRAILER_BYTES);
   const kid = tv.getUint32(0);
@@ -106,7 +121,12 @@ export function encryptGroup(key: DerivedSenderKey, counter: number, plaintext: 
   const aad = new Uint8Array(8);
   new DataView(aad.buffer).setUint32(0, key.kid);
   new DataView(aad.buffer).setUint32(4, counter >>> 0);
-  const ct = aesGcmEncrypt(key.textKey, nonceFor(key.textSalt, key.kid, counter >>> 0), plaintext, aad);
+  const ct = aesGcmEncrypt(
+    key.textKey,
+    nonceFor(key.textSalt, key.kid, counter >>> 0),
+    plaintext,
+    aad,
+  );
   return { kid: key.kid, n: counter >>> 0, ct: toB64u(ct) };
 }
 

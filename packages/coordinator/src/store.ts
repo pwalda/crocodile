@@ -141,7 +141,10 @@ export class MemoryStore implements Store {
     this.dirty = false;
     mkdirSync(dirname(this.snapshotPath), { recursive: true });
     const tmp = `${this.snapshotPath}.tmp`;
-    writeFileSync(tmp, JSON.stringify({ records: [...this.records.values()], meta: [...this.meta] }));
+    writeFileSync(
+      tmp,
+      JSON.stringify({ records: [...this.records.values()], meta: [...this.meta] }),
+    );
     renameSync(tmp, this.snapshotPath);
   }
 
@@ -169,7 +172,8 @@ export class SqliteStore implements Store {
 
   constructor(path: string) {
     // getBuiltinModule works in ESM, CJS bundles and Electron utility processes alike.
-    const sqlite = process.getBuiltinModule?.('node:sqlite') as { DatabaseSync: new (p: string) => SqliteDb } | undefined;
+    const sqlite = process.getBuiltinModule?.('node:sqlite') as
+      { DatabaseSync: new (p: string) => SqliteDb } | undefined;
     if (!sqlite) throw new Error('node:sqlite is not available in this runtime');
     const { DatabaseSync } = sqlite;
     if (path !== ':memory:') mkdirSync(dirname(path), { recursive: true });
@@ -201,7 +205,9 @@ export class SqliteStore implements Store {
       ),
       delTerms: this.db.prepare('DELETE FROM terms WHERE key = ?'),
       addTerm: this.db.prepare('INSERT OR IGNORE INTO terms (term, key) VALUES (?, ?)'),
-      prefix: this.db.prepare('SELECT json FROM records WHERE key >= ? AND key < ? ORDER BY key LIMIT ?'),
+      prefix: this.db.prepare(
+        'SELECT json FROM records WHERE key >= ? AND key < ? ORDER BY key LIMIT ?',
+      ),
       since: this.db.prepare('SELECT seq, json FROM records WHERE seq > ? ORDER BY seq LIMIT ?'),
       byTerm: this.db.prepare(
         'SELECT r.json FROM terms t JOIN records r ON r.key = t.key WHERE t.term = ? LIMIT ?',
@@ -238,8 +244,11 @@ export class SqliteStore implements Store {
 
   listPrefix(prefix: string, limit: number) {
     // Prefixes end in ':' so bumping the last char gives an exclusive upper bound.
-    const upper = prefix.slice(0, -1) + String.fromCharCode(prefix.charCodeAt(prefix.length - 1) + 1);
-    return this.stmts.prefix.all(prefix, upper, limit).map((r) => JSON.parse(r.json as string) as SignedRecord);
+    const upper =
+      prefix.slice(0, -1) + String.fromCharCode(prefix.charCodeAt(prefix.length - 1) + 1);
+    return this.stmts.prefix
+      .all(prefix, upper, limit)
+      .map((r) => JSON.parse(r.json as string) as SignedRecord);
   }
 
   since(seq: number, limit: number) {
@@ -253,7 +262,9 @@ export class SqliteStore implements Store {
   }
 
   findByTerm(term: string, limit: number) {
-    return this.stmts.byTerm.all(term, limit).map((r) => JSON.parse(r.json as string) as SignedRecord);
+    return this.stmts.byTerm
+      .all(term, limit)
+      .map((r) => JSON.parse(r.json as string) as SignedRecord);
   }
 
   getMeta(key: string) {

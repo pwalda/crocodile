@@ -11,11 +11,21 @@ export function randomBytes(n: number): Uint8Array {
   return nobleRandomBytes(n);
 }
 
-export function hkdfSha256(ikm: Uint8Array, salt: Uint8Array, info: string, length: number): Uint8Array {
+export function hkdfSha256(
+  ikm: Uint8Array,
+  salt: Uint8Array,
+  info: string,
+  length: number,
+): Uint8Array {
   return hkdf(sha256, ikm, salt, utf8.encode(info), length);
 }
 
-export function aesGcmEncrypt(key: Uint8Array, nonce: Uint8Array, plaintext: Uint8Array, aad?: Uint8Array) {
+export function aesGcmEncrypt(
+  key: Uint8Array,
+  nonce: Uint8Array,
+  plaintext: Uint8Array,
+  aad?: Uint8Array,
+) {
   return gcm(key, nonce, aad).encrypt(plaintext);
 }
 
@@ -42,7 +52,12 @@ export function signPayload(secretKey: Uint8Array, domain: string, payload: unkn
   return toB64u(ed25519.sign(signingBytes(domain, payload), secretKey));
 }
 
-export function verifyPayload(publicKeyB64u: string, domain: string, payload: unknown, sigB64u: string): boolean {
+export function verifyPayload(
+  publicKeyB64u: string,
+  domain: string,
+  payload: unknown,
+  sigB64u: string,
+): boolean {
   try {
     const pub = fromB64u(publicKeyB64u);
     const sig = fromB64u(sigB64u);

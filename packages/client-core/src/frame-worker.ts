@@ -54,7 +54,12 @@ interface EncodedFrame {
   data: ArrayBuffer;
 }
 
-function pipe(readable: ReadableStream<EncodedFrame>, writable: WritableStream<EncodedFrame>, role: string, scopeId: string) {
+function pipe(
+  readable: ReadableStream<EncodedFrame>,
+  writable: WritableStream<EncodedFrame>,
+  role: string,
+  scopeId: string,
+) {
   const transform = new TransformStream<EncodedFrame, EncodedFrame>({
     transform(frame, controller) {
       const s = scopes.get(scopeId);
@@ -75,17 +80,32 @@ function pipe(readable: ReadableStream<EncodedFrame>, writable: WritableStream<E
       controller.enqueue(frame);
     },
   });
-  readable.pipeThrough(transform).pipeTo(writable).catch(() => {});
+  readable
+    .pipeThrough(transform)
+    .pipeTo(writable)
+    .catch(() => {});
 }
 
 const ctx = self as unknown as DedicatedWorkerGlobalScope & {
-  onrtctransform?: (ev: { transformer: { readable: ReadableStream; writable: WritableStream; options: { role: string; scope: string } } }) => void;
+  onrtctransform?: (ev: {
+    transformer: {
+      readable: ReadableStream;
+      writable: WritableStream;
+      options: { role: string; scope: string };
+    };
+  }) => void;
 };
 
 ctx.onmessage = (ev: MessageEvent) => {
   const m = ev.data as
     | { type: 'keys'; scope: string; keys: FrameKeys }
-    | { type: 'stream'; scope: string; role: string; readable: ReadableStream; writable: WritableStream }
+    | {
+        type: 'stream';
+        scope: string;
+        role: string;
+        readable: ReadableStream;
+        writable: WritableStream;
+      }
     | { type: 'drop'; scope: string };
   if (m.type === 'keys') updateKeys(m.scope, m.keys);
   else if (m.type === 'stream') pipe(m.readable, m.writable, m.role, m.scope);

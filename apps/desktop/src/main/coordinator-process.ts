@@ -5,7 +5,14 @@
 import { Coordinator } from '@crocodile/coordinator';
 import type { CoordinatorProcessIn, CoordinatorProcessOut, CoordinatorStatus } from './ipc-types';
 
-const port = (process as unknown as { parentPort: { on(ev: 'message', fn: (e: { data: CoordinatorProcessIn }) => void): void; postMessage(m: CoordinatorProcessOut): void } }).parentPort;
+const port = (
+  process as unknown as {
+    parentPort: {
+      on(ev: 'message', fn: (e: { data: CoordinatorProcessIn }) => void): void;
+      postMessage(m: CoordinatorProcessOut): void;
+    };
+  }
+).parentPort;
 let coordinator: Coordinator | undefined;
 let status: CoordinatorStatus = { state: 'stopped' };
 let announced = false;
@@ -17,7 +24,12 @@ const publish = (s: CoordinatorStatus) => {
 
 setInterval(() => {
   if (coordinator && status.state === 'running') {
-    publish({ ...status, peers: coordinator.mesh.peerIds().length, users: coordinator.presence.local.size, announced });
+    publish({
+      ...status,
+      peers: coordinator.mesh.peerIds().length,
+      users: coordinator.presence.local.size,
+      announced,
+    });
   }
 }, 5000).unref();
 
@@ -61,7 +73,9 @@ port.on('message', async ({ data: msg }) => {
       });
     } catch (err) {
       coordinator = undefined;
-      const message = String(err).includes('EADDRINUSE') ? `Port ${s.port} is already in use` : String(err);
+      const message = String(err).includes('EADDRINUSE')
+        ? `Port ${s.port} is already in use`
+        : String(err);
       publish({ state: 'error', message });
     }
   }

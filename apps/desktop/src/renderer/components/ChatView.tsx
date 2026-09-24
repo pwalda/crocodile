@@ -1,5 +1,16 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
-import { AtSign, CircleAlert, Hash, Pencil, Phone, Reply, ShieldCheck, Trash2, Users, X } from 'lucide-react';
+import {
+  AtSign,
+  CircleAlert,
+  Hash,
+  Pencil,
+  Phone,
+  Reply,
+  ShieldCheck,
+  Trash2,
+  Users,
+  X,
+} from 'lucide-react';
 import type { MessageView } from '@crocodile/client-core';
 import { getClient, openModal, ui, useCroc, useUi } from '../croc';
 import { dayOf, renderMessage, stampOf, timeOf } from '../lib/format';
@@ -58,23 +69,41 @@ export function ChatView({
   return (
     <section className="flex min-w-0 flex-1 flex-col bg-main">
       <header className="flex h-12 shrink-0 items-center gap-2 border-b border-rail px-4 shadow-sm">
-        {kind === 'dm' ? <AtSign size={22} className="text-faint" /> : <Hash size={22} className="text-faint" />}
+        {kind === 'dm' ? (
+          <AtSign size={22} className="text-faint" />
+        ) : (
+          <Hash size={22} className="text-faint" />
+        )}
         <h1 className="font-semibold text-white">{title}</h1>
-        {topic && <span className="ml-2 truncate border-l border-line pl-3 text-sm text-muted">{topic}</span>}
+        {topic && (
+          <span className="ml-2 truncate border-l border-line pl-3 text-sm text-muted">
+            {topic}
+          </span>
+        )}
         <div className="ml-auto flex items-center gap-1">
           <span
             className="mr-2 flex items-center gap-1 rounded bg-rail/60 px-2 py-1 text-xs text-muted"
             title="Messages go directly between peers and are end-to-end encrypted. No server stores them."
           >
-            <ShieldCheck size={14} className="text-croc" /> P2P · E2EE · {peers} peer{peers === 1 ? '' : 's'} online
+            <ShieldCheck size={14} className="text-croc" /> P2P · E2EE · {peers} peer
+            {peers === 1 ? '' : 's'} online
           </span>
           {kind === 'dm' && otherUserId && (
-            <IconButton label="Start voice call" onClick={() => void client.callDm(otherUserId).catch((e) => client.reportError(e.message))}>
+            <IconButton
+              label="Start voice call"
+              onClick={() =>
+                void client.callDm(otherUserId).catch((e) => client.reportError(e.message))
+              }
+            >
               <Phone size={20} />
             </IconButton>
           )}
           {kind === 'channel' && (
-            <IconButton label={showMembers ? 'Hide member list' : 'Show member list'} active={showMembers} onClick={() => ui.set({ showMembers: !showMembers })}>
+            <IconButton
+              label={showMembers ? 'Hide member list' : 'Show member list'}
+              active={showMembers}
+              onClick={() => ui.set({ showMembers: !showMembers })}
+            >
               <Users size={20} />
             </IconButton>
           )}
@@ -94,16 +123,29 @@ export function ChatView({
       >
         <div className="px-4 pb-4 pt-12">
           <div className="flex h-16 w-16 items-center justify-center rounded-full bg-active">
-            {kind === 'dm' && otherUserId ? <Avatar userId={otherUserId} size={64} /> : <Hash size={40} className="text-white" />}
+            {kind === 'dm' && otherUserId ? (
+              <Avatar userId={otherUserId} size={64} />
+            ) : (
+              <Hash size={40} className="text-white" />
+            )}
           </div>
-          <h2 className="mt-3 text-3xl font-bold text-white">{kind === 'dm' ? title : `Welcome to #${title}!`}</h2>
+          <h2 className="mt-3 text-3xl font-bold text-white">
+            {kind === 'dm' ? title : `Welcome to #${title}!`}
+          </h2>
           <p className="mt-1 text-muted">
             {kind === 'dm'
               ? `This is the beginning of your conversation with ${title}. It travels only between your devices.`
               : `This is the start of the #${title} channel.`}
           </p>
         </div>
-        <MessageList messages={messages ?? []} me={me} onReply={setReplyTo} editing={editing} setEditing={setEditing} channel={channel} />
+        <MessageList
+          messages={messages ?? []}
+          me={me}
+          onReply={setReplyTo}
+          editing={editing}
+          setEditing={setEditing}
+          channel={channel}
+        />
       </div>
 
       <div className="px-4 pb-6">
@@ -130,7 +172,9 @@ export function ChatView({
         <div className="h-5 pt-1 text-xs text-muted">
           {typers.length > 0 && (
             <span>
-              <b className="text-text">{typers.map((u) => getClient().state.profiles[u]?.username ?? 'Someone').join(', ')}</b>{' '}
+              <b className="text-text">
+                {typers.map((u) => getClient().state.profiles[u]?.username ?? 'Someone').join(', ')}
+              </b>{' '}
               {typers.length === 1 ? 'is' : 'are'} typing…
             </span>
           )}
@@ -161,7 +205,12 @@ function MessageList({
       {messages.map((m, i) => {
         const prev = messages[i - 1];
         const newDay = !prev || dayOf(prev.ts) !== dayOf(m.ts);
-        const grouped = !!prev && !newDay && prev.author === m.author && m.ts - prev.ts < 5 * 60_000 && !m.replyTo;
+        const grouped =
+          !!prev &&
+          !newDay &&
+          prev.author === m.author &&
+          m.ts - prev.ts < 5 * 60_000 &&
+          !m.replyTo;
         const replied = m.replyTo ? byId.get(m.replyTo) : undefined;
         return (
           <div key={m.id}>
@@ -172,7 +221,16 @@ function MessageList({
                 <div className="h-px flex-1 bg-line" />
               </div>
             )}
-            <Message message={m} grouped={grouped} replied={replied} mine={m.author === me} onReply={onReply} editing={editing === m.id} setEditing={setEditing} channel={channel} />
+            <Message
+              message={m}
+              grouped={grouped}
+              replied={replied}
+              mine={m.author === me}
+              onReply={onReply}
+              editing={editing === m.id}
+              setEditing={setEditing}
+              channel={channel}
+            />
           </div>
         );
       })}
@@ -203,12 +261,22 @@ function Message({
   const [draft, setDraft] = useState(m.body);
   if (m.deleted) return null;
   return (
-    <div className={cx('group relative flex gap-4 px-4 hover:bg-[#2e3035]', grouped ? 'py-0.5' : 'mt-3 py-0.5')}>
+    <div
+      className={cx(
+        'group relative flex gap-4 px-4 hover:bg-[#2e3035]',
+        grouped ? 'py-0.5' : 'mt-3 py-0.5',
+      )}
+    >
       <div className="w-10 shrink-0">
         {grouped ? (
-          <span className="invisible block pt-1 text-[11px] text-faint group-hover:visible">{timeOf(m.ts)}</span>
+          <span className="invisible block pt-1 text-[11px] text-faint group-hover:visible">
+            {timeOf(m.ts)}
+          </span>
         ) : (
-          <button onClick={() => openModal({ kind: 'profile', userId: m.author })} className="mt-0.5">
+          <button
+            onClick={() => openModal({ kind: 'profile', userId: m.author })}
+            className="mt-0.5"
+          >
             <Avatar userId={m.author} size={40} />
           </button>
         )}
@@ -223,7 +291,10 @@ function Message({
         )}
         {!grouped && (
           <div className="flex items-baseline gap-2">
-            <button onClick={() => openModal({ kind: 'profile', userId: m.author })} className="font-medium text-white hover:underline">
+            <button
+              onClick={() => openModal({ kind: 'profile', userId: m.author })}
+              className="font-medium text-white hover:underline"
+            >
               <UserName userId={m.author} />
             </button>
             <span className="text-xs text-faint">{stampOf(m.ts)}</span>
@@ -251,7 +322,10 @@ function Message({
             {renderMessage(m.body)}
             {m.edited && <span className="ml-1 text-[10px] text-faint">(edited)</span>}
             {m.pending && (
-              <span className="ml-2 inline-flex items-center gap-1 text-[11px] text-warn" title="Nobody else was online; it will be delivered peer-to-peer when they are.">
+              <span
+                className="ml-2 inline-flex items-center gap-1 text-[11px] text-warn"
+                title="Nobody else was online; it will be delivered peer-to-peer when they are."
+              >
                 <CircleAlert size={12} /> waiting for peers
               </span>
             )}
@@ -264,12 +338,22 @@ function Message({
             <Reply size={16} />
           </IconButton>
           {mine && (
-            <IconButton label="Edit" onClick={() => { setDraft(m.body); setEditing(m.id); }}>
+            <IconButton
+              label="Edit"
+              onClick={() => {
+                setDraft(m.body);
+                setEditing(m.id);
+              }}
+            >
               <Pencil size={16} />
             </IconButton>
           )}
           {mine && (
-            <IconButton label="Delete" danger onClick={() => void client.deleteMessage(channel, m.id)}>
+            <IconButton
+              label="Delete"
+              danger
+              onClick={() => void client.deleteMessage(channel, m.id)}
+            >
               <Trash2 size={16} />
             </IconButton>
           )}
@@ -279,7 +363,17 @@ function Message({
   );
 }
 
-function Composer({ channel, placeholder, onSend, rounded }: { channel: string; placeholder: string; onSend: (text: string) => Promise<void>; rounded: boolean }) {
+function Composer({
+  channel,
+  placeholder,
+  onSend,
+  rounded,
+}: {
+  channel: string;
+  placeholder: string;
+  onSend: (text: string) => Promise<void>;
+  rounded: boolean;
+}) {
   const [text, setText] = useState('');
   const lastTyping = useRef(0);
   const ref = useRef<HTMLTextAreaElement>(null);

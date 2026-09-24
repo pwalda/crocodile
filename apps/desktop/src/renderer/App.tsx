@@ -13,7 +13,12 @@ import { FriendsView } from './components/FriendsView';
 import { MemberList } from './components/MemberList';
 import { Avatar, Button, Toasts, UserName } from './components/ui';
 import { Logo } from './components/Logo';
-import { AddSpaceModal, CreateChannelModal, InviteModal, SpaceSettingsModal } from './modals/SpaceModals';
+import {
+  AddSpaceModal,
+  CreateChannelModal,
+  InviteModal,
+  SpaceSettingsModal,
+} from './modals/SpaceModals';
 import { ConfirmModal, NewDmModal, ProfileModal } from './modals/UserModals';
 import { SettingsModal } from './modals/Settings';
 
@@ -65,16 +70,27 @@ function Shell() {
         <VoiceStage
           sessionId={sessionIds.voice(space.id, channel.id)}
           title={channel.name}
-          onJoin={() => void client.joinVoice(space.id, channel.id).catch((e) => client.reportError(e.message))}
+          onJoin={() =>
+            void client.joinVoice(space.id, channel.id).catch((e) => client.reportError(e.message))
+          }
         />
       );
     } else {
-      main = <ChatView channel={channel.id} title={channel.name} topic={channel.topic} kind="channel" />;
+      main = (
+        <ChatView channel={channel.id} title={channel.name} topic={channel.topic} kind="channel" />
+      );
       if (showMembers) members = <MemberList spaceId={space.id} />;
     }
   } else if (view.kind === 'dm' && me) {
     sidebar = <HomeSidebar />;
-    main = <ChatView channel={sessionIds.dm(me, view.userId)} title={profiles[view.userId]?.username ?? 'Direct message'} kind="dm" otherUserId={view.userId} />;
+    main = (
+      <ChatView
+        channel={sessionIds.dm(me, view.userId)}
+        title={profiles[view.userId]?.username ?? 'Direct message'}
+        kind="dm"
+        otherUserId={view.userId}
+      />
+    );
   } else {
     sidebar = <HomeSidebar />;
     main = <FriendsView />;
@@ -139,7 +155,12 @@ function CallBanner() {
         </div>
         <div className="text-sm text-muted">Incoming call…</div>
         <div className="mt-4 flex justify-center gap-4">
-          <Button variant="danger" className="h-12 w-12 rounded-full p-0" title="Decline" onClick={() => client.declineCall()}>
+          <Button
+            variant="danger"
+            className="h-12 w-12 rounded-full p-0"
+            title="Decline"
+            onClick={() => client.declineCall()}
+          >
             <PhoneOff size={20} />
           </Button>
           <Button
@@ -165,7 +186,12 @@ function CallBanner() {
             Calling <UserName userId={outgoing.to} />…
           </div>
         </div>
-        <Button variant="danger" className="h-9 w-9 rounded-full p-0" title="Hang up" onClick={() => void client.leaveVoice()}>
+        <Button
+          variant="danger"
+          className="h-9 w-9 rounded-full p-0"
+          title="Hang up"
+          onClick={() => void client.leaveVoice()}
+        >
           <PhoneOff size={16} />
         </Button>
       </div>
@@ -180,7 +206,12 @@ function useGlobalBehaviours() {
 
   useEffect(() => {
     const down = (e: KeyboardEvent) => {
-      if (e.code === ui.get().pttKey && !e.repeat && !(e.target as HTMLElement)?.closest('input,textarea')) client.voiceEngine?.setPushToTalk(true);
+      if (
+        e.code === ui.get().pttKey &&
+        !e.repeat &&
+        !(e.target as HTMLElement)?.closest('input,textarea')
+      )
+        client.voiceEngine?.setPushToTalk(true);
     };
     const up = (e: KeyboardEvent) => {
       if (e.code === ui.get().pttKey) client.voiceEngine?.setPushToTalk(false);
@@ -203,7 +234,9 @@ function useGlobalBehaviours() {
         if (mine || !s.settings.notifications || s.settings.status === 'dnd') return;
         if (document.hasFocus() && s.activeChannel === channel) return;
         const author = s.profiles[message.author]?.username ?? 'Someone';
-        const space = Object.values(s.spaces).find((sp) => sp.channels.some((c) => c.id === channel));
+        const space = Object.values(s.spaces).find((sp) =>
+          sp.channels.some((c) => c.id === channel),
+        );
         const chName = space?.channels.find((c) => c.id === channel)?.name;
         const n = new Notification(space ? `${author} (#${chName}, ${space.name})` : author, {
           body: message.body.slice(0, 200),
@@ -218,7 +251,9 @@ function useGlobalBehaviours() {
     [client],
   );
 
-  const totalUnread = useCroc((s) => Object.values(s.unread).reduce((a, b) => a + b, 0) + s.friends.incoming.length);
+  const totalUnread = useCroc(
+    (s) => Object.values(s.unread).reduce((a, b) => a + b, 0) + s.friends.incoming.length,
+  );
   useEffect(() => {
     void desktop?.app.setBadge(totalUnread);
   }, [totalUnread]);
@@ -238,7 +273,11 @@ function useGlobalBehaviours() {
         onConfirm: async () => {
           const spaceId = await client.joinWithInvite(m[1]!);
           const space = client.state.spaces[spaceId];
-          navigate({ kind: 'space', spaceId, channelId: space?.channels.find((c) => c.kind === 'text')?.id ?? null });
+          navigate({
+            kind: 'space',
+            spaceId,
+            channelId: space?.channels.find((c) => c.kind === 'text')?.id ?? null,
+          });
         },
       });
     };

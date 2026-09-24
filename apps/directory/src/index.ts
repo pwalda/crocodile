@@ -3,7 +3,12 @@ import type { AddressInfo } from 'node:net';
 import { mkdirSync, readFileSync, writeFileSync, existsSync, renameSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { keyMatchesUserId, verifyPayload } from '@crocodile/crypto';
-import { DIRECTORY_PATHS, DirectoryEntry, SIG_DOMAIN, type DirectoryListing } from '@crocodile/protocol';
+import {
+  DIRECTORY_PATHS,
+  DirectoryEntry,
+  SIG_DOMAIN,
+  type DirectoryListing,
+} from '@crocodile/protocol';
 
 export interface DirectoryConfig {
   host: string;
@@ -58,19 +63,24 @@ export class Directory {
     return { servers, generatedAt: now };
   }
 
-  async register(input: unknown): Promise<{ ok: true } | { ok: false; status: number; error: string }> {
+  async register(
+    input: unknown,
+  ): Promise<{ ok: true } | { ok: false; status: number; error: string }> {
     const parsed = DirectoryEntry.safeParse(input);
     if (!parsed.success) return { ok: false, status: 400, error: 'malformed entry' };
     const entry = parsed.data;
     const now = Date.now();
-    if (Math.abs(now - entry.signedAt) > MAX_SKEW_MS) return { ok: false, status: 400, error: 'stale signature; check clock' };
-    if (!keyMatchesUserId(entry.server.key, entry.server.id)) return { ok: false, status: 400, error: 'id does not match key' };
+    if (Math.abs(now - entry.signedAt) > MAX_SKEW_MS)
+      return { ok: false, status: 400, error: 'stale signature; check clock' };
+    if (!keyMatchesUserId(entry.server.key, entry.server.id))
+      return { ok: false, status: 400, error: 'id does not match key' };
     const signed = { server: entry.server, load: entry.load, signedAt: entry.signedAt };
     if (!verifyPayload(entry.server.key, SIG_DOMAIN.directory, signed, entry.sig)) {
       return { ok: false, status: 401, error: 'bad signature' };
     }
     const url = new URL(entry.server.url);
-    if (!['http:', 'https:'].includes(url.protocol)) return { ok: false, status: 400, error: 'url must be http(s)' };
+    if (!['http:', 'https:'].includes(url.protocol))
+      return { ok: false, status: 400, error: 'url must be http(s)' };
     if (!this.config.allowPrivateUrls && isPrivateHost(url.hostname)) {
       return { ok: false, status: 400, error: 'url must be publicly reachable' };
     }
@@ -79,11 +89,13 @@ export class Directory {
     let verifiedAt = previous && previous.server.url === entry.server.url ? previous.verifiedAt : 0;
     if (this.config.verifyReachability && now - verifiedAt > REVERIFY_MS) {
       const reachable = await probe(entry.server.url, entry.server.id);
-      if (!reachable) return { ok: false, status: 422, error: `could not reach ${entry.server.url}/health` };
+      if (!reachable)
+        return { ok: false, status: 422, error: `could not reach ${entry.server.url}/health` };
       verifiedAt = now;
     }
     // One URL belongs to one server; a re-keyed server replaces its old entry.
-    for (const [id, e] of this.entries) if (e.server.url === entry.server.url && id !== entry.server.id) this.entries.delete(id);
+    for (const [id, e] of this.entries)
+      if (e.server.url === entry.server.url && id !== entry.server.id) this.entries.delete(id);
     if (!previous) this.config.log?.(`registered ${entry.server.name} (${entry.server.url})`);
     this.entries.set(entry.server.id, { ...entry, lastSeen: now, verifiedAt });
     return { ok: true };
@@ -95,7 +107,10 @@ export class Directory {
     app.addHook('onSend', async (_req, reply) => {
       reply.header('access-control-allow-origin', '*');
     });
-    app.get(DIRECTORY_PATHS.health, async () => ({ ok: true, servers: this.listing().servers.length }));
+    app.get(DIRECTORY_PATHS.health, async () => ({
+      ok: true,
+      servers: this.listing().servers.length,
+    }));
     app.get(DIRECTORY_PATHS.list, async (_req, reply) => {
       reply.header('cache-control', 'public, max-age=15');
       return this.listing();
@@ -135,7 +150,9 @@ export class Directory {
 
 async function probe(baseUrl: string, expectedId: string): Promise<boolean> {
   try {
-    const res = await fetch(`${baseUrl.replace(/\/$/, '')}/health`, { signal: AbortSignal.timeout(5000) });
+    const res = await fetch(`${baseUrl.replace(/\/$/, '')}/health`, {
+      signal: AbortSignal.timeout(5000),
+    });
     if (!res.ok) return false;
     const body = (await res.json()) as { id?: string };
     return body.id === expectedId;
@@ -150,7 +167,15 @@ export function isPrivateHost(hostname: string): boolean {
   const v4 = h.match(/^(\d+)\.(\d+)\.(\d+)\.(\d+)$/);
   if (v4) {
     const [a, b] = [Number(v4[1]), Number(v4[2])];
-    return a === 10 || a === 127 || a === 0 || (a === 169 && b === 254) || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168) || (a === 100 && b >= 64 && b <= 127);
+    return (
+      a === 10 ||
+      a === 127 ||
+      a === 0 ||
+      (a === 169 && b === 254) ||
+      (a === 172 && b >= 16 && b <= 31) ||
+      (a === 192 && b === 168) ||
+      (a === 100 && b >= 64 && b <= 127)
+    );
   }
   return h === '::1' || h.startsWith('fc') || h.startsWith('fd') || h.startsWith('fe80');
 }

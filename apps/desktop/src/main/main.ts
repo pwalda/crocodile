@@ -44,7 +44,8 @@ let quitting = false;
 let pendingDeepLink: string | null = null;
 
 const userData = () => app.getPath('userData');
-const resource = (...p: string[]) => (app.isPackaged ? join(process.resourcesPath, ...p) : join(__dirname, '../../resources', ...p));
+const resource = (...p: string[]) =>
+  app.isPackaged ? join(process.resourcesPath, ...p) : join(__dirname, '../../resources', ...p);
 
 // ---------------------------------------------------------------------------
 // Secure storage (identity seed): encrypted with the OS keychain via safeStorage.
@@ -68,7 +69,8 @@ function writeSecure(data: Record<string, string>) {
 }
 
 function encrypt(value: string): string {
-  if (safeStorage.isEncryptionAvailable()) return `enc:${safeStorage.encryptString(value).toString('base64')}`;
+  if (safeStorage.isEncryptionAvailable())
+    return `enc:${safeStorage.encryptString(value).toString('base64')}`;
   return `raw:${value}`;
 }
 
@@ -106,14 +108,20 @@ let relayProc: UtilityProcess | null = null;
 
 function relayProcess(): UtilityProcess {
   if (relayProc) return relayProc;
-  const proc = utilityProcess.fork(join(__dirname, 'relay-process.cjs'), [], { serviceName: 'Crocodile Relay' });
+  const proc = utilityProcess.fork(join(__dirname, 'relay-process.cjs'), [], {
+    serviceName: 'Crocodile Relay',
+  });
   proc.on('message', (msg: RelayProcessOut) => {
     if (msg.type === 'log') console.log(`[relay] ${msg.msg}`, msg.extra ?? '');
     else win?.webContents.send('relay:event', msg);
   });
   proc.on('exit', () => {
     relayProc = null;
-    win?.webContents.send('relay:event', { type: 'error', handle: '*', message: 'relay process exited' });
+    win?.webContents.send('relay:event', {
+      type: 'error',
+      handle: '*',
+      message: 'relay process exited',
+    });
   });
   relayProc = proc;
   return proc;
@@ -147,7 +155,10 @@ function coordSettings(): CoordinatorSettings {
 
 function directories(): string[] {
   const raw = process.env.CROC_DIRECTORIES_OVERRIDE ?? process.env.CROC_DIRECTORIES ?? '';
-  return raw.split(',').map((s) => s.trim()).filter(Boolean);
+  return raw
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean);
 }
 
 function applyCoordinator() {
@@ -157,7 +168,9 @@ function applyCoordinator() {
     return;
   }
   if (!coordProc) {
-    coordProc = utilityProcess.fork(join(__dirname, 'coordinator-process.cjs'), [], { serviceName: 'Crocodile Coordinator' });
+    coordProc = utilityProcess.fork(join(__dirname, 'coordinator-process.cjs'), [], {
+      serviceName: 'Crocodile Coordinator',
+    });
     coordProc.on('message', (msg: CoordinatorProcessOut) => {
       coordStatus = msg.status;
       win?.webContents.send('coordinator:status', coordStatus);
@@ -168,7 +181,12 @@ function applyCoordinator() {
       win?.webContents.send('coordinator:status', coordStatus);
     });
   }
-  coordProc.postMessage({ type: 'start', settings: s, dataDir: join(userData(), 'coordinator'), directories: directories() });
+  coordProc.postMessage({
+    type: 'start',
+    settings: s,
+    dataDir: join(userData(), 'coordinator'),
+    directories: directories(),
+  });
 }
 
 ipcMain.handle('coordinator:get', () => ({ settings: coordSettings(), status: coordStatus }));
@@ -264,7 +282,8 @@ function createWindow() {
     return { action: 'deny' };
   });
   win.webContents.on('will-navigate', (e, url) => {
-    if (!url.startsWith('file://') && !(isDev && url.startsWith(process.env.CROC_RENDERER_URL!))) e.preventDefault();
+    if (!url.startsWith('file://') && !(isDev && url.startsWith(process.env.CROC_RENDERER_URL!)))
+      e.preventDefault();
   });
   if (isDev) void win.loadURL(process.env.CROC_RENDERER_URL!);
   else void win.loadFile(join(__dirname, '../renderer/index.html'));
@@ -310,10 +329,16 @@ app.whenReady().then(() => {
   handleDeepLink(process.argv.find((a) => a.startsWith(`${APP_PROTOCOL}://`)));
 
   session.defaultSession.setPermissionRequestHandler((_wc, permission, callback) => {
-    callback(['media', 'notifications', 'clipboard-sanitized-write', 'speaker-selection'].includes(permission));
+    callback(
+      ['media', 'notifications', 'clipboard-sanitized-write', 'speaker-selection'].includes(
+        permission,
+      ),
+    );
   });
   session.defaultSession.setPermissionCheckHandler((_wc, permission) =>
-    ['media', 'notifications', 'clipboard-sanitized-write', 'speaker-selection'].includes(permission),
+    ['media', 'notifications', 'clipboard-sanitized-write', 'speaker-selection'].includes(
+      permission,
+    ),
   );
 
   createWindow();
