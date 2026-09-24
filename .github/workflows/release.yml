@@ -1,18 +1,46 @@
 name: Release
 
-# Push a tag like v0.2.0 to build installers for every platform and publish
-# them (plus auto-update metadata) to a GitHub release, and server images to GHCR.
+# Push a tag like v0.2.0 — or publish a release with a new v* tag in the
+# GitHub UI — to build installers for every platform, attach them (plus
+# auto-update metadata) to the release, and push server images to GHCR.
 on:
   push:
     tags: ['v*']
+  release:
+    types: [published]
 
 permissions:
   contents: write
   packages: write
 
+env:
+  TAG: ${{ github.event.release.tag_name || github.ref_name }}
+
+# Publishing a release in the UI also pushes its tag; build only once.
+concurrency:
+  group: release-${{ github.event.release.tag_name || github.ref_name }}
+  cancel-in-progress: true
+
 jobs:
+  # Make sure a *draft* release exists for the tag, so every platform uploads
+  # into the same one (electron-builder only uploads into drafts).
+  prepare:
+    name: Prepare draft release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release edit "$TAG" --draft=true
+          else
+            gh release create "$TAG" --draft --verify-tag --title "Crocodile ${TAG#v}" --notes "Building…"
+          fi
+
   installers:
     name: Installers (${{ matrix.os }})
+    needs: prepare
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60
     strategy:
@@ -21,6 +49,8 @@ jobs:
         os: [ubuntu-latest, windows-latest, macos-latest]
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
       - uses: pnpm/action-setup@v4
       - uses: actions/setup-node@v4
         with:
@@ -33,7 +63,7 @@ jobs:
       - name: Set version from tag
         working-directory: apps/desktop
         shell: bash
-        run: npm version --no-git-tag-version --allow-same-version "${GITHUB_REF_NAME#v}"
+        run: npm version --no-git-tag-version --allow-same-version "${TAG#v}"
       - name: Build and publish
         working-directory: apps/desktop
         env:
@@ -56,14 +86,16 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
       - name: Publish with notes
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          notes="docs/releases/${GITHUB_REF_NAME}.md"
-          args=(--draft=false --latest --title "Crocodile ${GITHUB_REF_NAME#v}")
+          notes="docs/releases/${TAG}.md"
+          args=(--draft=false --latest --title "Crocodile ${TAG#v}")
           if [ -f "$notes" ]; then args+=(--notes-file "$notes"); fi
-          gh release edit "$GITHUB_REF_NAME" "${args[@]}"
+          gh release edit "$TAG" "${args[@]}"
 
   images:
     name: Server images
@@ -81,10 +113,10 @@ jobs:
           context: .
           file: packages/coordinator/Dockerfile
           push: true
-          tags: ghcr.io/${{ github.repository_owner }}/crocodile-coordinator:${{ github.ref_name }},ghcr.io/${{ github.repository_owner }}/crocodile-coordinator:latest
+          tags: ghcr.io/${{ github.repository_owner }}/crocodile-coordinator:${{ env.TAG }},ghcr.io/${{ github.repository_owner }}/crocodile-coordinator:latest
       - uses: docker/build-push-action@v6
         with:
           context: .
           file: apps/directory/Dockerfile
           push: true
-          tags: ghcr.io/${{ github.repository_owner }}/crocodile-directory:${{ github.ref_name }},ghcr.io/${{ github.repository_owner }}/crocodile-directory:latest
+          tags: ghcr.io/${{ github.repository_owner }}/crocodile-directory:${{ env.TAG }},ghcr.io/${{ github.repository_owner }}/crocodile-directory:latest
