@@ -111,5 +111,7 @@ export type SealedPayload = z.infer<typeof SealedPayload>;
 export const GroupPayload = z.discriminatedUnion('type', [
   z.object({ type: z.literal('message'), message: ChatMessage }),
   z.object({ type: z.literal('typing'), ch: z.string().max(200) }),
+  /** Direct-call signalling inside a DM session. */
+  z.object({ type: z.literal('call'), action: z.enum(['ring', 'accept', 'decline', 'end']) }),
 ]);
 export type GroupPayload = z.infer<typeof GroupPayload>;

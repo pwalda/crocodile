@@ -1,0 +1,68 @@
+/**
+ * Utility process running an embedded coordination server, for users who opt
+ * in to contributing one to the mesh (or want a private LAN server).
+ */
+import { Coordinator } from '@crocodile/coordinator';
+import type { CoordinatorProcessIn, CoordinatorProcessOut, CoordinatorStatus } from './ipc-types';
+
+const port = (process as unknown as { parentPort: { on(ev: 'message', fn: (e: { data: CoordinatorProcessIn }) => void): void; postMessage(m: CoordinatorProcessOut): void } }).parentPort;
+let coordinator: Coordinator | undefined;
+let status: CoordinatorStatus = { state: 'stopped' };
+let announced = false;
+
+const publish = (s: CoordinatorStatus) => {
+  status = s;
+  port.postMessage({ type: 'status', status });
+};
+
+setInterval(() => {
+  if (coordinator && status.state === 'running') {
+    publish({ ...status, peers: coordinator.mesh.peerIds().length, users: coordinator.presence.local.size, announced });
+  }
+}, 5000).unref();
+
+port.on('message', async ({ data: msg }) => {
+  if (msg.type === 'status') return publish(status);
+  if (msg.type === 'stop') {
+    await coordinator?.stop().catch(() => {});
+    coordinator = undefined;
+    return publish({ state: 'stopped' });
+  }
+  if (msg.type === 'start') {
+    await coordinator?.stop().catch(() => {});
+    publish({ state: 'starting' });
+    const s = msg.settings;
+    try {
+      coordinator = new Coordinator({
+        name: s.name,
+        host: '0.0.0.0',
+        port: s.port,
+        publicUrl: s.publicUrl || undefined,
+        dataDir: msg.dataDir,
+        storage: 'sqlite',
+        directoryUrls: msg.directories,
+        announce: s.announce && !!s.publicUrl,
+        meshPeers: [],
+        stunPort: s.port,
+        extraStun: [],
+        capacity: 500,
+        logLevel: 'warn',
+      });
+      await coordinator.start();
+      announced = s.announce && !!s.publicUrl;
+      publish({
+        state: 'running',
+        url: `http://127.0.0.1:${new URL(coordinator.url).port || s.port}`,
+        id: coordinator.info.id,
+        peers: 0,
+        users: 0,
+        publicUrl: s.publicUrl,
+        announced,
+      });
+    } catch (err) {
+      coordinator = undefined;
+      const message = String(err).includes('EADDRINUSE') ? `Port ${s.port} is already in use` : String(err);
+      publish({ state: 'error', message });
+    }
+  }
+});

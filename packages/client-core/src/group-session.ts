@@ -59,6 +59,7 @@ export type GroupSessionEvents = {
   update: void;
   track: { slot: number; track: MediaStreamTrack; receiver: RTCRtpReceiver };
   typing: { userId: string; ch: string };
+  call: { userId: string; action: 'ring' | 'accept' | 'decline' | 'end' };
   error: { message: string };
 };
 
@@ -426,6 +427,8 @@ export class GroupSession extends Emitter<GroupSessionEvents> {
       await this.ctx.acceptMessage(this.sessionId, payload.message);
     } else if (payload.type === 'typing') {
       this.emit('typing', { userId: from, ch: payload.ch });
+    } else if (payload.type === 'call' && this.isDm) {
+      this.emit('call', { userId: from, action: payload.action });
     }
   }
 
