@@ -196,6 +196,8 @@ export interface ServerEvents {
   session_closed: { sessionId: string; reason: string };
   signal: { from: string; sessionId: string; data: SignalData };
   voice: VoiceOccupancy;
+  /** Someone opened a direct conversation with you; join it to talk. */
+  session_invite: { sessionId: string; from: string };
   /** Another connection authenticated with the same identity. */
   replaced: { reason: string };
 }

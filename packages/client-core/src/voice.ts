@@ -1,0 +1,296 @@
+import { Emitter } from './emitter';
+import type { FrameKeys, GroupKeyring } from './keyring';
+import type { FrameCryptoHooks } from './relay-link';
+
+export interface VoiceSettings {
+  inputDeviceId?: string;
+  outputDeviceId?: string;
+  /** Voice activity detection or push-to-talk. */
+  mode: 'vad' | 'ptt';
+  /** Gate threshold for VAD in dBFS (-100 .. 0). */
+  vadThresholdDb: number;
+  echoCancellation: boolean;
+  noiseSuppression: boolean;
+  autoGainControl: boolean;
+  /** Master output volume 0..2. */
+  outputVolume: number;
+  /** Per-user volume 0..2. */
+  userVolumes: Record<string, number>;
+}
+
+export const defaultVoiceSettings: VoiceSettings = {
+  mode: 'vad',
+  vadThresholdDb: -55,
+  echoCancellation: true,
+  noiseSuppression: true,
+  autoGainControl: true,
+  outputVolume: 1,
+  userVolumes: {},
+};
+
+export interface VoicePlatform {
+  getUserMedia(constraints: MediaStreamConstraints): Promise<MediaStream>;
+  enumerateDevices?(): Promise<MediaDeviceInfo[]>;
+  /** Creates the frame encryption worker (see frame-worker.ts). */
+  createFrameWorker(): Worker;
+}
+
+export type VoiceEvents = {
+  level: { db: number; gateOpen: boolean };
+  error: { message: string };
+  /** The microphone track changed (device switch); sessions must swap it in. */
+  track: MediaStreamTrack | null;
+};
+
+type WorkerMessage =
+  | { type: 'keys'; scope: string; keys: FrameKeys }
+  | { type: 'stream'; scope: string; role: 'encrypt' | 'decrypt'; readable: ReadableStream; writable: WritableStream }
+  | { type: 'drop'; scope: string };
+
+declare const RTCRtpScriptTransform: {
+  new (worker: Worker, options?: unknown, transfer?: unknown[]): unknown;
+} | undefined;
+
+/**
+ * Microphone capture with Chromium's echo cancellation / noise suppression,
+ * a VAD or push-to-talk gate, playback of the relay's speaker slots, and the
+ * end-to-end frame encryption worker (Encoded Transforms / SFrame-style).
+ * Voice refuses to run where frame encryption is unavailable.
+ */
+export class VoiceEngine extends Emitter<VoiceEvents> {
+  settings: VoiceSettings;
+  private stream?: MediaStream;
+  private track?: MediaStreamTrack;
+  private ctx?: AudioContext;
+  private meterTimer?: ReturnType<typeof setInterval>;
+  private gateOpen = false;
+  private gateUntil = 0;
+  private muted = false;
+  private deafened = false;
+  private pttDown = false;
+  private worker?: Worker;
+  private scopes = new Map<string, () => void>();
+  private players = new Map<string, { el: HTMLAudioElement; owner: () => string | null; timer: ReturnType<typeof setInterval> }>();
+
+  constructor(
+    private readonly platform: VoicePlatform,
+    settings: Partial<VoiceSettings> = {},
+  ) {
+    super();
+    this.settings = { ...defaultVoiceSettings, ...settings };
+  }
+
+  static supportsE2EE(): boolean {
+    const hasScript = typeof RTCRtpScriptTransform !== 'undefined';
+    const hasLegacy =
+      typeof RTCRtpSender !== 'undefined' && 'createEncodedStreams' in (RTCRtpSender.prototype as object);
+    return hasScript || hasLegacy;
+  }
+
+  get active() {
+    return !!this.track;
+  }
+
+  micTrack(): MediaStreamTrack | null {
+    return this.track ?? null;
+  }
+
+  async start() {
+    if (!VoiceEngine.supportsE2EE()) {
+      throw new Error('This device cannot encrypt voice end-to-end, so voice is disabled.');
+    }
+    if (this.track) return;
+    await this.acquire();
+  }
+
+  private async acquire() {
+    const s = this.settings;
+    let stream: MediaStream;
+    try {
+      stream = await this.platform.getUserMedia({
+        audio: {
+          ...(s.inputDeviceId ? { deviceId: { exact: s.inputDeviceId } } : {}),
+          echoCancellation: s.echoCancellation,
+          noiseSuppression: s.noiseSuppression,
+          autoGainControl: s.autoGainControl,
+          channelCount: 1,
+        },
+        video: false,
+      });
+    } catch (err) {
+      const name = (err as { name?: string }).name;
+      const message =
+        name === 'NotAllowedError'
+          ? 'Microphone access was denied. Allow it in your system settings to talk.'
+          : name === 'NotFoundError'
+            ? 'No microphone found.'
+            : `Could not open the microphone: ${(err as Error).message}`;
+      this.emit('error', { message });
+      throw new Error(message);
+    }
+    this.stream?.getTracks().forEach((t) => t.stop());
+    this.stream = stream;
+    this.track = stream.getAudioTracks()[0];
+    this.applyGate();
+    this.startMeter(stream);
+    this.emit('track', this.track ?? null);
+  }
+
+  private startMeter(stream: MediaStream) {
+    clearInterval(this.meterTimer);
+    void this.ctx?.close().catch(() => {});
+    if (typeof AudioContext === 'undefined') {
+      this.gateOpen = true;
+      return;
+    }
+    const ctx = new AudioContext();
+    this.ctx = ctx;
+    const source = ctx.createMediaStreamSource(stream);
+    const analyser = ctx.createAnalyser();
+    analyser.fftSize = 1024;
+    source.connect(analyser);
+    const buf = new Float32Array(analyser.fftSize);
+    this.meterTimer = setInterval(() => {
+      analyser.getFloatTimeDomainData(buf);
+      let sum = 0;
+      for (const v of buf) sum += v * v;
+      const db = 10 * Math.log10(sum / buf.length + 1e-12);
+      const now = Date.now();
+      if (db > this.settings.vadThresholdDb) this.gateUntil = now + 350;
+      const open = this.settings.mode === 'ptt' ? this.pttDown : now < this.gateUntil;
+      if (open !== this.gateOpen) {
+        this.gateOpen = open;
+        this.applyGate();
+      }
+      this.emit('level', { db, gateOpen: open && !this.muted });
+    }, 50);
+  }
+
+  private applyGate() {
+    // A disabled track sends silence (Opus DTX), so the relay sees no speech.
+    if (this.track) this.track.enabled = !this.muted && this.gateOpen;
+  }
+
+  setMuted(muted: boolean) {
+    this.muted = muted;
+    this.applyGate();
+  }
+
+  setDeafened(deafened: boolean) {
+    this.deafened = deafened;
+    for (const p of this.players.values()) p.el.muted = deafened;
+  }
+
+  /** Push-to-talk key state. */
+  setPushToTalk(down: boolean) {
+    this.pttDown = down;
+    if (this.settings.mode === 'ptt') {
+      this.gateOpen = down;
+      this.applyGate();
+    }
+  }
+
+  async updateSettings(patch: Partial<VoiceSettings>) {
+    const prev = this.settings;
+    this.settings = { ...prev, ...patch };
+    const needsNewMic =
+      this.track &&
+      (patch.inputDeviceId !== undefined && patch.inputDeviceId !== prev.inputDeviceId ||
+        ['echoCancellation', 'noiseSuppression', 'autoGainControl'].some(
+          (k) => k in patch && patch[k as keyof VoiceSettings] !== prev[k as keyof VoiceSettings],
+        ));
+    if (needsNewMic) await this.acquire();
+    if (patch.outputDeviceId !== undefined) for (const p of this.players.values()) void this.setSink(p.el);
+    if (patch.mode) {
+      this.gateOpen = patch.mode === 'vad';
+      this.applyGate();
+    }
+  }
+
+  async devices(): Promise<{ inputs: MediaDeviceInfo[]; outputs: MediaDeviceInfo[] }> {
+    const all = (await this.platform.enumerateDevices?.()) ?? [];
+    return { inputs: all.filter((d) => d.kind === 'audioinput'), outputs: all.filter((d) => d.kind === 'audiooutput') };
+  }
+
+  frameCrypto(keyring: GroupKeyring): FrameCryptoHooks {
+    const worker = (this.worker ??= this.platform.createFrameWorker());
+    const scope = Math.random().toString(36).slice(2);
+    const post = (msg: WorkerMessage, transfer: Transferable[] = []) => worker.postMessage(msg, transfer);
+    post({ type: 'keys', scope, keys: keyring.frameKeys() });
+    const off = keyring.on('changed', (keys) => post({ type: 'keys', scope, keys }));
+    this.scopes.set(scope, () => {
+      off();
+      post({ type: 'drop', scope });
+    });
+    const useScript = typeof RTCRtpScriptTransform !== 'undefined';
+    const install = (target: RTCRtpSender | RTCRtpReceiver, role: 'encrypt' | 'decrypt') => {
+      if (useScript) {
+        (target as unknown as { transform: unknown }).transform = new RTCRtpScriptTransform!(worker, { role, scope });
+      } else {
+        const { readable, writable } = (target as unknown as {
+          createEncodedStreams(): { readable: ReadableStream; writable: WritableStream };
+        }).createEncodedStreams();
+        post({ type: 'stream', scope, role, readable, writable }, [readable as unknown as Transferable, writable as unknown as Transferable]);
+      }
+    };
+    return {
+      rtcConfig: useScript ? undefined : { encodedInsertableStreams: true },
+      protectSender: (sender) => install(sender, 'encrypt'),
+      protectReceiver: (receiver) => install(receiver, 'decrypt'),
+    };
+  }
+
+  playSlot(sessionId: string, slot: number, track: MediaStreamTrack, owner: () => string | null) {
+    if (typeof Audio === 'undefined') return;
+    const key = `${sessionId}:${slot}`;
+    let player = this.players.get(key);
+    if (!player) {
+      const el = new Audio();
+      el.autoplay = true;
+      const p = {
+        el,
+        owner,
+        timer: setInterval(() => {
+          const who = p.owner();
+          const v = (who ? (this.settings.userVolumes[who] ?? 1) : 1) * this.settings.outputVolume;
+          el.volume = Math.max(0, Math.min(1, v));
+        }, 250),
+      };
+      player = p;
+      this.players.set(key, p);
+    }
+    player.owner = owner;
+    player.el.srcObject = new MediaStream([track]);
+    player.el.muted = this.deafened;
+    void this.setSink(player.el);
+    void player.el.play().catch(() => {});
+  }
+
+  private async setSink(el: HTMLAudioElement) {
+    const id = this.settings.outputDeviceId;
+    const withSink = el as HTMLAudioElement & { setSinkId?: (id: string) => Promise<void> };
+    if (id && withSink.setSinkId) await withSink.setSinkId(id).catch(() => {});
+  }
+
+  stopSession(sessionId: string) {
+    for (const [key, p] of this.players) {
+      if (key.startsWith(`${sessionId}:`)) {
+        clearInterval(p.timer);
+        p.el.srcObject = null;
+        this.players.delete(key);
+      }
+    }
+    for (const drop of this.scopes.values()) drop();
+    this.scopes.clear();
+  }
+
+  stop() {
+    clearInterval(this.meterTimer);
+    void this.ctx?.close().catch(() => {});
+    this.ctx = undefined;
+    this.stream?.getTracks().forEach((t) => t.stop());
+    this.stream = undefined;
+    this.track = undefined;
+    this.emit('track', null);
+  }
+}

@@ -269,6 +269,12 @@ export class SessionService {
       }
       s.memberServer.set(userId, serverId);
       this.recompute(s);
+      if (scope.kind === 'dm') {
+        const other = scope.users[0] === userId ? scope.users[1] : scope.users[0];
+        if (!s.state.members.some((m) => m.userId === other)) {
+          this.hub.deliver(other, 'session_invite', { sessionId, from: userId });
+        }
+      }
       return s.state;
     }
 
