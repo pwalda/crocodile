@@ -19,7 +19,11 @@ let coord: Coordinator;
 
 beforeAll(async () => {
   if (!haveChromium) return;
-  coord = await startCoordinator({ stunPort: 0 });
+  // Everything runs on loopback here, so the relay must be allowed to reach it.
+  coord = await startCoordinator({
+    stunPort: 0,
+    relay: { enabled: true, maxUsers: 25, allowPrivatePeers: true },
+  });
   harness = await serveHarness();
   browser = await launchBrowser();
 }, 60_000);

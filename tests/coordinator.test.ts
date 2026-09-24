@@ -475,3 +475,18 @@ describe('opt-in mailbox', () => {
     expect(c.store.mailExpire(Date.now())).toBe(1);
   });
 });
+
+describe('abuse limits', () => {
+  it('caps concurrent connections from one address', async () => {
+    const c = await server({ maxConnectionsPerIp: 2 });
+    await user(c);
+    await user(c);
+    await expect(user(c)).rejects.toThrow();
+  });
+
+  it('refuses new clients when the server is at capacity', async () => {
+    const c = await server({ capacity: 1 });
+    await user(c);
+    await expect(user(c)).rejects.toThrow();
+  });
+});

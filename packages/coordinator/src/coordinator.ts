@@ -68,9 +68,22 @@ export interface CoordinatorConfig {
    * Opt-in relay (TURN) for users without a direct path. Runs on the STUN
    * port. Grants last at most an hour; `maxUsers` caps concurrent users.
    */
-  relay: { enabled: boolean; maxUsers: number; publicIp?: string };
+  relay: {
+    enabled: boolean;
+    maxUsers: number;
+    publicIp?: string;
+    /** Allow relaying to private/loopback addresses (LAN-only setups, tests). */
+    allowPrivatePeers?: boolean;
+  };
   /** Opt-in mailbox holding sealed messages for offline devices. */
   mailbox: MailboxConfig;
+  /** Concurrent WebSocket connections allowed from one IP address. */
+  maxConnectionsPerIp: number;
+  /**
+   * Take the client address from X-Forwarded-For (only behind a trusted
+   * reverse proxy such as the main server's Caddy).
+   */
+  trustProxy: boolean;
   /**
    * Where users can get this server's source code (AGPL-3.0 section 13).
    * Operators running a modified version must point this at their changes.
@@ -94,6 +107,8 @@ export const defaultConfig: CoordinatorConfig = {
   storage: 'sqlite',
   relay: { enabled: true, maxUsers: 25 },
   mailbox: defaultMailboxConfig,
+  maxConnectionsPerIp: 50,
+  trustProxy: false,
 };
 
 /**
@@ -159,7 +174,11 @@ export class Coordinator {
   }
 
   async start(): Promise<this> {
-    const app = Fastify({ logger: false, bodyLimit: 1024 * 1024 });
+    const app = Fastify({
+      logger: false,
+      bodyLimit: 1024 * 1024,
+      trustProxy: this.config.trustProxy,
+    });
     this.app = app;
     await app.register(websocket, { options: { maxPayload: LIMITS.wsMessageMaxBytes } });
     app.addHook('onSend', async (_req, reply) => {
@@ -184,10 +203,16 @@ export class Coordinator {
       source: this.config.sourceUrl ?? SOURCE_URL,
     }));
     app.register(async (scope) => {
-      scope.get('/v1/client', { websocket: true }, (socket) => {
+      scope.get('/v1/client', { websocket: true }, (socket, req) => {
+        if (!this.admit(socket, req.ip)) return;
+        if (this.presence.localCount >= this.config.capacity) {
+          socket.close(1013, 'server full; try another');
+          return;
+        }
         new ClientConnection(this, socket);
       });
-      scope.get('/v1/federation', { websocket: true }, (socket) => {
+      scope.get('/v1/federation', { websocket: true }, (socket, req) => {
+        if (!this.admit(socket, req.ip)) return;
         this.mesh.accept(socket);
       });
     });
@@ -215,6 +240,7 @@ export class Coordinator {
           relayIp: await this.relayIp(publicUrl),
           secret: Buffer.from(randomBytes(32)),
           limits: { maxUsers: this.config.relay.maxUsers },
+          allowPrivatePeers: this.config.relay.allowPrivatePeers,
           log: (m, e) => this.log.debug(m, e),
         }).start();
         this.stunPortBound = this.turn.port;
@@ -265,6 +291,32 @@ export class Coordinator {
       signedAt,
       sig: sign(this.identity, SIG_DOMAIN.directory, { server: this.info, load, signedAt }),
     };
+  }
+
+  /** Open WebSocket connections per remote IP. */
+  private connectionsByIp = new Map<string, number>();
+
+  /** Per-IP connection limit, so one machine cannot exhaust a (home) server. */
+  private admit(
+    socket: {
+      close(code?: number, reason?: string): void;
+      on(ev: 'close', fn: () => void): unknown;
+    },
+    ip: string,
+  ) {
+    const n = this.connectionsByIp.get(ip) ?? 0;
+    if (n >= this.config.maxConnectionsPerIp) {
+      this.log.info('too many connections from one address', { ip });
+      socket.close(1008, 'too many connections from your address');
+      return false;
+    }
+    this.connectionsByIp.set(ip, n + 1);
+    socket.on('close', () => {
+      const left = (this.connectionsByIp.get(ip) ?? 1) - 1;
+      if (left <= 0) this.connectionsByIp.delete(ip);
+      else this.connectionsByIp.set(ip, left);
+    });
+    return true;
   }
 
   // -------------------------------------------------------------------------

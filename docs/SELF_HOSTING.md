@@ -44,21 +44,24 @@ pnpm install && pnpm --filter @crocodile/coordinator build
 node packages/coordinator/dist/bin.js --help
 ```
 
-| Option              | Env                    | Default                        |
-| ------------------- | ---------------------- | ------------------------------ |
-| `--name`            | `CROC_NAME`            | Crocodile coordinator          |
-| `--port`            | `CROC_PORT`            | 7443                           |
-| `--public-url`      | `CROC_PUBLIC_URL`      | `http://<host>:<port>`         |
-| `--data-dir`        | `CROC_DATA_DIR`        | `.crocodile-data`              |
-| `--directory`       | `CROC_DIRECTORY`       | none                           |
-| `--peers`           | `CROC_PEERS`           | none (static mesh peers)       |
-| `--stun-port`       | `CROC_STUN_PORT`       | same as port, `off` to disable |
-| `--private`         | `CROC_PRIVATE=1`       | announce to directory          |
-| `--relay`           | `CROC_RELAY`           | `on` (`off` to disable)        |
-| `--relay-max-users` | `CROC_RELAY_MAX_USERS` | 25                             |
-| `--relay-ip`        | `CROC_RELAY_IP`        | public IP from `--public-url`  |
-| `--mailbox`         | `CROC_MAILBOX`         | `on` (`off` to disable)        |
-| `--mailbox-days`    | `CROC_MAILBOX_DAYS`    | 3 (max 7)                      |
+| Option                     | Env                          | Default                          |
+| -------------------------- | ---------------------------- | -------------------------------- |
+| `--name`                   | `CROC_NAME`                  | Crocodile coordinator            |
+| `--port`                   | `CROC_PORT`                  | 7443                             |
+| `--public-url`             | `CROC_PUBLIC_URL`            | `http://<host>:<port>`           |
+| `--data-dir`               | `CROC_DATA_DIR`              | `.crocodile-data`                |
+| `--directory`              | `CROC_DIRECTORY`             | none                             |
+| `--peers`                  | `CROC_PEERS`                 | none (static mesh peers)         |
+| `--stun-port`              | `CROC_STUN_PORT`             | same as port, `off` to disable   |
+| `--private`                | `CROC_PRIVATE=1`             | announce to directory            |
+| `--relay`                  | `CROC_RELAY`                 | `on` (`off` to disable)          |
+| `--relay-max-users`        | `CROC_RELAY_MAX_USERS`       | 25                               |
+| `--relay-ip`               | `CROC_RELAY_IP`              | public IP from `--public-url`    |
+| `--mailbox`                | `CROC_MAILBOX`               | `on` (`off` to disable)          |
+| `--mailbox-days`           | `CROC_MAILBOX_DAYS`          | 3 (max 7)                        |
+| `--relay-allow-private`    | `CROC_RELAY_ALLOW_PRIVATE=1` | off (LAN-only setups)            |
+| `--max-connections-per-ip` | `CROC_MAX_CONN_PER_IP`       | 50                               |
+| `--trust-proxy`            | `CROC_TRUST_PROXY=1`         | off (set behind a reverse proxy) |
 
 ### The opt-in mailbox
 
@@ -78,6 +81,47 @@ it at once, and each allocation is rate-limited (about 100 kbit/s of voice
 per person). Your server only ever sees ciphertext. Turn it off with
 `--relay off` if bandwidth is scarce. The desktop app's built-in server
 leaves it off unless you enable "Offer a relay".
+
+## Hosting safely
+
+**Why port 7443?** It's an unprivileged port (no administrator rights needed
+to open it), it reads as "an alternative HTTPS port" to firewalls and
+people, and one number serves both TCP (HTTP/WebSocket) and UDP (STUN and the
+relay), so there is only one port to forward. Any port works (`--port`); the
+main server puts the TCP side behind Caddy on 443.
+
+**What sharing your server's address exposes:**
+
+- **Your public IP address.** It reveals your approximate location and
+  internet provider, and makes you a target for denial-of-service attacks
+  (someone flooding your connection). If you list the server in the
+  directory, the address is public. Calls already expose IP addresses
+  between the people in them (that is how peer-to-peer works), but a server
+  address is shared with everyone who connects.
+- **A program listening on the internet.** Any bug in it could be attacked.
+  The server validates every message, limits sizes and rates, caps
+  connections per address (`--max-connections-per-ip`) and in total
+  (`--capacity`), and times out connections that don't authenticate. The
+  built-in relay refuses to send traffic to your own machine or your private
+  network (loopback, 10/8, 172.16/12, 192.168/16, link-local, CGNAT, IPv6
+  ULA and similar), so relay users cannot reach your router or other home
+  devices through it.
+- **Metadata of the people using it.** Your server sees who is online, who
+  talks to whom and when, and public profiles. Never message content. In
+  many countries (e.g. the EU's GDPR) this makes you responsible for handling
+  that data sensibly.
+
+**Recommendations:**
+
+- For friends on your network, the desktop app's server is fine: nothing is
+  exposed to the internet unless you forward the port.
+- For a public server, prefer a small VPS or a separate machine with Docker
+  over the computer you use every day, so a compromise doesn't reach your
+  files. Keep it updated (`docker compose pull && docker compose up -d`).
+- Only forward the one port (TCP+UDP 7443). Don't put the machine in your
+  router's "DMZ".
+- If your home IP is sensitive, host on a VPS or behind a reverse proxy
+  instead of sharing it.
 
 ## The main server
 

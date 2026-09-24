@@ -1,6 +1,6 @@
 import { createSocket, type RemoteInfo, type Socket } from 'node:dgram';
 import { createHash, createHmac, timingSafeEqual } from 'node:crypto';
-import { isIPv4 } from 'node:net';
+import { BlockList, isIP, isIPv4 } from 'node:net';
 import { networkInterfaces } from 'node:os';
 
 /**
@@ -279,7 +279,70 @@ export interface TurnServerOptions {
   /** Shared secret for REST-API style credentials. */
   secret: Buffer;
   limits?: Partial<TurnLimits>;
+  /**
+   * Allow relaying to loopback/private/link-local addresses. Off by default:
+   * otherwise a relay user could reach services on the server's own machine
+   * or home network. Only for LAN-only deployments and tests.
+   */
+  allowPrivatePeers?: boolean;
   log?: (msg: string, extra?: Record<string, unknown>) => void;
+}
+
+/**
+ * Peer addresses a public relay must never send to: "this host", loopback,
+ * private and carrier-grade NAT ranges, link-local, multicast, reserved and
+ * documentation ranges (IPv4, IPv6 and IPv4-mapped IPv6), plus the server's
+ * own addresses. Same class of issue as coturn's CVE-2020-26262.
+ */
+const FORBIDDEN_PEERS = (() => {
+  const b = new BlockList();
+  for (const [net, bits] of [
+    ['0.0.0.0', 8],
+    ['10.0.0.0', 8],
+    ['100.64.0.0', 10],
+    ['127.0.0.0', 8],
+    ['169.254.0.0', 16],
+    ['172.16.0.0', 12],
+    ['192.0.0.0', 24],
+    ['192.0.2.0', 24],
+    ['192.88.99.0', 24],
+    ['192.168.0.0', 16],
+    ['198.18.0.0', 15],
+    ['198.51.100.0', 24],
+    ['203.0.113.0', 24],
+    ['224.0.0.0', 4],
+    ['240.0.0.0', 4],
+  ] as const)
+    b.addSubnet(net, bits, 'ipv4');
+  for (const [net, bits] of [
+    ['::', 128],
+    ['::1', 128],
+    ['64:ff9b::', 96],
+    ['100::', 64],
+    ['2001::', 32],
+    ['2001:db8::', 32],
+    ['2002::', 16],
+    ['fc00::', 7],
+    ['fe80::', 10],
+    ['ff00::', 8],
+  ] as const)
+    b.addSubnet(net, bits, 'ipv6');
+  return b;
+})();
+
+export function isForbiddenPeerAddress(address: string, own: ReadonlySet<string> = new Set()) {
+  const addr = address
+    .replace(/^\[|\]$/g, '')
+    .replace(/%.*$/, '')
+    .toLowerCase();
+  const mapped = addr.match(/^::ffff:(\d+\.\d+\.\d+\.\d+)$/);
+  const v4 = mapped ? mapped[1]! : isIPv4(addr) ? addr : null;
+  if (own.has(addr) || (v4 && own.has(v4))) return true;
+  if (v4) return FORBIDDEN_PEERS.check(v4, 'ipv4');
+  if (isIP(addr) !== 6) return true;
+  // Other IPv4-in-IPv6 forms (::a.b.c.d, ::ffff:hex) are refused outright.
+  if (/^::(ffff:)?[0-9a-f]{1,4}:[0-9a-f]{1,4}$/.test(addr) || addr.includes('.')) return true;
+  return FORBIDDEN_PEERS.check(addr, 'ipv6');
 }
 
 export class TurnServer {
@@ -288,6 +351,8 @@ export class TurnServer {
   private sockets: Socket[] = [];
   private allocations = new Map<string, Allocation>();
   private sweep?: ReturnType<typeof setInterval>;
+  /** This machine's own addresses (never valid relay peers). */
+  private own = new Set<string>();
   port = 0;
 
   constructor(private readonly opts: TurnServerOptions) {
@@ -310,6 +375,7 @@ export class TurnServer {
       }
     }
     if (this.sockets.length === 0) throw new Error('could not bind any UDP socket');
+    this.own = new Set([...localAddresses(true), this.opts.relayIp].map((a) => a.toLowerCase()));
     this.port = port;
     this.sweep = setInterval(() => this.expire(), 2000);
     this.sweep.unref?.();
@@ -594,6 +660,11 @@ export class TurnServer {
       this.reply(via, m, rinfo, CLASS.error, [errorAttr(400, 'Bad Request')], auth.key);
       return;
     }
+    if (peers.some((p) => !this.peerAllowed(p!.address))) {
+      this.opts.log?.('relay to forbidden peer refused', { user: a.userId });
+      this.reply(via, m, rinfo, CLASS.error, [errorAttr(403, 'Forbidden')], auth.key);
+      return;
+    }
     for (const p of peers) a.permissions.set(p!.address, Date.now() + 300_000);
     this.reply(via, m, rinfo, CLASS.success, [], auth.key);
   }
@@ -608,6 +679,11 @@ export class TurnServer {
     const number = ch && ch.length >= 2 ? ch.readUInt16BE(0) : 0;
     if (!a || !peer || number < 0x4000 || number > 0x7ffe) {
       this.reply(via, m, rinfo, CLASS.error, [errorAttr(400, 'Bad Request')], auth.key);
+      return;
+    }
+    if (!this.peerAllowed(peer.address)) {
+      this.opts.log?.('relay to forbidden peer refused', { user: a.userId });
+      this.reply(via, m, rinfo, CLASS.error, [errorAttr(403, 'Forbidden')], auth.key);
       return;
     }
     const key = `${peer.address}|${peer.port}`;
@@ -643,6 +719,10 @@ export class TurnServer {
       { type: ATTR.data, value: data },
     ]);
     a.via.send(ind, a.client.port, a.client.address);
+  }
+
+  private peerAllowed(address: string) {
+    return !!this.opts.allowPrivatePeers || !isForbiddenPeerAddress(address, this.own);
   }
 
   private hasPermission(a: Allocation, address: string) {

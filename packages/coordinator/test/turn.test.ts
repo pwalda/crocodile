@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { RTCPeerConnection, type RTCDataChannel } from 'werift';
 import { randomBytes } from 'node:crypto';
-import { TurnServer } from '../src/turn';
+import { TurnServer, isForbiddenPeerAddress } from '../src/turn';
 
 const cleanup: (() => unknown)[] = [];
 afterEach(async () => {
@@ -37,6 +37,7 @@ describe('TURN relay', () => {
       relayIp: '127.0.0.1',
       secret: randomBytes(32),
       limits: { maxUsers: 1 },
+      allowPrivatePeers: true,
     }).start();
     cleanup.push(() => turn.stop());
     const creds = turn.credentials('aaaaaaaaaaaaaaaaaaaaaaaaaa', Date.now() + 60_000);
@@ -112,5 +113,63 @@ describe('TURN relay', () => {
 
     turn.dropUser('aaaaaaaaaaaaaaaaaaaaaaaaaa');
     expect(turn.allocationCount()).toBe(0);
+  });
+
+  it('never relays to the host itself or its private network', async () => {
+    const own = new Set(['203.0.114.9']);
+    for (const bad of [
+      '127.0.0.1',
+      '0.0.0.0',
+      '10.1.2.3',
+      '172.20.0.5',
+      '192.168.1.1',
+      '100.64.0.1',
+      '169.254.169.254',
+      '224.0.0.251',
+      '255.255.255.255',
+      '::',
+      '::1',
+      '::ffff:127.0.0.1',
+      '::ffff:192.168.0.10',
+      '::127.0.0.1',
+      'fe80::1',
+      'fd00::1',
+      'ff02::1',
+      '203.0.114.9',
+      'not-an-ip',
+    ]) {
+      expect(isForbiddenPeerAddress(bad, own), bad).toBe(true);
+    }
+    for (const ok of ['8.8.8.8', '203.0.114.10', '2606:4700::1111', '::ffff:1.1.1.1']) {
+      expect(isForbiddenPeerAddress(ok, own), ok).toBe(false);
+    }
+
+    // End to end: a relay-only client cannot open a path to a loopback peer.
+    const turn = await new TurnServer({
+      port: 0,
+      host: '127.0.0.1',
+      relayIp: '127.0.0.1',
+      secret: randomBytes(32),
+    }).start();
+    cleanup.push(() => turn.stop());
+    const creds = turn.credentials('dddddddddddddddddddddddddd', Date.now() + 60_000);
+    const relayed = new RTCPeerConnection({
+      iceServers: [
+        {
+          urls: `turn:127.0.0.1:${turn.port}`,
+          username: creds.username,
+          credential: creds.credential,
+        },
+      ],
+      iceTransportPolicy: 'relay',
+    });
+    const target = new RTCPeerConnection({ iceAdditionalHostAddresses: ['127.0.0.1'] });
+    cleanup.push(
+      () => relayed.close(),
+      () => target.close(),
+    );
+    const dc = await connect(relayed, target);
+    await new Promise((r) => setTimeout(r, 3000));
+    expect(dc.readyState).not.toBe('open');
   });
 });
