@@ -82,7 +82,9 @@ describe('offline delivery', () => {
   it('exchanges both outboxes when two people who wrote offline meet again', async () => {
     const coord = await server();
     const net = new FakeRelayNetwork();
-    let { alice, bob, dm } = await friends(net, coord, coord);
+    const start = await friends(net, coord, coord);
+    const dm = start.dm;
+    let { alice, bob } = start;
 
     // Bob leaves; Alice writes and leaves.
     await bob.shutdown();

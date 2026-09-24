@@ -32,6 +32,8 @@ function loadHook(): Hook | null {
     ? join(process.resourcesPath, 'app.asar.unpacked', 'dist', 'native', 'uiohook-napi')
     : join(__dirname, '..', 'native', 'uiohook-napi');
   try {
+    // A runtime path outside the bundle: must be a plain require, not an import.
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
     hook = existsSync(dir) ? (require(dir) as Hook) : null;
   } catch (err) {
     console.warn('global push-to-talk unavailable', err);

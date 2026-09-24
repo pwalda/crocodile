@@ -56,7 +56,8 @@ coordination servers (mesh) ── signed metadata, presence, signalling, host e
 peers ── WebRTC to the elected host's relay, carrying E2E-encrypted frames
 ```
 
-Read [ARCHITECTURE.md](ARCHITECTURE.md) for the full design and
+Read [ARCHITECTURE.md](ARCHITECTURE.md) for the full design,
+[docs/QA.md](docs/QA.md) for testing and releases, and
 [docs/SECURITY.md](docs/SECURITY.md) for the threat model.
 
 ## Repository layout
@@ -78,8 +79,9 @@ Requirements: Node.js 22+, pnpm 10 (`corepack enable`).
 
 ```sh
 pnpm install
-pnpm typecheck
-pnpm test                      # unit + integration (+ Chromium E2E if available)
+pnpm check                     # typecheck, lint, format and all tests (what CI runs)
+pnpm qa:env                    # local directory + 3 coordination servers
+pnpm qa:app alice bob          # app instances with separate profiles
 
 # Run a local directory and coordination server, then the desktop app against them
 pnpm dev:directory             # :7400  (set CROC_DIR_ALLOW_PRIVATE=1 for LAN URLs)

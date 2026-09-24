@@ -94,7 +94,10 @@ export async function bootClient(): Promise<CrocodileClient> {
   client = new CrocodileClient(platform, {
     directories,
     preferredServers: preferred,
-    log: (m, e) => console.debug(`[croc] ${m}`, e ?? ''),
+    log: (m, e) => {
+      console.debug(`[croc] ${m}`, e ?? '');
+      remember(m, e);
+    },
   });
 
   const saved = (await kv.get<Partial<VoiceSettings>>('voice-settings')) ?? {};
@@ -137,6 +140,64 @@ export async function bootClient(): Promise<CrocodileClient> {
 
 export function getClient() {
   return client;
+}
+
+// ---------------------------------------------------------------------------
+// Diagnostics for bug reports
+// ---------------------------------------------------------------------------
+
+const recentLog: string[] = [];
+function remember(msg: string, extra?: Record<string, unknown>) {
+  recentLog.push(`${new Date().toISOString()} ${msg}${extra ? ` ${JSON.stringify(extra)}` : ''}`);
+  if (recentLog.length > 300) recentLog.shift();
+}
+
+/**
+ * What a tester pastes into a bug report: versions, connection state,
+ * settings and recent client log lines. Never message content, keys or the
+ * recovery key.
+ */
+export async function diagnostics(): Promise<string> {
+  const s = client.state;
+  const u = ui.get();
+  const info = await desktop?.app.info();
+  const hosting = await desktop?.coordinator.get().catch(() => null);
+  const report = {
+    generatedAt: new Date().toISOString(),
+    app: { version: u.appVersion, platform: info?.platform, userAgent: navigator.userAgent },
+    account: { userId: s.me?.userId, deviceId: s.deviceId, devices: s.devices.length },
+    connection: {
+      link: s.link,
+      server: s.server
+        ? { name: s.server.info.name, url: s.server.info.url, rttMs: Math.round(s.server.rttMs) }
+        : null,
+      knownServers: s.servers.map((r) => ({ name: r.info.name, rttMs: Math.round(r.rttMs) })),
+    },
+    settings: {
+      allowHosting: s.settings.allowHosting,
+      allowServerRelay: s.settings.allowServerRelay,
+      useMailbox: s.settings.useMailbox,
+      status: s.settings.status,
+      preferredServers: s.settings.preferredServers.length,
+      voiceMode: u.voiceSettings.mode,
+      pushToTalk: u.pttStatus,
+    },
+    sessions: Object.values(s.sessions).map((v) => ({
+      id: v.id.split(':')[0],
+      status: v.status,
+      epoch: v.epoch,
+      members: v.members.length,
+      peers: v.peers.length,
+      iAmHost: v.iAmHost,
+      relayed: !!v.relay,
+    })),
+    voice: s.voiceSession ? { muted: s.muted, deafened: s.deafened } : null,
+    hostingServer: hosting
+      ? { enabled: hosting.settings.enabled, status: hosting.status.state }
+      : null,
+    recentLog,
+  };
+  return JSON.stringify(report, null, 2);
 }
 
 export async function saveVoiceSettings(patch: Partial<VoiceSettings>) {

@@ -24,6 +24,7 @@ import {
 import {
   ACCENTS,
   closeModal,
+  diagnostics,
   getClient,
   openModal,
   saveAppearance,
@@ -1035,6 +1036,24 @@ function HostTab() {
   );
 }
 
+/** Copies a bug-report summary (no messages or keys) to the clipboard. */
+function DiagnosticsButton() {
+  const [copied, setCopied] = useState(false);
+  return (
+    <Button
+      variant="ghost"
+      title="Versions, connection state and recent log lines for a bug report. No messages or keys."
+      onClick={async () => {
+        await copyText(await diagnostics());
+        setCopied(true);
+        setTimeout(() => setCopied(false), 2000);
+      }}
+    >
+      {copied ? <Check size={16} /> : <Copy size={16} />} {copied ? 'Copied' : 'Copy diagnostics'}
+    </Button>
+  );
+}
+
 function AboutTab() {
   const version = useUi((s) => s.appVersion);
   return (
@@ -1060,6 +1079,7 @@ function AboutTab() {
           <Button variant="secondary" onClick={() => openLink(SOURCE_URL)}>
             Source code
           </Button>
+          <DiagnosticsButton />
           <Button variant="ghost" onClick={() => openLink(`${SOURCE_URL}/blob/main/LICENSE`)}>
             License
           </Button>
