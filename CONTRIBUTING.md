@@ -15,14 +15,15 @@ stays available under an open-source license.
 
 ## Licenses
 
-| Part                                                                             | License       |
-| -------------------------------------------------------------------------------- | ------------- |
-| `packages/protocol`, `packages/crypto`, `packages/client-core`, `packages/relay` | Apache-2.0    |
-| everything else (desktop app, coordination server, directory, site, scripts)     | AGPL-3.0-only |
+| Part                                                                                                 | License       |
+| ---------------------------------------------------------------------------------------------------- | ------------- |
+| `packages/protocol`, `packages/crypto`                                                               | Apache-2.0    |
+| everything else (client core, call host, desktop app, coordination server, directory, site, scripts) | AGPL-3.0-only |
 
-The libraries are permissive so anyone can build compatible clients. The
-apps and servers are AGPL so improvements to them, including ones run as a
-service, come back to everyone.
+The wire formats and crypto building blocks are permissive so anyone can
+build compatible clients and bots. Everything else is AGPL so improvements,
+including ones run as a service, come back to everyone. The maintainer also
+offers commercial licences; see [COMMERCIAL.md](COMMERCIAL.md).
 
 ## Development
 

@@ -43,15 +43,15 @@ contributions "under any license terms".
 
 ### Changes to make
 
-| #   | Change                                                                                                                                 | Why                                                                                                                                                | Status                                  |
-| --- | -------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------- |
-| 1   | Move `packages/client-core` and `packages/relay` from Apache-2.0 to AGPL-3.0                                                           | They hold the product's value: all client logic and the call host. Under Apache, anyone could put a new UI on them and sell a closed-source rival. | To do                                   |
-| 2   | Keep `packages/protocol` and `packages/crypto` on Apache-2.0                                                                           | Wire formats and crypto building blocks; permissive terms let others build compatible clients and bots, and invite review of the crypto            | Decided                                 |
-| 3   | Update every place that states the licences: `README.md`, `CONTRIBUTING.md`, `CLAUDE.md`, `TRADEMARKS.md`, Settings → About in the app | Keep the statements accurate                                                                                                                       | To do                                   |
-| 4   | Name the owner in `TRADEMARKS.md` and add a copyright notice                                                                           | "The Crocodile project" is not a legal person and cannot own a mark                                                                                | Needs the owner's legal name or company |
-| 5   | Add `COMMERCIAL.md`: how to get a non-AGPL licence                                                                                     | Makes dual licensing a real offer                                                                                                                  | To do                                   |
-| 6   | Check the name "Crocodile" is free to use, then consider registering it (EUIPO, USPTO)                                                 | It is a common word; a clash later is expensive                                                                                                    | Owner                                   |
-| 7   | Lawyer review of the CLA, licences and trademark policy                                                                                | Before the first commercial licence is sold                                                                                                        | Owner                                   |
+| #   | Change                                                                                                                                 | Why                                                                                                                                                | Status                                                          |
+| --- | -------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------- |
+| 1   | Move `packages/client-core` and `packages/relay` from Apache-2.0 to AGPL-3.0                                                           | They hold the product's value: all client logic and the call host. Under Apache, anyone could put a new UI on them and sell a closed-source rival. | Done                                                            |
+| 2   | Keep `packages/protocol` and `packages/crypto` on Apache-2.0                                                                           | Wire formats and crypto building blocks; permissive terms let others build compatible clients and bots, and invite review of the crypto            | Decided                                                         |
+| 3   | Update every place that states the licences: `README.md`, `CONTRIBUTING.md`, `CLAUDE.md`, `TRADEMARKS.md`, Settings → About in the app | Keep the statements accurate                                                                                                                       | Done                                                            |
+| 4   | Name the owner in `TRADEMARKS.md` and add a copyright notice                                                                           | "The Crocodile project" is not a legal person and cannot own a mark                                                                                | Done with the GitHub handle; legal name or company still to add |
+| 5   | Add `COMMERCIAL.md`: how to get a non-AGPL licence                                                                                     | Makes dual licensing a real offer                                                                                                                  | Done                                                            |
+| 6   | Check the name "Crocodile" is free to use, then consider registering it (EUIPO, USPTO)                                                 | It is a common word; a clash later is expensive                                                                                                    | Owner                                                           |
+| 7   | Lawyer review of the CLA, licences and trademark policy                                                                                | Before the first commercial licence is sold                                                                                                        | Owner                                                           |
 
 v0.0.1 was published with `client-core` and `relay` under Apache-2.0; that
 copy stays Apache-2.0 for anyone who has it. The risk is small now, which is
@@ -187,7 +187,8 @@ they are picked up again.
 
 ## Open decisions
 
-- **Domain and product name** (the name check in section 1 may affect both).
+- **Domain:** most likely `crocodilechat.com` (subject to the name check in
+  section 1).
 - **Legal owner** for the copyright notice and trademark: the owner
   personally or a company.
 - **Price points** for the subscription, once the cloud call host exists.
