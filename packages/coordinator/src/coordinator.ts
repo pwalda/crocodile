@@ -146,6 +146,15 @@ export class Coordinator {
 
   constructor(config: Partial<CoordinatorConfig> & Pick<CoordinatorConfig, 'name'>) {
     this.config = { ...defaultConfig, ...config };
+    // A typo (NaN) or zero here would silently switch a protection off.
+    for (const [name, n] of [
+      ['capacity', this.config.capacity],
+      ['maxConnectionsPerIp', this.config.maxConnectionsPerIp],
+      ['relay.maxUsers', this.config.relay.maxUsers],
+    ] as const) {
+      if (!Number.isSafeInteger(n) || n < 1)
+        throw new Error(`${name} must be a positive whole number, got ${n}`);
+    }
     this.log = consoleLogger(`coord:${this.config.name}`, this.config.logLevel ?? 'info');
     this.store = openStore({ dataDir: this.config.dataDir, kind: this.config.storage });
     let seed = this.config.seed ?? this.store.getMeta('server-seed');
@@ -207,10 +216,7 @@ export class Coordinator {
     app.register(async (scope) => {
       scope.get('/v1/client', { websocket: true }, (socket, req) => {
         if (!this.admit(socket, req.ip)) return;
-        if (this.presence.localCount >= this.config.capacity) {
-          socket.close(1013, 'server full; try another');
-          return;
-        }
+        // Capacity is enforced when the device authenticates (see hasRoomFor).
         new ClientConnection(this, socket);
       });
       scope.get('/v1/federation', { websocket: true }, (socket, req) => {
@@ -512,6 +518,16 @@ export class Coordinator {
   // -------------------------------------------------------------------------
   // Lifecycle hooks
   // -------------------------------------------------------------------------
+
+  /**
+   * Whether a device that just proved its identity may stay. Checked and
+   * followed by attach() in the same synchronous step, so concurrent logins
+   * cannot overshoot the capacity; a device replacing its own older
+   * connection always fits.
+   */
+  hasRoomFor(peer: string) {
+    return !!this.presence.localPeer(peer) || this.presence.localCount < this.config.capacity;
+  }
 
   onClientAuthed(client: ClientConnection) {
     const previous = this.presence.attach(client);

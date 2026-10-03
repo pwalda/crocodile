@@ -32,9 +32,9 @@ describe('directory', () => {
     expect(res.servers[0].server.id).toBe(c.info.id);
 
     // The public listing never shows the address in plain text…
-    const { host, port } = new URL(c.url);
+    const { hostname, port } = new URL(c.url);
     expect(text).not.toContain(c.url);
-    expect(text).not.toContain(`${host}:${port}`);
+    expect(text).not.toContain(`${hostname}:${port}`);
     expect(res.servers[0].server.url).toBeUndefined();
     // …but apps decode it and verify the server's signature over the real one.
     expect(openDirectoryEntry(res.servers[0])?.server.url).toBe(c.url);

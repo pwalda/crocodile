@@ -8,7 +8,7 @@ import {
   userTag,
 } from '@crocodile/crypto';
 import { peerIds, recordKey, sessionIds, utf8, type PrekeyBundle } from '@crocodile/protocol';
-import type { Coordinator } from '@crocodile/coordinator';
+import { Coordinator } from '@crocodile/coordinator';
 import {
   caps,
   connectUser,
@@ -486,7 +486,28 @@ describe('abuse limits', () => {
 
   it('refuses new clients when the server is at capacity', async () => {
     const c = await server({ capacity: 1 });
-    await user(c);
+    const first = await user(c);
     await expect(user(c)).rejects.toThrow();
+    // The same device reconnecting still fits: it replaces its old connection.
+    const again = await connectUser(c, first.identity, undefined, first.conn.peer.split('.')[1]);
+    cleanup.push(() => again.conn.close());
+    expect(c.presence.localCount).toBe(1);
+  });
+
+  it('never exceeds capacity when many clients log in at once', async () => {
+    const c = await server({ capacity: 2 });
+    const results = await Promise.allSettled(
+      Array.from({ length: 6 }, () => connectUser(c, createIdentity())),
+    );
+    for (const r of results) if (r.status === 'fulfilled') cleanup.push(() => r.value.conn.close());
+    expect(results.filter((r) => r.status === 'fulfilled')).toHaveLength(2);
+    expect(c.presence.localCount).toBe(2);
+  });
+
+  it('refuses to start with a limit that would switch a protection off', () => {
+    for (const bad of [{ maxConnectionsPerIp: NaN }, { capacity: 0 }, { maxConnectionsPerIp: 1.5 }])
+      expect(() => new Coordinator({ name: 'x', storage: 'memory', ...bad })).toThrow(
+        /positive whole number/,
+      );
   });
 });

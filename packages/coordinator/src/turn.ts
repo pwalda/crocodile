@@ -330,19 +330,28 @@ const FORBIDDEN_PEERS = (() => {
   return b;
 })();
 
+/**
+ * One spelling per address, so checks cannot be dodged by writing it
+ * differently: IPv4 in dotted form (also for IPv4-mapped and IPv4-compatible
+ * IPv6), everything else as compressed lowercase IPv6. Null if not an IP.
+ */
+export function canonicalIp(address: string): string | null {
+  const addr = address.replace(/^\[|\]$/g, '').replace(/%.*$/, '');
+  if (isIPv4(addr)) return addr;
+  if (isIP(addr) !== 6) return null;
+  // WHATWG URL parsing normalises IPv6 to compressed, lowercase hex groups.
+  const b = ipv6Bytes(new URL(`http://[${addr}]/`).hostname.slice(1, -1));
+  const prefix = b.subarray(0, 10).every((x) => x === 0) ? b.readUInt16BE(10) : -1;
+  if (prefix === 0xffff || prefix === 0) return [...b.subarray(12)].join('.');
+  const groups: string[] = [];
+  for (let i = 0; i < 16; i += 2) groups.push(b.readUInt16BE(i).toString(16));
+  return new URL(`http://[${groups.join(':')}]/`).hostname.slice(1, -1);
+}
+
 export function isForbiddenPeerAddress(address: string, own: ReadonlySet<string> = new Set()) {
-  const addr = address
-    .replace(/^\[|\]$/g, '')
-    .replace(/%.*$/, '')
-    .toLowerCase();
-  const mapped = addr.match(/^::ffff:(\d+\.\d+\.\d+\.\d+)$/);
-  const v4 = mapped ? mapped[1]! : isIPv4(addr) ? addr : null;
-  if (own.has(addr) || (v4 && own.has(v4))) return true;
-  if (v4) return FORBIDDEN_PEERS.check(v4, 'ipv4');
-  if (isIP(addr) !== 6) return true;
-  // Other IPv4-in-IPv6 forms (::a.b.c.d, ::ffff:hex) are refused outright.
-  if (/^::(ffff:)?[0-9a-f]{1,4}:[0-9a-f]{1,4}$/.test(addr) || addr.includes('.')) return true;
-  return FORBIDDEN_PEERS.check(addr, 'ipv6');
+  const addr = canonicalIp(address);
+  if (!addr || own.has(addr)) return true;
+  return isIPv4(addr) ? FORBIDDEN_PEERS.check(addr, 'ipv4') : FORBIDDEN_PEERS.check(addr, 'ipv6');
 }
 
 export class TurnServer {
@@ -375,7 +384,9 @@ export class TurnServer {
       }
     }
     if (this.sockets.length === 0) throw new Error('could not bind any UDP socket');
-    this.own = new Set([...localAddresses(true), this.opts.relayIp].map((a) => a.toLowerCase()));
+    this.own = new Set(
+      [...localAddresses(true), this.opts.relayIp].flatMap((a) => canonicalIp(a) ?? []),
+    );
     this.port = port;
     this.sweep = setInterval(() => this.expire(), 2000);
     this.sweep.unref?.();

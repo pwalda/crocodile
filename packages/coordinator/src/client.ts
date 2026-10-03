@@ -167,6 +167,10 @@ export class ClientConnection implements ClientHandle {
     this.userId = userIdFromKey(key);
     this.deviceId = device;
     this.peer = peerIds.make(this.userId, device);
+    if (!this.hub.hasRoomFor(this.peer)) {
+      this.ws.close(1013, 'server full; try another');
+      return;
+    }
     this.publicKey = key;
     this.platform = client.platform;
     this.channel = new SecureChannel(

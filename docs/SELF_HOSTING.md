@@ -113,10 +113,11 @@ main server puts the TCP side behind Caddy on 443.
   that data sensibly.
 
 **How the directory shows addresses.** The public listing
-(`/v1/servers`) and a server's `/v1/info` never contain addresses in plain
-text: each appears as `addr`, encrypted with a key built into the app, padded
-and with a fresh nonce every time, next to the server's ID (a hash of its
-public key). Apps decode it and verify the server's own signature over its
+(`/v1/servers`) never contains server addresses in plain text, and neither do
+the mesh peers a server lists in its `/v1/info` (that endpoint does show the
+server's own address, which whoever fetched it already knows). Each appears as
+`addr`, encrypted with a key built into the app, padded and with a fresh nonce
+every time, next to the server's ID (a hash of its public key). Apps decode it and verify the server's own signature over its
 real details, so a directory cannot redirect them. This keeps IPs out of
 search engines and casual scraping; it is **not** secret from anyone who
 runs the open-source app, and the app necessarily connects to (and so sees)

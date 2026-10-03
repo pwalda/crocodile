@@ -1,7 +1,15 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { RTCPeerConnection, type RTCDataChannel } from 'werift';
-import { randomBytes } from 'node:crypto';
-import { TurnServer, isForbiddenPeerAddress } from '../src/turn';
+import { createHash, randomBytes } from 'node:crypto';
+import { createSocket } from 'node:dgram';
+import {
+  TurnServer,
+  canonicalIp,
+  encodeStun,
+  isForbiddenPeerAddress,
+  parseStun,
+  xorAddress,
+} from '../src/turn';
 
 const cleanup: (() => unknown)[] = [];
 afterEach(async () => {
@@ -116,7 +124,7 @@ describe('TURN relay', () => {
   });
 
   it('never relays to the host itself or its private network', async () => {
-    const own = new Set(['203.0.114.9']);
+    const own = new Set(['203.0.114.9', '2a01:4f8::5'].map((a) => canonicalIp(a)!));
     for (const bad of [
       '127.0.0.1',
       '0.0.0.0',
@@ -132,15 +140,29 @@ describe('TURN relay', () => {
       '::ffff:127.0.0.1',
       '::ffff:192.168.0.10',
       '::127.0.0.1',
+      // Uncompressed spellings, as parsed from an IPv6 XOR-PEER-ADDRESS.
+      '0:0:0:0:0:ffff:7f00:1',
+      '0:0:0:0:0:0:7f00:1',
+      '0:0:0:0:0:ffff:c0a8:101',
+      '0:0:0:0:0:0:0:1',
       'fe80::1',
       'fd00::1',
       'ff02::1',
       '203.0.114.9',
+      '::ffff:203.0.114.9',
+      '2a01:4f8:0:0:0:0:0:5',
+      '2A01:4F8::5',
       'not-an-ip',
     ]) {
       expect(isForbiddenPeerAddress(bad, own), bad).toBe(true);
     }
-    for (const ok of ['8.8.8.8', '203.0.114.10', '2606:4700::1111', '::ffff:1.1.1.1']) {
+    for (const ok of [
+      '8.8.8.8',
+      '203.0.114.10',
+      '2606:4700::1111',
+      '2606:4700:0:0:0:0:0:1111',
+      '::ffff:1.1.1.1',
+    ]) {
       expect(isForbiddenPeerAddress(ok, own), ok).toBe(false);
     }
 
@@ -171,5 +193,61 @@ describe('TURN relay', () => {
     const dc = await connect(relayed, target);
     await new Promise((r) => setTimeout(r, 3000));
     expect(dc.readyState).not.toBe('open');
+  });
+
+  it('refuses IPv6-encoded private peers in CreatePermission', async () => {
+    const turn = await new TurnServer({
+      port: 0,
+      host: '127.0.0.1',
+      relayIp: '127.0.0.1',
+      secret: randomBytes(32),
+    }).start();
+    cleanup.push(() => turn.stop());
+    const sock = createSocket('udp4');
+    cleanup.push(() => sock.close());
+    const replies: Buffer[] = [];
+    sock.on('message', (b) => replies.push(b));
+    await new Promise<void>((r) => sock.bind(0, '127.0.0.1', r));
+    // Sends one STUN request and returns the error code of the reply (0 = success).
+    const ask = async (
+      method: number,
+      attrs: (txId: Buffer) => { type: number; value: Buffer }[],
+      key?: Buffer,
+    ) => {
+      const txId = randomBytes(12);
+      sock.send(encodeStun(method, 0, txId, attrs(txId), key), turn.port, '127.0.0.1');
+      const m = await waitFor(() =>
+        replies.map(parseStun).find((r): r is NonNullable<typeof r> => !!r?.txId.equals(txId)),
+      );
+      const err = m.attrs.find((a) => a.type === 0x0009)?.value;
+      return { m, code: err ? err[2]! * 100 + err[3]! : 0 };
+    };
+    const creds = turn.credentials('eeeeeeeeeeeeeeeeeeeeeeeeee', Date.now() + 60_000);
+    const key = createHash('md5')
+      .update(`${creds.username}:crocodile:${creds.credential}`)
+      .digest();
+    const transport = { type: 0x0019, value: Buffer.from([17, 0, 0, 0]) };
+    const first = await ask(0x003, () => [transport]);
+    expect(first.code).toBe(401);
+    const auth = [
+      { type: 0x0006, value: Buffer.from(creds.username) },
+      { type: 0x0014, value: Buffer.from('crocodile') },
+      first.m.attrs.find((a) => a.type === 0x0015)!,
+    ];
+    expect((await ask(0x003, () => [transport, ...auth], key)).code).toBe(0);
+    const permit = async (peer: string) =>
+      (
+        await ask(
+          0x008,
+          (txId) => [{ type: 0x0012, value: xorAddress(peer, 9, txId) }, ...auth],
+          key,
+        )
+      ).code;
+    // Loopback and private IPv4 written as IPv6 (family 2) are refused…
+    for (const peer of ['::ffff:127.0.0.1', '::127.0.0.1', '::ffff:192.168.1.1', '::1']) {
+      expect(await permit(peer), peer).toBe(403);
+    }
+    // …while a public IPv6 peer is fine.
+    expect(await permit('2606:4700::1111')).toBe(0);
   });
 });
