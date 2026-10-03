@@ -1,5 +1,8 @@
 # Roadmap
 
+For the order of work, the path to a public release, licensing, the paid
+subscription and video, see [PLAN.md](PLAN.md).
+
 ## Done
 
 - Identity without passwords (recovery key), profiles, friends, blocking.
