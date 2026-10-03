@@ -26,16 +26,24 @@ anything.
 agreement and a trademark.
 
 An open-source licence cannot forbid others from using the code
-commercially. What the AGPL does is make it unattractive: anyone who sells a
-product built on Crocodile, including one they only run as a hosted service,
-must publish all of their source under the AGPL, and cannot call it
-Crocodile. Only the owner can:
+commercially. Two separate tools make it unattractive instead:
 
-- sell commercial licences that exempt a company from the AGPL;
-- ship closed add-ons and paid services;
+- **The AGPL (code).** Anyone who distributes Crocodile's AGPL code, or runs a
+  modified version as a hosted service, must offer users the Corresponding
+  Source of that work, including their changes, under the AGPL. It does not
+  reach their unrelated software, and genuinely separate add-ons are not
+  automatically covered.
+- **The trademark (name and logo).** [TRADEMARKS.md](../TRADEMARKS.md) lets
+  anyone distribute unmodified official releases and refer to Crocodile, but
+  a modified app or server needs its own name.
+
+Only the owner can:
+
+- sell commercial licences that exempt a company from the AGPL's conditions;
+- ship closed add-ons and paid services built into Crocodile itself;
 - publish store builds (App Store terms are generally considered
   incompatible with the AGPL; the owner is not bound by their own licence);
-- sell under the Crocodile name and logo.
+- sell modified or rebranded products under the Crocodile name and logo.
 
 This works because the owner holds the copyright to all code (every commit
 so far is theirs) and the [CLA](../CLA.md) (§2) lets the owner distribute

@@ -12,9 +12,10 @@ The maintainer holds the rights to all of the code (contributors sign the
 ## When you need one
 
 The AGPL lets anyone use, change and share Crocodile, including commercially,
-as long as they pass the same freedoms on. You need a commercial licence if
-you want to do any of these **without** publishing your source under the
-AGPL:
+as long as they pass the same freedoms on. Its conditions apply to the
+Crocodile code you use and your changes to it (the "Corresponding Source" of
+that work), not to unrelated software you own. You need a commercial licence
+if you want to do any of these **without** meeting those conditions:
 
 - ship a product, app or device that includes Crocodile's AGPL code (for
   example the client core or call host) as closed source;
