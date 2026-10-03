@@ -66,6 +66,5 @@ The order of this work, and what comes before it, is in [PLAN.md](PLAN.md).
 
 ## Open questions
 
-- The product domain (most likely `crocodilechat.com`; see PLAN.md).
 - Mailbox for spaces (today DMs only): sealing to every member's devices is
   costly for big spaces; a per-space rotating mailbox key is one option.

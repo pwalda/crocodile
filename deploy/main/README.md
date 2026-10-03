@@ -25,12 +25,14 @@ One machine runs everything the public Crocodile network needs from "us":
 Caddy obtains HTTPS certificates automatically. Check
 `https://DOMAIN/v1/servers` lists the coordinator after a minute.
 
-## Make it the default in the apps
+## The default in the apps
 
-Set the repository variable `CROC_DIRECTORIES` (GitHub → Settings → Secrets
-and variables → Actions → Variables) to `https://DOMAIN`. Every release built
-afterwards uses it. Users can still add other servers under
-Settings → Network.
+Apps built from this repository use `https://crocodilechat.com` as their
+server directory (set in `apps/desktop/scripts/build.mjs`). A build can use
+other directories by setting `CROC_DIRECTORIES` to a comma-separated list of
+URLs (for releases: the repository variable under GitHub → Settings →
+Secrets and variables → Actions → Variables), or `none` for no default. Users
+can still add other servers under Settings → Network.
 
 ## Updating
 

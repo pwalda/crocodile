@@ -70,6 +70,8 @@ export const ui = new StateStore<UiState>({
 });
 
 let client: CrocodileClient;
+/** Server directories this app instance uses (shown in diagnostics). */
+let directoriesInUse: string[] = [];
 
 export async function bootClient(): Promise<CrocodileClient> {
   const info = (await desktop?.app.info()) ?? {
@@ -78,9 +80,12 @@ export async function bootClient(): Promise<CrocodileClient> {
     directories: [],
     cpuCores: navigator.hardwareConcurrency,
   };
-  const builtIn =
-    (process.env.CROC_DIRECTORIES as string | undefined)?.split(',').filter(Boolean) ?? [];
-  const directories = info.directories.length ? info.directories : builtIn;
+  // The desktop main process already resolves overrides and the built-in
+  // list; an empty list from it means "no directory" (e.g. a test override).
+  const directories = desktop
+    ? info.directories
+    : ((process.env.CROC_DIRECTORIES as string | undefined)?.split(',').filter(Boolean) ?? []);
+  directoriesInUse = directories;
   const platform = createPlatform({
     version: info.version,
     cpuCores: info.cpuCores,
@@ -172,6 +177,7 @@ export async function diagnostics(): Promise<string> {
         ? { name: s.server.info.name, url: s.server.info.url, rttMs: Math.round(s.server.rttMs) }
         : null,
       knownServers: s.servers.map((r) => ({ name: r.info.name, rttMs: Math.round(r.rttMs) })),
+      directories: directoriesInUse,
     },
     settings: {
       allowHosting: s.settings.allowHosting,

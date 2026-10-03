@@ -32,12 +32,12 @@ the people in the conversation. Servers never see them.
 
 ```sh
 # macOS and Linux
-curl -fsSL https://raw.githubusercontent.com/pwalda/crocodile/main/scripts/install.sh | sh
+curl -fsSL https://crocodilechat.com/install.sh | sh
 ```
 
 ```powershell
 # Windows (PowerShell)
-irm https://raw.githubusercontent.com/pwalda/crocodile/main/scripts/install.ps1 | iex
+irm https://crocodilechat.com/install.ps1 | iex
 ```
 
 Or download the installer for your system from

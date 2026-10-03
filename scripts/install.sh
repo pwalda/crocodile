@@ -1,7 +1,7 @@
 #!/bin/sh
 # Crocodile installer for macOS and Linux.
 #
-#   curl -fsSL https://raw.githubusercontent.com/pwalda/crocodile/main/scripts/install.sh | sh
+#   curl -fsSL https://crocodilechat.com/install.sh | sh
 #
 # Downloads the latest release from GitHub and installs it:
 #   macOS  -> /Applications/Crocodile.app (or ~/Applications)
