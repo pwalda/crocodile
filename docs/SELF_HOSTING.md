@@ -137,8 +137,9 @@ the servers it measures and uses.
 
 ## The main server
 
-`deploy/main/` runs the product page, the directory, the install scripts and
-a first coordinator behind Caddy with automatic HTTPS. See
+`deploy/main/` runs the directory and a first coordinator in Docker, behind
+the Caddy already on the machine, which also serves the install scripts and
+the website. See
 [deploy/main/README.md](../deploy/main/README.md).
 
 ## Running a directory

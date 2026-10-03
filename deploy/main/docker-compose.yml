@@ -1,38 +1,22 @@
-# The main Crocodile server: product page, server directory, install
-# scripts and a first coordination server, behind Caddy (automatic HTTPS).
+# The main Crocodile server: server directory and a first coordination
+# server. HTTPS comes from the Caddy already running on the machine; see
+# Caddyfile.example and README.md.
 #
 #   cd deploy/main
-#   cp .env.example .env    # set CROC_DOMAIN and CROC_EMAIL
-#   docker compose up -d
+#   cp .env.example .env    # set CROC_DOMAIN
+#   docker compose up -d --build
 #
-# DNS: point CROC_DOMAIN and coord.CROC_DOMAIN at this machine.
-# Firewall: open TCP 80, 443 and TCP+UDP 7443.
+# Both HTTP services listen on 127.0.0.1 only, so they are reachable just
+# through Caddy. Firewall: TCP 80 and 443 (Caddy), UDP 7443 (STUN, relay).
 services:
-  caddy:
-    image: caddy:2
-    restart: unless-stopped
-    ports:
-      - '80:80'
-      - '443:443'
-      - '443:443/udp'
-    environment:
-      CROC_DOMAIN: ${CROC_DOMAIN:?set CROC_DOMAIN in .env}
-      CROC_EMAIL: ${CROC_EMAIL:?set CROC_EMAIL in .env}
-    volumes:
-      - ./Caddyfile:/etc/caddy/Caddyfile:ro
-      - ../../site:/srv/site:ro
-      - ../../scripts:/srv/scripts:ro
-      - caddy-data:/data
-      - caddy-config:/config
-    depends_on: [directory, coordinator]
-
   directory:
     build:
       context: ../..
       dockerfile: apps/directory/Dockerfile
     image: ghcr.io/pwalda/crocodile-directory:latest
     restart: unless-stopped
-    expose: ['7400']
+    ports:
+      - '127.0.0.1:7400:7400'
     volumes:
       - directory-data:/data
 
@@ -42,13 +26,16 @@ services:
       dockerfile: packages/coordinator/Dockerfile
     image: ghcr.io/pwalda/crocodile-coordinator:latest
     restart: unless-stopped
-    # WebSocket traffic comes through Caddy; STUN, relay (TURN) use UDP directly.
-    expose: ['7443']
     ports:
+      # WebSocket traffic comes through Caddy. Keep this on 127.0.0.1: the
+      # server trusts X-Forwarded-For (below), so a public TCP port would let
+      # clients fake their address and dodge the per-IP limit.
+      - '127.0.0.1:7443:7443/tcp'
+      # STUN and the opt-in relay (TURN) use UDP directly.
       - '7443:7443/udp'
     environment:
       CROC_NAME: ${CROC_COORD_NAME:-Crocodile main}
-      CROC_PUBLIC_URL: https://coord.${CROC_DOMAIN}
+      CROC_PUBLIC_URL: https://coord.${CROC_DOMAIN:?set CROC_DOMAIN in .env}
       CROC_DIRECTORY: https://${CROC_DOMAIN}
       CROC_REGION: ${CROC_REGION:-}
       CROC_RELAY: ${CROC_RELAY:-on}
@@ -63,7 +50,5 @@ services:
     depends_on: [directory]
 
 volumes:
-  caddy-data:
-  caddy-config:
   directory-data:
   coordinator-data:

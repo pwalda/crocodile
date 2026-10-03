@@ -1,0 +1,43 @@
+# Site blocks for the main server, to add to the Caddyfile of the Caddy
+# already running on the machine. Replace /opt/crocodile with the path of
+# this repository's clone, then reload Caddy (systemctl reload caddy).
+
+crocodilechat.com {
+	encode zstd gzip
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		X-Content-Type-Options nosniff
+		Referrer-Policy no-referrer
+		Content-Security-Policy "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; frame-ancestors 'none'"
+	}
+
+	# Server directory: the apps query /v1/servers to find coordination servers.
+	handle /v1/* {
+		reverse_proxy 127.0.0.1:7400
+	}
+	handle /health {
+		reverse_proxy 127.0.0.1:7400
+	}
+
+	# One-line installers: curl -fsSL https://crocodilechat.com/install.sh | sh
+	@install path /install.sh /install.ps1
+	handle @install {
+		root * /opt/crocodile/scripts
+		header Content-Type "text/plain; charset=utf-8"
+		file_server
+	}
+
+	# Everything else: the "work in progress" placeholder until the website
+	# is ready. Point root at the website's files then.
+	handle {
+		root * /opt/crocodile/deploy/main/placeholder
+		try_files {path} /index.html
+		file_server
+	}
+}
+
+# The main coordination server (WebSocket). STUN and the relay use UDP 7443
+# directly, not Caddy.
+coord.crocodilechat.com {
+	reverse_proxy 127.0.0.1:7443
+}

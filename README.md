@@ -100,8 +100,9 @@ Useful extras:
 
 ## The main server
 
-The product page, the server directory, the install scripts and a first
-coordination server run together from [`deploy/main`](deploy/main/README.md).
+The server directory and a first coordination server run from
+[`deploy/main`](deploy/main/README.md), behind the machine's own Caddy, which
+also serves the install scripts and (for now) a "work in progress" page.
 
 ## Self-hosting a coordination server
 
