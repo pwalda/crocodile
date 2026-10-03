@@ -1,13 +1,13 @@
 # The main Crocodile server: server directory and a first coordination
-# server. HTTPS comes from the Caddy already running on the machine; see
-# Caddyfile.example and README.md.
+# server. HTTPS comes from the reverse proxy already running on the
+# machine; see README.md for what it must route.
 #
 #   cd deploy/main
 #   cp .env.example .env    # set CROC_DOMAIN
 #   docker compose up -d --build
 #
 # Both HTTP services listen on 127.0.0.1 only, so they are reachable just
-# through Caddy. Firewall: TCP 80 and 443 (Caddy), UDP 7443 (STUN, relay).
+# through the proxy. Firewall: TCP 80 and 443 (proxy), UDP 7443 (STUN, relay).
 services:
   directory:
     build:
@@ -27,7 +27,7 @@ services:
     image: ghcr.io/pwalda/crocodile-coordinator:latest
     restart: unless-stopped
     ports:
-      # WebSocket traffic comes through Caddy. Keep this on 127.0.0.1: the
+      # WebSocket traffic comes through the proxy. Keep this on 127.0.0.1: the
       # server trusts X-Forwarded-For (below), so a public TCP port would let
       # clients fake their address and dodge the per-IP limit.
       - '127.0.0.1:7443:7443/tcp'
@@ -43,7 +43,7 @@ services:
       CROC_RELAY_IP: ${CROC_RELAY_IP:-}
       CROC_MAILBOX: ${CROC_MAILBOX:-on}
       CROC_MAILBOX_DAYS: ${CROC_MAILBOX_DAYS:-3}
-      # Behind Caddy: take client addresses from X-Forwarded-For.
+      # Behind the proxy: take client addresses from X-Forwarded-For.
       CROC_TRUST_PROXY: '1'
     volumes:
       - coordinator-data:/data

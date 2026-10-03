@@ -82,7 +82,7 @@ export interface CoordinatorConfig {
   maxConnectionsPerIp: number;
   /**
    * Take the client address from X-Forwarded-For (only behind a trusted
-   * reverse proxy such as the main server's Caddy).
+   * reverse proxy, as on the main server).
    */
   trustProxy: boolean;
   /**

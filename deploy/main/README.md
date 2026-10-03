@@ -11,16 +11,16 @@ One machine runs everything the public Crocodile network needs from "us":
 
 The directory and coordination server run in Docker
 ([docker-compose.yml](docker-compose.yml)). HTTPS, the installers and the
-website come from the Caddy already running on the machine
-([Caddyfile.example](Caddyfile.example)).
+website come from the reverse proxy already running on the machine.
 
 ## Set up
 
-1. A small VPS (1 vCPU, 1 GB RAM is plenty to start) with Docker and Caddy.
+1. A small VPS (1 vCPU, 1 GB RAM is plenty to start) with Docker and a
+   reverse proxy that handles HTTPS.
 2. DNS: `A`/`AAAA` records for `DOMAIN` and `coord.DOMAIN` pointing to it.
-3. Firewall: TCP 80 and 443 (Caddy), UDP 7443 (STUN and relay). Do **not**
-   open TCP 7400 or 7443: those services listen on 127.0.0.1 and must only be
-   reached through Caddy.
+3. Firewall: TCP 80 and 443 (the proxy), UDP 7443 (STUN and relay). Do
+   **not** open TCP 7400 or 7443: those services listen on 127.0.0.1 and must
+   only be reached through the proxy.
 4. On the server:
 
    ```sh
@@ -29,9 +29,17 @@ website come from the Caddy already running on the machine
    docker compose up -d --build
    ```
 
-5. Add the site blocks from [Caddyfile.example](Caddyfile.example) to your
-   Caddyfile, with `/opt/crocodile` replaced by the path of the clone, and
-   reload Caddy (`systemctl reload caddy`).
+5. Route these in the reverse proxy (with HTTPS):
+
+   | Request                                   | Goes to                                                    |
+   | ----------------------------------------- | ---------------------------------------------------------- |
+   | `DOMAIN/v1/*` and `DOMAIN/health`         | `http://127.0.0.1:7400` (directory)                        |
+   | `DOMAIN/install.sh`, `DOMAIN/install.ps1` | files in `scripts/` of the clone, as `text/plain`          |
+   | everything else on `DOMAIN`               | the website; until it is ready, `deploy/main/placeholder/` |
+   | `coord.DOMAIN` (all paths, WebSocket too) | `http://127.0.0.1:7443` (coordinator)                      |
+
+   The proxy must set `X-Forwarded-For`; the coordinator uses it for its
+   per-address limits.
 
 Check that `https://DOMAIN/v1/servers` lists the coordinator after a minute,
 and that `https://coord.DOMAIN/health` answers.
@@ -51,8 +59,8 @@ can still add other servers under Settings → Network.
 git pull && docker compose up -d --build
 ```
 
-The placeholder page and install scripts update with `git pull` alone (Caddy
-serves them straight from the clone).
+The placeholder page and install scripts update with `git pull` alone (the
+proxy serves them straight from the clone).
 
 ## Load and privacy
 

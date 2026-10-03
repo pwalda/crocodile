@@ -101,7 +101,7 @@ Useful extras:
 ## The main server
 
 The server directory and a first coordination server run from
-[`deploy/main`](deploy/main/README.md), behind the machine's own Caddy, which
+[`deploy/main`](deploy/main/README.md), behind the machine's own reverse proxy, which
 also serves the install scripts and (for now) a "work in progress" page.
 
 ## Self-hosting a coordination server
