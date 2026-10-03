@@ -117,12 +117,16 @@ It needs TCP and UDP on port 7443 (UDP also carries the opt-in relay). See [docs
 
 Crocodile is free software.
 
-- The desktop app, coordination server, directory, product page and scripts
-  are licensed under the [GNU Affero General Public License v3.0](LICENSE).
-- The libraries other clients need — `packages/protocol`, `packages/crypto`,
-  `packages/client-core` and `packages/relay` — are licensed under
+- The client core, call host, desktop app, coordination server, directory,
+  product page and scripts are licensed under the
+  [GNU Affero General Public License v3.0](LICENSE).
+- The wire formats and crypto building blocks other clients need —
+  `packages/protocol` and `packages/crypto` — are licensed under
   [Apache-2.0](packages/protocol/LICENSE).
 
-"Crocodile" and the logo are trademarks; see [TRADEMARKS.md](TRADEMARKS.md).
+Copyright © 2026 the Crocodile maintainer ([@pwalda](https://github.com/pwalda)).
+Commercial licences without the AGPL's conditions are available; see
+[COMMERCIAL.md](COMMERCIAL.md). "Crocodile" and the logo are trademarks; see
+[TRADEMARKS.md](TRADEMARKS.md).
 Contributions require signing the [CLA](CLA.md); see
 [CONTRIBUTING.md](CONTRIBUTING.md).

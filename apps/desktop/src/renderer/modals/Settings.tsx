@@ -1071,9 +1071,9 @@ function AboutTab() {
       </Card>
       <Card className="mt-3 space-y-2 text-sm leading-relaxed text-text-2">
         <p>
-          Crocodile is free software: the app, coordination server and directory are licensed under
-          the GNU Affero General Public License v3; the protocol, crypto and client libraries under
-          Apache-2.0. “Crocodile” and the crocodile logo are trademarks of the project.
+          Crocodile is free software, licensed under the GNU Affero General Public License v3; the
+          protocol and crypto libraries under Apache-2.0. Commercial licences are available from the
+          maintainer. “Crocodile” and the crocodile logo are trademarks of the maintainer.
         </p>
         <div className="flex gap-2 pt-1">
           <Button variant="secondary" onClick={() => openLink(SOURCE_URL)}>

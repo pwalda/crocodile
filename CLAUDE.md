@@ -42,9 +42,9 @@ See `docs/QA.md` for the test layers, manual matrix and release checklist.
 - Network-facing server code: validate input with zod schemas in
   `packages/protocol`, rate-limit per connection, and keep the relay's
   private-address filter (`isForbiddenPeerAddress` in `turn.ts`).
-- Licenses: `packages/{protocol,crypto,client-core,relay}` are Apache-2.0;
-  everything else AGPL-3.0. Don't copy code between them in the wrong
-  direction without checking.
+- Licenses: `packages/{protocol,crypto}` are Apache-2.0; everything else
+  (including `client-core` and `relay`) is AGPL-3.0. Don't move AGPL code
+  into the Apache packages. See `docs/PLAN.md` §1 for why.
 
 ## Git and GitHub (maintainer's preference)
 

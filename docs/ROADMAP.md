@@ -1,5 +1,8 @@
 # Roadmap
 
+For the order of work, the path to a public release, licensing, the paid
+subscription and video, see [PLAN.md](PLAN.md).
+
 ## Done
 
 - Identity without passwords (recovery key), profiles, friends, blocking.
@@ -31,33 +34,38 @@
 
 ## Next
 
-1. **Mobile (iOS/Android).** React Native app reusing `@crocodile/client-core`
-   with a WebRTC build that supports frame encryptors. Mobile devices never
-   host; they join hosts. Push notifications need a content-free wake-up (an
-   opt-in push relay that only says "open the app").
-2. **Per-device signing keys** certified by the identity, so removing a
+The order of this work, and what comes before it, is in [PLAN.md](PLAN.md).
+
+1. **Per-device signing keys** certified by the identity, so removing a
    device fully revokes it.
-3. **Better reachability.** UPnP / NAT-PMP / PCP port mapping on hosts, IPv6
+2. **Better reachability.** UPnP / NAT-PMP / PCP port mapping on hosts, IPv6
    preference, TURN over TCP/TLS for UDP-blocked networks, pre-warming the
    backup host for sub-second failover.
-4. **MLS (RFC 9420)** for very large spaces.
-5. **Roles and permissions**: moderators with delegated signing certificates,
+3. **MLS (RFC 9420)** for very large spaces.
+4. **Roles and permissions**: moderators with delegated signing certificates,
    channel permissions, kicking from voice.
-6. **Rich content**: attachments sent P2P (chunked over data channels),
+5. **Rich content**: attachments sent P2P (chunked over data channels),
    reactions, mentions, on-device search.
-7. **Screen share and video** over the same relay design.
-8. **Wayland global shortcuts** (XDG GlobalShortcuts portal) and Flathub.
-9. **Server-side hardening**: per-IP rate limits, record quotas per user,
-   abuse reporting for public directories.
-10. **Web client** (cannot host; joins hosts) from the same renderer.
-11. **Store and signing path** (see [DISTRIBUTION.md](DISTRIBUTION.md)):
-    Microsoft Store listing (MSIX, signed by the Store, with the built-in
-    updater disabled) plus winget; Apple Developer Program for Developer ID
-    signing, notarization and working macOS auto-update; SignPath for the
-    direct Windows download. Until then: the one-line installers.
+6. **Screen share, video and remote control** (see PLAN.md §4).
+7. **Wayland global shortcuts** (XDG GlobalShortcuts portal) and Flathub.
+8. **Server-side hardening**: record quotas per user, abuse reporting for
+   public directories (per-IP connection limits are done).
+9. **Store and signing path** (see [DISTRIBUTION.md](DISTRIBUTION.md)):
+   Microsoft Store listing (MSIX, signed by the Store, with the built-in
+   updater disabled) plus winget; Apple Developer Program for Developer ID
+   signing, notarization and working macOS auto-update; SignPath for the
+   direct Windows download. Until then: the one-line installers.
+
+## Paused
+
+- **Mobile (iOS/Android) and a web client.** Assessed and paused (see
+  PLAN.md). Both first need a way to hold calls when nobody in them is on the
+  desktop app: direct calls for DMs and small groups, or a cloud call host.
+  A wrapped web build (Capacitor) is the likely route for mobile, since it
+  keeps the browser's frame encryption for voice.
 
 ## Open questions
 
-- The product domain (the main server hosts the directory and product page).
+- The product domain (most likely `crocodilechat.com`; see PLAN.md).
 - Mailbox for spaces (today DMs only): sealing to every member's devices is
   costly for big spaces; a per-space rotating mailbox key is one option.

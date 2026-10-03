@@ -1,8 +1,10 @@
 # Trademark policy
 
 "Crocodile" (as the name of this communicator) and the crocodile logo are
-trademarks of the Crocodile project. The software licenses (AGPL-3.0 and
-Apache-2.0) cover the code; they do **not** grant rights to the name or logo.
+trademarks of the Crocodile maintainer (GitHub user
+[@pwalda](https://github.com/pwalda), the "Maintainer" in [CLA.md](CLA.md)).
+The software licenses (AGPL-3.0 and Apache-2.0) cover the code; they do
+**not** grant rights to the name or logo.
 This protects users from confusing look-alikes, for example a modified build
 that someone else distributes under our name.
 
