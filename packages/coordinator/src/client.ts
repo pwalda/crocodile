@@ -5,6 +5,7 @@ import {
   randomId,
   SecureChannel,
   sign,
+  toPublicServerInfo,
   userIdFromKey,
   verifyPayload,
   type ChannelKeys,
@@ -166,6 +167,10 @@ export class ClientConnection implements ClientHandle {
     this.userId = userIdFromKey(key);
     this.deviceId = device;
     this.peer = peerIds.make(this.userId, device);
+    if (!this.hub.hasRoomFor(this.peer)) {
+      this.ws.close(1013, 'server full; try another');
+      return;
+    }
     this.publicKey = key;
     this.platform = client.platform;
     this.channel = new SecureChannel(
@@ -293,7 +298,7 @@ export class ClientConnection implements ClientHandle {
         return { delivered: hub.deliverToPeer(to, 'signal', { from: this.peer, sessionId, data }) };
       }
       case 'servers.list':
-        return { servers: [hub.info, ...hub.mesh.knownServers()] };
+        return { servers: [hub.info, ...hub.mesh.knownServers()].map(toPublicServerInfo) };
       case 'link.open': {
         const { encKey } = p as unknown as { encKey: string };
         this.encKey = encKey;

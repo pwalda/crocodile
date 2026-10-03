@@ -1,3 +1,4 @@
+import { openDirectoryEntry } from '@crocodile/crypto';
 import { DIRECTORY_PATHS, type DirectoryListing, type ServerInfo } from '@crocodile/protocol';
 import type { KeyValueStore } from './platform';
 
@@ -32,7 +33,10 @@ export async function fetchServerList(
         if (!res.ok) return;
         const listing = (await res.json()) as DirectoryListing;
         any = true;
-        for (const e of listing.servers) {
+        for (const raw of listing.servers) {
+          // Decodes the obfuscated address and checks the server's signature.
+          const e = openDirectoryEntry(raw);
+          if (!e) continue;
           merged.set(e.server.id, e.server);
           loads.set(e.server.id, e.load.capacity ? e.load.users / e.load.capacity : 0);
         }

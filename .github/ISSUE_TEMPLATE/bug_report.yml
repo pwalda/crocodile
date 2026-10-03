@@ -1,0 +1,77 @@
+name: Bug report
+description: Something doesn't work as expected
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for testing Crocodile! Please don't include message content, recovery keys or anything private.
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened?
+      description: What you did, what you expected, and what happened instead.
+      placeholder: |
+        1. Alice and Bob joined the voice room "General"
+        2. Alice (the host) closed the app
+        3. Bob's call dropped and never reconnected
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Voice / calls
+        - Text chat / DMs
+        - Offline delivery / mailbox
+        - Friends / spaces / invites
+        - Devices / linking
+        - Connection / servers / relay
+        - Installation / updates
+        - Settings / appearance
+        - Hosting a server
+        - Other
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Crocodile version
+      description: Settings → About
+      placeholder: 0.0.1
+    validations:
+      required: true
+  - type: dropdown
+    id: os
+    attributes:
+      label: Operating system
+      multiple: true
+      options:
+        [
+          Windows 11,
+          Windows 10,
+          macOS (Apple silicon),
+          macOS (Intel),
+          Linux (X11),
+          Linux (Wayland),
+          Other,
+        ]
+    validations:
+      required: true
+  - type: input
+    id: network
+    attributes:
+      label: Network
+      description: Same network as the other people? Home, office, mobile hotspot, VPN?
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Diagnostics
+      description: Settings → About → Copy diagnostics, then paste here (contains no messages or keys).
+      render: json
+  - type: dropdown
+    id: frequency
+    attributes:
+      label: How often?
+      options: [Every time, Sometimes, Once]

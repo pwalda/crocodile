@@ -26,8 +26,11 @@ const { values } = parseArgs({
     relay: { type: 'string' },
     'relay-max-users': { type: 'string' },
     'relay-ip': { type: 'string' },
+    'relay-allow-private': { type: 'boolean' },
     mailbox: { type: 'string' },
     source: { type: 'string' },
+    'trust-proxy': { type: 'boolean' },
+    'max-connections-per-ip': { type: 'string' },
     'mailbox-days': { type: 'string' },
     'log-level': { type: 'string' },
     help: { type: 'boolean', short: 'h' },
@@ -54,9 +57,15 @@ Options (environment variable in brackets):
   --relay on|off         opt-in relay for blocked users   [CROC_RELAY]
   --relay-max-users <n>  concurrent relay users (25)      [CROC_RELAY_MAX_USERS]
   --relay-ip <addr>      public IP for relay candidates   [CROC_RELAY_IP]
+  --relay-allow-private  let the relay reach private and  [CROC_RELAY_ALLOW_PRIVATE=1]
+                         loopback addresses (LAN-only
+                         deployments; unsafe on the internet)
   --mailbox on|off       hold sealed mail for offline     [CROC_MAILBOX]
                          devices (opt-in for users)
   --mailbox-days <n>     how long mail is kept, max 7 (3) [CROC_MAILBOX_DAYS]
+  --trust-proxy          read client IPs from             [CROC_TRUST_PROXY=1]
+                         X-Forwarded-For (behind a proxy)
+  --max-connections-per-ip <n>  per-address limit (50)    [CROC_MAX_CONN_PER_IP]
   --source <url>         where users get this server's    [CROC_SOURCE_URL]
                          source (required by the AGPL if
                          you run a modified version)
@@ -89,8 +98,15 @@ const coordinator = new Coordinator({
       pick(values['relay-max-users'], 'CROC_RELAY_MAX_USERS') ?? defaultConfig.relay.maxUsers,
     ),
     publicIp: pick(values['relay-ip'], 'CROC_RELAY_IP'),
+    allowPrivatePeers:
+      values['relay-allow-private'] === true || env.CROC_RELAY_ALLOW_PRIVATE === '1',
   },
   sourceUrl: pick(values.source, 'CROC_SOURCE_URL'),
+  trustProxy: values['trust-proxy'] === true || env.CROC_TRUST_PROXY === '1',
+  maxConnectionsPerIp: Number(
+    pick(values['max-connections-per-ip'], 'CROC_MAX_CONN_PER_IP') ??
+      defaultConfig.maxConnectionsPerIp,
+  ),
   mailbox: {
     ...defaultConfig.mailbox,
     enabled: (pick(values.mailbox, 'CROC_MAILBOX') ?? 'on') !== 'off',

@@ -2,7 +2,7 @@ import Fastify, { type FastifyInstance } from 'fastify';
 import type { AddressInfo } from 'node:net';
 import { mkdirSync, readFileSync, writeFileSync, existsSync, renameSync } from 'node:fs';
 import { dirname } from 'node:path';
-import { keyMatchesUserId, verifyPayload } from '@crocodile/crypto';
+import { keyMatchesUserId, toPublicDirectoryEntry, verifyPayload } from '@crocodile/crypto';
 import {
   DIRECTORY_PATHS,
   DirectoryEntry,
@@ -57,9 +57,10 @@ export class Directory {
   }
 
   listing(now = Date.now()): DirectoryListing {
+    // Addresses are published obfuscated, never as plain URLs/IPs.
     const servers = [...this.entries.values()]
       .filter((e) => now - e.lastSeen < this.config.ttlMs)
-      .map(({ verifiedAt: _v, ...e }) => e);
+      .map(({ verifiedAt: _v, ...e }) => toPublicDirectoryEntry(e));
     return { servers, generatedAt: now };
   }
 

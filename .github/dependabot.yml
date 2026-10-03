@@ -1,0 +1,27 @@
+version: 2
+updates:
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      # Batch routine updates; security updates still come individually.
+      dev-tooling:
+        dependency-type: development
+        update-types: [minor, patch]
+      runtime:
+        dependency-type: production
+        update-types: [minor, patch]
+    ignore:
+      # Electron majors change Chromium/WebRTC; upgrade deliberately.
+      - dependency-name: electron
+        update-types: [version-update:semver-major]
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
+  - package-ecosystem: docker
+    directories: [/packages/coordinator, /apps/directory]
+    schedule:
+      interval: monthly

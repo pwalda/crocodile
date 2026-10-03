@@ -8,7 +8,6 @@ import {
   UserMinus,
   UserPlus,
   Users,
-  X,
 } from 'lucide-react';
 import type { ProfileView } from '@crocodile/client-core';
 import { getClient, navigate, openModal, useCroc } from '../croc';

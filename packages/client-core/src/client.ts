@@ -36,7 +36,6 @@ import {
   type DeviceBody,
   type LinkBox,
   type MailItem,
-  type RelayGrant,
   SealedPayload,
   utf8,
   type SealedBox,

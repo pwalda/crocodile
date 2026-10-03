@@ -176,6 +176,15 @@ await shot(a.page, '13-settings-network');
 await a.page.getByRole('button', { name: 'Appearance' }).click();
 await a.page.getByRole('button', { name: 'Lagoon' }).click();
 await shot(a.page, '14-settings-dark');
+// Bug-report diagnostics: copied as JSON, without message content.
+await a.page.getByRole('button', { name: 'About' }).click();
+await a.page.getByRole('button', { name: 'Copy diagnostics' }).click();
+await a.page.getByText('Copied').first().waitFor();
+const report = JSON.parse(await a.app.evaluate(({ clipboard }) => clipboard.readText()));
+if (report.connection.link !== 'connected' || !Array.isArray(report.recentLog))
+  throw new Error('diagnostics report is incomplete');
+if (JSON.stringify(report).includes('This never touches a server'))
+  throw new Error('diagnostics must not contain message content');
 await a.page.getByRole('button', { name: 'Close settings' }).click();
 await a.page.getByRole('button', { name: 'The Swamp' }).click();
 await shot(a.page, '15-dark-chat');
