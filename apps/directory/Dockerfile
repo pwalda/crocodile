@@ -1,11 +1,11 @@
 # Build from the repository root:  docker build -f apps/directory/Dockerfile .
-FROM node:22-alpine AS build
+FROM node:26-alpine AS build
 WORKDIR /src
 RUN corepack enable
 COPY . .
 RUN pnpm install --frozen-lockfile && pnpm --filter @crocodile/directory build
 
-FROM node:22-alpine
+FROM node:26-alpine
 WORKDIR /app
 COPY --from=build /src/apps/directory/dist/bin.js ./bin.js
 ENV CROC_DIR_STATE=/data/directory.json
