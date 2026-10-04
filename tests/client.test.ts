@@ -1,12 +1,20 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import {
+  CoordinatorLink,
   CrocodileClient,
   MemoryKeyValueStore,
   MemoryMessageStore,
   type PlatformAdapter,
 } from '@crocodile/client-core';
 import type { Coordinator } from '@crocodile/coordinator';
-import { recordKey, sessionIds, type DeviceBody } from '@crocodile/protocol';
+import { createIdentity, signRecord } from '@crocodile/crypto';
+import {
+  DELETED_PROFILE_NAME,
+  recordKey,
+  sessionIds,
+  type DeviceBody,
+  type SpaceBody,
+} from '@crocodile/protocol';
 import { FakeRelayNetwork } from './helpers/fake-relay';
 import { startCoordinator, waitFor } from './helpers';
 
@@ -24,12 +32,12 @@ async function server(overrides = {}) {
 function makeClient(
   net: FakeRelayNetwork,
   coordinator: Coordinator,
-  opts: { canHost?: boolean; nat?: 'open' | 'cone' | 'symmetric' } = {},
+  opts: { canHost?: boolean; nat?: 'open' | 'cone' | 'symmetric'; kv?: MemoryKeyValueStore } = {},
 ) {
   const platform: PlatformAdapter = {
     platform: opts.canHost === false ? 'web' : 'desktop',
     appVersion: 'test',
-    kv: new MemoryKeyValueStore(),
+    kv: opts.kv ?? new MemoryKeyValueStore(),
     messages: new MemoryMessageStore(),
     ...(opts.canHost === false ? {} : { relay: net.adapter() }),
     capabilities: async () => ({ nat: opts.nat ?? 'cone', cpuCores: 8 }),
@@ -366,7 +374,8 @@ describe('leaving', () => {
   it('deleting the account removes it for friends and signs out its other devices', async () => {
     const coord = await server();
     const net = new FakeRelayNetwork();
-    const alice = await signUp(makeClient(net, coord, { nat: 'open' }), 'alice');
+    const kv = new MemoryKeyValueStore();
+    const alice = await signUp(makeClient(net, coord, { nat: 'open', kv }), 'alice');
     const bob = await signUp(makeClient(net, coord), 'bob');
     await bob.addFriend(alice.userId);
     await waitFor(() => alice.state.friends.incoming.includes(bob.userId), 3000, 'request');
@@ -384,19 +393,89 @@ describe('leaving', () => {
     await laptop.init();
     await laptop.restoreAccount(alice.recoveryKey());
     await waitFor(() => laptop.state.link === 'connected', 5000, 'laptop connected');
+    // The laptop is in a channel session when the account goes.
+    await waitFor(() => laptop.state.spaces[bobs], 5000, 'laptop synced');
+    await laptop.openChannel(channelOf(laptop, bobs));
+    await waitFor(() => laptop.state.sessions[sessionIds.space(bobs)], 5000, 'laptop session');
 
     const aliceId = alice.userId;
     await alice.deleteAccount();
     expect(alice.state.phase).toBe('onboarding');
     expect(alice.state.accountDeleted).toBe(true);
     expect(alice.identity).toBeNull();
-    // The other device forgets the account too.
-    await waitFor(() => laptop.state.accountDeleted, 5000, 'laptop signed out');
+    // The other device forgets the account too, promptly despite its session.
+    await waitFor(() => laptop.state.accountDeleted, 3000, 'laptop signed out');
     expect(laptop.state.phase).toBe('onboarding');
+    // Nothing erased comes back from a delayed save.
+    await new Promise((r) => setTimeout(r, 1500));
+    expect(await kv.get('records-cache')).toBeUndefined();
+    expect(await kv.get('outbox')).toBeUndefined();
     // Bob: the space she owned is gone, she left his, and she's no longer a friend.
     await waitFor(() => !bob.state.spaces[owned], 5000, 'owned space deleted');
     await waitFor(() => !bob.state.spaces[bobs]?.members.includes(aliceId), 5000, 'left bob space');
     await waitFor(() => !bob.state.friends.friends.includes(aliceId), 5000, 'unfriended');
     expect(bob.state.friends.outgoing).not.toContain(aliceId);
+  });
+
+  it('a stopped link fails requests at once instead of waiting for a server', async () => {
+    const link = new CoordinatorLink({
+      identity: createIdentity(),
+      deviceId: 'testdevice',
+      platform: 'desktop',
+      version: 'test',
+      kv: new MemoryKeyValueStore(),
+      directories: [],
+    });
+    link.stop();
+    const started = Date.now();
+    await expect(link.request('records.get', { keys: [] })).rejects.toThrow(/stopped/);
+    expect(Date.now() - started).toBeLessThan(1000);
+  });
+
+  it("doesn't erase anything on a server's word without the signed marker", async () => {
+    const coord = await server();
+    const alice = await signUp(makeClient(new FakeRelayNetwork(), coord), 'alice');
+    const userId = alice.userId;
+    // A server (or anything in between) claims the account was deleted.
+    for (const client of coord.presence.localOf(userId)) client.close(4010, 'account deleted');
+    await waitFor(() => alice.state.link !== 'connected', 3000, 'disconnected');
+    await waitFor(() => alice.state.link === 'connected', 5000, 'reconnected');
+    expect(alice.identity?.userId).toBe(userId);
+    expect(alice.state.accountDeleted).toBe(false);
+    expect(alice.state.me?.userId).toBe(userId);
+  });
+
+  it('deletes owned spaces this device never synced', async () => {
+    const coord = await server();
+    const net = new FakeRelayNetwork();
+    const alice = await signUp(makeClient(net, coord), 'alice');
+    const owned = await alice.createSpace('Old place');
+    // She left her own space, so a restored device doesn't list it as hers.
+    await alice.leaveSpace(owned);
+    const laptop = makeClient(net, coord);
+    await laptop.init();
+    await laptop.restoreAccount(alice.recoveryKey());
+    await waitFor(() => laptop.state.link === 'connected', 5000, 'laptop connected');
+    expect(laptop.records.get(recordKey.space(owned))).toBeUndefined();
+    await laptop.deleteAccount();
+    expect((coord.records.get(recordKey.space(owned))?.body as SpaceBody).deleted).toBe(true);
+  });
+
+  it('drops a deleted account from member lists even if its leave never arrived', async () => {
+    const coord = await server();
+    const net = new FakeRelayNetwork();
+    const alice = await signUp(makeClient(net, coord), 'alice');
+    const bob = await signUp(makeClient(net, coord), 'bob');
+    const space = await bob.createSpace('Swamp');
+    await alice.joinWithInvite(await bob.createInvite(space));
+    await waitFor(() => bob.state.spaces[space]?.members.includes(alice.userId), 3000, 'member');
+    // Bob was offline: all he gets later is the marker.
+    const marker = signRecord(alice.identity!, 'profile', recordKey.profile(alice.userId), {
+      username: DELETED_PROFILE_NAME,
+      encKey: alice.identity!.encPublicKey,
+      deleted: true,
+    });
+    expect(bob.records.ingest(marker)).toBe(true);
+    expect(bob.state.spaces[space]?.members).not.toContain(alice.userId);
   });
 });

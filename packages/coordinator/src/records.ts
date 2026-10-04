@@ -122,6 +122,14 @@ export class RecordService {
       (record.kind === 'member' &&
         (current.body as RecordBodies['member']).left &&
         !(record.body as RecordBodies['member']).left);
+    // A leave record for a membership that doesn't exist would be free storage.
+    if (
+      opts.fresh &&
+      !current &&
+      record.kind === 'member' &&
+      (record.body as RecordBodies['member']).left
+    )
+      return { accepted: false, current, reason: 'not a member of this space' };
     if (opts.fresh && grows) {
       const over = this.overQuota(record);
       if (over) return { accepted: false, current, reason: `quota reached: ${over}` };

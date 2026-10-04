@@ -16,6 +16,7 @@ import {
   type ServerFrame,
   type ServerHello,
   type ServerInfo,
+  type SignedRecord,
 } from '@crocodile/protocol';
 import { Emitter } from './emitter';
 
@@ -23,6 +24,8 @@ export class RpcCallError extends Error {
   constructor(
     readonly code: RpcError['code'],
     message: string,
+    /** For account_deleted: the server's proof, unverified until checked. */
+    readonly record?: SignedRecord,
   ) {
     super(message);
   }
@@ -175,7 +178,7 @@ export class CoordinatorConnection extends Emitter<ConnectionEvents> {
             ),
           );
         } else if (frame.t === 'error') {
-          fail(new RpcCallError(frame.err.code, frame.err.message));
+          fail(new RpcCallError(frame.err.code, frame.err.message, frame.err.record));
         }
       };
     });

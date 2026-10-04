@@ -190,7 +190,7 @@ export class Coordinator {
       this.mesh.onRecord(record, seq, origin);
       this.pushRecordToClients(record);
       if (record.kind === 'profile' && (record.body as ProfileBody).deleted)
-        this.purgeAccount(record.key.slice('profile:'.length));
+        this.purgeAccount(record as SignedRecord<'profile'>);
     });
   }
 
@@ -199,7 +199,8 @@ export class Coordinator {
    * marker profile replicates through the mesh, so every server does the same,
    * and validateRecord refuses anything the identity signs afterwards.
    */
-  private purgeAccount(userId: string) {
+  private purgeAccount(marker: SignedRecord<'profile'>) {
+    const userId = marker.key.slice('profile:'.length);
     const keys = [
       ...this.store.listPrefix(recordKey.devicePrefix(userId), 100_000).map((r) => r.key),
       recordKey.friends(userId),
@@ -208,14 +209,21 @@ export class Coordinator {
     for (const key of keys) this.store.delete(key);
     const mail = this.store.mailDeleteUser(userId);
     this.log.info('account deleted', { records: keys.length, mail });
-    // After the request that deleted it has been answered.
+    // After the request that deleted it has been answered. The marker goes
+    // first: devices only sign out on a deletion they can verify.
     setTimeout(() => {
-      for (const client of this.presence.localOf(userId)) client.close(4010, 'account deleted');
+      for (const client of this.presence.localOf(userId)) {
+        client.send('record', { record: marker });
+        client.close(4010, 'account deleted');
+      }
     }, 100).unref?.();
   }
 
-  isDeletedAccount(userId: string) {
-    return !!(this.store.get(recordKey.profile(userId))?.body as ProfileBody | undefined)?.deleted;
+  /** The signed deletion marker, if this account was deleted. */
+  deletionMarker(userId: string): SignedRecord<'profile'> | undefined {
+    const profile = this.store.get(recordKey.profile(userId)) as
+      SignedRecord<'profile'> | undefined;
+    return profile?.body.deleted ? profile : undefined;
   }
 
   get info(): ServerInfo {

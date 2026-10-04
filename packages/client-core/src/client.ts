@@ -465,6 +465,10 @@ export class CrocodileClient extends Emitter<ClientEvents> {
     if (this.state.link !== 'connected')
       throw new Error('Connect to a coordination server first, so the deletion reaches it.');
     const me = id.userId;
+    // The server's full list, not just what this device has synced: once the
+    // marker is out, nothing more can be signed, so a missed space stays.
+    const mine = await this.link!.request('spaces.mine', {});
+    this.records.ingestAll([...mine.spaces, ...mine.members]);
     for (const r of this.records.list('space:') as SignedRecord<'space'>[]) {
       if (r.body.owner !== me || r.body.deleted) continue;
       // The space disappears for its members; keep nothing but what identifies it.
@@ -497,10 +501,13 @@ export class CrocodileClient extends Emitter<ClientEvents> {
 
   /** Clears this device's copy of the account, including stored messages. */
   private async forgetLocalAccount({ deleted }: { deleted: boolean }) {
-    for (const s of this.sessions.values()) await s.leave().catch(() => {});
+    await Promise.all([...this.sessions.values()].map((s) => s.leave().catch(() => {})));
     this.sessions.clear();
     this.link?.stop();
     this.link = undefined;
+    // Cancel pending saves first, or they could write erased data back.
+    this.records.reset();
+    this.outbox.dispose();
     await this.platform.messages.clear();
     await this.platform.kv.delete('identity-seed');
     await this.platform.kv.delete('records-cache');
@@ -516,9 +523,13 @@ export class CrocodileClient extends Emitter<ClientEvents> {
     this.store.set({
       phase: 'onboarding',
       me: null,
+      profiles: {},
+      friends: { friends: [], incoming: [], outgoing: [], blocked: [] },
       spaces: {},
       sessions: {},
       messages: {},
+      dms: [],
+      devices: [],
       accountDeleted: deleted,
     });
   }
@@ -570,8 +581,18 @@ export class CrocodileClient extends Emitter<ClientEvents> {
       );
     });
     link.on('disconnected', () => this.store.set({ server: null }));
-    // Deleted from another device: this one forgets the account too.
-    link.on('account_deleted', () => void this.forgetLocalAccount({ deleted: true }));
+    // Deleted from another device: this one forgets the account too, but only
+    // with a marker signed by this identity. A server's word is not enough.
+    link.on('account_deleted', ({ record }) => {
+      if (record) this.records.ingest(record);
+      const mine = this.identity && this.records.get(recordKey.profile(this.identity.userId));
+      if (!(mine?.body as ProfileBody | undefined)?.deleted) {
+        this.log('ignoring an account deletion without a valid marker');
+        return;
+      }
+      this.link?.stop();
+      void this.forgetLocalAccount({ deleted: true });
+    });
     link.on('record', ({ record }) => {
       this.records.ingest(record);
       // Membership of ours whose space we have not seen yet (joined on another device).
@@ -898,6 +919,12 @@ export class CrocodileClient extends Emitter<ClientEvents> {
 
   private onRecordChanged(record: SignedRecord) {
     if (!this.identity) return;
+    if (record.kind === 'profile' && (record.body as ProfileBody).deleted) {
+      // The cache dropped the account's devices and memberships: rebuild everything.
+      this.refreshDerivedState();
+      for (const s of this.sessions.values()) s.recheckPeers();
+      return;
+    }
     this.refreshDerivedState(record);
     if (
       record.kind === 'member' ||

@@ -34,6 +34,13 @@ export class RecordCache extends Emitter<{ changed: SignedRecord; wanted: string
     return out;
   }
 
+  /** Forgets everything, including a pending save (signing out). */
+  reset() {
+    clearTimeout(this.saveTimer);
+    this.map.clear();
+    this.pending = [];
+  }
+
   /**
    * Drops a record we stored optimistically before the server refused it,
    * unless a newer version has arrived since.

@@ -618,6 +618,21 @@ describe('record quotas', () => {
     expect((await put(alice, member(one.spaceId, one.code))).reason).toMatch(/quota reached/);
   });
 
+  it('refuses leave records for memberships that never existed', async () => {
+    const c = await server();
+    const alice = await user(c);
+    const spaceId = spaceIdFor(createIdentity().publicKey, 'some-nonce');
+    const leave = signRecord(
+      alice.identity,
+      'member',
+      recordKey.member(spaceId, alice.identity.userId),
+      { spaceId, userId: alice.identity.userId, left: true },
+    );
+    const res = await put(alice, leave);
+    expect(res.accepted).toBe(false);
+    expect(res.reason).toBe('not a member of this space');
+  });
+
   it('does not drop records replicated from a server with a looser limit', async () => {
     const a = await server({ name: 'A', quotas: { spacesPerUser: 5 } });
     const b = await server({ name: 'B', meshPeers: [a.url], quotas: { spacesPerUser: 1 } });
