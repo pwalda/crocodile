@@ -68,11 +68,14 @@ jobs:
           cache: pnpm
       - run: sudo apt-get update && sudo apt-get install -y xvfb
       - run: pnpm install --frozen-lockfile
+      # From the repository root, as CLAUDE.md documents it.
+      - name: Build the app
+        run: node apps/desktop/scripts/build.mjs
       - name: Package the app (unpacked)
         working-directory: apps/desktop
         env:
           CSC_IDENTITY_AUTO_DISCOVERY: 'false'
-        run: pnpm run dist:dir
+        run: pnpm exec electron-builder --config electron-builder.config.cjs --dir --publish never
       - name: Smoke test
         env:
           CROC_APP_EXEC: ${{ github.workspace }}/apps/desktop/release/linux-unpacked/crocodile

@@ -1,9 +1,11 @@
 # Running a coordination server
 
 Coordination servers are the volunteer backbone of Crocodile. They store
-signed public metadata, keep track of who is online, relay WebRTC signalling
-and elect session hosts. **They never carry voice or messages.** A small VPS
-(1 vCPU, 512 MB) handles thousands of users.
+signed records, keep track of who is online, relay WebRTC signalling and
+elect session hosts. **They can't read voice or messages:** those are
+end-to-end encrypted and normally go directly between people, through a
+server only with the opt-in mailbox or relay. A small VPS (1 vCPU, 512 MB)
+handles thousands of users.
 
 ## From the desktop app
 
@@ -142,16 +144,18 @@ network, the IP addresses of the people connected to it, and, if you turn
 them on, mail waiting for offline people and relayed traffic (both
 end-to-end encrypted). Whoever runs a server decides to keep that data, so
 privacy laws such as the EU's GDPR treat them as responsible for it, as its
-_controller_. This applies to you, not to the Crocodile project, for your
-server, the same way it applies to us for the main server.
+_controller_. For your server that is you, not the Crocodile project, just
+as the project is for the main server.
 
 What that means depends on who uses your server:
 
-- **Only you, on your own devices.** Nothing to do.
-- **Family or friends you invited.** Keep it simple, but tell them who runs
-  the server and how to reach you. Your server still keeps copies of other
-  people's records from the network, so look after the machine and its
-  disk (see [Hosting safely](#hosting-safely)).
+- **Only you, or family and friends you invited.** You probably don't need
+  a published notice, but tell the people you invited who runs the server
+  and how to reach you. Don't assume the data is private, though: even if
+  nobody else connects, your server keeps copies of the records of people
+  you don't know, so privacy laws may still apply to you. Look after the
+  machine and its disk (see [Hosting safely](#hosting-safely)), and check
+  what applies where you live.
 - **The public: listed in the directory, or the address shared openly.**
   Publish a privacy notice that says who you are, how to reach you, what the
   server stores and for how long. Start from the
@@ -163,12 +167,19 @@ Whatever the case:
 - **Keep only what the server needs.** Its own data directory is all the
   state it keeps. Keep logs short (the main server keeps them for at most 14
   days) and don't add analytics or extra logging of people's addresses.
-- **Deletions reach you by themselves.** When someone deletes their account,
-  the deletion reaches every server in the network, yours included, and your
-  server erases their records.
+- **Deletions reach you by themselves.** When someone deletes their account
+  in the app, the deletion reaches every server in the network, yours
+  included. Your server erases their devices, friends list, memberships and
+  waiting mail, and keeps only a "Deleted user" marker (account ID and public
+  key) and a "Deleted space" marker for each space they owned, so the account
+  can't be brought back.
 - **Answer requests.** People may ask what you hold about them, or ask you to
-  delete it. Most of it they can see and change in the app; for the rest,
-  stopping the server and deleting its data directory removes everything.
+  delete it. Network records are signed by their owners and kept by every
+  server, so you can't delete one person's records yourself: a copy you
+  delete comes back from the other servers. Point them to account deletion
+  in the app, which removes them everywhere. Data only your server has, such
+  as its logs, you can delete. Stopping the server and deleting its data
+  directory, logs and backups erases everything it holds.
 
 This is not legal advice. The rules differ between countries; if you run a
 large public server, check what applies where you live.

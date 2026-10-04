@@ -925,7 +925,7 @@ function HostTab() {
     setSettings(await desktop!.coordinator.set(patch));
   return (
     <>
-      <H sub="Help the network by running a coordination server on this computer. It introduces people, picks call hosts and keeps a copy of the network's account records. It never receives messages or voice.">
+      <H sub="Help the network by running a coordination server on this computer. It introduces people, picks call hosts and keeps a copy of the network's account records. It can't read messages or calls: they are end-to-end encrypted.">
         Host a server
       </H>
       <Card className="mb-6 flex items-center gap-3 text-sm">

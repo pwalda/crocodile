@@ -260,6 +260,18 @@ await d.page.getByText("I'm new here").waitFor();
 await shot(d.page, '22-account-deleted');
 await d.app.close();
 
+// Run server really starts the app's own coordination server (on the default
+// port 7443). Done last: while it runs it joins the test network.
+await a.page.getByLabel('Account').click();
+await a.page.getByText('Settings', { exact: true }).click();
+await a.page.getByRole('button', { name: 'Host a server' }).click();
+await runServer.click();
+await hostConfirm.getByRole('button', { name: 'Run server' }).click();
+await a.page.getByText(/Running at/).waitFor({ timeout: 20_000 });
+await shot(a.page, '23-hosting');
+await runServer.click();
+await a.page.getByText(/^stopped$/i).waitFor({ timeout: 20_000 });
+
 console.log('SMOKE OK');
 await a.app.close();
 await b.app.close();

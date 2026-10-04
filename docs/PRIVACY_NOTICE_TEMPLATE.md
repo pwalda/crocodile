@@ -22,10 +22,11 @@ _Last updated [date]_
 [your name, or your organisation's name and address], who is responsible for
 the data described here. Contact: [email address].
 
-Crocodile messages and calls are end-to-end encrypted and travel directly
-between the people talking. This server never receives their content. It
-introduces people to each other and keeps the records the Crocodile network
-needs.
+Crocodile messages and calls are end-to-end encrypted, so this server can't
+read them. They normally travel directly between the people talking; they pass
+through this server only if you use its mailbox or relay (see below), and then
+still encrypted. The server introduces people to each other and keeps the
+records the Crocodile network needs.
 
 ### What the server keeps
 
@@ -46,18 +47,35 @@ servers.
 
 ### Legal basis
 
-[For servers in the EU or serving people there:] We process this data to
-provide the service you asked for (Article 6(1)(b) GDPR), and keep logs and
-enforce connection limits for our legitimate interest in keeping the server
-secure and free of abuse (Article 6(1)(f)). We don't sell it, use it for
-advertising, or share it with anyone except the other servers of the
-Crocodile network as described above, or when the law requires it.
+[For servers in the EU or serving people there; check that these fit how
+you run your server:]
+
+- For people who use this server, we process their data to provide the
+  service they asked for (Article 6(1)(b) GDPR).
+- We keep copies of the records of people on other servers for our
+  legitimate interest, shared with them, in running a network where people
+  on different servers can reach each other (Article 6(1)(f)).
+- We keep logs and enforce connection limits for our legitimate interest in
+  keeping the server secure and free of abuse (Article 6(1)(f)).
+
+We don't sell data, use it for advertising, or share it with anyone except
+the other servers of the Crocodile network as described above, or when the
+law requires it.
 
 ### Your rights
 
-You can ask us for a copy of the data we hold about you, to correct it or to
-delete it. Most of it you can see and change yourself in the app. Deleting
-your account (Settings → Profile → Delete account) erases your records from
-this server and from every other server in the network. You also have the
-right to complain to your data protection authority[, in [country]:
-[authority name and website]].
+You can ask us for a copy of the data we hold about you, or to correct or
+delete it. Most of it you can see and change yourself in the app.
+
+The records in the first two rows are signed by you and kept by every server
+in the network, so no single server can delete them for you: a copy deleted
+here would come back from the others. To delete them everywhere, delete your
+account in the app (Settings → Profile → Delete account). Every server,
+this one included, then erases your devices, friends list, memberships and
+any mail waiting for you. What remains is a marker with your account ID and
+public key, named "Deleted user", and a "Deleted space" marker for each space
+you owned, so the account and its spaces can't be brought back. For data only
+this server has, such as its logs, ask us.
+
+You also have the right to complain to your data protection
+authority[, in [country]: [authority name and website]].
