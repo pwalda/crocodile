@@ -27,23 +27,30 @@ offers commercial licences; see [COMMERCIAL.md](COMMERCIAL.md).
 
 ## Development
 
-See the [README](README.md#development). Before pushing:
+See the [README](README.md#development). Before pushing, run what CI runs:
 
 ```sh
-pnpm typecheck
-pnpm format:check
-pnpm test
+pnpm check   # typecheck, lint, format and all tests
 ```
 
-UI changes: run the Electron smoke test
-(`xvfb-run -a npx tsx tests/electron/smoke.ts /tmp/shots`) and look at the
-screenshots.
+- Every bug fix comes with a test that fails without it.
+- UI changes: run the Electron smoke test (`xvfb-run -a pnpm qa:smoke
+/tmp/shots`, without `xvfb-run` on a desktop) and look at the screenshots.
+- Protocol or crypto changes: read [ARCHITECTURE.md](ARCHITECTURE.md) and the
+  [threat model](docs/SECURITY.md) first, and explain compatibility with older
+  clients and servers in the PR.
 
 ## Security
 
-Please report vulnerabilities privately to the maintainer (GitHub security
-advisories on this repository), not in public issues. See
-[docs/SECURITY.md](docs/SECURITY.md).
+Please report vulnerabilities privately, not in public issues: see the
+[security policy](.github/SECURITY.md). The design and its threat model are
+in [docs/SECURITY.md](docs/SECURITY.md).
+
+Workflows use read-only tokens unless a job needs more, and every action is
+pinned to a commit (Dependabot keeps the pins current). The repository's
+GitHub settings (rulesets, secret scanning, Actions permissions) are applied
+by [`.github/repo-settings.sh`](.github/repo-settings.sh), run by a repository
+admin.
 
 ## Trademarks
 

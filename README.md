@@ -100,9 +100,10 @@ Useful extras:
 
 ## The main server
 
-The server directory and a first coordination server run from
-[`deploy/main`](deploy/main/README.md), behind the machine's own reverse proxy, which
-also serves the install scripts and (for now) a "work in progress" page.
+`crocodilechat.com` runs the public server directory and a first
+coordination server from [`deploy/main`](deploy/main/README.md), behind a
+reverse proxy that also serves the install scripts and the website. Apps use
+that directory by default.
 
 ## Self-hosting a coordination server
 
@@ -112,7 +113,9 @@ CROC_DIRECTORY=https://directory.example.org \
 docker compose up -d coordinator
 ```
 
-It needs TCP and UDP on port 7443 (UDP also carries the opt-in relay). See [docs/SELF_HOSTING.md](docs/SELF_HOSTING.md).
+It needs TCP and UDP on port 7443 (UDP also carries the opt-in relay) and
+UDP 7444 (a second STUN port for NAT detection). See
+[docs/SELF_HOSTING.md](docs/SELF_HOSTING.md).
 
 ## License
 

@@ -1,7 +1,7 @@
 # Roadmap
 
-For the order of work, the path to a public release, licensing, the paid
-subscription and video, see [PLAN.md](PLAN.md).
+What Crocodile does today and what comes next. Priorities change as testers
+report what matters most; issues and discussions are welcome.
 
 ## Done
 
@@ -36,8 +36,6 @@ subscription and video, see [PLAN.md](PLAN.md).
 
 ## Next
 
-The order of this work, and what comes before it, is in [PLAN.md](PLAN.md).
-
 1. **Per-device signing keys** certified by the identity, so removing a
    device fully revokes it.
 2. **Better reachability.** UPnP / NAT-PMP / PCP port mapping on hosts, IPv6
@@ -48,7 +46,9 @@ The order of this work, and what comes before it, is in [PLAN.md](PLAN.md).
    channel permissions, kicking from voice.
 5. **Rich content**: attachments sent P2P (chunked over data channels),
    reactions, mentions, on-device search.
-6. **Screen share, video and remote control** (see PLAN.md §4).
+6. **Screen share, then video and remote control.** Screen sharing first,
+   one sharer per voice room; then 1:1 and group video; remote control last,
+   view-only by default and only between friends who allow it each time.
 7. **Wayland global shortcuts** (XDG GlobalShortcuts portal) and Flathub.
 8. **Server-side hardening**: abuse reporting for public directories
    (per-IP connection limits and per-account record quotas are done).
@@ -60,8 +60,8 @@ The order of this work, and what comes before it, is in [PLAN.md](PLAN.md).
 
 ## Paused
 
-- **Mobile (iOS/Android) and a web client.** Assessed and paused (see
-  PLAN.md). Both first need a way to hold calls when nobody in them is on the
+- **Mobile (iOS/Android) and a web client.** Assessed and paused. Both first
+  need a way to hold calls when nobody in them is on the
   desktop app: direct calls for DMs and small groups, or a cloud call host.
   A wrapped web build (Capacitor) is the likely route for mobile, since it
   keeps the browser's frame encryption for voice.

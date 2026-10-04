@@ -72,7 +72,7 @@ module.exports = {
       { target: 'rpm', arch: ['x64'] },
       { target: 'tar.gz', arch: ['x64', 'arm64'] },
     ],
-    maintainer: 'Crocodile contributors',
+    maintainer: 'Crocodile contributors <contact@crocodilechat.com>',
     mimeTypes: ['x-scheme-handler/croc'],
     desktop: { entry: { StartupWMClass: 'Crocodile' } },
   },

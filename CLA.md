@@ -78,5 +78,4 @@ being accurate.
 ---
 
 _This agreement is based on common open-source contributor agreements
-(Apache ICLA, Harmony). It is not legal advice; the Maintainer should have it
-reviewed by a lawyer in their jurisdiction before relying on it._
+(Apache ICLA, Harmony)._

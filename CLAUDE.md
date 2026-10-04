@@ -11,7 +11,7 @@ the threat model before changing protocol, crypto or server code.
   `packages/relay` host SFU · `packages/coordinator` coordination server ·
   `apps/directory` server directory · `apps/desktop` Electron + React UI ·
   `tests/` integration, browser and Electron tests · `deploy/main/` main
-  server. The product website lives in a separate private repository.
+  server. The product website lives in a separate repository.
 
 ## Commands
 
@@ -44,13 +44,15 @@ See `docs/QA.md` for the test layers, manual matrix and release checklist.
   private-address filter (`isForbiddenPeerAddress` in `turn.ts`).
 - Licenses: `packages/{protocol,crypto}` are Apache-2.0; everything else
   (including `client-core` and `relay`) is AGPL-3.0. Don't move AGPL code
-  into the Apache packages. See `docs/PLAN.md` §1 for why.
+  into the Apache packages. See `CONTRIBUTING.md` (Licenses) for why.
 
-## Git and GitHub (maintainer's preference)
+## Git and GitHub
 
-- Commits are authored and committed as `pwalda <pwalda2204@gmail.com>`
-  (set `git config user.name pwalda` and `user.email pwalda2204@gmail.com`).
-- Do **not** add `Co-Authored-By`, `Claude-Session` or "Generated with
-  Claude Code" lines to commit messages or PR descriptions.
 - Work on a branch and open a PR to `main`; CI (tests, lint, Electron E2E,
-  builds) and the CLA check must pass.
+  builds, CodeQL) and the CLA check must pass. First-time contributors sign
+  the CLA (see `CONTRIBUTING.md`).
+- Fill in the PR template, including how the change was tested.
+- Workflows: keep tokens read-only unless a job needs more, and pin new
+  actions to a commit SHA with the version as a comment.
+- Personal preferences (commit identity, attribution lines) belong in your
+  own `CLAUDE.local.md` or user-level memory, not in this file.

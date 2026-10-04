@@ -1,5 +1,6 @@
-A test release of Crocodile: peer-to-peer, end-to-end encrypted voice and
-text chat.
+A beta release of Crocodile: peer-to-peer, end-to-end encrypted voice and
+text chat. It works, but expect rough edges, and note that it hasn't had an
+independent security audit yet.
 
 ## Download
 
@@ -9,6 +10,9 @@ text chat.
 | macOS (Intel and Apple) | the `.dmg` (universal)                                                   |
 | Linux                   | `.AppImage`, `.deb` (Debian/Ubuntu), `.rpm` (Fedora/openSUSE), `.tar.gz` |
 
+Or install with one line in a terminal, which avoids the warnings below; see
+the [README](https://github.com/pwalda/crocodile#install).
+
 These builds are not code-signed yet:
 
 - **Windows:** SmartScreen says "Windows protected your PC" → _More info_ →
@@ -17,26 +21,16 @@ These builds are not code-signed yet:
   Open Anyway_. macOS updates are not automatic in unsigned builds; the app
   tells you when a new version is available.
 
-## Testing without a public server
+## Getting started
 
-There is no public server list in this release yet, so one tester runs a
-coordination server and the others connect to it:
+Open Crocodile, pick a name and save your recovery key. The app finds a
+coordination server by itself. Add friends under _Home → Add someone_
+(`name#1234`), create a space, share the invite, and talk.
 
-1. **Host:** open Crocodile, create your account, then _Settings → Host a
-   server → Run a coordination server_. The page shows the address to share
-   (e.g. `http://192.168.1.20:7443`).
-   - Same network (home, office): share that address.
-   - Over the internet: forward TCP and UDP port 7443, and UDP port 7444, on
-     your router to this computer, and share `http://<your public IP>:7443`.
-2. **Everyone else:** after creating an account, the app shows _Can't reach a
-   coordination server_. Paste the address and press _Connect_ (or add it
-   under _Settings → Network → Preferred servers_).
-3. Add each other under _Home → Add someone_ (`name#1234`), create a space,
-   share the invite, and talk.
-
-Alternatively, run the server with Docker on any machine with a public
-address: `docker run -d -p 7443:7443/tcp -p 7443:7443/udp -p 7444:7444/udp -e
-CROC_PUBLIC_URL=http://<address>:7443 ghcr.io/pwalda/crocodile-coordinator`.
+Want to run your own server instead, for example on a home network? Turn on
+_Settings → Host a server_ and share the address it shows; others add it
+under _Settings → Network → Preferred servers_. See the
+[self-hosting guide](https://github.com/pwalda/crocodile/blob/main/docs/SELF_HOSTING.md).
 
 ## What to try
 
@@ -48,4 +42,8 @@ CROC_PUBLIC_URL=http://<address>:7443 ghcr.io/pwalda/crocodile-coordinator`.
 - Link a second computer (account menu → _Link another device_).
 - Light/dark theme and accent colours (Settings → Appearance).
 
-Please report problems as GitHub issues with your OS and what you did.
+Found a problem? Open an
+[issue](https://github.com/pwalda/crocodile/issues/new/choose) and attach
+_Settings → About → Copy diagnostics_ (it contains no messages). Report
+security problems
+[privately](https://github.com/pwalda/crocodile/security/advisories/new).

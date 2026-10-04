@@ -38,9 +38,8 @@ logo is a separate permission; see [TRADEMARKS.md](TRADEMARKS.md).
 
 ## Contact
 
-Contact the maintainer, [@pwalda](https://github.com/pwalda), privately
-through GitHub. Describe what you want to build and which parts of Crocodile
-it uses.
+Write to [contact@crocodilechat.com](mailto:contact@crocodilechat.com).
+Describe what you want to build and which parts of Crocodile it uses.
 
 This page summarises the licences; it is not legal advice. The licence texts
 decide.
