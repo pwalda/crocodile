@@ -11,9 +11,14 @@ $repo = if ($env:CROC_REPO) { $env:CROC_REPO } else { 'pwalda/crocodile' }
 
 Write-Host '==> Looking up the latest Crocodile release' -ForegroundColor Green
 $release = Invoke-RestMethod "https://api.github.com/repos/$repo/releases/latest"
-$asset = $release.assets |
-  Where-Object { $_.name -match '\.exe$' -and $_.name -notmatch 'blockmap' } |
-  Select-Object -First 1
+# There is an installer per architecture, and a bigger one with both. 32-bit
+# PowerShell on 64-bit Windows reports the real architecture in ARCHITEW6432.
+$arch = if (@($env:PROCESSOR_ARCHITEW6432, $env:PROCESSOR_ARCHITECTURE) -contains 'ARM64') { 'arm64' } else { 'x64' }
+$installers = @($release.assets | Where-Object { $_.name -match '\.exe$' })
+$asset = $installers | Where-Object { $_.name -match "-win-$arch\.exe$" } | Select-Object -First 1
+if (-not $asset) {
+  $asset = $installers | Where-Object { $_.name -match '-win\.exe$' } | Select-Object -First 1
+}
 if (-not $asset) { throw 'No Windows installer found in the latest release.' }
 
 $file = Join-Path $env:TEMP $asset.name
