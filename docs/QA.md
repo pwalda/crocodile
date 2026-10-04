@@ -93,8 +93,12 @@ hotspot, a captive/office network that blocks UDP, and packet loss
    release, or a `pnpm dist` build).
 3. `docs/releases/<tag>.md` written (what changed, known issues), or rely on
    `docs/releases/default.md`.
-4. Publish the release in the GitHub UI (tag `vX.Y.Z` on `main`); watch the
-   Release workflow; check every platform's files are attached.
+4. Publish the release in the GitHub UI with a new tag on `main`:
+   `beta-vX.Y.Z` during the beta, `vX.Y.Z` after it. Publish it as a normal
+   release, not a pre-release: the apps' updater, the website and the install
+   scripts only look at the latest release. Only repository admins can create
+   release tags, and nobody can move or delete them. Watch the Release
+   workflow and check every platform's files are attached.
 5. Install from the release page on each OS once more (smoke: sign in, send a
    message, join voice).
 6. Update the main server (`deploy/main`: `git pull && docker compose up -d --build`).

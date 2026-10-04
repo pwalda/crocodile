@@ -22,7 +22,14 @@ module.exports = {
   protocols: [{ name: 'Crocodile invite', schemes: ['croc'] }],
   // Upload into the release for the tag (created by the workflow as a draft,
   // or published by hand in the GitHub UI).
-  publish: { provider: 'github', owner: 'pwalda', repo: 'crocodile', releaseType: 'release' },
+  publish: {
+    provider: 'github',
+    owner: 'pwalda',
+    repo: 'crocodile',
+    releaseType: 'release',
+    // Release tags are beta-v1.2.3 during the beta (set by the release workflow).
+    tagNamePrefix: process.env.CROC_TAG_PREFIX || 'v',
+  },
   // Predictable names for scripts/install.sh and install.ps1.
   artifactName: 'Crocodile-${version}-${os}-${arch}.${ext}',
   // Lets the app know whether macOS auto-update can work (needs Developer ID).
