@@ -30,6 +30,7 @@ pnpm qa:env                # local network: directory + 3 meshed coordinators
 pnpm qa:app alice bob      # app instances with their own profiles (~/.crocodile-qa/<name>)
 pnpm qa:app carol --reset --no-directory   # fresh profile, no server list (first-run path)
 xvfb-run -a pnpm qa:smoke /tmp/shots        # the Electron smoke test (Linux; drop xvfb-run on a desktop)
+xvfb-run -a -s '-screen 0 3000x2000x24' pnpm qa:showcase /tmp/showcase  # website and store screenshots
 ```
 
 `pnpm qa:env` enables the relay and mailbox and allows the relay to reach

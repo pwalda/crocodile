@@ -80,5 +80,6 @@ RFC 6464 audio-level header). It holds the same keys as every other member
 - The host peer and relay operators see traffic metadata (sizes, timing,
   speaking activity).
 
-Please report vulnerabilities privately to the maintainers rather than in
-public issues.
+Please report vulnerabilities privately through
+[GitHub's private reporting](https://github.com/pwalda/crocodile/security/advisories/new)
+rather than in public issues.
