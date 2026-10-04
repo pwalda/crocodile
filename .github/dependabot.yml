@@ -17,10 +17,15 @@ updates:
       # Electron majors change Chromium/WebRTC; upgrade deliberately.
       - dependency-name: electron
         update-types: [version-update:semver-major]
+  # Actions are pinned to commit SHAs; Dependabot moves the pins and their
+  # version comments together.
   - package-ecosystem: github-actions
     directory: /
     schedule:
-      interval: monthly
+      interval: weekly
+    groups:
+      actions:
+        patterns: ['*']
   - package-ecosystem: docker
     directories: [/packages/coordinator, /apps/directory]
     schedule:

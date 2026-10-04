@@ -41,9 +41,14 @@ screenshots.
 
 ## Security
 
-Please report vulnerabilities privately to the maintainer (GitHub security
-advisories on this repository), not in public issues. See
-[docs/SECURITY.md](docs/SECURITY.md).
+Please report vulnerabilities privately, not in public issues: see the
+[security policy](.github/SECURITY.md). The design and its threat model are
+in [docs/SECURITY.md](docs/SECURITY.md).
+
+Workflows use read-only tokens unless a job needs more, and every action is
+pinned to a commit (Dependabot keeps the pins current). The repository's
+GitHub settings (rulesets, secret scanning, Actions permissions) are applied
+by [`.github/repo-settings.sh`](.github/repo-settings.sh), run by the owner.
 
 ## Trademarks
 
