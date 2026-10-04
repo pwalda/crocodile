@@ -27,7 +27,11 @@ export function toB64u(bytes: Uint8Array): string {
 }
 
 export function fromB64u(text: string): Uint8Array {
-  const clean = text.replace(/=+$/, '');
+  // Strip padding with a loop: the regex /=+$/ takes quadratic time on a long
+  // run of '=' that doesn't end the string, and this decodes network input.
+  let end = text.length;
+  while (end > 0 && text.charCodeAt(end - 1) === 61 /* = */) end--;
+  const clean = text.slice(0, end);
   if (clean.length % 4 === 1) throw new Error('invalid base64url length');
   const out = new Uint8Array(Math.floor((clean.length * 3) / 4));
   let buffer = 0;
