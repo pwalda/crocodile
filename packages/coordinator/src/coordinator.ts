@@ -25,6 +25,8 @@ import {
   type ServerEvents,
   type ServerInfo,
   type SignedRecord,
+  type OperatorInfo,
+  isOperatorContact,
 } from '@crocodile/protocol';
 import { ClientConnection } from './client';
 import { DirectoryClient } from './directory-client';
@@ -104,6 +106,11 @@ export interface CoordinatorConfig {
    * Operators running a modified version must point this at their changes.
    */
   sourceUrl?: string;
+  /**
+   * How to reach whoever runs this server: an email address or an https://
+   * page such as its privacy notice. Apps show it to the people using it.
+   */
+  operatorContact?: string;
 }
 
 /** Source of the unmodified coordinator (AGPL-3.0). */
@@ -170,6 +177,13 @@ export class Coordinator {
       if (!Number.isSafeInteger(n) || n < 1)
         throw new Error(`${name} must be a positive whole number, got ${n}`);
     }
+    if (
+      this.config.operatorContact !== undefined &&
+      !isOperatorContact(this.config.operatorContact)
+    )
+      throw new Error(
+        `operatorContact must be an email address or an https:// page, got ${this.config.operatorContact}`,
+      );
     this.log = consoleLogger(`coord:${this.config.name}`, this.config.logLevel ?? 'info');
     this.store = openStore({ dataDir: this.config.dataDir, kind: this.config.storage });
     let seed = this.config.seed ?? this.store.getMeta('server-seed');
@@ -260,6 +274,7 @@ export class Coordinator {
       peers: this.mesh.peerIds().length,
       time: Date.now(),
       source: this.config.sourceUrl ?? SOURCE_URL,
+      ...this.operatorInfo(),
     }));
     app.get('/v1/info', async () => ({
       server: this.info,
@@ -267,6 +282,7 @@ export class Coordinator {
       // Other servers' addresses are only shown obfuscated.
       peers: this.mesh.peers().map(toPublicServerInfo),
       source: this.config.sourceUrl ?? SOURCE_URL,
+      ...this.operatorInfo(),
     }));
     app.register(async (scope) => {
       scope.get('/v1/client', { websocket: true }, (socket, req) => {
@@ -366,6 +382,13 @@ export class Coordinator {
       p ? [`stun:${host}:${p}`] : [],
     );
     return [...own, ...this.config.extraStun];
+  }
+
+  /** `{ operator }` for the hello, /health and /v1/info; nothing without a contact. */
+  operatorInfo(): { operator?: OperatorInfo } {
+    return this.config.operatorContact
+      ? { operator: { contact: this.config.operatorContact } }
+      : {};
   }
 
   directoryEntry(): DirectoryEntry {

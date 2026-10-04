@@ -44,6 +44,7 @@ import {
   type HostCaps,
   type PresenceStatus,
   type ProfileBody,
+  type OperatorInfo,
   type ServerInfo,
   type SessionState,
   type SignedRecord,
@@ -186,7 +187,8 @@ export interface MessageView extends ChatMessage {
 export interface ClientState {
   phase: 'loading' | 'onboarding' | 'ready';
   link: LinkStatus;
-  server: { info: ServerInfo; rttMs: number } | null;
+  /** The server this device is connected to, and who runs it if it says. */
+  server: { info: ServerInfo; rttMs: number; operator?: OperatorInfo } | null;
   servers: RankedServer[];
   me: ProfileView | null;
   profiles: Record<string, ProfileView>;
@@ -573,9 +575,9 @@ export class CrocodileClient extends Emitter<ClientEvents> {
     this.link = link;
     link.on('status', (status) => this.store.set({ link: status }));
     link.on('servers', (servers) => this.store.set({ servers }));
-    link.on('connected', ({ server, rttMs, stun }) => {
+    link.on('connected', ({ server, rttMs, stun, operator }) => {
       this.stun = stun;
-      this.store.set({ server: { info: server, rttMs } });
+      this.store.set({ server: { info: server, rttMs, operator } });
       void this.onConnected().catch((err) =>
         this.log('post-connect sync failed', { err: String(err) }),
       );

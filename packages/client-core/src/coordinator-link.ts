@@ -1,5 +1,6 @@
 import type { Identity } from '@crocodile/crypto';
 import type {
+  OperatorInfo,
   Platform,
   RpcMethod,
   RpcMethods,
@@ -18,7 +19,7 @@ export type LinkStatus = 'idle' | 'discovering' | 'connecting' | 'connected' | '
 export type LinkEvents = ServerEvents & {
   status: LinkStatus;
   /** Fired on every (re)connection; subscribers re-establish their state. */
-  connected: { server: ServerInfo; rttMs: number; stun: string[] };
+  connected: { server: ServerInfo; rttMs: number; stun: string[]; operator?: OperatorInfo };
   disconnected: { reason: string };
   servers: RankedServer[];
   /**
@@ -233,6 +234,11 @@ export class CoordinatorLink extends Emitter<LinkEvents> {
     });
     this.setStatus('connected');
     for (const w of this.waiters.splice(0)) w.resolve(conn);
-    this.emit('connected', { server: conn.server, rttMs: server.rttMs, stun: conn.stun });
+    this.emit('connected', {
+      server: conn.server,
+      rttMs: server.rttMs,
+      stun: conn.stun,
+      operator: conn.operator,
+    });
   }
 }

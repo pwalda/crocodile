@@ -27,6 +27,29 @@ export const ServerInfo = z.object({
 });
 export type ServerInfo = z.infer<typeof ServerInfo>;
 
+/** An email address, or an https:// page such as the server's privacy notice. */
+export function isOperatorContact(value: string): boolean {
+  if (value.length > 200 || /\s/.test(value)) return false;
+  // Domain labels exclude '.', so the pattern can't backtrack.
+  if (/^[^@:/]+@[^@:/.]+(?:\.[^@:/.]+)+$/.test(value)) return true;
+  try {
+    return new URL(value).protocol === 'https:';
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Who runs a server and how to reach them, as its operator states it. Not
+ * signed and not verified by anyone: the app shows it as the server's own
+ * claim. Kept out of ServerInfo, whose signature older apps and directories
+ * check without knowing about new fields.
+ */
+export const OperatorInfo = z.object({
+  contact: z.string().refine(isOperatorContact, 'an email address or an https:// page'),
+});
+export type OperatorInfo = z.infer<typeof OperatorInfo>;
+
 export const PresenceStatus = z.enum(['online', 'idle', 'dnd', 'offline']);
 export type PresenceStatus = z.infer<typeof PresenceStatus>;
 
@@ -63,6 +86,8 @@ export interface ServerHello {
   sig: string;
   /** Optional services this server offers (not signed; informational). */
   features?: { relay?: boolean; mailbox?: { ttlMs: number } };
+  /** Who runs the server, if they say (not signed; informational). */
+  operator?: OperatorInfo;
 }
 
 export const ClientAuth = z.object({

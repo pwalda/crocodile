@@ -758,3 +758,25 @@ describe('account deletion', () => {
     expect(a.records.get(recordKey.space(space.spaceId))).toBeDefined();
   });
 });
+
+describe('operator contact', () => {
+  it('tells apps and /v1/info who runs the server, outside the signed server info', async () => {
+    const c = await server({ operatorContact: 'https://example.org/privacy/' });
+    const u = await user(c);
+    expect(u.conn.operator).toEqual({ contact: 'https://example.org/privacy/' });
+    const info = (await (await fetch(`${c.url}/v1/info`)).json()) as {
+      server: object;
+      operator?: { contact: string };
+    };
+    expect(info.operator).toEqual({ contact: 'https://example.org/privacy/' });
+    // Older apps and directories verify the signed ServerInfo without knowing
+    // new fields, so the contact must stay out of it.
+    expect(JSON.stringify(info.server)).not.toContain('example.org/privacy');
+  });
+
+  it('refuses a malformed contact at startup', async () => {
+    await expect(startCoordinator({ operatorContact: 'javascript:alert(1)' })).rejects.toThrow(
+      /operatorContact/,
+    );
+  });
+});
