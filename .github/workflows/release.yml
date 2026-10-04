@@ -1,11 +1,14 @@
 name: Release
 
-# Push a tag like v0.2.0 — or publish a release with a new v* tag in the
-# GitHub UI — to build installers for every platform, attach them (plus
-# auto-update metadata) to the release, and push server images to GHCR.
+# Push a tag like beta-v0.2.0 (during the beta) or v1.0.0 — or publish a
+# release with such a tag in the GitHub UI — to build installers for every
+# platform, attach them (plus auto-update metadata) to the release, and push
+# server images to GHCR. The app's version is the tag without its prefix.
+# Keep beta releases as normal releases, not pre-releases: the apps' updater,
+# the website and the install scripts all look at the latest release.
 on:
   push:
-    tags: ['v*']
+    tags: ['v*', 'beta-v*']
   release:
     types: [published]
 
@@ -39,6 +42,13 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           EVENT: ${{ github.event_name }}
         run: |
+          if ! [[ "$TAG" =~ ^(beta-)?v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Release tags look like beta-v1.2.3 or v1.2.3, not $TAG"
+            exit 1
+          fi
+          version="${TAG#*v}"
+          title="Crocodile $version"
+          if [[ "$TAG" == beta-* ]]; then title="$title beta"; fi
           if gh release view "$TAG" >/dev/null 2>&1; then
             # Published in the UI: its own 'release' run does the work.
             if [ "$EVENT" = push ]; then echo "skip=true" >> "$GITHUB_OUTPUT"; fi
@@ -46,7 +56,7 @@ jobs:
             # Plain tag push: create a draft that every platform uploads into.
             notes="docs/releases/${TAG}.md"
             [ -f "$notes" ] || notes=docs/releases/default.md
-            gh release create "$TAG" --draft --verify-tag --title "Crocodile ${TAG#v}" --notes-file "$notes"
+            gh release create "$TAG" --draft --verify-tag --title "$title" --notes-file "$notes"
           fi
 
   installers:
@@ -77,7 +87,11 @@ jobs:
       - name: Set version from tag
         working-directory: apps/desktop
         shell: bash
-        run: npm version --no-git-tag-version --allow-same-version "${TAG#v}"
+        # beta-v1.2.3 and v1.2.3 both give 1.2.3; the prefix tells
+        # electron-builder which release to upload into.
+        run: |
+          npm version --no-git-tag-version --allow-same-version "${TAG#*v}"
+          echo "CROC_TAG_PREFIX=${TAG%%v*}v" >> "$GITHUB_ENV"
       - name: Build and publish
         working-directory: apps/desktop
         shell: bash
