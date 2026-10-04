@@ -26,6 +26,8 @@ subscription and video, see [PLAN.md](PLAN.md).
 - Offline delivery: a per-device outbox exchanged peer-to-peer with
   acknowledgements, and an opt-in server mailbox for DMs (sealed per device,
   up to 7 days, works across the server mesh).
+- Account deletion: erased from every server in the mesh, other devices
+  signed out; per-account record quotas on servers.
 - Main server deployment: directory, install scripts, a first coordinator
   and a placeholder page (`deploy/main`).
 - Desktop app for Windows, macOS and Linux with its own design (light and

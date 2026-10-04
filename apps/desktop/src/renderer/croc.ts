@@ -30,6 +30,8 @@ export type ModalState =
       body: string;
       action: string;
       danger?: boolean;
+      /** The user must type this text to enable the action. */
+      confirmText?: string;
       onConfirm: () => void | Promise<void>;
     };
 

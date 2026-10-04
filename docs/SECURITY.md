@@ -21,6 +21,15 @@ on the **mailbox** let their server hold direct messages for offline friends
 as boxes sealed to the friend's devices; the server sees sender, recipient,
 size and time, keeps them at most 7 days, and cannot read them.
 
+**Deleting an account** (Settings → Profile) deletes the spaces the user
+owns, leaves the others, and replaces the profile with a signed "deleted"
+marker. Every server that receives the marker erases the account's devices,
+friends list, memberships and mailbox items, signs out its devices and
+refuses anything the identity signs afterwards, so stale copies elsewhere in
+the mesh can't bring it back. The marker itself stays: the user id, the
+public keys and the words "Deleted user". Messages already delivered to other
+people's devices stay there.
+
 Connections to coordination servers and between servers are encrypted with
 a per-connection hybrid key exchange (X25519 + ML-KEM-768) and AES-256-GCM,
 independent of TLS, so metadata is not exposed to the network even when a

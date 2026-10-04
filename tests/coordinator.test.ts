@@ -10,11 +10,13 @@ import {
   userTag,
 } from '@crocodile/crypto';
 import {
+  DELETED_PROFILE_NAME,
   peerIds,
   recordKey,
   sessionIds,
   utf8,
   type PrekeyBundle,
+  type ProfileBody,
   type SignedRecord,
 } from '@crocodile/protocol';
 import { Coordinator } from '@crocodile/coordinator';
@@ -634,5 +636,110 @@ describe('record quotas', () => {
     expect(
       () => new Coordinator({ name: 'x', storage: 'memory', quotas: { spacesPerUser: 0 } }),
     ).toThrow(/quotas.spacesPerUser must be a positive whole number/);
+  });
+});
+
+describe('account deletion', () => {
+  it('erases the account on every server, signs out its devices and refuses it afterwards', async () => {
+    const a = await server({ name: 'A' });
+    const b = await server({ name: 'B', meshPeers: [a.url] });
+    await waitFor(() => b.mesh.peerIds().length === 1, 5000, 'mesh link');
+
+    const alice = await user(a, 'alice');
+    const me = alice.identity.userId;
+    const deviceId = peerIds.device(alice.conn.peer);
+    const prekey = createPrekey().bundle;
+    const put = (u: TestUser, record: SignedRecord) => u.conn.request('records.put', { record });
+    expectAccepted(
+      await put(
+        alice,
+        signRecord(alice.identity, 'device', recordKey.device(me, deviceId), {
+          userId: me,
+          deviceId,
+          name: 'laptop',
+          platform: 'bot',
+          prekey,
+        }),
+      ),
+    );
+    const bob = await user(a, 'bob');
+    expectAccepted(
+      await put(
+        alice,
+        signRecord(alice.identity, 'friends', recordKey.friends(me), {
+          friends: [bob.identity.userId],
+          blocked: [],
+        }),
+      ),
+    );
+    const space = await createSpace(bob, 'Swamp');
+    await joinSpace(alice, space.spaceId, space.code);
+    // Mail waiting for her.
+    const bobDevice = peerIds.device(bob.conn.peer);
+    expectAccepted(
+      await put(
+        bob,
+        signRecord(bob.identity, 'device', recordKey.device(bob.identity.userId, bobDevice), {
+          userId: bob.identity.userId,
+          deviceId: bobDevice,
+          name: 'phone',
+          platform: 'bot',
+          prekey: createPrekey().bundle,
+        }),
+      ),
+    );
+    alice.conn.close();
+    await waitFor(() => a.presence.localOf(me).length === 0, 3000, 'alice offline');
+    const sealed = sealToDevice(
+      bob.identity,
+      bobDevice,
+      { peer: alice.conn.peer, prekey },
+      utf8.encode('{"type":"mail","messages":[]}'),
+    );
+    await bob.conn.request('mail.put', { items: [{ to: alice.conn.peer, box: sealed }] });
+    expect(a.store.mailCount({ toUser: me })).toBe(1);
+
+    const keys = [
+      recordKey.device(me, deviceId),
+      recordKey.friends(me),
+      recordKey.member(space.spaceId, me),
+    ];
+    await waitFor(() => keys.every((k) => b.records.get(k)), 3000, 'replicated to B');
+
+    // Two devices online when she deletes the account from one of them.
+    const phone = await connectUser(a, alice.identity, 'alice');
+    const laptop = await connectUser(a, alice.identity, 'alice');
+    const closes: number[] = [];
+    laptop.conn.on('close', ({ code }) => closes.push(code));
+    const marker = signRecord(alice.identity, 'profile', recordKey.profile(me), {
+      username: DELETED_PROFILE_NAME,
+      encKey: alice.identity.encPublicKey,
+      deleted: true,
+    });
+    expectAccepted(await put(phone, marker));
+
+    for (const c of [a, b]) {
+      await waitFor(
+        () => (c.records.get(recordKey.profile(me))?.body as ProfileBody).deleted,
+        3000,
+        `marker on ${c.config.name}`,
+      );
+      for (const k of keys) expect(c.records.get(k), `${k} on ${c.config.name}`).toBeUndefined();
+    }
+    expect(a.store.mailCount({ toUser: me })).toBe(0);
+    // Signed out everywhere, and can't sign in again.
+    await waitFor(() => closes.includes(4010), 3000, 'laptop signed out');
+    await expect(connectUser(a, alice.identity, 'alice')).rejects.toThrow(/deleted/);
+    // A stale copy of her old records can't come back through the mesh.
+    const old = signRecord(
+      alice.identity,
+      'friends',
+      recordKey.friends(me),
+      { friends: [], blocked: [] },
+      Date.now() - 60_000,
+    );
+    expect(b.records.put(old, { fresh: false, origin: 'peer' }).reason).toBe('account was deleted');
+    // Bob's own records are untouched.
+    expect(a.records.get(recordKey.space(space.spaceId))).toBeDefined();
   });
 });

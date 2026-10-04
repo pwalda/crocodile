@@ -329,6 +329,29 @@ function AccountTab() {
       >
         <LogOut size={16} /> Sign out
       </Button>
+
+      <h3 className="mb-2 mt-9 text-lg font-bold">Delete account</h3>
+      <p className="mb-3 text-sm text-muted">
+        Deletes your account on every device and from the coordination servers: your profile,
+        friends list, memberships and any mail waiting for you. Spaces you own are deleted for
+        everyone. Messages already on other people's devices stay with them.
+      </p>
+      <Button
+        variant="danger"
+        onClick={() =>
+          openModal({
+            kind: 'confirm',
+            title: 'Delete your account?',
+            body: 'This cannot be undone, not even with your recovery key.',
+            action: 'Delete account',
+            danger: true,
+            confirmText: me.username,
+            onConfirm: () => client.deleteAccount(),
+          })
+        }
+      >
+        <Trash2 size={16} /> Delete account
+      </Button>
     </>
   );
 }

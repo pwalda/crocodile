@@ -74,7 +74,9 @@ export function indexTerms(record: SignedRecord): string[] {
       return [`invite-space:${(record.body as { spaceId: string }).spaceId}`];
     case 'member': {
       const body = record.body as { userId: string; left?: boolean };
-      return body.left ? [] : [`member-user:${body.userId}`];
+      // member-user: active memberships; member-any: all of them (for account deletion).
+      const any = `member-any:${body.userId}`;
+      return body.left ? [any] : [`member-user:${body.userId}`, any];
     }
     default:
       return [];

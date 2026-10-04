@@ -165,6 +165,14 @@ export class ClientConnection implements ClientHandle {
       return;
     }
     this.userId = userIdFromKey(key);
+    if (this.hub.isDeletedAccount(this.userId)) {
+      this.frame({
+        t: 'error',
+        err: { code: 'account_deleted', message: 'this account was deleted' },
+      });
+      this.ws.close(4010, 'account deleted');
+      return;
+    }
     this.deviceId = device;
     this.peer = peerIds.make(this.userId, device);
     if (!this.hub.hasRoomFor(this.peer)) {

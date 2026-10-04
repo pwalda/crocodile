@@ -6,7 +6,7 @@ import {
   type PlatformAdapter,
 } from '@crocodile/client-core';
 import type { Coordinator } from '@crocodile/coordinator';
-import { sessionIds } from '@crocodile/protocol';
+import { recordKey, sessionIds, type DeviceBody } from '@crocodile/protocol';
 import { FakeRelayNetwork } from './helpers/fake-relay';
 import { startCoordinator, waitFor } from './helpers';
 
@@ -343,5 +343,60 @@ describe('client and server quotas', () => {
     await expect(alice.createSpace('Two')).rejects.toThrow(/quota reached/);
     const cached = alice.records.list('space:').map((r) => (r.body as { name: string }).name);
     expect(cached).toEqual(['One']);
+  });
+});
+
+describe('leaving', () => {
+  it('signing out revokes this device on the server', async () => {
+    const coord = await server();
+    const alice = await signUp(makeClient(new FakeRelayNetwork(), coord), 'alice');
+    const userId = alice.userId;
+    const deviceId = alice.deviceId;
+    await waitFor(
+      () => coord.records.get(recordKey.device(userId, deviceId)),
+      3000,
+      'device registered',
+    );
+    await alice.signOut();
+    expect(alice.state.phase).toBe('onboarding');
+    const device = coord.records.get(recordKey.device(userId, deviceId))?.body as DeviceBody;
+    expect(device.revoked).toBe(true);
+  });
+
+  it('deleting the account removes it for friends and signs out its other devices', async () => {
+    const coord = await server();
+    const net = new FakeRelayNetwork();
+    const alice = await signUp(makeClient(net, coord, { nat: 'open' }), 'alice');
+    const bob = await signUp(makeClient(net, coord), 'bob');
+    await bob.addFriend(alice.userId);
+    await waitFor(() => alice.state.friends.incoming.includes(bob.userId), 3000, 'request');
+    await alice.addFriend(bob.userId);
+    await waitFor(() => bob.state.friends.friends.includes(alice.userId), 5000, 'friends');
+    const owned = await alice.createSpace('Alice place');
+    const bobs = await bob.createSpace('Bob place');
+    await alice.joinWithInvite(await bob.createInvite(bobs));
+    await waitFor(() => bob.state.spaces[bobs]?.members.includes(alice.userId), 3000, 'member');
+    await bob.joinWithInvite(await alice.createInvite(owned));
+    await waitFor(() => bob.state.spaces[owned], 3000, 'bob joined');
+
+    // The same account on a second device.
+    const laptop = makeClient(net, coord);
+    await laptop.init();
+    await laptop.restoreAccount(alice.recoveryKey());
+    await waitFor(() => laptop.state.link === 'connected', 5000, 'laptop connected');
+
+    const aliceId = alice.userId;
+    await alice.deleteAccount();
+    expect(alice.state.phase).toBe('onboarding');
+    expect(alice.state.accountDeleted).toBe(true);
+    expect(alice.identity).toBeNull();
+    // The other device forgets the account too.
+    await waitFor(() => laptop.state.accountDeleted, 5000, 'laptop signed out');
+    expect(laptop.state.phase).toBe('onboarding');
+    // Bob: the space she owned is gone, she left his, and she's no longer a friend.
+    await waitFor(() => !bob.state.spaces[owned], 5000, 'owned space deleted');
+    await waitFor(() => !bob.state.spaces[bobs]?.members.includes(aliceId), 5000, 'left bob space');
+    await waitFor(() => !bob.state.friends.friends.includes(aliceId), 5000, 'unfriended');
+    expect(bob.state.friends.outgoing).not.toContain(aliceId);
   });
 });

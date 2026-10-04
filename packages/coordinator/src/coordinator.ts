@@ -15,9 +15,11 @@ import {
   fromB64u,
   LIMITS,
   PROTOCOL_VERSION,
+  recordKey,
   SIG_DOMAIN,
   toB64u,
   type DirectoryEntry,
+  type ProfileBody,
   type LinkBox,
   type RelayGrant,
   type ServerEvents,
@@ -187,7 +189,33 @@ export class Coordinator {
     this.records.onAccepted((record, seq, origin) => {
       this.mesh.onRecord(record, seq, origin);
       this.pushRecordToClients(record);
+      if (record.kind === 'profile' && (record.body as ProfileBody).deleted)
+        this.purgeAccount(record.key.slice('profile:'.length));
     });
+  }
+
+  /**
+   * A deleted account: erase everything else this server holds about it. The
+   * marker profile replicates through the mesh, so every server does the same,
+   * and validateRecord refuses anything the identity signs afterwards.
+   */
+  private purgeAccount(userId: string) {
+    const keys = [
+      ...this.store.listPrefix(recordKey.devicePrefix(userId), 100_000).map((r) => r.key),
+      recordKey.friends(userId),
+      ...this.store.findByTerm(`member-any:${userId}`, 100_000).map((r) => r.key),
+    ];
+    for (const key of keys) this.store.delete(key);
+    const mail = this.store.mailDeleteUser(userId);
+    this.log.info('account deleted', { records: keys.length, mail });
+    // After the request that deleted it has been answered.
+    setTimeout(() => {
+      for (const client of this.presence.localOf(userId)) client.close(4010, 'account deleted');
+    }, 100).unref?.();
+  }
+
+  isDeletedAccount(userId: string) {
+    return !!(this.store.get(recordKey.profile(userId))?.body as ProfileBody | undefined)?.deleted;
   }
 
   get info(): ServerInfo {

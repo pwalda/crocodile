@@ -234,6 +234,19 @@ await d.page.waitForFunction(() => /Dora#\d+/.test(document.body.innerText), und
 });
 await d.page.getByText("Can't reach a coordination server").waitFor({ state: 'detached' });
 await shot(d.page, '20-connected-by-address');
+// Deleting the account: typed confirmation, then back to the welcome screen.
+await d.page.getByLabel('Account').click();
+await d.page.getByText('Settings', { exact: true }).click();
+await d.page.getByRole('button', { name: 'Delete account' }).click();
+const confirm = d.page.getByRole('dialog');
+const deleteButton = confirm.getByRole('button', { name: 'Delete account' });
+if (await deleteButton.isEnabled()) throw new Error('delete must wait for the typed name');
+await confirm.getByLabel('Type Dora to confirm').fill('Dora');
+await shot(d.page, '21-delete-account');
+await deleteButton.click();
+await d.page.getByText('Your account was deleted').waitFor({ timeout: 15_000 });
+await d.page.getByText("I'm new here").waitFor();
+await shot(d.page, '22-account-deleted');
 await d.app.close();
 
 console.log('SMOKE OK');

@@ -189,6 +189,9 @@ export const messages: MessageStore = {
     );
     return decode(await d.getAllFromIndex('messages', 'byChannelTs', range, limit));
   },
+  async clear() {
+    await (await db()).clear('messages');
+  },
   async latestTs(channel) {
     const d = await db();
     const range = IDBKeyRange.bound([channel, 0], [channel, Number.MAX_SAFE_INTEGER]);

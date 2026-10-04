@@ -175,7 +175,7 @@ export class CoordinatorConnection extends Emitter<ConnectionEvents> {
             ),
           );
         } else if (frame.t === 'error') {
-          fail(new Error(frame.err.message));
+          fail(new RpcCallError(frame.err.code, frame.err.message));
         }
       };
     });

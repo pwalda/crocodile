@@ -20,6 +20,8 @@ export type LinkEvents = ServerEvents & {
   connected: { server: ServerInfo; rttMs: number; stun: string[] };
   disconnected: { reason: string };
   servers: RankedServer[];
+  /** This identity's account was deleted (from another device); the link stops. */
+  account_deleted: Record<string, never>;
 };
 
 export interface CoordinatorLinkOptions {
@@ -182,7 +184,11 @@ export class CoordinatorLink extends Emitter<LinkEvents> {
         });
         this.attach(conn, { ...candidate, info: conn.server });
         return;
-      } catch {
+      } catch (err) {
+        if (err instanceof RpcCallError && err.code === 'account_deleted') {
+          this.accountDeleted();
+          return;
+        }
         /* next candidate */
       }
     }
@@ -190,6 +196,11 @@ export class CoordinatorLink extends Emitter<LinkEvents> {
     this.attempt += 1;
     const delay = Math.min(30_000, 1000 * 2 ** Math.min(this.attempt, 5));
     this.retryTimer = setTimeout(() => void this.connectLoop(), delay);
+  }
+
+  private accountDeleted() {
+    this.stop();
+    this.emit('account_deleted', {});
   }
 
   private attach(conn: CoordinatorConnection, server: RankedServer) {
@@ -201,11 +212,15 @@ export class CoordinatorLink extends Emitter<LinkEvents> {
     conn.on('replaced', () => {
       this.replacedElsewhere = true;
     });
-    conn.on('close', ({ reason }) => {
+    conn.on('close', ({ code, reason }) => {
       if (this.conn !== conn) return;
       this.conn = undefined;
       this.emit('disconnected', { reason });
       if (this.stopped) return;
+      if (code === 4010) {
+        this.accountDeleted();
+        return;
+      }
       if (this.replacedElsewhere) {
         // Signed in on another device/window: do not fight over the identity.
         this.setStatus('offline');

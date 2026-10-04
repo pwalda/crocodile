@@ -142,15 +142,19 @@ export function ConfirmModal({
   body,
   action,
   danger,
+  confirmText,
   onConfirm,
 }: {
   title: string;
   body: string;
   action: string;
   danger?: boolean;
+  confirmText?: string;
   onConfirm: () => void | Promise<void>;
 }) {
   const [busy, setBusy] = useState(false);
+  const [typed, setTyped] = useState('');
+  const confirmed = !confirmText || typed.trim() === confirmText;
   return (
     <Modal
       title={title}
@@ -162,7 +166,7 @@ export function ConfirmModal({
           </Button>
           <Button
             variant={danger ? 'danger' : 'primary'}
-            disabled={busy}
+            disabled={busy || !confirmed}
             onClick={async () => {
               setBusy(true);
               try {
@@ -180,6 +184,17 @@ export function ConfirmModal({
       }
     >
       <p className="text-center text-muted">{body}</p>
+      {confirmText && (
+        <label className="mt-4 block text-sm text-muted">
+          Type <b className="selectable text-text">{confirmText}</b> to confirm
+          <Input
+            className="mt-2"
+            value={typed}
+            onChange={(e) => setTyped(e.target.value)}
+            aria-label={`Type ${confirmText} to confirm`}
+          />
+        </label>
+      )}
     </Modal>
   );
 }

@@ -70,6 +70,8 @@ export class RecordCache extends Emitter<{ changed: SignedRecord; wanted: string
       return false;
     }
     this.map.set(record.key, record);
+    if (record.kind === 'profile' && (record.body as { deleted?: boolean }).deleted)
+      this.dropAccount(record.key.slice('profile:'.length));
     if (persist) this.scheduleSave();
     this.emit('changed', record);
     if (this.pending.length) {
@@ -77,6 +79,18 @@ export class RecordCache extends Emitter<{ changed: SignedRecord; wanted: string
       for (const r of retry) this.ingest(r, persist);
     }
     return true;
+  }
+
+  /** A deleted account: drop its other records, as servers do. */
+  private dropAccount(userId: string) {
+    for (const key of [...this.map.keys()]) {
+      if (
+        key.startsWith(`device:${userId}:`) ||
+        key === `friends:${userId}` ||
+        (key.startsWith('member:') && key.endsWith(`:${userId}`))
+      )
+        this.map.delete(key);
+    }
   }
 
   private scheduleSave() {

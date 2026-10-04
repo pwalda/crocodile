@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { recordKey, type SignedRecord, utf8 } from '@crocodile/protocol';
+import { DELETED_PROFILE_NAME, recordKey, type SignedRecord, utf8 } from '@crocodile/protocol';
 import {
   AudioReceiver,
   AudioSender,
@@ -106,6 +106,48 @@ describe('records', () => {
     });
     expect(validateRecord(v1, ctx([v2]))).toMatchObject({ ok: false, reason: 'stale version' });
     expect(validateRecord(v2, ctx([v1])).ok).toBe(true);
+  });
+
+  it('a deleted account is a bare marker and signs nothing more', () => {
+    const deleted = (body: Record<string, unknown> = {}, version = Date.now()) =>
+      signRecord(
+        alice,
+        'profile',
+        recordKey.profile(alice.userId),
+        { username: DELETED_PROFILE_NAME, encKey: alice.encPublicKey, deleted: true, ...body },
+        version,
+      );
+    const before = signRecord(
+      alice,
+      'profile',
+      recordKey.profile(alice.userId),
+      { username: 'alice', encKey: alice.encPublicKey },
+      Date.now() - 5000,
+    );
+    expect(validateRecord(deleted(), ctx([before])).ok).toBe(true);
+    expect(validateRecord(deleted({ bio: 'still here' }), ctx([]))).toMatchObject({
+      ok: false,
+      reason: 'a deleted profile carries no details',
+    });
+    expect(validateRecord(deleted({ username: 'alice' }), ctx([]))).toMatchObject({ ok: false });
+
+    const marker = deleted({}, Date.now() - 1000);
+    // Not even a newer profile brings the account back...
+    expect(validateRecord(profile(), ctx([marker]))).toMatchObject({
+      ok: false,
+      reason: 'account was deleted',
+    });
+    // ...and nothing else it signs is accepted.
+    const friends = signRecord(alice, 'friends', recordKey.friends(alice.userId), {
+      friends: [bob.userId],
+      blocked: [],
+    });
+    expect(validateRecord(friends, ctx([marker]))).toMatchObject({
+      ok: false,
+      reason: 'account was deleted',
+    });
+    // Other people are unaffected.
+    expect(validateRecord(profile(bob), ctx([marker])).ok).toBe(true);
   });
 
   it('binds spaces to their owner and gates membership on invites', () => {

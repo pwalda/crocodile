@@ -111,7 +111,9 @@ export interface RpcError {
     | 'conflict'
     | 'rate_limited'
     | 'unavailable'
-    | 'internal';
+    | 'internal'
+    /** Sent when a deleted account tries to sign in. */
+    | 'account_deleted';
   message: string;
 }
 
