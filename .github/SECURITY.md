@@ -48,5 +48,7 @@ action against you for it.
 
 ## Supported versions
 
-Fixes go into the latest release; the app updates itself. Older versions
-don't get backported fixes.
+Fixes go into the latest release; older versions don't get backported fixes.
+On Windows, and on Linux with the AppImage, `.deb` or `.rpm`, the app updates
+itself. On macOS, until builds are code-signed, the app tells you when a new
+version is out and you install it yourself, so please do so promptly.

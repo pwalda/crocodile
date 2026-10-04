@@ -133,15 +133,29 @@ EOF
 }
 EOF
 
-  step 'Ruleset for release tags: only admins create them; nobody moves or deletes them'
-  ruleset 'release tags' <<'EOF'
+  # Two rulesets: a bypass applies to every rule in its ruleset, so the admin
+  # exception for creating tags must not share one with update and deletion.
+  step 'Ruleset for release tags: only admins create them'
+  ruleset 'release tags: creation' <<'EOF'
 {
-  "name": "release tags",
+  "name": "release tags: creation",
   "target": "tag",
   "enforcement": "active",
   "conditions": { "ref_name": { "include": ["refs/tags/v*"], "exclude": [] } },
   "bypass_actors": [{ "actor_id": 5, "actor_type": "RepositoryRole", "bypass_mode": "always" }],
-  "rules": [{ "type": "creation" }, { "type": "update" }, { "type": "deletion" }]
+  "rules": [{ "type": "creation" }]
+}
+EOF
+
+  step 'Ruleset for release tags: nobody moves or deletes them, admins included'
+  ruleset 'release tags: immutable' <<'EOF'
+{
+  "name": "release tags: immutable",
+  "target": "tag",
+  "enforcement": "active",
+  "conditions": { "ref_name": { "include": ["refs/tags/v*"], "exclude": [] } },
+  "bypass_actors": [],
+  "rules": [{ "type": "update" }, { "type": "deletion" }]
 }
 EOF
 fi
