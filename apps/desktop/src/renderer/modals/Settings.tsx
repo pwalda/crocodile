@@ -36,6 +36,7 @@ import {
 import { copyText, imageToDataUrl, keyLabel, openLink, stampOf } from '../lib/format';
 
 const SOURCE_URL = 'https://github.com/pwalda/crocodile';
+const HOSTING_GUIDE_URL = `${SOURCE_URL}/blob/main/docs/SELF_HOSTING.md#if-other-people-use-your-server`;
 import { desktop } from '../platform';
 import { Avatar, Button, Input, Label, Toggle, cx } from '../components/ui';
 import type { CoordinatorSettings, CoordinatorStatus } from '../../main/ipc-types';
@@ -909,6 +910,7 @@ function ConnectionTab() {
 function HostTab() {
   const [settings, setSettings] = useState<CoordinatorSettings | null>(null);
   const [status, setStatus] = useState<CoordinatorStatus>({ state: 'stopped' });
+  const [confirming, setConfirming] = useState(false);
   useEffect(() => {
     if (!desktop) return;
     void desktop.coordinator.get().then((r) => {
@@ -923,7 +925,7 @@ function HostTab() {
     setSettings(await desktop!.coordinator.set(patch));
   return (
     <>
-      <H sub="Help the network by running a coordination server on this computer. It stores public profiles and space settings (signed by their owners), introduces people and picks call hosts. It never receives messages or voice.">
+      <H sub="Help the network by running a coordination server on this computer. It introduces people, picks call hosts and keeps a copy of the network's account records. It never receives messages or voice.">
         Host a server
       </H>
       <Card className="mb-6 flex items-center gap-3 text-sm">
@@ -974,11 +976,51 @@ function HostTab() {
       )}
       <Row label="Run a coordination server">
         <Toggle
-          checked={settings.enabled}
-          onChange={(v) => void update({ enabled: v })}
+          checked={settings.enabled || confirming}
+          onChange={(v) => {
+            setConfirming(v);
+            if (!v) void update({ enabled: false });
+          }}
           label="Run a coordination server"
         />
       </Row>
+      {confirming && (
+        <section aria-label="Before you run a server">
+          <Card className="mb-4 text-sm">
+            <div className="font-bold">Before you run a server</div>
+            <p className="mt-1 text-muted">
+              Your server joins the Crocodile network and keeps a copy of everyone&apos;s account
+              records: profiles, friend lists, spaces and memberships. It also sees who is online
+              and who calls whom, never what they say. If other people use your server, privacy laws
+              such as the GDPR can make you responsible for that data.
+            </p>
+            <div className="mt-3 flex justify-end gap-2">
+              <Button variant="ghost" onClick={() => setConfirming(false)}>
+                Cancel
+              </Button>
+              <Button
+                onClick={async () => {
+                  await update({ enabled: true });
+                  setConfirming(false);
+                }}
+              >
+                Run server
+              </Button>
+            </div>
+          </Card>
+        </section>
+      )}
+      <p className="-mt-1 text-xs text-faint">
+        What running a server means for you, and a privacy notice you can adapt:{' '}
+        <button
+          type="button"
+          className="text-accent hover:underline"
+          onClick={() => openLink(HOSTING_GUIDE_URL)}
+        >
+          hosting guide
+        </button>
+        .
+      </p>
       <div className="grid grid-cols-2 gap-4 py-4">
         <div>
           <Label>Server name</Label>
@@ -1014,7 +1056,7 @@ function HostTab() {
       </div>
       <Row
         label="List in the server directory"
-        hint="The directory is the public phone book of coordination servers that apps use to find the fastest one. Requires a public address."
+        hint="The directory is the public phone book of coordination servers that apps use to find the fastest one. Requires a public address. Anyone may then use your server, so tell them who runs it and how to reach you (see the hosting guide)."
       >
         <Toggle
           checked={settings.announce}

@@ -173,6 +173,17 @@ await a.page.getByRole('button', { name: 'Voice' }).click();
 await shot(a.page, '12-settings-voice');
 await a.page.getByRole('button', { name: 'Network' }).click();
 await shot(a.page, '13-settings-network');
+// Running a server asks first and says what the server will keep.
+await a.page.getByRole('button', { name: 'Host a server' }).click();
+const runServer = a.page.getByRole('switch', { name: 'Run a coordination server' });
+await runServer.click();
+const hostConfirm = a.page.getByRole('region', { name: 'Before you run a server' });
+await hostConfirm.getByText("keeps a copy of everyone's account records").waitFor();
+await shot(a.page, '13b-host-confirm');
+await hostConfirm.getByRole('button', { name: 'Cancel' }).click();
+await hostConfirm.waitFor({ state: 'detached' });
+if ((await runServer.getAttribute('aria-checked')) !== 'false')
+  throw new Error('cancelling must leave the server off');
 await a.page.getByRole('button', { name: 'Appearance' }).click();
 await a.page.getByRole('button', { name: 'Lagoon' }).click();
 await shot(a.page, '14-settings-dark');
