@@ -100,8 +100,9 @@ Useful extras:
 
 ## The main server
 
-The product page, the server directory, the install scripts and a first
-coordination server run together from [`deploy/main`](deploy/main/README.md).
+The server directory and a first coordination server run from
+[`deploy/main`](deploy/main/README.md), behind the machine's own reverse proxy, which
+also serves the install scripts and (for now) a "work in progress" page.
 
 ## Self-hosting a coordination server
 
@@ -117,8 +118,8 @@ It needs TCP and UDP on port 7443 (UDP also carries the opt-in relay). See [docs
 
 Crocodile is free software.
 
-- The client core, call host, desktop app, coordination server, directory,
-  product page and scripts are licensed under the
+- The client core, call host, desktop app, coordination server, directory
+  and scripts are licensed under the
   [GNU Affero General Public License v3.0](LICENSE).
 - The wire formats and crypto building blocks other clients need —
   `packages/protocol` and `packages/crypto` — are licensed under

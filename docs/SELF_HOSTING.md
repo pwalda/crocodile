@@ -25,17 +25,8 @@ docker compose up -d coordinator
 ```
 
 Expose **TCP 7443** (HTTP + WebSocket) and **UDP 7443** (STUN). For HTTPS,
-put a reverse proxy (Caddy, nginx, Traefik) in front of TCP 7443 with
-WebSocket upgrades enabled, and set `CROC_PUBLIC_URL` to the https URL. Keep
-UDP 7443 open directly.
-
-Example Caddyfile:
-
-```
-croc.example.org {
-  reverse_proxy 127.0.0.1:7443
-}
-```
+put any reverse proxy in front of TCP 7443 with WebSocket upgrades enabled,
+and set `CROC_PUBLIC_URL` to the https URL. Keep UDP 7443 open directly.
 
 ## Without Docker
 
@@ -88,7 +79,7 @@ leaves it off unless you enable "Offer a relay".
 to open it), it reads as "an alternative HTTPS port" to firewalls and
 people, and one number serves both TCP (HTTP/WebSocket) and UDP (STUN and the
 relay), so there is only one port to forward. Any port works (`--port`); the
-main server puts the TCP side behind Caddy on 443.
+main server puts the TCP side behind a reverse proxy on 443.
 
 **What sharing your server's address exposes:**
 
@@ -137,8 +128,9 @@ the servers it measures and uses.
 
 ## The main server
 
-`deploy/main/` runs the product page, the directory, the install scripts and
-a first coordinator behind Caddy with automatic HTTPS. See
+`deploy/main/` runs the directory and a first coordinator in Docker, behind
+the machine's own reverse proxy, which also serves the install scripts and
+the website. See
 [deploy/main/README.md](../deploy/main/README.md).
 
 ## Running a directory

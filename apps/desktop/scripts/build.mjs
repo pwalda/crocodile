@@ -9,8 +9,12 @@ import { cpSync, readdirSync, rmSync } from 'node:fs';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 const dev = process.argv.includes('--dev');
+// The main server's directory, unless the build sets another list
+// (comma-separated URLs) or CROC_DIRECTORIES=none for no default at all.
+const DEFAULT_DIRECTORIES = 'https://crocodilechat.com';
+const directories = process.env.CROC_DIRECTORIES || DEFAULT_DIRECTORIES;
 const define = {
-  'process.env.CROC_DIRECTORIES': JSON.stringify(process.env.CROC_DIRECTORIES ?? ''),
+  'process.env.CROC_DIRECTORIES': JSON.stringify(directories === 'none' ? '' : directories),
   'process.env.CROC_APP_VERSION': JSON.stringify(process.env.npm_package_version ?? '0.1.0'),
 };
 

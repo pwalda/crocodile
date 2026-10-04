@@ -183,6 +183,8 @@ await a.page.getByText('Copied').first().waitFor();
 const report = JSON.parse(await a.app.evaluate(({ clipboard }) => clipboard.readText()));
 if (report.connection.link !== 'connected' || !Array.isArray(report.recentLog))
   throw new Error('diagnostics report is incomplete');
+if (JSON.stringify(report.connection.directories) !== JSON.stringify([directory.url]))
+  throw new Error(`expected the test directory, got ${report.connection.directories}`);
 if (JSON.stringify(report).includes('This never touches a server'))
   throw new Error('diagnostics must not contain message content');
 await a.page.getByRole('button', { name: 'Close settings' }).click();
@@ -215,6 +217,16 @@ await onboard(d.page, 'Dora');
 await finishOnboarding(d.page);
 await d.page.getByText("Can't reach a coordination server").waitFor({ timeout: 20_000 });
 await shot(d.page, '19-no-server');
+// "No directory" must win over the directory built into release builds.
+await d.page.getByLabel('Account').click();
+await d.page.getByText('Settings', { exact: true }).click();
+await d.page.getByRole('button', { name: 'About' }).click();
+await d.page.getByRole('button', { name: 'Copy diagnostics' }).click();
+await d.page.getByText('Copied').first().waitFor();
+const newcomer = JSON.parse(await d.app.evaluate(({ clipboard }) => clipboard.readText()));
+if (newcomer.connection.directories.length !== 0)
+  throw new Error(`newcomer must use no directory, got ${newcomer.connection.directories}`);
+await d.page.getByRole('button', { name: 'Close settings' }).click();
 await d.page.getByLabel('Server address').fill(coordinator.url.replace('http://', ''));
 await d.page.getByRole('button', { name: 'Connect' }).click();
 await d.page.waitForFunction(() => /Dora#\d+/.test(document.body.innerText), undefined, {
