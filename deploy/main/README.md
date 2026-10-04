@@ -31,12 +31,12 @@ website come from the reverse proxy already running on the machine.
 
 5. Route these in the reverse proxy (with HTTPS):
 
-   | Request                                   | Goes to                                                    |
-   | ----------------------------------------- | ---------------------------------------------------------- |
-   | `DOMAIN/v1/*` and `DOMAIN/health`         | `http://127.0.0.1:7400` (directory)                        |
-   | `DOMAIN/install.sh`, `DOMAIN/install.ps1` | files in `scripts/` of the clone, as `text/plain`          |
-   | everything else on `DOMAIN`               | the website; until it is ready, `deploy/main/placeholder/` |
-   | `coord.DOMAIN` (all paths, WebSocket too) | `http://127.0.0.1:7443` (coordinator)                      |
+   | Request                                   | Goes to                                                     |
+   | ----------------------------------------- | ----------------------------------------------------------- |
+   | `DOMAIN/v1/*` and `DOMAIN/health`         | `http://127.0.0.1:7400` (directory)                         |
+   | `DOMAIN/install.sh`, `DOMAIN/install.ps1` | files in `scripts/` of the clone, as `text/plain`           |
+   | everything else on `DOMAIN`               | the website (a separate repository); for now `placeholder/` |
+   | `coord.DOMAIN` (all paths, WebSocket too) | `http://127.0.0.1:7443` (coordinator)                       |
 
    The proxy must add the client's address to `X-Forwarded-For` (appending
    or replacing both work) and be the only hop in front of the coordinator:

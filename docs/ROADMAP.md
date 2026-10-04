@@ -26,8 +26,8 @@ subscription and video, see [PLAN.md](PLAN.md).
 - Offline delivery: a per-device outbox exchanged peer-to-peer with
   acknowledgements, and an opt-in server mailbox for DMs (sealed per device,
   up to 7 days, works across the server mesh).
-- Main server deployment: product page, directory, install scripts and a
-  first coordinator (`deploy/main`).
+- Main server deployment: directory, install scripts, a first coordinator
+  and a placeholder page (`deploy/main`).
 - Desktop app for Windows, macOS and Linux with its own design (light and
   dark themes, accents), installers, auto-update, one-line install scripts
   and an embedded coordination server.

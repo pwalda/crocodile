@@ -10,8 +10,8 @@ the threat model before changing protocol, crypto or server code.
   boxes, ratchets · `packages/client-core` the client (UI-agnostic) ·
   `packages/relay` host SFU · `packages/coordinator` coordination server ·
   `apps/directory` server directory · `apps/desktop` Electron + React UI ·
-  `tests/` integration, browser and Electron tests · `site/` product page ·
-  `deploy/main/` main server.
+  `tests/` integration, browser and Electron tests · `deploy/main/` main
+  server. The product website lives in a separate private repository.
 
 ## Commands
 
