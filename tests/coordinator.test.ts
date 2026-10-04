@@ -2,17 +2,27 @@ import { afterEach, describe, expect, it } from 'vitest';
 import {
   createIdentity,
   createPrekey,
+  randomDeviceId,
   randomId,
   sealToDevice,
   signRecord,
+  spaceIdFor,
   userTag,
 } from '@crocodile/crypto';
-import { peerIds, recordKey, sessionIds, utf8, type PrekeyBundle } from '@crocodile/protocol';
+import {
+  peerIds,
+  recordKey,
+  sessionIds,
+  utf8,
+  type PrekeyBundle,
+  type SignedRecord,
+} from '@crocodile/protocol';
 import { Coordinator } from '@crocodile/coordinator';
 import {
   caps,
   connectUser,
   createSpace,
+  expectAccepted,
   joinSpace,
   lastSession,
   startCoordinator,
@@ -509,5 +519,120 @@ describe('abuse limits', () => {
       expect(() => new Coordinator({ name: 'x', storage: 'memory', ...bad })).toThrow(
         /positive whole number/,
       );
+  });
+});
+
+describe('record quotas', () => {
+  const put = (u: TestUser, record: SignedRecord) => u.conn.request('records.put', { record });
+  const space = (u: TestUser, name = 'Swamp') => {
+    const nonce = randomId();
+    const spaceId = spaceIdFor(u.identity.publicKey, nonce);
+    const body = { name, owner: u.identity.userId, nonce, admins: [], bans: [], channels: [] };
+    return {
+      spaceId,
+      body,
+      record: signRecord(u.identity, 'space', recordKey.space(spaceId), body),
+    };
+  };
+
+  it('limits how many spaces one account can create, but not updates to them', async () => {
+    const c = await server({ quotas: { spacesPerUser: 2 } });
+    const alice = await user(c);
+    const first = space(alice);
+    expectAccepted(await put(alice, first.record));
+    expectAccepted(await put(alice, space(alice).record));
+    const third = await put(alice, space(alice).record);
+    expect(third.accepted).toBe(false);
+    expect(third.reason).toMatch(/quota reached: at most 2 spaces/);
+    // Renaming an existing space still works.
+    const renamed = signRecord(
+      alice.identity,
+      'space',
+      recordKey.space(first.spaceId),
+      { ...first.body, name: 'Renamed' },
+      first.record.version + 1,
+    );
+    expectAccepted(await put(alice, renamed));
+    // Other accounts have their own budget.
+    const bob = await user(c);
+    expectAccepted(await put(bob, space(bob).record));
+  });
+
+  it('limits devices per account and invites per space', async () => {
+    const c = await server({ quotas: { devicesPerUser: 2, invitesPerSpace: 2 } });
+    const alice = await user(c);
+    const device = () => {
+      const deviceId = randomDeviceId();
+      return signRecord(
+        alice.identity,
+        'device',
+        recordKey.device(alice.identity.userId, deviceId),
+        {
+          userId: alice.identity.userId,
+          deviceId,
+          name: 'test',
+          platform: 'bot' as const,
+          prekey: createPrekey().bundle,
+        },
+      );
+    };
+    expectAccepted(await put(alice, device()));
+    expectAccepted(await put(alice, device()));
+    expect((await put(alice, device())).reason).toMatch(/at most 2 devices/);
+
+    const s = space(alice);
+    expectAccepted(await put(alice, s.record));
+    const invite = () => {
+      const code = randomId(6);
+      return signRecord(alice.identity, 'invite', recordKey.invite(code), {
+        spaceId: s.spaceId,
+        code,
+        expiresAt: null,
+      });
+    };
+    expectAccepted(await put(alice, invite()));
+    expectAccepted(await put(alice, invite()));
+    expect((await put(alice, invite())).reason).toMatch(/at most 2 invites per space/);
+  });
+
+  it('limits active memberships; leaving frees a place', async () => {
+    const c = await server({ quotas: { membershipsPerUser: 1 } });
+    // Owners are members of their own space, so each owner gets one space here.
+    const one = await createSpace(await user(c), 'One');
+    const two = await createSpace(await user(c), 'Two');
+    const alice = await user(c);
+    await joinSpace(alice, one.spaceId, one.code);
+    const member = (spaceId: string, code: string, left?: boolean) =>
+      signRecord(alice.identity, 'member', recordKey.member(spaceId, alice.identity.userId), {
+        spaceId,
+        userId: alice.identity.userId,
+        inviteCode: code,
+        ...(left ? { left } : {}),
+      });
+    expect((await put(alice, member(two.spaceId, two.code))).reason).toMatch(/at most 1 spaces/);
+    expectAccepted(await put(alice, member(one.spaceId, one.code, true)));
+    expectAccepted(await put(alice, member(two.spaceId, two.code)));
+    // Rejoining the first space would make two again.
+    expect((await put(alice, member(one.spaceId, one.code))).reason).toMatch(/quota reached/);
+  });
+
+  it('does not drop records replicated from a server with a looser limit', async () => {
+    const a = await server({ name: 'A', quotas: { spacesPerUser: 5 } });
+    const b = await server({ name: 'B', meshPeers: [a.url], quotas: { spacesPerUser: 1 } });
+    await waitFor(() => b.mesh.peerIds().length === 1, 5000, 'mesh link');
+    const alice = await user(a);
+    const spaces = [space(alice), space(alice), space(alice)];
+    for (const s of spaces) expectAccepted(await put(alice, s.record));
+    await waitFor(
+      () => spaces.every((s) => b.records.get(recordKey.space(s.spaceId))),
+      3000,
+      'replication',
+    );
+  });
+
+  it('refuses to start with a quota that is not a positive whole number', () => {
+    expect(
+      () => new Coordinator({ name: 'x', storage: 'memory', quotas: { spacesPerUser: 0 } }),
+    ).toThrow(/quotas.spacesPerUser must be a positive whole number/);
   });
 });

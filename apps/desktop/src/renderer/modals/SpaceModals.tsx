@@ -140,14 +140,23 @@ export function InviteModal({ spaceId }: { spaceId: string }) {
   const [error, setError] = useState<string | null>(null);
   useEffect(() => {
     getClient()
-      .createInvite(spaceId)
+      .shareInvite(spaceId)
       .then(setCode, (e) => setError(e.message));
   }, [spaceId]);
   const link = code ? `croc://join/${code}` : '';
+  const expiresAt = code
+    ? (getClient().records.get(`invite:${code}`)?.body as { expiresAt?: number | null } | undefined)
+        ?.expiresAt
+    : undefined;
+  const days = expiresAt ? Math.max(1, Math.round((expiresAt - Date.now()) / 86_400_000)) : 7;
   return (
     <Modal
       title={`Invite friends to ${space?.name ?? 'this space'}`}
-      subtitle="Anyone with this link can join for the next 7 days."
+      subtitle={
+        expiresAt === null
+          ? 'Anyone with this link can join.'
+          : `Anyone with this link can join for the next ${days === 1 ? 'day' : `${days} days`}.`
+      }
       onClose={closeModal}
     >
       <Label>Invite link</Label>

@@ -324,3 +324,24 @@ describe('multiple devices', () => {
     fresh.cancelDeviceLink();
   });
 });
+
+describe('client and server quotas', () => {
+  it('reuses a valid invite instead of making a new one each time', async () => {
+    const coord = await server();
+    const alice = await signUp(makeClient(new FakeRelayNetwork(), coord), 'alice');
+    const spaceId = await alice.createSpace('Swamp');
+    const first = await alice.shareInvite(spaceId);
+    expect(await alice.shareInvite(spaceId)).toBe(first);
+    // Making a new one on purpose still works.
+    expect(await alice.createInvite(spaceId)).not.toBe(first);
+  });
+
+  it('does not keep a record the server refused', async () => {
+    const coord = await server({ quotas: { spacesPerUser: 1 } });
+    const alice = await signUp(makeClient(new FakeRelayNetwork(), coord), 'alice');
+    await alice.createSpace('One');
+    await expect(alice.createSpace('Two')).rejects.toThrow(/quota reached/);
+    const cached = alice.records.list('space:').map((r) => (r.body as { name: string }).name);
+    expect(cached).toEqual(['One']);
+  });
+});

@@ -28,7 +28,7 @@ import { ClientConnection } from './client';
 import { DirectoryClient } from './directory-client';
 import { Mesh } from './mesh';
 import { PresenceService } from './presence';
-import { RecordService } from './records';
+import { RecordService, defaultRecordQuotas, type RecordQuotas } from './records';
 import { SessionService } from './sessions';
 import { openStore, type Store } from './store';
 import { TurnServer } from './turn';
@@ -89,6 +89,8 @@ export interface CoordinatorConfig {
   mailbox: MailboxConfig;
   /** Concurrent WebSocket connections allowed from one IP address. */
   maxConnectionsPerIp: number;
+  /** Per-user record limits; defaults in defaultRecordQuotas. */
+  quotas?: Partial<RecordQuotas>;
   /**
    * Take the client address from X-Forwarded-For (only behind a trusted
    * reverse proxy, as on the main server). Exactly one proxy hop is trusted:
@@ -161,6 +163,7 @@ export class Coordinator {
       ['capacity', this.config.capacity],
       ['maxConnectionsPerIp', this.config.maxConnectionsPerIp],
       ['relay.maxUsers', this.config.relay.maxUsers],
+      ...Object.entries(this.config.quotas ?? {}).map(([k, v]) => [`quotas.${k}`, v] as const),
     ] as const) {
       if (!Number.isSafeInteger(n) || n < 1)
         throw new Error(`${name} must be a positive whole number, got ${n}`);
@@ -173,7 +176,10 @@ export class Coordinator {
       this.store.setMeta('server-seed', seed);
     }
     this.identity = identityFromSeed(fromB64u(seed));
-    this.records = new RecordService(this.store, this.log);
+    this.records = new RecordService(this.store, this.log, {
+      ...defaultRecordQuotas,
+      ...this.config.quotas,
+    });
     this.presence = new PresenceService(this);
     this.sessions = new SessionService(this);
     this.mesh = new Mesh(this);

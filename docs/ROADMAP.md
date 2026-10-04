@@ -48,8 +48,8 @@ The order of this work, and what comes before it, is in [PLAN.md](PLAN.md).
    reactions, mentions, on-device search.
 6. **Screen share, video and remote control** (see PLAN.md §4).
 7. **Wayland global shortcuts** (XDG GlobalShortcuts portal) and Flathub.
-8. **Server-side hardening**: record quotas per user, abuse reporting for
-   public directories (per-IP connection limits are done).
+8. **Server-side hardening**: abuse reporting for public directories
+   (per-IP connection limits and per-account record quotas are done).
 9. **Store and signing path** (see [DISTRIBUTION.md](DISTRIBUTION.md)):
    Microsoft Store listing (MSIX, signed by the Store, with the built-in
    updater disabled) plus winget; Apple Developer Program for Developer ID

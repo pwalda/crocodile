@@ -970,7 +970,11 @@ export class CrocodileClient extends Emitter<ClientEvents> {
     this.records.ingest(record);
     const res = await this.link!.request('records.put', { record });
     if (!res.accepted) {
+      // Don't keep a record the server refused (e.g. over a quota): put back
+      // the server's version, if it has one.
+      this.records.forget(record.key, record.version);
       if (res.current) this.records.ingest(res.current);
+      this.refreshDerivedState();
       throw new Error(res.reason ?? 'rejected by server');
     }
   }
@@ -1182,6 +1186,26 @@ export class CrocodileClient extends Emitter<ClientEvents> {
   }
 
   /** Creates an invite code others can use to join. */
+  /**
+   * An invite to share: one of ours for this space that is still valid for at
+   * least a day, or a new one. Reusing keeps the space under the server's
+   * invite quota.
+   */
+  async shareInvite(spaceId: string): Promise<string> {
+    const me = this.identity!.publicKey;
+    const minExpiry = Date.now() + 24 * 3600_000;
+    const reusable = (this.records.list('invite:') as SignedRecord<'invite'>[])
+      .filter(
+        (r) =>
+          r.author === me &&
+          r.body.spaceId === spaceId &&
+          !r.body.revoked &&
+          (r.body.expiresAt === null || r.body.expiresAt > minExpiry),
+      )
+      .sort((a, b) => b.version - a.version)[0];
+    return reusable ? reusable.body.code : this.createInvite(spaceId);
+  }
+
   async createInvite(
     spaceId: string,
     expiresInMs: number | null = 7 * 24 * 3600_000,

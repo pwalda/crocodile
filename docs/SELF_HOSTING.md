@@ -96,7 +96,10 @@ main server puts the TCP side behind a reverse proxy on 443.
 - **A program listening on the internet.** Any bug in it could be attacked.
   The server validates every message, limits sizes and rates, caps
   connections per address (`--max-connections-per-ip`) and in total
-  (`--capacity`), and times out connections that don't authenticate. The
+  (`--capacity`), and times out connections that don't authenticate. Each
+  account can make it store at most 100 devices, 100 spaces and 500
+  memberships, and each space at most 1000 invites, so one account cannot
+  fill your disk (records replicated from other servers are not counted). The
   built-in relay refuses to send traffic to your own machine or your private
   network (loopback, 10/8, 172.16/12, 192.168/16, link-local, CGNAT, IPv6
   ULA and similar), so relay users cannot reach your router or other home

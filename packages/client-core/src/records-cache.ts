@@ -34,6 +34,16 @@ export class RecordCache extends Emitter<{ changed: SignedRecord; wanted: string
     return out;
   }
 
+  /**
+   * Drops a record we stored optimistically before the server refused it,
+   * unless a newer version has arrived since.
+   */
+  forget(key: string, version: number) {
+    if (this.map.get(key)?.version !== version) return;
+    this.map.delete(key);
+    this.scheduleSave();
+  }
+
   ingestAll(records: SignedRecord[], persist = true) {
     const sorted = [...records].sort(
       (a, b) => RECORD_KIND_ORDER[a.kind] - RECORD_KIND_ORDER[b.kind],
