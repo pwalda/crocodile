@@ -1,9 +1,11 @@
+import { fileURLToPath } from 'node:url';
 import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
 import tailwindcss from '@tailwindcss/vite';
 
 export default defineConfig({
-  root: 'src/renderer',
+  // Absolute, so the build works from any working directory.
+  root: fileURLToPath(new URL('src/renderer', import.meta.url)),
   base: './',
   plugins: [react(), tailwindcss()],
   build: {

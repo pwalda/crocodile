@@ -1,17 +1,20 @@
 # Running a coordination server
 
 Coordination servers are the volunteer backbone of Crocodile. They store
-signed public metadata, keep track of who is online, relay WebRTC signalling
-and elect session hosts. **They never carry voice or messages.** A small VPS
-(1 vCPU, 512 MB) handles thousands of users.
+signed records, keep track of who is online, relay WebRTC signalling and
+elect session hosts. **They can't read voice or messages:** those are
+end-to-end encrypted and normally go directly between people, through a
+server only with the opt-in mailbox or relay. A small VPS (1 vCPU, 512 MB)
+handles thousands of users.
 
 ## From the desktop app
 
 Settings → **Host a Server** → _Run a coordination server_. For internet
 use, forward TCP+UDP port 7443 and UDP port 7444 on your router to your computer, then enter
 your public address (e.g. `http://203.0.113.7:7443`). Enable _List in the
-public directory_ to let others use it. Without a public address it serves
-your local network.
+server directory_ to let others use it. Without a public address it serves
+your local network. Either way it joins the network and keeps a copy of its
+account records; see [If other people use your server](#if-other-people-use-your-server).
 
 ## With Docker
 
@@ -104,10 +107,11 @@ main server puts the TCP side behind a reverse proxy on 443.
   network (loopback, 10/8, 172.16/12, 192.168/16, link-local, CGNAT, IPv6
   ULA and similar), so relay users cannot reach your router or other home
   devices through it.
-- **Metadata of the people using it.** Your server sees who is online, who
-  talks to whom and when, and public profiles. Never message content. In
-  many countries (e.g. the EU's GDPR) this makes you responsible for handling
-  that data sensibly.
+- **Metadata of the people using it, and a copy of everyone's records.**
+  Your server sees who is online and who talks to whom and when, never
+  message content. Like every server in the network it also keeps a copy of
+  every account record: profiles, friend lists, spaces and memberships. See
+  [If other people use your server](#if-other-people-use-your-server).
 
 **How the directory shows addresses.** The public listing
 (`/v1/servers`) never contains server addresses in plain text, and neither do
@@ -122,8 +126,9 @@ the servers it measures and uses.
 
 **Recommendations:**
 
-- For friends on your network, the desktop app's server is fine: nothing is
-  exposed to the internet unless you forward the port.
+- For friends on your network, the desktop app's server is fine: it accepts
+  no connections from the internet unless you forward the port. It still
+  connects out to the network to keep its copy of the records.
 - For a public server, prefer a small VPS or a separate machine with Docker
   over the computer you use every day, so a compromise doesn't reach your
   files. Keep it updated (`docker compose pull && docker compose up -d`).
@@ -131,6 +136,53 @@ the servers it measures and uses.
   router's "DMZ".
 - If your home IP is sensitive, host on a VPS or behind a reverse proxy
   instead of sharing it.
+
+## If other people use your server
+
+A coordination server holds personal data: the records copied from the
+network, the IP addresses of the people connected to it, and, if you turn
+them on, mail waiting for offline people and relayed traffic (both
+end-to-end encrypted). Whoever runs a server decides to keep that data, so
+privacy laws such as the EU's GDPR treat them as responsible for it, as its
+_controller_. For your server that is you, not the Crocodile project, just
+as the project is for the main server.
+
+What that means depends on who uses your server:
+
+- **Only you, or family and friends you invited.** You probably don't need
+  a published notice, but tell the people you invited who runs the server
+  and how to reach you. Don't assume the data is private, though: even if
+  nobody else connects, your server keeps copies of the records of people
+  you don't know, so privacy laws may still apply to you. Look after the
+  machine and its disk (see [Hosting safely](#hosting-safely)), and check
+  what applies where you live.
+- **The public: listed in the directory, or the address shared openly.**
+  Publish a privacy notice that says who you are, how to reach you, what the
+  server stores and for how long. Start from the
+  [privacy notice template](PRIVACY_NOTICE_TEMPLATE.md), which lists what a
+  Crocodile server stores.
+
+Whatever the case:
+
+- **Keep only what the server needs.** Its own data directory is all the
+  state it keeps. Keep logs short (the main server keeps them for at most 14
+  days) and don't add analytics or extra logging of people's addresses.
+- **Deletions reach you by themselves.** When someone deletes their account
+  in the app, the deletion reaches every server in the network, yours
+  included. Your server erases their devices, friends list, memberships and
+  waiting mail, and keeps only a "Deleted user" marker (account ID and public
+  key) and a "Deleted space" marker for each space they owned, so the account
+  can't be brought back.
+- **Answer requests.** People may ask what you hold about them, or ask you to
+  delete it. Network records are signed by their owners and kept by every
+  server, so you can't delete one person's records yourself: a copy you
+  delete comes back from the other servers. Point them to account deletion
+  in the app, which removes them everywhere. Data only your server has, such
+  as its logs, you can delete. Stopping the server and deleting its data
+  directory, logs and backups erases everything it holds.
+
+This is not legal advice. The rules differ between countries; if you run a
+large public server, check what applies where you live.
 
 ## The main server
 
