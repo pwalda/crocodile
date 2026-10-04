@@ -1,6 +1,6 @@
 # Crocodile installer for Windows.
 #
-#   irm https://crocodilechat.com/install.ps1 | iex
+#   irm https://raw.githubusercontent.com/pwalda/crocodile/main/scripts/install.ps1 | iex
 #
 # Downloads the latest installer from GitHub and runs it silently (per-user,
 # no administrator rights). Files downloaded by PowerShell are not marked as

@@ -15,12 +15,12 @@ anything.
 - `main` is green: 72 tests, about 73% coverage, lint, and a smoke test of
   the packaged Linux app in CI.
 - v0.0.1 is published as an unsigned test release.
-- **Domain:** `crocodilechat.com` is registered; apps built from this
-  repository use its directory by default.
-- **Not yet done:** the main server (product page,
-  directory, first coordination server) has never run. Nobody has used the
-  app across real home, mobile or corporate networks. The protocol has had no
-  outside security review.
+- **Main server:** `crocodilechat.com` is live with the server directory and
+  a first coordination server; apps built from this repository use its
+  directory by default. The website shows a "work in progress" placeholder
+  until the real one is ready.
+- **Not yet done:** nobody has used the app across real home, mobile or
+  corporate networks, and the protocol has had no outside security review.
 
 ## 1. Licensing: open source, commercial rights stay with the owner
 
@@ -72,7 +72,7 @@ why the switch should happen before the public release.
 | #   | Step                                                                                                                                                                                     | Who                                         | Rough time                |
 | --- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------- | ------------------------- |
 | 1   | Licensing changes above                                                                                                                                                                  | Owner decides, Claude implements            | 1 day                     |
-| 2   | Main server live on `crocodilechat.com` (ideally two coordination servers)                                                                                                               | Owner (domain, VPS, DNS), Claude (deploy)   | A few days                |
+| 2   | Main server live on `crocodilechat.com` (done; a second coordination server is still worth adding)                                                                                       | Owner (domain, VPS, DNS), Claude (deploy)   | A few days                |
 | 3   | Closed beta: 10–30 testers on Windows, macOS and Linux, on home networks, mobile hotspots, corporate networks and carrier-grade NAT                                                      | Owner and testers; Claude fixes             | 2–4 weeks                 |
 | 4   | Code signing: Apple Developer Program (signing, notarization, macOS auto-update) and SignPath or Azure Trusted Signing for Windows                                                       | Owner (accounts), Claude (release workflow) | 1–3 weeks, mostly waiting |
 | 5   | Running a service: server monitoring and backups, per-user record quotas, abuse reporting, a privacy policy for the main server (it handles who-talks-to-whom metadata, e.g. under GDPR) | Owner (legal), Claude (code)                | 1–2 weeks                 |

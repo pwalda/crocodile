@@ -82,7 +82,8 @@ export interface CoordinatorConfig {
   maxConnectionsPerIp: number;
   /**
    * Take the client address from X-Forwarded-For (only behind a trusted
-   * reverse proxy, as on the main server).
+   * reverse proxy, as on the main server). Exactly one proxy hop is trusted:
+   * the address is the last one the proxy added, never one the client wrote.
    */
   trustProxy: boolean;
   /**
@@ -187,7 +188,10 @@ export class Coordinator {
     const app = Fastify({
       logger: false,
       bodyLimit: 1024 * 1024,
-      trustProxy: this.config.trustProxy,
+      // Trust exactly one hop, not `true`: with `true`, Fastify takes the
+      // leftmost X-Forwarded-For entry, which a client can write itself when
+      // the proxy appends to an existing header.
+      trustProxy: this.config.trustProxy ? (_address: string, hop: number) => hop < 1 : false,
     });
     this.app = app;
     await app.register(websocket, { options: { maxPayload: LIMITS.wsMessageMaxBytes } });

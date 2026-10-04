@@ -38,7 +38,9 @@ website come from the reverse proxy already running on the machine.
    | everything else on `DOMAIN`               | the website; until it is ready, `deploy/main/placeholder/` |
    | `coord.DOMAIN` (all paths, WebSocket too) | `http://127.0.0.1:7443` (coordinator)                      |
 
-   The proxy must set `X-Forwarded-For`; the coordinator uses it for its
+   The proxy must add the client's address to `X-Forwarded-For` (appending
+   or replacing both work) and be the only hop in front of the coordinator:
+   the coordinator takes the last entry, the one the proxy added, for its
    per-address limits.
 
 Check that `https://DOMAIN/v1/servers` lists the coordinator after a minute,
