@@ -28,8 +28,8 @@ irm https://raw.githubusercontent.com/pwalda/crocodile/main/scripts/install.ps1 
 Files fetched by `curl` or PowerShell are not tagged as "downloaded from the
 internet" (no quarantine attribute on macOS, no Mark-of-the-Web on Windows),
 so Gatekeeper and SmartScreen do not interrupt. The scripts only download the
-official release assets from GitHub over HTTPS. Put these lines on the
-website next to the regular download buttons.
+official release assets from GitHub over HTTPS. The website offers them next
+to the regular download buttons.
 
 ## Windows
 
@@ -46,9 +46,9 @@ website next to the regular download buttons.
   package. Note: Store builds should disable the built-in auto-updater (the
   Store updates them).
 - **SignPath Foundation:** free Authenticode signing for open-source
-  projects, integrated with GitHub Actions. Apply once the repository is
-  public and has a license and releases. This is the recommended long-term
-  fix for the direct download.
+  projects, integrated with GitHub Actions (it requires a public repository
+  with a licence and releases). This is the recommended long-term fix for the
+  direct download.
 - **Azure Trusted Signing:** low monthly cost, but requires identity
   validation and has eligibility restrictions; check current availability.
 

@@ -31,4 +31,5 @@ that someone else distributes under our name.
 - Don't suggest the project endorses you unless it does.
 - Don't alter the logo or combine it with other marks.
 
-Questions: open an issue or contact the maintainer.
+Questions: open an issue, or write to
+[contact@crocodilechat.com](mailto:contact@crocodilechat.com).
