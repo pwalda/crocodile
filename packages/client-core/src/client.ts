@@ -23,6 +23,7 @@ import {
   type PrekeySecret,
 } from '@crocodile/crypto';
 import {
+  DELETED_PROFILE_NAME,
   LIMITS,
   fromB64u,
   parseSessionId,
@@ -214,6 +215,8 @@ export interface ClientState {
   linking: LinkingState | null;
   /** The server relay window ended; the UI may offer to extend it. */
   relayEnded: { sessionId: string; reason: string } | null;
+  /** This device was signed out because the account was deleted. */
+  accountDeleted: boolean;
 }
 
 export type ClientEvents = {
@@ -281,6 +284,7 @@ export class CrocodileClient extends Emitter<ClientEvents> {
       deviceId: null,
       linking: null,
       relayEnded: null,
+      accountDeleted: false,
     });
     this.records.on('changed', (r) => this.onRecordChanged(r));
     this.records.on('wanted', (keys) => this.fetchWanted(keys));
@@ -384,6 +388,7 @@ export class CrocodileClient extends Emitter<ClientEvents> {
 
   private async adoptIdentity(identity: Identity) {
     this.identity = identity;
+    this.store.set({ accountDeleted: false });
     await this.platform.kv.set('identity-seed', toB64u(identity.seed));
     this.connect();
   }
@@ -440,13 +445,70 @@ export class CrocodileClient extends Emitter<ClientEvents> {
 
   /** Forget this device's identity (the user should have saved the recovery key). */
   async signOut() {
-    for (const s of this.sessions.values()) await s.leave();
-    this.sessions.clear();
-    this.link?.stop();
-    this.link = undefined;
+    // While the link is still up: revoking goes through the server.
     if (this.identity && this.deviceId) {
       await this.revokeDevice(this.deviceId).catch(() => {});
     }
+    await this.forgetLocalAccount({ deleted: false });
+  }
+
+  /**
+   * Deletes the account everywhere: spaces you own are deleted for everyone,
+   * you leave the others, and the profile becomes a permanent "deleted"
+   * marker. Servers then erase your devices, friends list, memberships and
+   * mail, and refuse anything this identity signs; your other devices are
+   * signed out. Messages stored on other people's devices stay with them.
+   */
+  async deleteAccount() {
+    const id = this.identity;
+    if (!id) throw new Error('not signed in');
+    if (this.state.link !== 'connected')
+      throw new Error('Connect to a coordination server first, so the deletion reaches it.');
+    const me = id.userId;
+    // The server's full list, not just what this device has synced: once the
+    // marker is out, nothing more can be signed, so a missed space stays.
+    const mine = await this.link!.request('spaces.mine', {});
+    this.records.ingestAll([...mine.spaces, ...mine.members]);
+    for (const r of this.records.list('space:') as SignedRecord<'space'>[]) {
+      if (r.body.owner !== me || r.body.deleted) continue;
+      // The space disappears for its members; keep nothing but what identifies it.
+      const body: SpaceBody = {
+        name: 'Deleted space',
+        owner: me,
+        nonce: r.body.nonce,
+        admins: [],
+        bans: [],
+        channels: [],
+        deleted: true,
+      };
+      await this.putRecord(signRecord(id, 'space', r.key, body, this.nextVersion(r.key)));
+    }
+    for (const r of this.records.list('member:') as SignedRecord<'member'>[]) {
+      if (r.body.userId === me && !r.body.left) await this.leaveSpace(r.body.spaceId);
+    }
+    const key = recordKey.profile(me);
+    await this.putRecord(
+      signRecord(
+        id,
+        'profile',
+        key,
+        { username: DELETED_PROFILE_NAME, encKey: id.encPublicKey, deleted: true },
+        this.nextVersion(key),
+      ),
+    );
+    await this.forgetLocalAccount({ deleted: true });
+  }
+
+  /** Clears this device's copy of the account, including stored messages. */
+  private async forgetLocalAccount({ deleted }: { deleted: boolean }) {
+    await Promise.all([...this.sessions.values()].map((s) => s.leave().catch(() => {})));
+    this.sessions.clear();
+    this.link?.stop();
+    this.link = undefined;
+    // Cancel pending saves first, or they could write erased data back.
+    this.records.reset();
+    this.outbox.dispose();
+    await this.platform.messages.clear();
     await this.platform.kv.delete('identity-seed');
     await this.platform.kv.delete('records-cache');
     await this.platform.kv.delete('prekeys');
@@ -458,7 +520,18 @@ export class CrocodileClient extends Emitter<ClientEvents> {
     this.prekeys = [];
     await this.loadDevice();
     this.identity = null;
-    this.store.set({ phase: 'onboarding', me: null, spaces: {}, sessions: {}, messages: {} });
+    this.store.set({
+      phase: 'onboarding',
+      me: null,
+      profiles: {},
+      friends: { friends: [], incoming: [], outgoing: [], blocked: [] },
+      spaces: {},
+      sessions: {},
+      messages: {},
+      dms: [],
+      devices: [],
+      accountDeleted: deleted,
+    });
   }
 
   async updateSettings(patch: Partial<Settings>) {
@@ -508,6 +581,18 @@ export class CrocodileClient extends Emitter<ClientEvents> {
       );
     });
     link.on('disconnected', () => this.store.set({ server: null }));
+    // Deleted from another device: this one forgets the account too, but only
+    // with a marker signed by this identity. A server's word is not enough.
+    link.on('account_deleted', ({ record }) => {
+      if (record) this.records.ingest(record);
+      const mine = this.identity && this.records.get(recordKey.profile(this.identity.userId));
+      if (!(mine?.body as ProfileBody | undefined)?.deleted) {
+        this.log('ignoring an account deletion without a valid marker');
+        return;
+      }
+      this.link?.stop();
+      void this.forgetLocalAccount({ deleted: true });
+    });
     link.on('record', ({ record }) => {
       this.records.ingest(record);
       // Membership of ours whose space we have not seen yet (joined on another device).
@@ -834,6 +919,12 @@ export class CrocodileClient extends Emitter<ClientEvents> {
 
   private onRecordChanged(record: SignedRecord) {
     if (!this.identity) return;
+    if (record.kind === 'profile' && (record.body as ProfileBody).deleted) {
+      // The cache dropped the account's devices and memberships: rebuild everything.
+      this.refreshDerivedState();
+      for (const s of this.sessions.values()) s.recheckPeers();
+      return;
+    }
     this.refreshDerivedState(record);
     if (
       record.kind === 'member' ||
@@ -898,12 +989,17 @@ export class CrocodileClient extends Emitter<ClientEvents> {
         })
         .sort((a, b) => Number(b.current) - Number(a.current) || b.lastUpdated - a.lastUpdated);
     }
-    if (!changed || changed.kind === 'friends') {
+    if (!changed || changed.kind === 'friends' || changed.kind === 'profile') {
       const mine = (this.records.get(recordKey.friends(me)) as SignedRecord<'friends'> | undefined)
         ?.body ?? {
         friends: [],
         blocked: [],
       };
+      const gone = new Set(
+        (this.records.list('profile:') as SignedRecord<'profile'>[])
+          .filter((r) => r.body.deleted)
+          .map((r) => r.key.slice('profile:'.length)),
+      );
       const listsMe = new Set<string>();
       for (const r of this.records.list('friends:')) {
         const owner = r.key.slice('friends:'.length);
@@ -912,7 +1008,8 @@ export class CrocodileClient extends Emitter<ClientEvents> {
       const blocked = new Set(mine.blocked);
       patch.friends = {
         friends: mine.friends.filter((f) => listsMe.has(f)),
-        outgoing: mine.friends.filter((f) => !listsMe.has(f)),
+        // Deleted accounts can't answer a request.
+        outgoing: mine.friends.filter((f) => !listsMe.has(f) && !gone.has(f)),
         incoming: [...listsMe].filter((u) => !mine.friends.includes(u) && !blocked.has(u)),
         blocked: mine.blocked,
       };
@@ -970,7 +1067,11 @@ export class CrocodileClient extends Emitter<ClientEvents> {
     this.records.ingest(record);
     const res = await this.link!.request('records.put', { record });
     if (!res.accepted) {
+      // Don't keep a record the server refused (e.g. over a quota): put back
+      // the server's version, if it has one.
+      this.records.forget(record.key, record.version);
       if (res.current) this.records.ingest(res.current);
+      this.refreshDerivedState();
       throw new Error(res.reason ?? 'rejected by server');
     }
   }
@@ -1179,6 +1280,26 @@ export class CrocodileClient extends Emitter<ClientEvents> {
 
   deleteSpace(spaceId: string) {
     return this.updateSpace(spaceId, (b) => ({ ...b, deleted: true }));
+  }
+
+  /**
+   * An invite to share: one of ours for this space that is still valid for at
+   * least a day, or a new one. Reusing keeps the space under the server's
+   * invite quota.
+   */
+  async shareInvite(spaceId: string): Promise<string> {
+    const me = this.identity!.publicKey;
+    const minExpiry = Date.now() + 24 * 3600_000;
+    const reusable = (this.records.list('invite:') as SignedRecord<'invite'>[])
+      .filter(
+        (r) =>
+          r.author === me &&
+          r.body.spaceId === spaceId &&
+          !r.body.revoked &&
+          (r.body.expiresAt === null || r.body.expiresAt > minExpiry),
+      )
+      .sort((a, b) => b.version - a.version)[0];
+    return reusable ? reusable.body.code : this.createInvite(spaceId);
   }
 
   /** Creates an invite code others can use to join. */

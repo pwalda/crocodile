@@ -15,9 +15,11 @@ import {
   fromB64u,
   LIMITS,
   PROTOCOL_VERSION,
+  recordKey,
   SIG_DOMAIN,
   toB64u,
   type DirectoryEntry,
+  type ProfileBody,
   type LinkBox,
   type RelayGrant,
   type ServerEvents,
@@ -28,10 +30,12 @@ import { ClientConnection } from './client';
 import { DirectoryClient } from './directory-client';
 import { Mesh } from './mesh';
 import { PresenceService } from './presence';
-import { RecordService } from './records';
+import { RecordService, defaultRecordQuotas, type RecordQuotas } from './records';
 import { SessionService } from './sessions';
 import { openStore, type Store } from './store';
 import { TurnServer } from './turn';
+import { startStunServer } from './stun';
+import type { Socket } from 'node:dgram';
 import { MailboxService, defaultMailboxConfig, type MailboxConfig } from './mailbox';
 import { consoleLogger, RpcFailure, type Logger } from './util';
 import { isIP } from 'node:net';
@@ -57,6 +61,13 @@ export interface CoordinatorConfig {
   meshPeers: string[];
   /** UDP port for the built-in STUN server; null disables it. */
   stunPort: number | null;
+  /**
+   * Second UDP port answering STUN only. Apps compare the public port they
+   * get on both to tell a cone NAT (same port, good for hosting calls) from
+   * a symmetric one, without asking third-party STUN servers. Default: the
+   * port after `stunPort`; null disables it.
+   */
+  stunAltPort?: number | null;
   /** Extra STUN URLs handed to clients. */
   extraStun: string[];
   capacity: number;
@@ -80,6 +91,8 @@ export interface CoordinatorConfig {
   mailbox: MailboxConfig;
   /** Concurrent WebSocket connections allowed from one IP address. */
   maxConnectionsPerIp: number;
+  /** Per-user record limits; defaults in defaultRecordQuotas. */
+  quotas?: Partial<RecordQuotas>;
   /**
    * Take the client address from X-Forwarded-For (only behind a trusted
    * reverse proxy, as on the main server). Exactly one proxy hop is trusted:
@@ -152,6 +165,7 @@ export class Coordinator {
       ['capacity', this.config.capacity],
       ['maxConnectionsPerIp', this.config.maxConnectionsPerIp],
       ['relay.maxUsers', this.config.relay.maxUsers],
+      ...Object.entries(this.config.quotas ?? {}).map(([k, v]) => [`quotas.${k}`, v] as const),
     ] as const) {
       if (!Number.isSafeInteger(n) || n < 1)
         throw new Error(`${name} must be a positive whole number, got ${n}`);
@@ -164,7 +178,10 @@ export class Coordinator {
       this.store.setMeta('server-seed', seed);
     }
     this.identity = identityFromSeed(fromB64u(seed));
-    this.records = new RecordService(this.store, this.log);
+    this.records = new RecordService(this.store, this.log, {
+      ...defaultRecordQuotas,
+      ...this.config.quotas,
+    });
     this.presence = new PresenceService(this);
     this.sessions = new SessionService(this);
     this.mesh = new Mesh(this);
@@ -172,7 +189,41 @@ export class Coordinator {
     this.records.onAccepted((record, seq, origin) => {
       this.mesh.onRecord(record, seq, origin);
       this.pushRecordToClients(record);
+      if (record.kind === 'profile' && (record.body as ProfileBody).deleted)
+        this.purgeAccount(record as SignedRecord<'profile'>);
     });
+  }
+
+  /**
+   * A deleted account: erase everything else this server holds about it. The
+   * marker profile replicates through the mesh, so every server does the same,
+   * and validateRecord refuses anything the identity signs afterwards.
+   */
+  private purgeAccount(marker: SignedRecord<'profile'>) {
+    const userId = marker.key.slice('profile:'.length);
+    const keys = [
+      ...this.store.listPrefix(recordKey.devicePrefix(userId), 100_000).map((r) => r.key),
+      recordKey.friends(userId),
+      ...this.store.findByTerm(`member-any:${userId}`, 100_000).map((r) => r.key),
+    ];
+    for (const key of keys) this.store.delete(key);
+    const mail = this.store.mailDeleteUser(userId);
+    this.log.info('account deleted', { records: keys.length, mail });
+    // After the request that deleted it has been answered. The marker goes
+    // first: devices only sign out on a deletion they can verify.
+    setTimeout(() => {
+      for (const client of this.presence.localOf(userId)) {
+        client.send('record', { record: marker });
+        client.close(4010, 'account deleted');
+      }
+    }, 100).unref?.();
+  }
+
+  /** The signed deletion marker, if this account was deleted. */
+  deletionMarker(userId: string): SignedRecord<'profile'> | undefined {
+    const profile = this.store.get(recordKey.profile(userId)) as
+      SignedRecord<'profile'> | undefined;
+    return profile?.body.deleted ? profile : undefined;
   }
 
   get info(): ServerInfo {
@@ -259,6 +310,26 @@ export class Coordinator {
       } catch (err) {
         this.log.warn('STUN/TURN server disabled', { err: String(err) });
       }
+      const alt =
+        this.config.stunAltPort !== undefined
+          ? this.config.stunAltPort
+          : this.config.stunPort === 0
+            ? 0
+            : this.config.stunPort + 1;
+      if (this.stunPortBound && alt !== null) {
+        try {
+          this.stunAlt = await startStunServer(
+            alt,
+            this.config.host.includes(':') ? '::' : '0.0.0.0',
+          );
+          this.stunAltPortBound = this.stunAlt.address().port;
+        } catch (err) {
+          this.log.warn('second STUN port disabled; NAT detection will be coarser', {
+            port: alt,
+            err: String(err),
+          });
+        }
+      }
     }
 
     this.mesh.start(this.config.meshPeers);
@@ -275,6 +346,8 @@ export class Coordinator {
   }
 
   private stunPortBound?: number;
+  private stunAlt?: Socket;
+  private stunAltPortBound?: number;
 
   private async relayIp(publicUrl: string): Promise<string> {
     if (this.config.relay.publicIp) return this.config.relay.publicIp;
@@ -288,10 +361,11 @@ export class Coordinator {
   }
 
   stunUrls(): string[] {
-    const urls = [...this.config.extraStun];
-    if (this.stunPortBound)
-      urls.unshift(`stun:${new URL(this.info.url).hostname}:${this.stunPortBound}`);
-    return urls;
+    const host = new URL(this.info.url).hostname;
+    const own = [this.stunPortBound, this.stunAltPortBound].flatMap((p) =>
+      p ? [`stun:${host}:${p}`] : [],
+    );
+    return [...own, ...this.config.extraStun];
   }
 
   directoryEntry(): DirectoryEntry {
@@ -567,6 +641,7 @@ export class Coordinator {
     this.mailbox.close();
     for (const g of this.relayGrants.values()) clearTimeout(g.timer);
     this.turn?.stop();
+    this.stunAlt?.close();
     await this.app?.close();
     this.store.close();
   }

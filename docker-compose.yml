@@ -14,6 +14,7 @@ services:
     ports:
       - '7443:7443/tcp'
       - '7443:7443/udp'
+      - '7444:7444/udp'
     environment:
       CROC_NAME: ${CROC_NAME:-My Crocodile coordinator}
       CROC_PUBLIC_URL: ${CROC_PUBLIC_URL:-}

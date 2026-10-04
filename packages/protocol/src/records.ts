@@ -56,8 +56,18 @@ export const ProfileBody = z.object({
     .string()
     .regex(/^#[0-9a-f]{6}$/i)
     .optional(),
+  /**
+   * The account was deleted. Permanent: servers then drop the user's other
+   * records and refuse any new record signed by this identity. The profile
+   * stays as this marker (named DELETED_PROFILE_NAME, with no other details)
+   * so stale copies elsewhere can't bring the account back.
+   */
+  deleted: z.boolean().optional(),
 });
 export type ProfileBody = z.infer<typeof ProfileBody>;
+
+/** The name a deleted account's marker profile carries. */
+export const DELETED_PROFILE_NAME = 'Deleted user';
 
 /**
  * A user's own relationship list. A friendship exists when both users list

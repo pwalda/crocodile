@@ -10,6 +10,7 @@ import {
   type SpaceBody,
   LIMITS,
   canonicalJson,
+  DELETED_PROFILE_NAME,
 } from '@crocodile/protocol';
 import { sha256, verifyPayload } from './primitives';
 import { sign, userIdFromKey, USER_ID_LENGTH, type Identity } from './identity';
@@ -98,11 +99,23 @@ export function validateRecord(input: unknown, ctx: ValidationContext): Validati
     retryable,
   });
 
+  // A deleted account signs nothing more, its own profile included.
+  const authorProfile = ctx.get(`profile:${authorId}`) as SignedRecord<'profile'> | undefined;
+  if (authorProfile?.body.deleted) return reject('account was deleted');
+
   switch (record.kind) {
     case 'profile':
     case 'friends': {
       if (parts.length !== 2 || parts[1] !== authorId)
         return reject('only the user may write this record');
+      const body = record.body as RecordBodies['profile'];
+      if (
+        record.kind === 'profile' &&
+        body.deleted &&
+        (body.username !== DELETED_PROFILE_NAME || body.avatar || body.bio || body.accent)
+      ) {
+        return reject('a deleted profile carries no details');
+      }
       return { ok: true, authorId };
     }
     case 'device': {

@@ -7,7 +7,7 @@
 #   docker compose up -d --build
 #
 # Both HTTP services listen on 127.0.0.1 only, so they are reachable just
-# through the proxy. Firewall: TCP 80 and 443 (proxy), UDP 7443 (STUN, relay).
+# through the proxy. Firewall: TCP 80 and 443 (proxy), UDP 7443 (STUN, relay), UDP 7444 (STUN).
 services:
   directory:
     build:
@@ -33,6 +33,8 @@ services:
       - '127.0.0.1:7443:7443/tcp'
       # STUN and the opt-in relay (TURN) use UDP directly.
       - '7443:7443/udp'
+      # Second STUN port: lets apps detect their NAT type without third-party servers.
+      - '7444:7444/udp'
     environment:
       CROC_NAME: ${CROC_COORD_NAME:-Crocodile main}
       CROC_PUBLIC_URL: https://coord.${CROC_DOMAIN:?set CROC_DOMAIN in .env}

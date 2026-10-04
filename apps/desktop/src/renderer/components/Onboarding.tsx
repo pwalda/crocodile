@@ -148,11 +148,20 @@ function Choice({
 }
 
 function Welcome({ go }: { go: (s: Step) => void }) {
+  const accountDeleted = useCroc((s) => s.accountDeleted);
   return (
     <>
       <div className="mb-6 md:hidden">
         <Logo size={56} />
       </div>
+      {accountDeleted && (
+        <p
+          role="status"
+          className="mb-6 rounded-2xl border border-line bg-island-2 p-4 text-sm text-muted"
+        >
+          Your account was deleted, and this device has forgotten it.
+        </p>
+      )}
       <Header
         title="Welcome"
         text="No passwords, emails or phone numbers. Your account is a key that lives on your devices."

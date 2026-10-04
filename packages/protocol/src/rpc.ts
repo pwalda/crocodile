@@ -111,8 +111,12 @@ export interface RpcError {
     | 'conflict'
     | 'rate_limited'
     | 'unavailable'
-    | 'internal';
+    | 'internal'
+    /** Sent when a deleted account tries to sign in, with the marker as proof. */
+    | 'account_deleted';
   message: string;
+  /** For account_deleted: the signed deletion marker, which clients verify before acting. */
+  record?: SignedRecord;
 }
 
 export interface RpcResponse {

@@ -83,6 +83,12 @@ export class Outbox {
     return this.entries.size;
   }
 
+  /** Cancels a pending save, so nothing is written after the outbox is discarded. */
+  dispose() {
+    clearTimeout(this.saveTimer);
+    this.entries.clear();
+  }
+
   private save() {
     clearTimeout(this.saveTimer);
     this.saveTimer = setTimeout(() => {

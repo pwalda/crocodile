@@ -34,6 +34,23 @@ export class RecordCache extends Emitter<{ changed: SignedRecord; wanted: string
     return out;
   }
 
+  /** Forgets everything, including a pending save (signing out). */
+  reset() {
+    clearTimeout(this.saveTimer);
+    this.map.clear();
+    this.pending = [];
+  }
+
+  /**
+   * Drops a record we stored optimistically before the server refused it,
+   * unless a newer version has arrived since.
+   */
+  forget(key: string, version: number) {
+    if (this.map.get(key)?.version !== version) return;
+    this.map.delete(key);
+    this.scheduleSave();
+  }
+
   ingestAll(records: SignedRecord[], persist = true) {
     const sorted = [...records].sort(
       (a, b) => RECORD_KIND_ORDER[a.kind] - RECORD_KIND_ORDER[b.kind],
@@ -60,6 +77,8 @@ export class RecordCache extends Emitter<{ changed: SignedRecord; wanted: string
       return false;
     }
     this.map.set(record.key, record);
+    if (record.kind === 'profile' && (record.body as { deleted?: boolean }).deleted)
+      this.dropAccount(record.key.slice('profile:'.length));
     if (persist) this.scheduleSave();
     this.emit('changed', record);
     if (this.pending.length) {
@@ -67,6 +86,18 @@ export class RecordCache extends Emitter<{ changed: SignedRecord; wanted: string
       for (const r of retry) this.ingest(r, persist);
     }
     return true;
+  }
+
+  /** A deleted account: drop its other records, as servers do. */
+  private dropAccount(userId: string) {
+    for (const key of [...this.map.keys()]) {
+      if (
+        key.startsWith(`device:${userId}:`) ||
+        key === `friends:${userId}` ||
+        (key.startsWith('member:') && key.endsWith(`:${userId}`))
+      )
+        this.map.delete(key);
+    }
   }
 
   private scheduleSave() {

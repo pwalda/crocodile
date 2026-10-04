@@ -6,6 +6,7 @@ import type {
   RpcParamsOf,
   ServerEvents,
   ServerInfo,
+  SignedRecord,
 } from '@crocodile/protocol';
 import { CoordinatorConnection, RpcCallError } from './coordinator-connection';
 import { Emitter } from './emitter';
@@ -20,6 +21,12 @@ export type LinkEvents = ServerEvents & {
   connected: { server: ServerInfo; rttMs: number; stun: string[] };
   disconnected: { reason: string };
   servers: RankedServer[];
+  /**
+   * A server says this identity's account was deleted, with the signed marker
+   * when it sent one. Unverified: the client checks the marker, and the link
+   * carries on as after any failed connection unless stopped.
+   */
+  account_deleted: { record?: SignedRecord };
 };
 
 export interface CoordinatorLinkOptions {
@@ -109,6 +116,7 @@ export class CoordinatorLink extends Emitter<LinkEvents> {
 
   ready(timeoutMs = 15_000): Promise<CoordinatorConnection> {
     if (this.conn?.isOpen) return Promise.resolve(this.conn);
+    if (this.stopped) return Promise.reject(new RpcCallError('unavailable', 'link stopped'));
     return new Promise((resolve, reject) => {
       const waiter = { resolve, reject };
       this.waiters.push(waiter);
@@ -182,7 +190,11 @@ export class CoordinatorLink extends Emitter<LinkEvents> {
         });
         this.attach(conn, { ...candidate, info: conn.server });
         return;
-      } catch {
+      } catch (err) {
+        if (err instanceof RpcCallError && err.code === 'account_deleted') {
+          this.emit('account_deleted', { record: err.record });
+          if (this.stopped) return;
+        }
         /* next candidate */
       }
     }
@@ -201,11 +213,16 @@ export class CoordinatorLink extends Emitter<LinkEvents> {
     conn.on('replaced', () => {
       this.replacedElsewhere = true;
     });
-    conn.on('close', ({ reason }) => {
+    conn.on('close', ({ code, reason }) => {
       if (this.conn !== conn) return;
       this.conn = undefined;
       this.emit('disconnected', { reason });
       if (this.stopped) return;
+      if (code === 4010) {
+        // The marker came as a 'record' event just before the close.
+        this.emit('account_deleted', {});
+        if (this.stopped) return;
+      }
       if (this.replacedElsewhere) {
         // Signed in on another device/window: do not fight over the identity.
         this.setStatus('offline');

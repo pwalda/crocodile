@@ -117,8 +117,10 @@ the call.
 JSON-snapshotted memory store where SQLite is unavailable.
 
 **STUN and the opt-in relay.** Each coordinator answers STUN (RFC 5389) on
-one UDP port so the ecosystem does not depend on third-party STUN. The same
-port can act as a TURN relay (RFC 5766) for users who turned on "Relay through
+its UDP port, and on a second port (`--stun-alt-port`, the next one by
+default), so the ecosystem does not depend on third-party STUN. Apps compare
+the public port both report: the same port means a cone NAT (good for
+hosting), different ports a symmetric one. The main port can act as a TURN relay (RFC 5766) for users who turned on "Relay through
 a coordination server" and whose direct connection failed. Grants use
 short-lived credentials, last at most one hour (the app asks before
 continuing), are capped per server (`--relay-max-users`, 25 by default, 10 in
@@ -129,7 +131,7 @@ ciphertext, sizes and timing.
 ## 5. Host election and failover
 
 Members report `HostCaps` when joining: whether they can and may host (desktop
-only, user setting), NAT type (detected by comparing STUN mappings), uplink,
+only, user setting), NAT type (detected by comparing the mappings the server's two STUN ports report), uplink,
 CPU cores, battery, RTT. `coordinator/src/election.ts` scores members:
 
 - Open or cone NAT scores highest and symmetric NAT lowest; web and mobile

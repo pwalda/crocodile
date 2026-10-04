@@ -26,6 +26,8 @@ subscription and video, see [PLAN.md](PLAN.md).
 - Offline delivery: a per-device outbox exchanged peer-to-peer with
   acknowledgements, and an opt-in server mailbox for DMs (sealed per device,
   up to 7 days, works across the server mesh).
+- Account deletion: erased from every server in the mesh, other devices
+  signed out; per-account record quotas on servers.
 - Main server deployment: directory, install scripts, a first coordinator
   and a placeholder page (`deploy/main`).
 - Desktop app for Windows, macOS and Linux with its own design (light and
@@ -48,8 +50,8 @@ The order of this work, and what comes before it, is in [PLAN.md](PLAN.md).
    reactions, mentions, on-device search.
 6. **Screen share, video and remote control** (see PLAN.md §4).
 7. **Wayland global shortcuts** (XDG GlobalShortcuts portal) and Flathub.
-8. **Server-side hardening**: record quotas per user, abuse reporting for
-   public directories (per-IP connection limits are done).
+8. **Server-side hardening**: abuse reporting for public directories
+   (per-IP connection limits and per-account record quotas are done).
 9. **Store and signing path** (see [DISTRIBUTION.md](DISTRIBUTION.md)):
    Microsoft Store listing (MSIX, signed by the Store, with the built-in
    updater disabled) plus winget; Apple Developer Program for Developer ID

@@ -7,3 +7,4 @@ export {
 export { elect, hostScore, isHostEligible, rendezvousOwner } from './election';
 export { MemoryStore, SqliteStore, openStore, type Store } from './store';
 export { buildBindingResponse, startStunServer } from './stun';
+export { defaultRecordQuotas, type RecordQuotas } from './records';

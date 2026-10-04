@@ -17,6 +17,8 @@ export interface MessageStore {
   /** Messages newer than `after`, oldest first. */
   since(channel: string, after: number, limit: number): Promise<ChatMessage[]>;
   latestTs(channel: string): Promise<number>;
+  /** Deletes every stored message (account deletion). */
+  clear(): Promise<void>;
 }
 
 /** A running relay for a session this device hosts. */
@@ -104,5 +106,10 @@ export class MemoryMessageStore implements MessageStore {
 
   async latestTs(channel: string) {
     return this.byChannel.get(channel)?.at(-1)?.ts ?? 0;
+  }
+
+  async clear() {
+    this.byChannel.clear();
+    this.ids.clear();
   }
 }

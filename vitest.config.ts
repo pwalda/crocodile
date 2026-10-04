@@ -14,7 +14,7 @@ export default defineConfig({
       reporter: ['text-summary', 'html', 'json-summary'],
       reportsDirectory: 'coverage',
       // A ratchet, a little below today's numbers: raise as coverage grows.
-      thresholds: { statements: 68, branches: 58, functions: 64, lines: 72 },
+      thresholds: { statements: 73, branches: 63, functions: 70, lines: 77 },
     },
   },
 });

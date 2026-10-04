@@ -2,9 +2,10 @@ import { describe, expect, it } from 'vitest';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { createIdentity, signRecord } from '@crocodile/crypto';
+import { createIdentity, signRecord, spaceIdFor } from '@crocodile/crypto';
 import { recordKey } from '@crocodile/protocol';
 import { MemoryStore, SqliteStore, type Store } from '../src';
+import { INDEX_VERSION } from '../src/store';
 import { elect, rendezvousOwner } from '../src';
 
 const stores: [string, () => Store][] = [
@@ -44,6 +45,73 @@ describe.each(stores)('%s store', (_name, make) => {
     expect(store.getMeta('cursor:x')).toBe('42');
     store.close();
   });
+
+  it('counts by term and deletes records and mail outright', () => {
+    const store = make();
+    const alice = createIdentity();
+    const space = (nonce: string) =>
+      signRecord(alice, 'space', recordKey.space(spaceIdFor(alice.publicKey, nonce)), {
+        name: 'Swamp',
+        owner: alice.userId,
+        nonce,
+        admins: [],
+        bans: [],
+        channels: [],
+      });
+    const [s1, s2] = [space('nonce-one'), space('nonce-two')];
+    store.put(s1);
+    store.put(s2);
+    expect(store.countByTerm(`owner:${alice.userId}`)).toBe(2);
+    store.delete(s1.key);
+    expect(store.get(s1.key)).toBeUndefined();
+    expect(store.countByTerm(`owner:${alice.userId}`)).toBe(1);
+    expect(store.listPrefix('space:', 10).map((r) => r.key)).toEqual([s2.key]);
+    expect(store.since(0, 10).map((r) => r.record.key)).toEqual([s2.key]);
+
+    const mail = (id: string, toUser: string, from: string) =>
+      store.mailPut({
+        id,
+        to: `${toUser}.dev`,
+        toUser,
+        from,
+        box: '{}',
+        createdAt: 1,
+        expiresAt: Date.now() + 1e6,
+      });
+    mail('m1', alice.userId, 'bob');
+    mail('m2', 'bob', alice.userId);
+    mail('m3', 'bob', 'carol');
+    expect(store.mailDeleteUser(alice.userId)).toBe(2);
+    expect(store.mailCount({})).toBe(1);
+    store.close();
+  });
+});
+
+it('sqlite rebuilds its index when the index format changes', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'croc-store-'));
+  const path = join(dir, 'db.sqlite');
+  const id = createIdentity();
+  const a = new SqliteStore(path);
+  a.put(
+    signRecord(id, 'space', recordKey.space(spaceIdFor(id.publicKey, 'nonce-one')), {
+      name: 'Swamp',
+      owner: id.userId,
+      nonce: 'nonce-one',
+      admins: [],
+      bans: [],
+      channels: [],
+    }),
+  );
+  a.close();
+  // A database written before the owner index existed.
+  const { DatabaseSync } = process.getBuiltinModule('node:sqlite') as typeof import('node:sqlite');
+  const raw = new DatabaseSync(path);
+  raw.exec("DELETE FROM terms; UPDATE meta SET value = '1' WHERE key = 'index-version'");
+  raw.close();
+  const b = new SqliteStore(path);
+  expect(b.countByTerm(`owner:${id.userId}`)).toBe(1);
+  expect(b.getMeta('index-version')).toBe(String(INDEX_VERSION));
+  b.close();
 });
 
 it('sqlite state survives a restart', () => {

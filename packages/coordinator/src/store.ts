@@ -37,6 +37,9 @@ export interface Store {
   latestSeq(): number;
   /** Records indexed under a term (see indexTerms). */
   findByTerm(term: string, limit: number): SignedRecord[];
+  countByTerm(term: string): number;
+  /** Removes a record outright (account deletion); replication cursors are unaffected. */
+  delete(key: string): void;
   getMeta(key: string): string | undefined;
   setMeta(key: string, value: string): void;
   mailPut(item: StoredMail): void;
@@ -46,8 +49,13 @@ export interface Store {
   mailDelete(peer: string, ids: string[]): number;
   mailExpire(now: number): number;
   mailCount(filter: { toUser?: string; from?: string }): number;
+  /** Deletes all mail to or from a user (account deletion); returns how many. */
+  mailDeleteUser(userId: string): number;
   close(): void;
 }
+
+/** Bump when indexTerms changes; stores rebuild their index on open. */
+export const INDEX_VERSION = 2;
 
 /** Secondary index terms so common queries avoid full scans. */
 export function indexTerms(record: SignedRecord): string[] {
@@ -60,9 +68,15 @@ export function indexTerms(record: SignedRecord): string[] {
       const body = record.body as { friends: string[] };
       return body.friends.map((f) => `friend-of:${f}`);
     }
+    case 'space':
+      return [`owner:${(record.body as { owner: string }).owner}`];
+    case 'invite':
+      return [`invite-space:${(record.body as { spaceId: string }).spaceId}`];
     case 'member': {
       const body = record.body as { userId: string; left?: boolean };
-      return body.left ? [] : [`member-user:${body.userId}`];
+      // member-user: active memberships; member-any: all of them (for account deletion).
+      const any = `member-any:${body.userId}`;
+      return body.left ? [any] : [`member-user:${body.userId}`, any];
     }
     default:
       return [];
@@ -125,6 +139,19 @@ export class MemoryStore implements Store {
     return seq;
   }
 
+  delete(key: string) {
+    const prev = this.records.get(key);
+    if (!prev) return;
+    this.records.delete(key);
+    this.bySeq.delete(prev.seq);
+    for (const t of indexTerms(prev.record)) this.terms.get(t)?.delete(key);
+    this.dirty = true;
+  }
+
+  countByTerm(term: string) {
+    return this.terms.get(term)?.size ?? 0;
+  }
+
   listPrefix(prefix: string, limit: number) {
     const out: SignedRecord[] = [];
     for (const [key, r] of this.records) {
@@ -185,6 +212,14 @@ export class MemoryStore implements Store {
   mailExpire(now: number) {
     let n = 0;
     for (const [id, m] of this.mail) if (m.expiresAt <= now && this.mail.delete(id)) n++;
+    if (n) this.dirty = true;
+    return n;
+  }
+
+  mailDeleteUser(userId: string) {
+    let n = 0;
+    for (const [id, m] of this.mail)
+      if ((m.toUser === userId || m.from === userId) && this.mail.delete(id)) n++;
     if (n) this.dirty = true;
     return n;
   }
@@ -284,6 +319,9 @@ export class SqliteStore implements Store {
          ON CONFLICT(key) DO UPDATE SET seq = excluded.seq, version = excluded.version, json = excluded.json`,
       ),
       delTerms: this.db.prepare('DELETE FROM terms WHERE key = ?'),
+      delRecord: this.db.prepare('DELETE FROM records WHERE key = ?'),
+      countTerm: this.db.prepare('SELECT COUNT(*) AS n FROM terms WHERE term = ?'),
+      mailDeleteUser: this.db.prepare('DELETE FROM mail WHERE recipient_user = ? OR sender = ?'),
       addTerm: this.db.prepare('INSERT OR IGNORE INTO terms (term, key) VALUES (?, ?)'),
       prefix: this.db.prepare(
         'SELECT json FROM records WHERE key >= ? AND key < ? ORDER BY key LIMIT ?',
@@ -312,6 +350,28 @@ export class SqliteStore implements Store {
       mailCountAll: this.db.prepare('SELECT COUNT(*) AS n FROM mail'),
     };
     this.seq = Number(this.stmts.maxSeq.get()!.s);
+    if (this.getMeta('index-version') !== String(INDEX_VERSION)) this.reindex();
+  }
+
+  /** Rebuilds the term index after indexTerms changed (see INDEX_VERSION). */
+  private reindex() {
+    this.db.exec('BEGIN');
+    try {
+      this.db.exec('DELETE FROM terms');
+      for (let cursor = 0; ;) {
+        const batch = this.since(cursor, 1000);
+        if (!batch.length) break;
+        for (const { seq, record } of batch) {
+          for (const term of indexTerms(record)) this.stmts.addTerm.run(term, record.key);
+          cursor = seq;
+        }
+      }
+      this.setMeta('index-version', String(INDEX_VERSION));
+      this.db.exec('COMMIT');
+    } catch (e) {
+      this.db.exec('ROLLBACK');
+      throw e;
+    }
   }
 
   private seq: number;
@@ -334,6 +394,22 @@ export class SqliteStore implements Store {
       throw e;
     }
     return seq;
+  }
+
+  delete(key: string) {
+    this.db.exec('BEGIN');
+    try {
+      this.stmts.delRecord.run(key);
+      this.stmts.delTerms.run(key);
+      this.db.exec('COMMIT');
+    } catch (e) {
+      this.db.exec('ROLLBACK');
+      throw e;
+    }
+  }
+
+  countByTerm(term: string) {
+    return Number(this.stmts.countTerm.get(term)?.n ?? 0);
   }
 
   listPrefix(prefix: string, limit: number) {
@@ -393,6 +469,10 @@ export class SqliteStore implements Store {
 
   mailExpire(now: number) {
     return Number(this.stmts.mailExpire.run(now).changes ?? 0);
+  }
+
+  mailDeleteUser(userId: string) {
+    return Number(this.stmts.mailDeleteUser.run(userId, userId).changes ?? 0);
   }
 
   mailCount(filter: { toUser?: string; from?: string }) {

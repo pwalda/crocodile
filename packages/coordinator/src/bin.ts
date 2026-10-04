@@ -20,6 +20,7 @@ const { values } = parseArgs({
     directory: { type: 'string' },
     peers: { type: 'string' },
     'stun-port': { type: 'string' },
+    'stun-alt-port': { type: 'string' },
     stun: { type: 'string' },
     capacity: { type: 'string' },
     private: { type: 'boolean' },
@@ -51,6 +52,8 @@ Options (environment variable in brackets):
   --directory <urls>     comma-separated directory URLs   [CROC_DIRECTORY]
   --peers <urls>         static mesh peers                [CROC_PEERS]
   --stun-port <n|off>    built-in STUN UDP port (7443)    [CROC_STUN_PORT]
+  --stun-alt-port <n|off>  second STUN-only UDP port for  [CROC_STUN_ALT_PORT]
+                         NAT detection (STUN port + 1)
   --stun <urls>          extra STUN URLs for clients      [CROC_STUN]
   --capacity <n>         max users advertised (5000)      [CROC_CAPACITY]
   --private              do not register with directory   [CROC_PRIVATE=1]
@@ -76,6 +79,7 @@ Options (environment variable in brackets):
 const env = process.env;
 const pick = (flag: string | undefined, envName: string) => flag ?? env[envName];
 const stunPort = pick(values['stun-port'], 'CROC_STUN_PORT');
+const stunAltPort = pick(values['stun-alt-port'], 'CROC_STUN_ALT_PORT');
 const port = Number(pick(values.port, 'CROC_PORT') ?? defaultConfig.port);
 
 const coordinator = new Coordinator({
@@ -89,6 +93,7 @@ const coordinator = new Coordinator({
   directoryUrls: list(pick(values.directory, 'CROC_DIRECTORY')),
   meshPeers: list(pick(values.peers, 'CROC_PEERS')),
   stunPort: stunPort === 'off' ? null : stunPort ? Number(stunPort) : port,
+  ...(stunAltPort ? { stunAltPort: stunAltPort === 'off' ? null : Number(stunAltPort) } : {}),
   extraStun: list(pick(values.stun, 'CROC_STUN')),
   capacity: Number(pick(values.capacity, 'CROC_CAPACITY') ?? defaultConfig.capacity),
   announce: !(values.private || env.CROC_PRIVATE === '1'),

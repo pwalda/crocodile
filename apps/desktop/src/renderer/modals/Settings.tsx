@@ -329,6 +329,29 @@ function AccountTab() {
       >
         <LogOut size={16} /> Sign out
       </Button>
+
+      <h3 className="mb-2 mt-9 text-lg font-bold">Delete account</h3>
+      <p className="mb-3 text-sm text-muted">
+        Deletes your account on every device and from the coordination servers: your profile,
+        friends list, memberships and any mail waiting for you. Spaces you own are deleted for
+        everyone. Messages already on other people's devices stay with them.
+      </p>
+      <Button
+        variant="danger"
+        onClick={() =>
+          openModal({
+            kind: 'confirm',
+            title: 'Delete your account?',
+            body: 'This cannot be undone, not even with your recovery key.',
+            action: 'Delete account',
+            danger: true,
+            confirmText: me.username,
+            onConfirm: () => client.deleteAccount(),
+          })
+        }
+      >
+        <Trash2 size={16} /> Delete account
+      </Button>
     </>
   );
 }
@@ -933,7 +956,7 @@ function HostTab() {
           <p className="mt-1 text-muted">
             People on your network add it under Settings → Network → Preferred servers (or when the
             app says it can't find a server). For people elsewhere, forward TCP+UDP {settings.port}{' '}
-            on your router and share your public address.
+            and UDP {settings.port + 1} on your router and share your public address.
           </p>
           <div className="mt-2 space-y-1">
             {(status.publicUrl ? [status.publicUrl, ...status.lanUrls] : status.lanUrls).map(

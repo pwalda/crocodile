@@ -165,6 +165,16 @@ export class ClientConnection implements ClientHandle {
       return;
     }
     this.userId = userIdFromKey(key);
+    const marker = this.hub.deletionMarker(this.userId);
+    if (marker) {
+      // The signed marker is the proof: clients don't erase anything on a server's word alone.
+      this.frame({
+        t: 'error',
+        err: { code: 'account_deleted', message: 'this account was deleted', record: marker },
+      });
+      this.ws.close(4010, 'account deleted');
+      return;
+    }
     this.deviceId = device;
     this.peer = peerIds.make(this.userId, device);
     if (!this.hub.hasRoomFor(this.peer)) {
@@ -245,6 +255,9 @@ export class ClientConnection implements ClientHandle {
           1000,
         ) as SignedRecord<'member'>[];
         const spaceIds = new Set(members.map((m) => m.body.spaceId));
+        // Owned spaces too, even without a membership (e.g. for account deletion).
+        for (const s of store.findByTerm(`owner:${this.userId}`, 1000))
+          spaceIds.add(s.key.slice('space:'.length));
         const spaces = [...spaceIds]
           .map((id) => store.get(`space:${id}`))
           .filter((s): s is SignedRecord<'space'> => !!s && s.kind === 'space');

@@ -23,6 +23,7 @@
     "check": "pnpm typecheck && pnpm lint && pnpm format:check && pnpm test",
     "qa:env": "tsx tests/qa/env.ts",
     "qa:app": "node tests/qa/app.mjs",
+    "qa:showcase": "tsx tests/electron/showcase.ts",
     "qa:smoke": "tsx tests/electron/smoke.ts"
   },
   "devDependencies": {
