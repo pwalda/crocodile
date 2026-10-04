@@ -257,11 +257,12 @@ export function createPlatform(opts: {
     async capabilities() {
       const caps = await browserCapabilities();
       if (!natCache || Date.now() - natCache.at > 10 * 60_000) {
+        // Only the coordination server's own STUN ports (it serves two, see
+        // stunAltPort): no third-party server learns the user's address.
         const stun = opts.stun();
-        const probes = [...stun, 'stun:stun.l.google.com:19302', 'stun:stun.cloudflare.com:3478'];
         natCache = {
           at: Date.now(),
-          nat: await detectNat(RTCPeerConnection, probes).catch(() => 'unknown' as const),
+          nat: await detectNat(RTCPeerConnection, stun).catch(() => 'unknown' as const),
         };
       }
       return { ...caps, cpuCores: opts.cpuCores ?? caps.cpuCores, nat: natCache.nat };

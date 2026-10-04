@@ -7,7 +7,7 @@ One machine runs everything the public Crocodile network needs from "us":
 | Website                   | `https://DOMAIN/`                           | the website, or `placeholder/` until it is deployed |
 | Server directory          | `https://DOMAIN/v1/servers`                 | what the apps query to find servers                 |
 | One-line installers       | `https://DOMAIN/install.sh`, `/install.ps1` | served from `scripts/`                              |
-| First coordination server | `https://coord.DOMAIN`, UDP 7443            | STUN, opt-in relay and mailbox on                   |
+| First coordination server | `https://coord.DOMAIN`, UDP 7443 and 7444   | STUN, opt-in relay and mailbox on                   |
 
 The directory and coordination server run in Docker
 ([docker-compose.yml](docker-compose.yml)). HTTPS, the installers and the
@@ -18,7 +18,7 @@ website come from the reverse proxy already running on the machine.
 1. A small VPS (1 vCPU, 1 GB RAM is plenty to start) with Docker and a
    reverse proxy that handles HTTPS.
 2. DNS: `A`/`AAAA` records for `DOMAIN` and `coord.DOMAIN` pointing to it.
-3. Firewall: TCP 80 and 443 (the proxy), UDP 7443 (STUN and relay). Do
+3. Firewall: TCP 80 and 443 (the proxy), UDP 7443 (STUN and relay) and UDP 7444 (STUN, for NAT detection). Do
    **not** open TCP 7400 or 7443: those services listen on 127.0.0.1 and must
    only be reached through the proxy.
 4. On the server:

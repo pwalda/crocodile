@@ -8,7 +8,7 @@ and elect session hosts. **They never carry voice or messages.** A small VPS
 ## From the desktop app
 
 Settings → **Host a Server** → _Run a coordination server_. For internet
-use, forward TCP+UDP port 7443 on your router to your computer, then enter
+use, forward TCP+UDP port 7443 and UDP port 7444 on your router to your computer, then enter
 your public address (e.g. `http://203.0.113.7:7443`). Enable _List in the
 public directory_ to let others use it. Without a public address it serves
 your local network.
@@ -24,9 +24,11 @@ CROC_REGION=eu-west \
 docker compose up -d coordinator
 ```
 
-Expose **TCP 7443** (HTTP + WebSocket) and **UDP 7443** (STUN). For HTTPS,
+Expose **TCP 7443** (HTTP + WebSocket), **UDP 7443** (STUN and relay) and
+**UDP 7444** (a second STUN port: apps compare the two to detect their NAT
+type without asking third-party STUN servers). For HTTPS,
 put any reverse proxy in front of TCP 7443 with WebSocket upgrades enabled,
-and set `CROC_PUBLIC_URL` to the https URL. Keep UDP 7443 open directly.
+and set `CROC_PUBLIC_URL` to the https URL. Keep the UDP ports open directly.
 
 ## Without Docker
 
@@ -44,6 +46,7 @@ node packages/coordinator/dist/bin.js --help
 | `--directory`              | `CROC_DIRECTORY`             | none                             |
 | `--peers`                  | `CROC_PEERS`                 | none (static mesh peers)         |
 | `--stun-port`              | `CROC_STUN_PORT`             | same as port, `off` to disable   |
+| `--stun-alt-port`          | `CROC_STUN_ALT_PORT`         | STUN port + 1, `off` to disable  |
 | `--private`                | `CROC_PRIVATE=1`             | announce to directory            |
 | `--relay`                  | `CROC_RELAY`                 | `on` (`off` to disable)          |
 | `--relay-max-users`        | `CROC_RELAY_MAX_USERS`       | 25                               |
@@ -121,7 +124,7 @@ the servers it measures and uses.
 - For a public server, prefer a small VPS or a separate machine with Docker
   over the computer you use every day, so a compromise doesn't reach your
   files. Keep it updated (`docker compose pull && docker compose up -d`).
-- Only forward the one port (TCP+UDP 7443). Don't put the machine in your
+- Only forward the server's ports (TCP+UDP 7443, UDP 7444). Don't put the machine in your
   router's "DMZ".
 - If your home IP is sensitive, host on a VPS or behind a reverse proxy
   instead of sharing it.

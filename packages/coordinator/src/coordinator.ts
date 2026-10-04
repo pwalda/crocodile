@@ -32,6 +32,8 @@ import { RecordService } from './records';
 import { SessionService } from './sessions';
 import { openStore, type Store } from './store';
 import { TurnServer } from './turn';
+import { startStunServer } from './stun';
+import type { Socket } from 'node:dgram';
 import { MailboxService, defaultMailboxConfig, type MailboxConfig } from './mailbox';
 import { consoleLogger, RpcFailure, type Logger } from './util';
 import { isIP } from 'node:net';
@@ -57,6 +59,13 @@ export interface CoordinatorConfig {
   meshPeers: string[];
   /** UDP port for the built-in STUN server; null disables it. */
   stunPort: number | null;
+  /**
+   * Second UDP port answering STUN only. Apps compare the public port they
+   * get on both to tell a cone NAT (same port, good for hosting calls) from
+   * a symmetric one, without asking third-party STUN servers. Default: the
+   * port after `stunPort`; null disables it.
+   */
+  stunAltPort?: number | null;
   /** Extra STUN URLs handed to clients. */
   extraStun: string[];
   capacity: number;
@@ -259,6 +268,26 @@ export class Coordinator {
       } catch (err) {
         this.log.warn('STUN/TURN server disabled', { err: String(err) });
       }
+      const alt =
+        this.config.stunAltPort !== undefined
+          ? this.config.stunAltPort
+          : this.config.stunPort === 0
+            ? 0
+            : this.config.stunPort + 1;
+      if (this.stunPortBound && alt !== null) {
+        try {
+          this.stunAlt = await startStunServer(
+            alt,
+            this.config.host.includes(':') ? '::' : '0.0.0.0',
+          );
+          this.stunAltPortBound = this.stunAlt.address().port;
+        } catch (err) {
+          this.log.warn('second STUN port disabled; NAT detection will be coarser', {
+            port: alt,
+            err: String(err),
+          });
+        }
+      }
     }
 
     this.mesh.start(this.config.meshPeers);
@@ -275,6 +304,8 @@ export class Coordinator {
   }
 
   private stunPortBound?: number;
+  private stunAlt?: Socket;
+  private stunAltPortBound?: number;
 
   private async relayIp(publicUrl: string): Promise<string> {
     if (this.config.relay.publicIp) return this.config.relay.publicIp;
@@ -288,10 +319,11 @@ export class Coordinator {
   }
 
   stunUrls(): string[] {
-    const urls = [...this.config.extraStun];
-    if (this.stunPortBound)
-      urls.unshift(`stun:${new URL(this.info.url).hostname}:${this.stunPortBound}`);
-    return urls;
+    const host = new URL(this.info.url).hostname;
+    const own = [this.stunPortBound, this.stunAltPortBound].flatMap((p) =>
+      p ? [`stun:${host}:${p}`] : [],
+    );
+    return [...own, ...this.config.extraStun];
   }
 
   directoryEntry(): DirectoryEntry {
@@ -567,6 +599,7 @@ export class Coordinator {
     this.mailbox.close();
     for (const g of this.relayGrants.values()) clearTimeout(g.timer);
     this.turn?.stop();
+    this.stunAlt?.close();
     await this.app?.close();
     this.store.close();
   }

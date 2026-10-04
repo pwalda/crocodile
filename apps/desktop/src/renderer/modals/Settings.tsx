@@ -933,7 +933,7 @@ function HostTab() {
           <p className="mt-1 text-muted">
             People on your network add it under Settings → Network → Preferred servers (or when the
             app says it can't find a server). For people elsewhere, forward TCP+UDP {settings.port}{' '}
-            on your router and share your public address.
+            and UDP {settings.port + 1} on your router and share your public address.
           </p>
           <div className="mt-2 space-y-1">
             {(status.publicUrl ? [status.publicUrl, ...status.lanUrls] : status.lanUrls).map(

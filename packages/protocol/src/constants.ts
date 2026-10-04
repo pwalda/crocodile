@@ -31,8 +31,3 @@ export const SIG_DOMAIN = {
   senderKey: 'croc/v1/sender-key',
   sealed: 'croc/v1/sealed',
 } as const;
-
-export const DEFAULT_STUN_SERVERS = [
-  'stun:stun.l.google.com:19302',
-  'stun:stun.cloudflare.com:3478',
-];

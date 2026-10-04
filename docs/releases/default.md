@@ -26,8 +26,8 @@ coordination server and the others connect to it:
    server → Run a coordination server_. The page shows the address to share
    (e.g. `http://192.168.1.20:7443`).
    - Same network (home, office): share that address.
-   - Over the internet: forward TCP and UDP port 7443 on your router to this
-     computer, and share `http://<your public IP>:7443`.
+   - Over the internet: forward TCP and UDP port 7443, and UDP port 7444, on
+     your router to this computer, and share `http://<your public IP>:7443`.
 2. **Everyone else:** after creating an account, the app shows _Can't reach a
    coordination server_. Paste the address and press _Connect_ (or add it
    under _Settings → Network → Preferred servers_).
@@ -35,7 +35,7 @@ coordination server and the others connect to it:
    share the invite, and talk.
 
 Alternatively, run the server with Docker on any machine with a public
-address: `docker run -d -p 7443:7443/tcp -p 7443:7443/udp -e
+address: `docker run -d -p 7443:7443/tcp -p 7443:7443/udp -p 7444:7444/udp -e
 CROC_PUBLIC_URL=http://<address>:7443 ghcr.io/pwalda/crocodile-coordinator`.
 
 ## What to try
