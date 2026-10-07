@@ -30,6 +30,7 @@ const { values } = parseArgs({
     'relay-allow-private': { type: 'boolean' },
     mailbox: { type: 'string' },
     source: { type: 'string' },
+    contact: { type: 'string' },
     'trust-proxy': { type: 'boolean' },
     'max-connections-per-ip': { type: 'string' },
     'mailbox-days': { type: 'string' },
@@ -69,6 +70,9 @@ Options (environment variable in brackets):
   --trust-proxy          read client IPs from             [CROC_TRUST_PROXY=1]
                          X-Forwarded-For (behind a proxy)
   --max-connections-per-ip <n>  per-address limit (50)    [CROC_MAX_CONN_PER_IP]
+  --contact <email|url>  how people reach you, the       [CROC_CONTACT]
+                         operator: an email address or an
+                         https:// page (your privacy notice)
   --source <url>         where users get this server's    [CROC_SOURCE_URL]
                          source (required by the AGPL if
                          you run a modified version)
@@ -107,6 +111,7 @@ const coordinator = new Coordinator({
       values['relay-allow-private'] === true || env.CROC_RELAY_ALLOW_PRIVATE === '1',
   },
   sourceUrl: pick(values.source, 'CROC_SOURCE_URL'),
+  operatorContact: pick(values.contact, 'CROC_CONTACT') || undefined,
   trustProxy: values['trust-proxy'] === true || env.CROC_TRUST_PROXY === '1',
   maxConnectionsPerIp: Number(
     pick(values['max-connections-per-ip'], 'CROC_MAX_CONN_PER_IP') ??
@@ -129,6 +134,11 @@ if (
 ) {
   coordinator.log.warn(
     'no --public-url set; the directory will list a loopback URL that others cannot reach',
+  );
+}
+if (coordinator.config.announce && !coordinator.config.operatorContact) {
+  coordinator.log.warn(
+    'no --contact set; people using a listed server should be able to reach whoever runs it',
   );
 }
 

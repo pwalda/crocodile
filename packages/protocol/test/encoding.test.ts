@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   canonicalJson,
+  isOperatorContact,
   fromB32,
   fromB64u,
   parseSessionId,
@@ -57,5 +58,24 @@ describe('session ids', () => {
       channelId: b,
     });
     expect(parseSessionId('space:NOPE')).toBeNull();
+  });
+});
+
+describe('operator contact', () => {
+  it('accepts an email address or an https page, nothing else', () => {
+    for (const ok of ['ops@example.org', 'https://example.org/privacy/'])
+      expect(isOperatorContact(ok)).toBe(true);
+    for (const bad of [
+      '',
+      'http://example.org',
+      'https:example.org',
+      'https:/example.org',
+      'javascript:alert(1)',
+      'mailto:ops@example.org',
+      'ops@example',
+      'ops @example.org',
+      `https://example.org/${'a'.repeat(200)}`,
+    ])
+      expect(isOperatorContact(bad)).toBe(false);
   });
 });

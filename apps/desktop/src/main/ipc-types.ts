@@ -27,6 +27,8 @@ export interface CoordinatorSettings {
   name: string;
   port: number;
   publicUrl?: string;
+  /** How people reach whoever runs the server: an email or an https:// page. */
+  contact?: string;
   announce: boolean;
   /** Offer the opt-in relay (TURN) to users without a direct path. */
   relay: boolean;

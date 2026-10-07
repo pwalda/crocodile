@@ -37,6 +37,7 @@ import { copyText, imageToDataUrl, keyLabel, openLink, stampOf } from '../lib/fo
 
 const SOURCE_URL = 'https://github.com/pwalda/crocodile';
 const HOSTING_GUIDE_URL = `${SOURCE_URL}/blob/main/docs/SELF_HOSTING.md#if-other-people-use-your-server`;
+import { isOperatorContact } from '@crocodile/protocol';
 import { desktop } from '../platform';
 import { Avatar, Button, Input, Label, Toggle, cx } from '../components/ui';
 import type { CoordinatorSettings, CoordinatorStatus } from '../../main/ipc-types';
@@ -775,7 +776,7 @@ function ConnectionTab() {
   const client = getClient();
   return (
     <>
-      <H sub="Coordination servers are run by volunteers. They introduce you to people and pick who hosts a call — they never receive your messages or voice. Crocodile uses the fastest one and keeps the runner-up on standby.">
+      <H sub="Coordination servers are run by volunteers. They introduce you to people and pick who hosts a call — they can't read your messages or voice, which are end-to-end encrypted. Crocodile uses the fastest one and keeps the runner-up on standby.">
         Network
       </H>
       <Card className="flex items-center gap-3">
@@ -803,6 +804,7 @@ function ConnectionTab() {
           Reconnect
         </Button>
       </Card>
+      {server && <OperatorLine contact={server.operator?.contact} />}
       {servers.length > 0 && (
         <Card className="mt-3 py-2">
           {servers.map((s, i) => (
@@ -907,14 +909,45 @@ function ConnectionTab() {
   );
 }
 
+/** Who runs the connected server, as the server itself says. */
+function OperatorLine({ contact }: { contact?: string }) {
+  if (!contact)
+    return <p className="mt-2 text-xs text-faint">This server doesn&apos;t say who runs it.</p>;
+  const isPage = contact.startsWith('https://');
+  return (
+    <p className="mt-2 flex flex-wrap items-center gap-1 text-xs text-muted">
+      Run by, as the server says:{' '}
+      {isPage ? (
+        <button
+          type="button"
+          className="selectable text-accent hover:underline"
+          onClick={() => openLink(contact)}
+        >
+          {contact}
+        </button>
+      ) : (
+        <span className="selectable font-mono">{contact}</span>
+      )}
+      {!isPage && (
+        <Button variant="ghost" className="h-7 text-xs" onClick={() => void copyText(contact)}>
+          <Copy size={13} /> Copy
+        </Button>
+      )}
+    </p>
+  );
+}
+
 function HostTab() {
   const [settings, setSettings] = useState<CoordinatorSettings | null>(null);
   const [status, setStatus] = useState<CoordinatorStatus>({ state: 'stopped' });
   const [confirming, setConfirming] = useState(false);
+  const [contact, setContact] = useState('');
+  const contactValid = !contact.trim() || isOperatorContact(contact.trim());
   useEffect(() => {
     if (!desktop) return;
     void desktop.coordinator.get().then((r) => {
       setSettings(r.settings);
+      setContact(r.settings.contact ?? '');
       setStatus(r.status);
     });
     return desktop.coordinator.onStatus(setStatus);
@@ -1054,9 +1087,28 @@ function HostTab() {
           your local network.
         </p>
       </div>
+      <div className="pb-4">
+        <label>
+          <Label>Operator contact</Label>
+          <Input
+            value={contact}
+            placeholder="you@example.org or https://example.org/privacy"
+            aria-invalid={!contactValid}
+            onChange={(e) => setContact(e.target.value)}
+            onBlur={() => {
+              if (contactValid) void update({ contact: contact.trim() || undefined });
+            }}
+          />
+        </label>
+        <p className={cx('mt-1.5 text-xs', contactValid ? 'text-faint' : 'text-danger')}>
+          {contactValid
+            ? 'How people using your server can reach you: an email address, or a web page such as your privacy notice. The app shows it to everyone connected to your server.'
+            : 'Enter an email address or a page starting with https://.'}
+        </p>
+      </div>
       <Row
         label="List in the server directory"
-        hint="The directory is the public phone book of coordination servers that apps use to find the fastest one. Requires a public address. Anyone may then use your server, so tell them who runs it and how to reach you (see the hosting guide)."
+        hint="The directory is the public phone book of coordination servers that apps use to find the fastest one. Requires a public address and an operator contact: anyone may then use your server."
       >
         <Toggle
           checked={settings.announce}

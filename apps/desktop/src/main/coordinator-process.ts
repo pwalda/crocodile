@@ -54,7 +54,9 @@ port.on('message', async ({ data: msg }) => {
         dataDir: msg.dataDir,
         storage: 'sqlite',
         directoryUrls: msg.directories,
-        announce: s.announce && !!s.publicUrl,
+        // Listed servers say who runs them.
+        announce: s.announce && !!s.publicUrl && !!s.contact,
+        operatorContact: s.contact || undefined,
         meshPeers: [],
         stunPort: s.port,
         extraStun: [],
@@ -71,7 +73,7 @@ port.on('message', async ({ data: msg }) => {
         logLevel: 'warn',
       });
       await coordinator.start();
-      announced = s.announce && !!s.publicUrl;
+      announced = s.announce && !!s.publicUrl && !!s.contact;
       publish({
         state: 'running',
         url: `http://127.0.0.1:${new URL(coordinator.url).port || s.port}`,

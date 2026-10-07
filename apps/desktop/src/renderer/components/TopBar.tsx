@@ -121,7 +121,7 @@ function ConnectionPill() {
       onClick={() => openModal({ kind: 'settings', tab: 'connection' })}
       title={
         ok
-          ? `Connected to ${server?.info.name} (${Math.round(server?.rttMs ?? 0)} ms). Messages and voice never pass through it.`
+          ? `Connected to ${server?.info.name} (${Math.round(server?.rttMs ?? 0)} ms). It can't read your messages or voice.`
           : 'Looking for a coordination server'
       }
       className={cx(

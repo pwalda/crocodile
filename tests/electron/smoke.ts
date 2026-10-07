@@ -30,6 +30,7 @@ const coordinator = await new Coordinator({
   stunPort: 0,
   directoryUrls: [directory.url],
   announce: true,
+  operatorContact: 'https://example.org/privacy/',
   logLevel: 'warn',
 }).start();
 await new Promise((r) => setTimeout(r, 1000));
@@ -172,6 +173,8 @@ await a.page.getByText('Settings', { exact: true }).click();
 await a.page.getByRole('button', { name: 'Voice' }).click();
 await shot(a.page, '12-settings-voice');
 await a.page.getByRole('button', { name: 'Network' }).click();
+// Who runs the connected server, as it says.
+await a.page.getByRole('button', { name: 'https://example.org/privacy/' }).waitFor();
 await shot(a.page, '13-settings-network');
 // Running a server asks first and says what the server will keep.
 await a.page.getByRole('button', { name: 'Host a server' }).click();

@@ -45,6 +45,8 @@ services:
       CROC_RELAY_IP: ${CROC_RELAY_IP:-}
       CROC_MAILBOX: ${CROC_MAILBOX:-on}
       CROC_MAILBOX_DAYS: ${CROC_MAILBOX_DAYS:-3}
+      # Shown in the apps as how to reach whoever runs this server.
+      CROC_CONTACT: https://${CROC_DOMAIN}/privacy/
       # Behind the proxy: take client addresses from X-Forwarded-For.
       CROC_TRUST_PROXY: '1'
     volumes:

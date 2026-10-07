@@ -80,6 +80,7 @@ export class ClientConnection implements ClientHandle {
         relay: hub.config.relay.enabled && !!hub.turn,
         ...(hub.config.mailbox.enabled ? { mailbox: { ttlMs: hub.mailbox.ttlMs } } : {}),
       },
+      ...hub.operatorInfo(),
       sig: sign(hub.identity, SIG_DOMAIN.serverHello, {
         challenge: this.challenge,
         server: info.id,

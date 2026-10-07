@@ -59,6 +59,7 @@ node packages/coordinator/dist/bin.js --help
 | `--relay-allow-private`    | `CROC_RELAY_ALLOW_PRIVATE=1` | off (LAN-only setups)            |
 | `--max-connections-per-ip` | `CROC_MAX_CONN_PER_IP`       | 50                               |
 | `--trust-proxy`            | `CROC_TRUST_PROXY=1`         | off (set behind a reverse proxy) |
+| `--contact`                | `CROC_CONTACT`               | none (email or `https://` page)  |
 
 ### The opt-in mailbox
 
@@ -160,7 +161,10 @@ What that means depends on who uses your server:
   Publish a privacy notice that says who you are, how to reach you, what the
   server stores and for how long. Start from the
   [privacy notice template](PRIVACY_NOTICE_TEMPLATE.md), which lists what a
-  Crocodile server stores.
+  Crocodile server stores. Set the server's contact (`--contact`, or
+  _Operator contact_ in the app) to its address or to your email: the app
+  shows it to everyone connected to your server, under Settings → Network.
+  The app lists a server in the directory only once it has a contact.
 
 Whatever the case:
 

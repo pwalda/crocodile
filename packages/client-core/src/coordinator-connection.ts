@@ -6,6 +6,7 @@ import {
   type Identity,
 } from '@crocodile/crypto';
 import {
+  OperatorInfo,
   SIG_DOMAIN,
   type Platform,
   type RpcError,
@@ -80,6 +81,8 @@ export class CoordinatorConnection extends Emitter<ConnectionEvents> {
     readonly userId: string,
     /** `<userId>.<deviceId>` */
     readonly peer: string,
+    /** Who runs the server, as it says; dropped unless well-formed. */
+    readonly operator?: OperatorInfo,
   ) {
     super();
     ws.onmessage = (ev) => this.onMessage(ev.data);
@@ -175,6 +178,7 @@ export class CoordinatorConnection extends Emitter<ConnectionEvents> {
               hello.stun,
               frame.userId,
               frame.peer,
+              OperatorInfo.safeParse(hello.operator).data,
             ),
           );
         } else if (frame.t === 'error') {

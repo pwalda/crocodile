@@ -243,6 +243,22 @@ describe('client', () => {
   });
 });
 
+describe('who runs the server', () => {
+  it('shows the contact a server gives, and drops a malformed one', async () => {
+    const net = new FakeRelayNetwork();
+    const listed = await server({ operatorContact: 'ops@example.org' });
+    const alice = await signUp(makeClient(net, listed), 'alice');
+    expect(alice.state.server!.operator).toEqual({ contact: 'ops@example.org' });
+
+    // A server can send anything; the app shows only an email or an https page.
+    const odd = await server({ operatorContact: 'ops@example.org' });
+    (odd.config as { operatorContact?: string }).operatorContact = 'javascript:alert(1)';
+    const bob = await signUp(makeClient(net, odd), 'bob');
+    expect(bob.state.server!.info.id).toBe(odd.info.id);
+    expect(bob.state.server!.operator).toBeUndefined();
+  });
+});
+
 describe('multiple devices', () => {
   it('links a new device with a code and delivers to every device of a user', async () => {
     const coord = await server();
