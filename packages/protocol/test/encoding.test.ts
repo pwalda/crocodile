@@ -19,6 +19,16 @@ describe('encoding', () => {
     }
   });
 
+  it('accepts padding and rejects long padding runs in linear time', () => {
+    expect(fromB64u('YQ==')).toEqual(new TextEncoder().encode('a'));
+    // Signatures and keys from the network reach this decoder before any length
+    // check; a run of '=' must not cost quadratic time (it once took ~30 s).
+    const hostile = '='.repeat(200_000) + '!';
+    const start = performance.now();
+    expect(() => fromB64u(hostile)).toThrow();
+    expect(performance.now() - start).toBeLessThan(500);
+  });
+
   it('round-trips base32', () => {
     for (let n = 0; n < 40; n++) {
       const bytes = Uint8Array.from({ length: n }, (_, i) => (i * 91 + 7) & 0xff);
