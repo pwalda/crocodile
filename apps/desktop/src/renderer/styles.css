@@ -45,7 +45,9 @@
   --faint: color-mix(in oklab, var(--accent) 18%, #969696);
   --bubble-me: color-mix(in oklab, var(--accent) 16%, #ffffff);
   --bubble: color-mix(in oklab, var(--accent) 4%, #f7f7f7);
-  --shadow: 0 10px 30px color-mix(in oklab, var(--accent) 15%, rgb(15 15 15 / 0.12));
+  /* Mix opaque colours first, then make the result 12% opaque. */
+  --shadow: 0 10px 30px
+    color-mix(in oklab, color-mix(in oklab, var(--accent) 15%, rgb(15 15 15)) 12%, transparent);
 }
 
 :root {

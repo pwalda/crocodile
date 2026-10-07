@@ -137,6 +137,15 @@ await b.page
 await b.page.keyboard.press('Enter');
 await a.page.getByText('peer-to-peer.').waitFor({ timeout: 15_000 });
 await shot(a.page, '06-chat');
+// Panel shadows stay as faint as designed (12% opaque) whatever the accent.
+const shadow = await a.page.evaluate(() => {
+  const probe = document.body.appendChild(document.createElement('div'));
+  probe.style.boxShadow = 'var(--shadow)';
+  const value = getComputedStyle(probe).boxShadow;
+  probe.remove();
+  return value;
+});
+if (!/[/,] 0\.12\)/.test(shadow)) throw new Error(`panel shadow is too strong: ${shadow}`);
 
 // Voice room.
 const inCall = (page: Page) =>
