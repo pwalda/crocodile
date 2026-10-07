@@ -55,7 +55,14 @@ export type CoordinatorStatus =
   | { state: 'error'; message: string };
 
 export type CoordinatorProcessIn =
-  | { type: 'start'; settings: CoordinatorSettings; dataDir: string; directories: string[] }
+  | {
+      type: 'start';
+      settings: CoordinatorSettings;
+      dataDir: string;
+      directories: string[];
+      /** The app's version, which its server reports. */
+      version: string;
+    }
   | { type: 'stop' }
   | { type: 'status' };
 export type CoordinatorProcessOut = { type: 'status'; status: CoordinatorStatus };

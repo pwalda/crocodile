@@ -780,3 +780,12 @@ describe('operator contact', () => {
     );
   });
 });
+
+describe('version', () => {
+  it('reports the version it was released as', async () => {
+    const c = await server({ version: '0.2.1' });
+    expect(c.info.version).toBe('0.2.1');
+    const health = (await (await fetch(`${c.url}/health`)).json()) as { version: string };
+    expect(health.version).toBe('0.2.1');
+  });
+});

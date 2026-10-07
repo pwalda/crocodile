@@ -161,10 +161,14 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+      - id: version
+        # beta-v1.2.3 and v1.2.3 both give 1.2.3.
+        run: echo "version=${TAG#*v}" >> "$GITHUB_OUTPUT"
       - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
           file: packages/coordinator/Dockerfile
+          build-args: CROC_VERSION=${{ steps.version.outputs.version }}
           push: true
           tags: ghcr.io/${{ github.repository_owner }}/crocodile-coordinator:${{ env.TAG }},ghcr.io/${{ github.repository_owner }}/crocodile-coordinator:latest
       - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
