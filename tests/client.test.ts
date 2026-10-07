@@ -277,6 +277,22 @@ describe('server list', () => {
   });
 });
 
+describe('preferred servers', () => {
+  it('moves a server to the front without listing it twice', async () => {
+    const coord = await server();
+    const client = await signUp(makeClient(new FakeRelayNetwork(), coord), 'alice');
+    await client.updateSettings({ preferredServers: ['http://a.test', 'http://b.test'] });
+    await client.preferServer('http://b.test');
+    expect(client.state.settings.preferredServers).toEqual(['http://b.test', 'http://a.test']);
+    await client.preferServer('http://c.test');
+    expect(client.state.settings.preferredServers).toEqual([
+      'http://c.test',
+      'http://b.test',
+      'http://a.test',
+    ]);
+  });
+});
+
 describe('who runs the server', () => {
   it('shows the contact a server gives, and drops a malformed one', async () => {
     const net = new FakeRelayNetwork();

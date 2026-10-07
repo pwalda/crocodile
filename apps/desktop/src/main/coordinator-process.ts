@@ -5,6 +5,7 @@
 import { networkInterfaces } from 'node:os';
 import { Coordinator } from '@crocodile/coordinator';
 import type { CoordinatorProcessIn, CoordinatorProcessOut, CoordinatorStatus } from './ipc-types';
+import { coordinatorStartError } from './coordinator-config';
 
 const port = (
   process as unknown as {
@@ -44,13 +45,10 @@ port.on('message', async ({ data: msg }) => {
   if (msg.type === 'start') {
     await coordinator?.stop().catch(() => {});
     const s = msg.settings;
-    // People using a server must be able to reach whoever runs it.
-    if (!s.contact) {
+    const refused = coordinatorStartError(s);
+    if (refused) {
       coordinator = undefined;
-      return publish({
-        state: 'error',
-        message: 'Add an operator contact below to run your server.',
-      });
+      return publish({ state: 'error', message: refused });
     }
     publish({ state: 'starting' });
     try {

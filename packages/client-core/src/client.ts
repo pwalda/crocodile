@@ -556,6 +556,12 @@ export class CrocodileClient extends Emitter<ClientEvents> {
   // Coordination link
   // ===========================================================================
 
+  /** Puts a server first among the preferred servers (moving it if listed). */
+  preferServer(url: string): Promise<void> {
+    const rest = this.state.settings.preferredServers.filter((p) => p !== url);
+    return this.updateSettings({ preferredServers: [url, ...rest] });
+  }
+
   /** Re-reads the server directories and measures every server. */
   refreshServers(): Promise<void> {
     return this.link?.refreshServers() ?? Promise.resolve();
@@ -585,7 +591,9 @@ export class CrocodileClient extends Emitter<ClientEvents> {
     });
     this.link = link;
     link.on('status', (status) => this.store.set({ link: status }));
-    link.on('servers', (servers) => this.store.set({ servers }));
+    link.on('servers', (servers) => {
+      if (this.link === link) this.store.set({ servers });
+    });
     link.on('connected', ({ server, rttMs, stun, operator }) => {
       this.stun = stun;
       this.store.set({ server: { info: server, rttMs, operator } });
@@ -594,6 +602,7 @@ export class CrocodileClient extends Emitter<ClientEvents> {
       );
     });
     link.on('latency', ({ rttMs }) => {
+      if (this.link !== link) return;
       const server = this.state.server;
       if (server) this.store.set({ server: { ...server, rttMs } });
     });

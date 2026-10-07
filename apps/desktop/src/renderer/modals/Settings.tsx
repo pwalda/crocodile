@@ -853,7 +853,7 @@ function ConnectionTab() {
             {servers.map((s) => {
               const reachable = Number.isFinite(s.rttMs);
               const isCurrent = s.info.id === server?.info.id;
-              const isPreferred = preferred.includes(s.info.url);
+              const isFirst = preferred[0] === s.info.url;
               return (
                 <div
                   key={s.info.id}
@@ -891,14 +891,10 @@ function ConnectionTab() {
                   <Button
                     variant="secondary"
                     className="h-8 w-20 text-xs"
-                    disabled={!reachable || isCurrent || isPreferred}
-                    onClick={() =>
-                      void client.updateSettings({
-                        preferredServers: [s.info.url, ...preferred],
-                      })
-                    }
+                    disabled={!reachable || isCurrent || isFirst}
+                    onClick={() => void client.preferServer(s.info.url)}
                   >
-                    {isPreferred ? 'Preferred' : 'Use'}
+                    {isFirst ? 'Preferred' : 'Use'}
                   </Button>
                 </div>
               );

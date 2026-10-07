@@ -170,8 +170,11 @@ export class CoordinatorLink extends Emitter<LinkEvents> {
   async refreshServers() {
     if (this.opts.directories.length === 0) return;
     await this.measureServers();
-    const mine = this.listed.find((s) => s.info.id === this.current?.info.id);
-    if (mine && Number.isFinite(mine.rttMs)) this.setLatency(mine.rttMs);
+    const current = this.current;
+    const mine = this.listed.find((s) => s.info.id === current?.info.id);
+    // Connected means reachable: if this one probe failed, keep the last value
+    // in both places rather than showing it unreachable in the list.
+    if (current && mine) this.setLatency(Number.isFinite(mine.rttMs) ? mine.rttMs : current.rttMs);
   }
 
   /** Measures the connected server once more (one /health round trip). */
@@ -192,7 +195,8 @@ export class CoordinatorLink extends Emitter<LinkEvents> {
 
   /** One number per server: the connected one's latency everywhere it shows. */
   private setLatency(rttMs: number) {
-    if (!this.current) return;
+    // A probe that finishes after stop() belongs to a link that's been replaced.
+    if (this.stopped || !this.current) return;
     this.current = { ...this.current, rttMs };
     const id = this.current.info.id;
     const update = (list: RankedServer[]) =>
