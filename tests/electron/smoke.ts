@@ -184,6 +184,12 @@ await shot(a.page, '12-settings-voice');
 await a.page.getByRole('button', { name: 'Network' }).click();
 // Who runs the connected server, as it says.
 await a.page.getByRole('button', { name: 'https://example.org/privacy/' }).waitFor();
+// The public server list from the directory, with the connected server marked.
+const listed = a.page
+  .getByRole('region', { name: 'Public servers' })
+  .getByRole('group', { name: 'Local test coordinator' });
+await listed.getByText('Using').waitFor();
+await listed.getByText(/\d+ ms/).waitFor();
 await shot(a.page, '13-settings-network');
 // Running a server asks first and says what the server will keep.
 await a.page.getByRole('button', { name: 'Host a server' }).click();
@@ -209,6 +215,8 @@ await shot(a.page, '14b-accent-purple');
 await a.page.getByRole('button', { name: 'Accent #34c77b' }).click();
 // Bug-report diagnostics: copied as JSON, without message content.
 await a.page.getByRole('button', { name: 'About' }).click();
+await a.page.getByRole('heading', { name: 'Crocodile' }).waitFor();
+await shot(a.page, '14c-about');
 await a.page.getByRole('button', { name: 'Copy diagnostics' }).click();
 await a.page.getByText('Copied').first().waitFor();
 const report = JSON.parse(await a.app.evaluate(({ clipboard }) => clipboard.readText()));
@@ -286,7 +294,11 @@ await a.page.getByLabel('Account').click();
 await a.page.getByText('Settings', { exact: true }).click();
 await a.page.getByRole('button', { name: 'Host a server' }).click();
 await runServer.click();
-await hostConfirm.getByRole('button', { name: 'Run server' }).click();
+// Running a server needs a way to reach whoever runs it.
+const run = hostConfirm.getByRole('button', { name: 'Run server' });
+if (await run.isEnabled()) throw new Error('Run server must wait for an operator contact');
+await hostConfirm.getByLabel('Operator contact (required)').fill('ops@example.org');
+await run.click();
 await a.page.getByText(/Running at/).waitFor({ timeout: 20_000 });
 await shot(a.page, '23-hosting');
 await runServer.click();

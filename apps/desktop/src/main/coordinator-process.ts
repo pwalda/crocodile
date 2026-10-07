@@ -5,6 +5,7 @@
 import { networkInterfaces } from 'node:os';
 import { Coordinator } from '@crocodile/coordinator';
 import type { CoordinatorProcessIn, CoordinatorProcessOut, CoordinatorStatus } from './ipc-types';
+import { coordinatorStartError } from './coordinator-config';
 
 const port = (
   process as unknown as {
@@ -43,8 +44,13 @@ port.on('message', async ({ data: msg }) => {
   }
   if (msg.type === 'start') {
     await coordinator?.stop().catch(() => {});
-    publish({ state: 'starting' });
     const s = msg.settings;
+    const refused = coordinatorStartError(s);
+    if (refused) {
+      coordinator = undefined;
+      return publish({ state: 'error', message: refused });
+    }
+    publish({ state: 'starting' });
     try {
       coordinator = new Coordinator({
         name: s.name,
@@ -55,9 +61,8 @@ port.on('message', async ({ data: msg }) => {
         dataDir: msg.dataDir,
         storage: 'sqlite',
         directoryUrls: msg.directories,
-        // Listed servers say who runs them.
-        announce: s.announce && !!s.publicUrl && !!s.contact,
-        operatorContact: s.contact || undefined,
+        announce: s.announce && !!s.publicUrl,
+        operatorContact: s.contact,
         meshPeers: [],
         stunPort: s.port,
         extraStun: [],
@@ -74,7 +79,7 @@ port.on('message', async ({ data: msg }) => {
         logLevel: 'warn',
       });
       await coordinator.start();
-      announced = s.announce && !!s.publicUrl && !!s.contact;
+      announced = s.announce && !!s.publicUrl;
       publish({
         state: 'running',
         url: `http://127.0.0.1:${new URL(coordinator.url).port || s.port}`,

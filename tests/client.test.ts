@@ -7,6 +7,7 @@ import {
   type PlatformAdapter,
 } from '@crocodile/client-core';
 import type { Coordinator } from '@crocodile/coordinator';
+import { Directory } from '@crocodile/directory';
 import { createIdentity, signRecord } from '@crocodile/crypto';
 import {
   DELETED_PROFILE_NAME,
@@ -32,7 +33,12 @@ async function server(overrides = {}) {
 function makeClient(
   net: FakeRelayNetwork,
   coordinator: Coordinator,
-  opts: { canHost?: boolean; nat?: 'open' | 'cone' | 'symmetric'; kv?: MemoryKeyValueStore } = {},
+  opts: {
+    canHost?: boolean;
+    nat?: 'open' | 'cone' | 'symmetric';
+    kv?: MemoryKeyValueStore;
+    directories?: string[];
+  } = {},
 ) {
   const platform: PlatformAdapter = {
     platform: opts.canHost === false ? 'web' : 'desktop',
@@ -43,7 +49,7 @@ function makeClient(
     capabilities: async () => ({ nat: opts.nat ?? 'cone', cpuCores: 8 }),
   };
   const client = new CrocodileClient(platform, {
-    directories: [],
+    directories: opts.directories ?? [],
     preferredServers: [coordinator.url],
     transportFactory: net.transportFactory(),
     log: process.env.DBG ? (m, e) => console.log('client', m, JSON.stringify(e)) : undefined,
@@ -240,6 +246,50 @@ describe('client', () => {
     await waitFor(() => bodies(bob, ch).includes('across the mesh'), 12000);
     expect(bob.state.server!.info.id).toBe(b.info.id);
     expect(alice.state.server!.info.id).toBe(a.info.id);
+  });
+});
+
+describe('server list', () => {
+  it('lists every public server, with one latency for the connected one', async () => {
+    const dir = await new Directory({ host: '127.0.0.1', port: 0, allowPrivateUrls: true }).start();
+    cleanup.push(() => dir.stop());
+    const a = await server({ directoryUrls: [dir.url], announce: true });
+    const b = await server({ directoryUrls: [dir.url], announce: true });
+    await waitFor(() => dir.listing().servers.length === 2, 5000, 'registration');
+    const alice = await signUp(
+      makeClient(new FakeRelayNetwork(), a, { directories: [dir.url] }),
+      'alice',
+    );
+    const listed = (id: string) => alice.state.servers.find((s) => s.info.id === id);
+    await waitFor(() => alice.state.servers.length === 2, 5000, 'server list');
+    expect(alice.state.server!.info.id).toBe(a.info.id);
+    // The connected server shows the same latency in the list as at the top…
+    expect(listed(a.info.id)!.rttMs).toBe(alice.state.server!.rttMs);
+    // …also after measuring it again.
+    await alice.measureLatency();
+    expect(listed(a.info.id)!.rttMs).toBe(alice.state.server!.rttMs);
+
+    // A server that stops answering stays listed, last, marked unreachable.
+    await b.stop();
+    await alice.refreshServers();
+    expect(alice.state.servers.at(-1)).toMatchObject({ info: { id: b.info.id }, rttMs: Infinity });
+    expect(listed(a.info.id)!.rttMs).toBe(alice.state.server!.rttMs);
+  });
+});
+
+describe('preferred servers', () => {
+  it('moves a server to the front without listing it twice', async () => {
+    const coord = await server();
+    const client = await signUp(makeClient(new FakeRelayNetwork(), coord), 'alice');
+    await client.updateSettings({ preferredServers: ['http://a.test', 'http://b.test'] });
+    await client.preferServer('http://b.test');
+    expect(client.state.settings.preferredServers).toEqual(['http://b.test', 'http://a.test']);
+    await client.preferServer('http://c.test');
+    expect(client.state.settings.preferredServers).toEqual([
+      'http://c.test',
+      'http://b.test',
+      'http://a.test',
+    ]);
   });
 });
 

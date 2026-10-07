@@ -189,6 +189,7 @@ export interface ClientState {
   link: LinkStatus;
   /** The server this device is connected to, and who runs it if it says. */
   server: { info: ServerInfo; rttMs: number; operator?: OperatorInfo } | null;
+  /** Every server the directories list, best first; unreachable ones last (rttMs Infinity). */
   servers: RankedServer[];
   me: ProfileView | null;
   profiles: Record<string, ProfileView>;
@@ -555,6 +556,22 @@ export class CrocodileClient extends Emitter<ClientEvents> {
   // Coordination link
   // ===========================================================================
 
+  /** Puts a server first among the preferred servers (moving it if listed). */
+  preferServer(url: string): Promise<void> {
+    const rest = this.state.settings.preferredServers.filter((p) => p !== url);
+    return this.updateSettings({ preferredServers: [url, ...rest] });
+  }
+
+  /** Re-reads the server directories and measures every server. */
+  refreshServers(): Promise<void> {
+    return this.link?.refreshServers() ?? Promise.resolve();
+  }
+
+  /** Measures the round trip to the connected server once more. */
+  measureLatency(): Promise<void> {
+    return this.link?.measureLatency() ?? Promise.resolve();
+  }
+
   private connect() {
     if (!this.identity) return;
     this.link?.stop();
@@ -574,13 +591,20 @@ export class CrocodileClient extends Emitter<ClientEvents> {
     });
     this.link = link;
     link.on('status', (status) => this.store.set({ link: status }));
-    link.on('servers', (servers) => this.store.set({ servers }));
+    link.on('servers', (servers) => {
+      if (this.link === link) this.store.set({ servers });
+    });
     link.on('connected', ({ server, rttMs, stun, operator }) => {
       this.stun = stun;
       this.store.set({ server: { info: server, rttMs, operator } });
       void this.onConnected().catch((err) =>
         this.log('post-connect sync failed', { err: String(err) }),
       );
+    });
+    link.on('latency', ({ rttMs }) => {
+      if (this.link !== link) return;
+      const server = this.state.server;
+      if (server) this.store.set({ server: { ...server, rttMs } });
     });
     link.on('disconnected', () => this.store.set({ server: null }));
     // Deleted from another device: this one forgets the account too, but only
