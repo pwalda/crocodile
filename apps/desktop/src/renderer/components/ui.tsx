@@ -23,7 +23,7 @@ export function Button({
   ...props
 }: ButtonHTMLAttributes<HTMLButtonElement> & { variant?: Variant }) {
   const styles: Record<Variant, string> = {
-    primary: 'bg-accent text-[#062014] hover:brightness-110 shadow-[0_4px_14px_-4px_var(--accent)]',
+    primary: 'bg-accent text-on-accent hover:brightness-110 shadow-[0_4px_14px_-4px_var(--accent)]',
     secondary: 'bg-raised text-text hover:bg-hover border border-line',
     danger: 'bg-danger text-white hover:brightness-110',
     ghost: 'bg-transparent text-text-2 hover:text-text hover:bg-hover',

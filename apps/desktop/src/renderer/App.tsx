@@ -239,7 +239,7 @@ function CallPrompts() {
           <button
             aria-label="Accept"
             title="Accept"
-            className="flex h-14 w-14 items-center justify-center rounded-full bg-accent text-[#062014] hover:brightness-110"
+            className="flex h-14 w-14 items-center justify-center rounded-full bg-accent text-on-accent hover:brightness-110"
             onClick={() => {
               navigate({ kind: 'dm', userId: incoming.from });
               void client.callDm(incoming.from).catch((e) => client.reportError(e.message));

@@ -51,7 +51,3 @@ pinned to a commit (Dependabot keeps the pins current). The repository's
 GitHub settings (rulesets, secret scanning, Actions permissions) are applied
 by [`.github/repo-settings.sh`](.github/repo-settings.sh), run by a repository
 admin.
-
-## Trademarks
-
-The code is open; the name and logo are not. See [TRADEMARKS.md](TRADEMARKS.md).

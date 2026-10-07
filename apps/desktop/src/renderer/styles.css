@@ -3,53 +3,59 @@
 
 /*
  * Crocodile design tokens. Two themes ("Lagoon" dark, "Reed" light) and a
- * user-selectable accent. Components use semantic names only.
+ * user-selectable accent. Components use semantic names only. Surfaces and
+ * text are neutral greys tinted with the accent, so the whole app follows the
+ * accent; with the default green they match the original palette.
  */
 @custom-variant dark (&:where([data-theme='dark'], [data-theme='dark'] *));
 
 :root,
 [data-theme='dark'] {
-  --app: #07110d;
-  --app-glow: #0e2a1f;
-  --island: #0f1b16;
-  --island-2: #13231c;
-  --raised: #182c24;
-  --hover: #1d352b;
-  --active: #234032;
-  --line: #22382e;
-  --field: #0b1511;
-  --text: #e7f1ea;
-  --text-2: #a9bdb2;
-  --muted: #7e978a;
-  --faint: #587266;
-  --bubble-me: color-mix(in oklab, var(--accent) 22%, #13231c);
-  --bubble: #172a22;
+  --app: color-mix(in oklab, var(--accent) 10%, #040404);
+  --app-glow: color-mix(in oklab, var(--accent) 24%, #040404);
+  --island: color-mix(in oklab, var(--accent) 12%, #080808);
+  --island-2: color-mix(in oklab, var(--accent) 15%, #0b0b0b);
+  --raised: color-mix(in oklab, var(--accent) 18%, #101010);
+  --hover: color-mix(in oklab, var(--accent) 21%, #141414);
+  --active: color-mix(in oklab, var(--accent) 26%, #171717);
+  --line: color-mix(in oklab, var(--accent) 20%, #191919);
+  --field: color-mix(in oklab, var(--accent) 10%, #060606);
+  --text: color-mix(in oklab, var(--accent) 9%, #f5f5f5);
+  --text-2: color-mix(in oklab, var(--accent) 16%, #bababa);
+  --muted: color-mix(in oklab, var(--accent) 21%, #898989);
+  --faint: color-mix(in oklab, var(--accent) 22%, #5a5a5a);
+  --bubble-me: color-mix(in oklab, var(--accent) 22%, var(--island-2));
+  --bubble: color-mix(in oklab, var(--accent) 18%, #0e0e0e);
   --shadow: 0 10px 30px rgb(0 0 0 / 0.35);
 }
 
 [data-theme='light'] {
-  --app: #e9efe9;
-  --app-glow: #d6e7da;
+  --app: color-mix(in oklab, var(--accent) 6%, #f1f1f1);
+  --app-glow: color-mix(in oklab, var(--accent) 15%, #ececec);
   --island: #ffffff;
-  --island-2: #f5f8f4;
-  --raised: #eef3ee;
-  --hover: #e8efe8;
-  --active: #dce8dd;
-  --line: #dbe5dc;
-  --field: #f2f6f2;
-  --text: #13221b;
-  --text-2: #3b5247;
-  --muted: #5f766a;
-  --faint: #8aa095;
+  --island-2: color-mix(in oklab, var(--accent) 4%, #fafafa);
+  --raised: color-mix(in oklab, var(--accent) 5%, #f5f5f5);
+  --hover: color-mix(in oklab, var(--accent) 7%, #f2f2f2);
+  --active: color-mix(in oklab, var(--accent) 12%, #ececec);
+  --line: color-mix(in oklab, var(--accent) 10%, #e8e8e8);
+  --field: color-mix(in oklab, var(--accent) 4%, #f8f8f8);
+  --text: color-mix(in oklab, var(--accent) 15%, #0b0b0b);
+  --text-2: color-mix(in oklab, var(--accent) 20%, #373737);
+  --muted: color-mix(in oklab, var(--accent) 20%, #626262);
+  --faint: color-mix(in oklab, var(--accent) 18%, #969696);
   --bubble-me: color-mix(in oklab, var(--accent) 16%, #ffffff);
-  --bubble: #f1f5f1;
-  --shadow: 0 10px 30px rgb(20 50 35 / 0.12);
+  --bubble: color-mix(in oklab, var(--accent) 4%, #f7f7f7);
+  /* Mix opaque colours first, then make the result 12% opaque. */
+  --shadow: 0 10px 30px
+    color-mix(in oklab, color-mix(in oklab, var(--accent) 15%, rgb(15 15 15)) 12%, transparent);
 }
 
 :root {
   --accent: #34c77b;
   --accent-strong: color-mix(in oklab, var(--accent) 80%, black);
   --accent-soft: color-mix(in oklab, var(--accent) 18%, transparent);
+  /* Text and icons on an accent background. */
+  --on-accent: color-mix(in oklab, var(--accent) 30%, black);
   --amber: #f5b53d;
   --danger: #ef5b5b;
   --warn: #f5b53d;
@@ -75,6 +81,7 @@
   --color-accent: var(--accent);
   --color-accent-strong: var(--accent-strong);
   --color-accent-soft: var(--accent-soft);
+  --color-on-accent: var(--on-accent);
   --color-amber: var(--amber);
   --color-danger: var(--danger);
   --color-warn: var(--warn);

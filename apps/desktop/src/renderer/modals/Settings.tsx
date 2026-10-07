@@ -696,7 +696,7 @@ function AppearanceTab() {
                 boxShadow: a.accent === c ? `0 0 0 2px var(--island), 0 0 0 4px ${c}` : undefined,
               }}
             >
-              {a.accent === c && <Check size={15} className="text-[#062014]" />}
+              {a.accent === c && <Check size={15} className="text-on-accent" />}
             </button>
           ))}
         </div>
@@ -1190,7 +1190,7 @@ function AboutTab() {
         <p>
           Crocodile is free software, licensed under the GNU Affero General Public License v3; the
           protocol and crypto libraries under Apache-2.0. Commercial licences are available from the
-          maintainer. “Crocodile” and the crocodile logo are trademarks of the maintainer.
+          maintainer.
         </p>
         <div className="flex gap-2 pt-1">
           <Button variant="secondary" onClick={() => openLink(SOURCE_URL)}>
