@@ -33,9 +33,6 @@ if you want to do any of these **without** meeting those conditions:
   `packages/crypto` alone (Apache-2.0).
 - Changing Crocodile and publishing your changes under the AGPL.
 
-A commercial licence covers the code only. Using the name "Crocodile" or the
-logo is a separate permission; see [TRADEMARKS.md](TRADEMARKS.md).
-
 ## Contact
 
 Write to [contact@crocodilechat.com](mailto:contact@crocodilechat.com).

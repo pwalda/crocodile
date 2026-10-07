@@ -130,7 +130,6 @@ Crocodile is free software.
 
 Copyright © 2026 the Crocodile maintainer ([@pwalda](https://github.com/pwalda)).
 Commercial licences without the AGPL's conditions are available; see
-[COMMERCIAL.md](COMMERCIAL.md). "Crocodile" and the logo are trademarks; see
-[TRADEMARKS.md](TRADEMARKS.md).
+[COMMERCIAL.md](COMMERCIAL.md).
 Contributions require signing the [CLA](CLA.md); see
 [CONTRIBUTING.md](CONTRIBUTING.md).

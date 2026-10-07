@@ -1190,7 +1190,7 @@ function AboutTab() {
         <p>
           Crocodile is free software, licensed under the GNU Affero General Public License v3; the
           protocol and crypto libraries under Apache-2.0. Commercial licences are available from the
-          maintainer. “Crocodile” and the crocodile logo are trademarks of the maintainer.
+          maintainer.
         </p>
         <div className="flex gap-2 pt-1">
           <Button variant="secondary" onClick={() => openLink(SOURCE_URL)}>
