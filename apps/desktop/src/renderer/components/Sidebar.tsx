@@ -162,7 +162,7 @@ export function SpaceSidebar({ spaceId }: { spaceId: string }) {
               <MessageSquareText size={17} className={active ? 'text-accent' : 'text-faint'} />
               <span className="truncate">{c.name}</span>
               {count > 0 && !active && (
-                <span className="ml-auto rounded-full bg-accent px-2 text-[11px] font-bold text-[#062014]">
+                <span className="ml-auto rounded-full bg-accent px-2 text-[11px] font-bold text-on-accent">
                   {count}
                 </span>
               )}
@@ -341,7 +341,7 @@ export function HomeSidebar() {
                 </div>
               </div>
               {count > 0 && (
-                <span className="rounded-full bg-accent px-2 text-[11px] font-bold text-[#062014]">
+                <span className="rounded-full bg-accent px-2 text-[11px] font-bold text-on-accent">
                   {count}
                 </span>
               )}

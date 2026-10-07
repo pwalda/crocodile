@@ -696,7 +696,7 @@ function AppearanceTab() {
                 boxShadow: a.accent === c ? `0 0 0 2px var(--island), 0 0 0 4px ${c}` : undefined,
               }}
             >
-              {a.accent === c && <Check size={15} className="text-[#062014]" />}
+              {a.accent === c && <Check size={15} className="text-on-accent" />}
             </button>
           ))}
         </div>

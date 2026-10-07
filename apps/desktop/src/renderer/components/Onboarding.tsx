@@ -212,7 +212,7 @@ function Create({ go }: { go: (s: Step) => void }) {
         back={() => go('welcome')}
       />
       <div className="flex items-center gap-4">
-        <label className="group relative flex h-20 w-20 shrink-0 cursor-pointer items-center justify-center overflow-hidden rounded-[26px] bg-accent text-3xl font-extrabold text-[#062014]">
+        <label className="group relative flex h-20 w-20 shrink-0 cursor-pointer items-center justify-center overflow-hidden rounded-[26px] bg-accent text-3xl font-extrabold text-on-accent">
           {avatar ? (
             <img src={avatar} alt="" className="h-full w-full object-cover" />
           ) : (

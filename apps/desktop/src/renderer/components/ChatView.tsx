@@ -482,7 +482,7 @@ function Composer({
         onClick={send}
         disabled={!text.trim()}
         aria-label="Send"
-        className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-accent text-[#062014] transition hover:brightness-110 disabled:bg-raised disabled:text-faint"
+        className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-accent text-on-accent transition hover:brightness-110 disabled:bg-raised disabled:text-faint"
       >
         <SendHorizontal size={17} />
       </button>

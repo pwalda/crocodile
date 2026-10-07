@@ -190,6 +190,14 @@ if ((await runServer.getAttribute('aria-checked')) !== 'false')
 await a.page.getByRole('button', { name: 'Appearance' }).click();
 await a.page.getByRole('button', { name: 'Lagoon' }).click();
 await shot(a.page, '14-settings-dark');
+// The whole app follows the accent, its background included.
+const appBackground = () => a.page.evaluate(() => getComputedStyle(document.body).backgroundColor);
+const greenBackground = await appBackground();
+await a.page.getByRole('button', { name: 'Accent #a27bf0' }).click();
+if ((await appBackground()) === greenBackground)
+  throw new Error('the app background must follow the accent');
+await shot(a.page, '14b-accent-purple');
+await a.page.getByRole('button', { name: 'Accent #34c77b' }).click();
 // Bug-report diagnostics: copied as JSON, without message content.
 await a.page.getByRole('button', { name: 'About' }).click();
 await a.page.getByRole('button', { name: 'Copy diagnostics' }).click();
