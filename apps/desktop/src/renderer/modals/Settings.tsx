@@ -1,9 +1,11 @@
-import { useEffect, useState, type ReactNode } from 'react';
+import { useCallback, useEffect, useState, type ReactNode } from 'react';
 import {
   AppWindow,
   Check,
+  Code,
   Copy,
   Eye,
+  Globe,
   Info,
   Laptop,
   LogOut,
@@ -12,12 +14,15 @@ import {
   Moon,
   Palette,
   Plus,
+  RefreshCw,
   Server,
   Shield,
+  ShieldCheck,
   Smartphone,
   Sun,
   Trash2,
   User,
+  Users,
   Wifi,
   X,
 } from 'lucide-react';
@@ -36,10 +41,12 @@ import {
 import { copyText, imageToDataUrl, keyLabel, openLink, stampOf } from '../lib/format';
 
 const SOURCE_URL = 'https://github.com/pwalda/crocodile';
+const WEBSITE_URL = 'https://crocodilechat.com';
 const HOSTING_GUIDE_URL = `${SOURCE_URL}/blob/main/docs/SELF_HOSTING.md#if-other-people-use-your-server`;
 import { isOperatorContact } from '@crocodile/protocol';
 import { desktop } from '../platform';
 import { Avatar, Button, Input, Label, Toggle, cx } from '../components/ui';
+import { Logo } from '../components/Logo';
 import type { CoordinatorSettings, CoordinatorStatus } from '../../main/ipc-types';
 
 const TABS = [
@@ -773,7 +780,21 @@ function ConnectionTab() {
   const settings = useCroc((s) => s.settings);
   const preferred = settings.preferredServers;
   const [url, setUrl] = useState('');
+  const [refreshing, setRefreshing] = useState(false);
   const client = getClient();
+  const refresh = useCallback(async () => {
+    setRefreshing(true);
+    await client.refreshServers().catch(() => {});
+    setRefreshing(false);
+  }, [client]);
+  // Live numbers while this tab is open: the list on opening, the connected
+  // server's round trip every few seconds.
+  useEffect(() => {
+    void refresh();
+    const timer = setInterval(() => void client.measureLatency().catch(() => {}), 5000);
+    return () => clearInterval(timer);
+  }, [client, refresh]);
+  const standby = servers.find((s) => s.info.id !== server?.info.id && Number.isFinite(s.rttMs));
   return (
     <>
       <H sub="Coordination servers are run by volunteers. They introduce you to people and pick who hosts a call — they can't read your messages or voice, which are end-to-end encrypted. Crocodile uses the fastest one and keeps the runner-up on standby.">
@@ -805,21 +826,85 @@ function ConnectionTab() {
         </Button>
       </Card>
       {server && <OperatorLine contact={server.operator?.contact} />}
-      {servers.length > 0 && (
-        <Card className="mt-3 py-2">
-          {servers.map((s, i) => (
-            <div
-              key={s.info.id}
-              className="flex items-center gap-3 border-b border-line py-2 text-sm last:border-b-0"
-            >
-              <span className="w-20 text-[11px] font-bold uppercase text-faint">
-                {i === 0 ? 'Using' : i === 1 ? 'Standby' : ''}
-              </span>
-              <span className="flex-1">{s.info.name}</span>
-              <span className="text-muted">{Math.round(s.rttMs)} ms</span>
-            </div>
-          ))}
-        </Card>
+
+      <div className="mb-2 mt-8 flex items-center justify-between">
+        <h3 className="text-lg font-bold">
+          Public servers{servers.length > 0 ? ` · ${servers.length}` : ''}
+        </h3>
+        <Button
+          variant="ghost"
+          className="h-8 text-xs"
+          disabled={refreshing}
+          onClick={() => void refresh()}
+        >
+          <RefreshCw size={14} className={cx(refreshing && 'animate-spin')} /> Refresh
+        </Button>
+      </div>
+      <p className="mb-2 text-xs text-faint">
+        Listed in the server directory. Crocodile picks the fastest; use one to try it first.
+      </p>
+      {servers.length === 0 ? (
+        <p className="text-sm text-muted">
+          {refreshing ? 'Measuring servers…' : 'No public servers found.'}
+        </p>
+      ) : (
+        <section aria-label="Public servers">
+          <Card className="py-1">
+            {servers.map((s) => {
+              const reachable = Number.isFinite(s.rttMs);
+              const isCurrent = s.info.id === server?.info.id;
+              const isPreferred = preferred.includes(s.info.url);
+              return (
+                <div
+                  key={s.info.id}
+                  role="group"
+                  aria-label={s.info.name}
+                  className="flex items-center gap-3 border-b border-line py-2.5 text-sm last:border-b-0"
+                >
+                  <div className="min-w-0 flex-1">
+                    <div className="flex items-center gap-2">
+                      <span className="truncate font-semibold">{s.info.name}</span>
+                      {isCurrent && (
+                        <span className="rounded-full bg-accent-soft px-2 text-[11px] font-bold text-accent">
+                          Using
+                        </span>
+                      )}
+                      {s === standby && (
+                        <span className="rounded-full bg-raised px-2 text-[11px] font-bold text-muted">
+                          Standby
+                        </span>
+                      )}
+                    </div>
+                    <div className="text-xs text-faint">
+                      {[
+                        s.info.region,
+                        `${Math.round(s.load * 100)}% full`,
+                        /^\d/.test(s.info.version) ? `v${s.info.version}` : s.info.version,
+                      ]
+                        .filter(Boolean)
+                        .join(' · ')}
+                    </div>
+                  </div>
+                  <span className={cx('tabular-nums', reachable ? 'text-muted' : 'text-danger')}>
+                    {reachable ? `${Math.round(s.rttMs)} ms` : 'Unreachable'}
+                  </span>
+                  <Button
+                    variant="secondary"
+                    className="h-8 w-20 text-xs"
+                    disabled={!reachable || isCurrent || isPreferred}
+                    onClick={() =>
+                      void client.updateSettings({
+                        preferredServers: [s.info.url, ...preferred],
+                      })
+                    }
+                  >
+                    {isPreferred ? 'Preferred' : 'Use'}
+                  </Button>
+                </div>
+              );
+            })}
+          </Card>
+        </section>
       )}
 
       <h3 className="mb-1 mt-8 text-lg font-bold">When someone is offline</h3>
@@ -1007,7 +1092,22 @@ function HostTab() {
           </div>
         </Card>
       )}
-      <Row label="Run a coordination server">
+      <Row
+        label="Run a coordination server"
+        hint={
+          <>
+            What running a server means for you, and a privacy notice you can adapt:{' '}
+            <button
+              type="button"
+              className="text-accent hover:underline"
+              onClick={() => openLink(HOSTING_GUIDE_URL)}
+            >
+              hosting guide
+            </button>
+            .
+          </>
+        }
+      >
         <Toggle
           checked={settings.enabled || confirming}
           onChange={(v) => {
@@ -1019,7 +1119,7 @@ function HostTab() {
       </Row>
       {confirming && (
         <section aria-label="Before you run a server">
-          <Card className="mb-4 text-sm">
+          <Card className="mb-4 mt-3 text-sm">
             <div className="font-bold">Before you run a server</div>
             <p className="mt-1 text-muted">
               Your server joins the Crocodile network and keeps a copy of everyone&apos;s account
@@ -1027,13 +1127,28 @@ function HostTab() {
               and who calls whom, never what they say. If other people use your server, privacy laws
               such as the GDPR can make you responsible for that data.
             </p>
+            <label className="mt-3 block">
+              <Label>Operator contact (required)</Label>
+              <Input
+                value={contact}
+                placeholder="you@example.org or https://example.org/privacy"
+                aria-invalid={!contactValid}
+                onChange={(e) => setContact(e.target.value)}
+              />
+            </label>
+            <p className={cx('mt-1.5 text-xs', contactValid ? 'text-faint' : 'text-danger')}>
+              {contactValid
+                ? 'How people using your server can reach you. Everyone connected to it sees this.'
+                : 'Enter an email address or a page starting with https://.'}
+            </p>
             <div className="mt-3 flex justify-end gap-2">
               <Button variant="ghost" onClick={() => setConfirming(false)}>
                 Cancel
               </Button>
               <Button
+                disabled={!contact.trim() || !contactValid}
                 onClick={async () => {
-                  await update({ enabled: true });
+                  await update({ contact: contact.trim(), enabled: true });
                   setConfirming(false);
                 }}
               >
@@ -1043,17 +1158,6 @@ function HostTab() {
           </Card>
         </section>
       )}
-      <p className="-mt-1 text-xs text-faint">
-        What running a server means for you, and a privacy notice you can adapt:{' '}
-        <button
-          type="button"
-          className="text-accent hover:underline"
-          onClick={() => openLink(HOSTING_GUIDE_URL)}
-        >
-          hosting guide
-        </button>
-        .
-      </p>
       <div className="grid grid-cols-2 gap-4 py-4">
         <div>
           <Label>Server name</Label>
@@ -1087,16 +1191,16 @@ function HostTab() {
           your local network.
         </p>
       </div>
-      <div className="pb-4">
+      <div className={cx('pb-4', confirming && 'hidden')}>
         <label>
-          <Label>Operator contact</Label>
+          <Label>Operator contact (required)</Label>
           <Input
             value={contact}
             placeholder="you@example.org or https://example.org/privacy"
             aria-invalid={!contactValid}
             onChange={(e) => setContact(e.target.value)}
             onBlur={() => {
-              if (contactValid) void update({ contact: contact.trim() || undefined });
+              if (contact.trim() && contactValid) void update({ contact: contact.trim() });
             }}
           />
         </label>
@@ -1108,7 +1212,7 @@ function HostTab() {
       </div>
       <Row
         label="List in the server directory"
-        hint="The directory is the public phone book of coordination servers that apps use to find the fastest one. Requires a public address and an operator contact: anyone may then use your server."
+        hint="The directory is the public phone book of coordination servers that apps use to find the fastest one. Requires a public address: anyone may then use your server."
       >
         <Toggle
           checked={settings.announce}
@@ -1171,35 +1275,66 @@ function DiagnosticsButton() {
   );
 }
 
+const ABOUT_FEATURES = [
+  {
+    icon: ShieldCheck,
+    title: 'End-to-end encrypted',
+    text: 'Messages and calls are encrypted on your device, with ratcheting keys and post-quantum key exchange.',
+  },
+  {
+    icon: Users,
+    title: 'Peer-to-peer',
+    text: 'Voice and text go straight between people. In groups the best-connected member hosts, with a runner-up on standby.',
+  },
+  {
+    icon: Server,
+    title: 'Volunteer servers',
+    text: "Coordination servers only introduce people and pick call hosts. They can't read what you say.",
+  },
+];
+
 function AboutTab() {
   const version = useUi((s) => s.appVersion);
   return (
     <>
-      <H>About Crocodile</H>
-      <Card className="space-y-3 text-sm leading-relaxed text-text-2">
-        <p>Crocodile {version}.</p>
-        <p>
-          Voice and text travel only between the people in a conversation, end-to-end encrypted with
-          keys that ratchet forward and hybrid post-quantum key exchange. In groups, the member with
-          the best connection is elected host and forwards the encrypted streams; a runner-up stands
-          by to take over.
+      <div className="flex flex-col items-center pb-7 pt-2 text-center">
+        <Logo size={88} className="drop-shadow-[0_14px_28px_var(--accent-soft)]" />
+        <h2 className="mt-4 text-3xl font-extrabold tracking-tight">Crocodile</h2>
+        <p className="mt-1 text-sm text-muted">
+          Peer-to-peer, end-to-end encrypted voice and text chat.
         </p>
-        <p>Volunteer coordination servers handle introductions and never see content.</p>
-      </Card>
-      <Card className="mt-3 space-y-2 text-sm leading-relaxed text-text-2">
+        <span className="mt-3 rounded-full bg-accent-soft px-3 py-1 text-xs font-bold text-accent">
+          Version {version} · beta
+        </span>
+      </div>
+      <div className="grid grid-cols-3 gap-3">
+        {ABOUT_FEATURES.map(({ icon: Icon, title, text }) => (
+          <Card key={title} className="p-4">
+            <span className="flex h-9 w-9 items-center justify-center rounded-xl bg-accent-soft text-accent">
+              <Icon size={18} />
+            </span>
+            <div className="mt-3 text-sm font-bold">{title}</div>
+            <p className="mt-1 text-xs leading-relaxed text-muted">{text}</p>
+          </Card>
+        ))}
+      </div>
+      <Card className="mt-3 text-sm leading-relaxed text-text-2">
         <p>
           Crocodile is free software, licensed under the GNU Affero General Public License v3; the
           protocol and crypto libraries under Apache-2.0. Commercial licences are available from the
           maintainer.
         </p>
-        <div className="flex gap-2 pt-1">
-          <Button variant="secondary" onClick={() => openLink(SOURCE_URL)}>
-            Source code
+        <div className="flex flex-wrap gap-2 pt-3">
+          <Button variant="secondary" onClick={() => openLink(WEBSITE_URL)}>
+            <Globe size={15} /> Website
           </Button>
-          <DiagnosticsButton />
+          <Button variant="secondary" onClick={() => openLink(SOURCE_URL)}>
+            <Code size={15} /> Source code
+          </Button>
           <Button variant="ghost" onClick={() => openLink(`${SOURCE_URL}/blob/main/LICENSE`)}>
             License
           </Button>
+          <DiagnosticsButton />
         </div>
       </Card>
     </>

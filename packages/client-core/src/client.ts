@@ -189,6 +189,7 @@ export interface ClientState {
   link: LinkStatus;
   /** The server this device is connected to, and who runs it if it says. */
   server: { info: ServerInfo; rttMs: number; operator?: OperatorInfo } | null;
+  /** Every server the directories list, best first; unreachable ones last (rttMs Infinity). */
   servers: RankedServer[];
   me: ProfileView | null;
   profiles: Record<string, ProfileView>;
@@ -555,6 +556,16 @@ export class CrocodileClient extends Emitter<ClientEvents> {
   // Coordination link
   // ===========================================================================
 
+  /** Re-reads the server directories and measures every server. */
+  refreshServers(): Promise<void> {
+    return this.link?.refreshServers() ?? Promise.resolve();
+  }
+
+  /** Measures the round trip to the connected server once more. */
+  measureLatency(): Promise<void> {
+    return this.link?.measureLatency() ?? Promise.resolve();
+  }
+
   private connect() {
     if (!this.identity) return;
     this.link?.stop();
@@ -581,6 +592,10 @@ export class CrocodileClient extends Emitter<ClientEvents> {
       void this.onConnected().catch((err) =>
         this.log('post-connect sync failed', { err: String(err) }),
       );
+    });
+    link.on('latency', ({ rttMs }) => {
+      const server = this.state.server;
+      if (server) this.store.set({ server: { ...server, rttMs } });
     });
     link.on('disconnected', () => this.store.set({ server: null }));
     // Deleted from another device: this one forgets the account too, but only

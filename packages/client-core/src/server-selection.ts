@@ -79,10 +79,10 @@ export async function probeLatency(
 }
 
 /**
- * Ranks servers by latency, nudged away from nearly-full servers. The first
- * entry is the one to use, the second is the standby.
+ * Measures every listed server and orders them best first: by latency, nudged
+ * away from nearly-full servers, with unreachable ones (rttMs Infinity) last.
  */
-export async function rankServers(
+export async function probeServers(
   servers: ServerInfo[],
   loads: Map<string, number>,
   fetchImpl: typeof fetch = fetch,
@@ -94,6 +94,19 @@ export async function rankServers(
       load: loads.get(info.id) ?? 0,
     })),
   );
-  const score = (s: RankedServer) => s.rttMs * (s.load > 0.9 ? 3 : s.load > 0.75 ? 1.5 : 1);
-  return probed.filter((s) => Number.isFinite(s.rttMs)).sort((a, b) => score(a) - score(b));
+  const score = (s: RankedServer) =>
+    Number.isFinite(s.rttMs) ? s.rttMs * (s.load > 0.9 ? 3 : s.load > 0.75 ? 1.5 : 1) : Infinity;
+  return probed.sort((a, b) => score(a) - score(b));
+}
+
+/**
+ * Ranks the reachable servers. The first entry is the one to use, the second
+ * is the standby.
+ */
+export async function rankServers(
+  servers: ServerInfo[],
+  loads: Map<string, number>,
+  fetchImpl: typeof fetch = fetch,
+): Promise<RankedServer[]> {
+  return (await probeServers(servers, loads, fetchImpl)).filter((s) => Number.isFinite(s.rttMs));
 }

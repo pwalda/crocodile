@@ -12,7 +12,7 @@ import type {
 import { CoordinatorConnection, RpcCallError } from './coordinator-connection';
 import { Emitter } from './emitter';
 import type { KeyValueStore } from './platform';
-import { fetchServerList, probeLatency, rankServers, type RankedServer } from './server-selection';
+import { fetchServerList, probeLatency, probeServers, type RankedServer } from './server-selection';
 
 export type LinkStatus = 'idle' | 'discovering' | 'connecting' | 'connected' | 'offline';
 
@@ -21,7 +21,10 @@ export type LinkEvents = ServerEvents & {
   /** Fired on every (re)connection; subscribers re-establish their state. */
   connected: { server: ServerInfo; rttMs: number; stun: string[]; operator?: OperatorInfo };
   disconnected: { reason: string };
+  /** Every listed server, best first; unreachable ones last with rttMs Infinity. */
   servers: RankedServer[];
+  /** A fresh round-trip time to the connected server. */
+  latency: { rttMs: number };
   /**
    * A server says this identity's account was deleted, with the signed marker
    * when it sent one. Unverified: the client checks the marker, and the link
@@ -66,7 +69,10 @@ const FORWARDED_EVENTS: (keyof ServerEvents)[] = [
  */
 export class CoordinatorLink extends Emitter<LinkEvents> {
   status: LinkStatus = 'idle';
+  /** Reachable servers, best first: the candidates to connect to. */
   ranked: RankedServer[] = [];
+  /** Every listed server, reachable or not, as last measured. */
+  listed: RankedServer[] = [];
   private conn?: CoordinatorConnection;
   private current?: RankedServer;
   private stopped = false;
@@ -92,7 +98,7 @@ export class CoordinatorLink extends Emitter<LinkEvents> {
   start() {
     this.stopped = false;
     void this.connectLoop();
-    this.rerankTimer = setInterval(() => void this.refreshRanking(), 10 * 60_000);
+    this.rerankTimer = setInterval(() => void this.refreshServers().catch(() => {}), 10 * 60_000);
   }
 
   stop() {
@@ -153,21 +159,48 @@ export class CoordinatorLink extends Emitter<LinkEvents> {
     }
     if (this.opts.directories.length === 0) return preferred;
     this.setStatus('discovering');
-    const { servers, loads } = await fetchServerList(this.opts.directories, this.opts.kv, f);
-    this.ranked = await rankServers(servers, loads, f);
-    this.emit('servers', this.ranked);
+    await this.measureServers();
     return [
       ...preferred,
       ...this.ranked.filter((r) => !preferred.some((p) => p.info.url === r.info.url)),
     ];
   }
 
-  private async refreshRanking() {
+  /** Re-reads the directories and measures every server again. */
+  async refreshServers() {
     if (this.opts.directories.length === 0) return;
+    await this.measureServers();
+    const mine = this.listed.find((s) => s.info.id === this.current?.info.id);
+    if (mine && Number.isFinite(mine.rttMs)) this.setLatency(mine.rttMs);
+  }
+
+  /** Measures the connected server once more (one /health round trip). */
+  async measureLatency() {
+    const current = this.current;
+    if (!current || this.status !== 'connected') return;
+    const rttMs = await probeLatency(current.info.url, this.opts.fetchImpl ?? fetch, 1);
+    if (Number.isFinite(rttMs) && this.current === current) this.setLatency(rttMs);
+  }
+
+  private async measureServers() {
     const f = this.opts.fetchImpl ?? fetch;
     const { servers, loads } = await fetchServerList(this.opts.directories, this.opts.kv, f);
-    this.ranked = await rankServers(servers, loads, f);
-    this.emit('servers', this.ranked);
+    this.listed = await probeServers(servers, loads, f);
+    this.ranked = this.listed.filter((s) => Number.isFinite(s.rttMs));
+    this.emit('servers', this.listed);
+  }
+
+  /** One number per server: the connected one's latency everywhere it shows. */
+  private setLatency(rttMs: number) {
+    if (!this.current) return;
+    this.current = { ...this.current, rttMs };
+    const id = this.current.info.id;
+    const update = (list: RankedServer[]) =>
+      list.map((s) => (s.info.id === id ? { ...s, rttMs } : s));
+    this.ranked = update(this.ranked);
+    this.listed = update(this.listed);
+    this.emit('latency', { rttMs });
+    this.emit('servers', this.listed);
   }
 
   private async connectLoop() {
@@ -240,5 +273,7 @@ export class CoordinatorLink extends Emitter<LinkEvents> {
       stun: conn.stun,
       operator: conn.operator,
     });
+    // A preferred server is measured once; make the list show the same number.
+    this.setLatency(server.rttMs);
   }
 }

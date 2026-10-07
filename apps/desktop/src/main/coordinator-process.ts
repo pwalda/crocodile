@@ -43,8 +43,16 @@ port.on('message', async ({ data: msg }) => {
   }
   if (msg.type === 'start') {
     await coordinator?.stop().catch(() => {});
-    publish({ state: 'starting' });
     const s = msg.settings;
+    // People using a server must be able to reach whoever runs it.
+    if (!s.contact) {
+      coordinator = undefined;
+      return publish({
+        state: 'error',
+        message: 'Add an operator contact below to run your server.',
+      });
+    }
+    publish({ state: 'starting' });
     try {
       coordinator = new Coordinator({
         name: s.name,
@@ -55,9 +63,8 @@ port.on('message', async ({ data: msg }) => {
         dataDir: msg.dataDir,
         storage: 'sqlite',
         directoryUrls: msg.directories,
-        // Listed servers say who runs them.
-        announce: s.announce && !!s.publicUrl && !!s.contact,
-        operatorContact: s.contact || undefined,
+        announce: s.announce && !!s.publicUrl,
+        operatorContact: s.contact,
         meshPeers: [],
         stunPort: s.port,
         extraStun: [],
@@ -74,7 +81,7 @@ port.on('message', async ({ data: msg }) => {
         logLevel: 'warn',
       });
       await coordinator.start();
-      announced = s.announce && !!s.publicUrl && !!s.contact;
+      announced = s.announce && !!s.publicUrl;
       publish({
         state: 'running',
         url: `http://127.0.0.1:${new URL(coordinator.url).port || s.port}`,

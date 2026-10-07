@@ -164,7 +164,7 @@ What that means depends on who uses your server:
   Crocodile server stores. Set the server's contact (`--contact`, or
   _Operator contact_ in the app) to its address or to your email: the app
   shows it to everyone connected to your server, under Settings → Network.
-  The app lists a server in the directory only once it has a contact.
+  The desktop app doesn't run a server without a contact.
 
 Whatever the case:
 
