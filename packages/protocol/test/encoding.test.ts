@@ -68,6 +68,8 @@ describe('operator contact', () => {
     for (const bad of [
       '',
       'http://example.org',
+      'https:example.org',
+      'https:/example.org',
       'javascript:alert(1)',
       'mailto:ops@example.org',
       'ops@example',

@@ -32,6 +32,8 @@ export function isOperatorContact(value: string): boolean {
   if (value.length > 200 || /\s/.test(value)) return false;
   // Domain labels exclude '.', so the pattern can't backtrack.
   if (/^[^@:/]+@[^@:/.]+(?:\.[^@:/.]+)+$/.test(value)) return true;
+  // The literal prefix: URL parsing would also accept forms like https:example.org.
+  if (!value.startsWith('https://')) return false;
   try {
     return new URL(value).protocol === 'https:';
   } catch {
