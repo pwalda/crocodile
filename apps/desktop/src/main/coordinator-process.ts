@@ -48,6 +48,7 @@ port.on('message', async ({ data: msg }) => {
     try {
       coordinator = new Coordinator({
         name: s.name,
+        version: msg.version,
         host: '0.0.0.0',
         port: s.port,
         publicUrl: s.publicUrl || undefined,

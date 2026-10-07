@@ -191,6 +191,7 @@ function applyCoordinator() {
     settings: s,
     dataDir: join(userData(), 'coordinator'),
     directories: directories(),
+    version: app.getVersion(),
   });
 }
 

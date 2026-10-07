@@ -43,7 +43,8 @@ import { consoleLogger, RpcFailure, type Logger } from './util';
 import { isIP } from 'node:net';
 import { lookup } from 'node:dns/promises';
 
-export const COORDINATOR_VERSION = '0.1.0';
+/** The release this server was built from: CROC_VERSION, set by the release images. */
+export const COORDINATOR_VERSION = process.env.CROC_VERSION || 'dev';
 
 export interface CoordinatorConfig {
   /** Display name announced to the directory, e.g. "Swamp EU-1". */
@@ -111,6 +112,8 @@ export interface CoordinatorConfig {
    * page such as its privacy notice. Apps show it to the people using it.
    */
   operatorContact?: string;
+  /** Version shown in /health and the server info; defaults to COORDINATOR_VERSION. */
+  version?: string;
 }
 
 /** Source of the unmodified coordinator (AGPL-3.0). */
@@ -184,6 +187,8 @@ export class Coordinator {
       throw new Error(
         `operatorContact must be an email address or an https:// page, got ${this.config.operatorContact}`,
       );
+    // ServerInfo allows 32 characters; a longer one would fail every client's check.
+    if (this.version.length > 32) throw new Error(`version is too long: ${this.version}`);
     this.log = consoleLogger(`coord:${this.config.name}`, this.config.logLevel ?? 'info');
     this.store = openStore({ dataDir: this.config.dataDir, kind: this.config.storage });
     let seed = this.config.seed ?? this.store.getMeta('server-seed');
@@ -267,7 +272,7 @@ export class Coordinator {
       ok: true,
       id: this.identity.userId,
       name: this.config.name,
-      version: COORDINATOR_VERSION,
+      version: this.version,
       protocol: PROTOCOL_VERSION,
       users: this.presence.localCount,
       capacity: this.config.capacity,
@@ -306,7 +311,7 @@ export class Coordinator {
       key: this.identity.publicKey,
       name: this.config.name,
       url: publicUrl,
-      version: COORDINATOR_VERSION,
+      version: this.version,
       ...(this.config.region ? { region: this.config.region } : {}),
     };
 
@@ -382,6 +387,10 @@ export class Coordinator {
       p ? [`stun:${host}:${p}`] : [],
     );
     return [...own, ...this.config.extraStun];
+  }
+
+  get version(): string {
+    return this.config.version ?? COORDINATOR_VERSION;
   }
 
   /** `{ operator }` for the hello, /health and /v1/info; nothing without a contact. */

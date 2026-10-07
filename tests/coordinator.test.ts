@@ -780,3 +780,17 @@ describe('operator contact', () => {
     );
   });
 });
+
+describe('version', () => {
+  it('reports the version it was released as', async () => {
+    const c = await server({ version: '0.2.1' });
+    expect(c.info.version).toBe('0.2.1');
+    const health = (await (await fetch(`${c.url}/health`)).json()) as { version: string };
+    expect(health.version).toBe('0.2.1');
+  });
+
+  it('refuses a version longer than ServerInfo allows', async () => {
+    expect((await server({ version: 'v'.repeat(32) })).info.version).toHaveLength(32);
+    await expect(startCoordinator({ version: 'v'.repeat(33) })).rejects.toThrow(/version/);
+  });
+});
