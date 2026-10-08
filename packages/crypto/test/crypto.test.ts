@@ -1,5 +1,12 @@
 import { describe, expect, it } from 'vitest';
-import { DELETED_PROFILE_NAME, recordKey, type SignedRecord, utf8 } from '@crocodile/protocol';
+import {
+  AnonBox,
+  DELETED_PROFILE_NAME,
+  NOTE_TTL_MS,
+  recordKey,
+  type SignedRecord,
+  utf8,
+} from '@crocodile/protocol';
 import {
   AudioReceiver,
   AudioSender,
@@ -14,10 +21,14 @@ import {
   exportChains,
   importChain,
   linkSecurityCode,
+  openAnonymous,
+  openForSelf,
   openLink,
   padmeLength,
   ratchet,
   rotatePrekeys,
+  sealAnonymous,
+  sealForSelf,
   sealLink,
   sealToDevice,
   userIdFromKey,
@@ -368,5 +379,122 @@ describe('messages and signalling', () => {
     expect(verifySdp(offer, { sessionId: 'other', from, to })).toBe(false);
     expect(verifySdp(offer, { sessionId: 's', from: `${bob.userId}.aaaadevice`, to })).toBe(false);
     expect(verifySdp({ ...offer, sdp: 'v=0 evil' }, { sessionId: 's', from, to })).toBe(false);
+  });
+});
+
+describe('anonymous boxes', () => {
+  it('hide the sender from everyone but the target device, which can verify them', () => {
+    const alice = createIdentity();
+    const bob = createIdentity();
+    const eve = createIdentity();
+    const bobPeer = `${bob.userId}.bobdevicea`;
+    const pk = createPrekey();
+    const lookup = (id: number) => (id === pk.id ? pk : undefined);
+    const box = sealAnonymous(
+      alice,
+      'alicedeva',
+      { peer: bobPeer, prekey: pk.bundle },
+      utf8.encode('psst'),
+    );
+    expect(AnonBox.safeParse(box).success).toBe(true);
+    // Nothing outside the encryption says who sent it.
+    const outside = JSON.stringify(box);
+    expect(outside).not.toContain(alice.publicKey);
+    expect(outside).not.toContain(alice.userId);
+    expect(outside).not.toContain('alicedeva');
+
+    const opened = openAnonymous({ peer: bobPeer }, lookup, box, userIdFromKey);
+    expect(opened?.from).toBe(`${alice.userId}.alicedeva`);
+    expect(opened?.fromKey).toBe(alice.publicKey);
+    expect(utf8.decode(opened!.plaintext)).toBe('psst');
+
+    // Another device, another prekey, tampering: all rejected.
+    expect(
+      openAnonymous({ peer: `${bob.userId}.otherdevaa` }, lookup, box, userIdFromKey),
+    ).toBeNull();
+    expect(openAnonymous({ peer: bobPeer }, () => createPrekey(), box, userIdFromKey)).toBeNull();
+    const flipped = box.ct.slice(0, 10) + (box.ct[10] === 'A' ? 'B' : 'A') + box.ct.slice(11);
+    expect(
+      openAnonymous({ peer: bobPeer }, lookup, { ...box, ct: flipped }, userIdFromKey),
+    ).toBeNull();
+    // Bob can't pass it on to Carol as if Alice had written to her: the
+    // signature covers the device it was sealed to.
+    const carolPeer = `${eve.userId}.caroldev`;
+    const readdressed = { ...box, to: carolPeer };
+    expect(openAnonymous({ peer: carolPeer }, lookup, readdressed, userIdFromKey)).toBeNull();
+    // Padded: short payloads look alike.
+    const longer = sealAnonymous(
+      alice,
+      'alicedeva',
+      { peer: bobPeer, prekey: pk.bundle },
+      utf8.encode('psst, psst'),
+    );
+    expect(longer.ct.length).toBe(box.ct.length);
+  });
+});
+
+describe('sealed for self', () => {
+  it("opens only with the same account's key and for the same place", () => {
+    const alice = createIdentity();
+    const sealed = sealForSelf(alice, 'friends', utf8.encode('my list'), 'friends:x');
+    expect(utf8.decode(openForSelf(alice, 'friends', sealed, 'friends:x')!)).toBe('my list');
+    // Same account on another device: same seed, same key.
+    const laptop = identityFromSeed(alice.seed);
+    expect(utf8.decode(openForSelf(laptop, 'friends', sealed, 'friends:x')!)).toBe('my list');
+    expect(openForSelf(createIdentity(), 'friends', sealed, 'friends:x')).toBeNull();
+    expect(openForSelf(alice, 'other', sealed, 'friends:x')).toBeNull();
+    expect(openForSelf(alice, 'friends', sealed, 'friends:y')).toBeNull();
+    expect(openForSelf(alice, 'friends', 'not base64!', 'friends:x')).toBeNull();
+    // Fresh nonce every time.
+    expect(sealForSelf(alice, 'friends', utf8.encode('my list'), 'friends:x')).not.toBe(sealed);
+  });
+});
+
+describe('notes', () => {
+  const bob = createIdentity();
+  const once = () => createIdentity();
+  const note = (author = once(), version = Date.now()) =>
+    signRecord(author, 'note', recordKey.note(bob.userId, author.userId), { boxes: [] }, version);
+
+  it('are signed by a one-time key named in the key, and written once', () => {
+    const n = note();
+    expect(validateRecord(n, ctx([])).ok).toBe(true);
+    const author = once();
+    const misnamed = signRecord(author, 'note', recordKey.note(bob.userId, once().userId), {
+      boxes: [],
+    });
+    expect(validateRecord(misnamed, ctx([]))).toMatchObject({ ok: false });
+    const first = note(author, Date.now() - 1000);
+    const again = signRecord(author, 'note', first.key, { boxes: [] });
+    expect(validateRecord(again, ctx([first]))).toMatchObject({
+      ok: false,
+      reason: 'note already exists',
+    });
+    // Boxes for someone else's devices don't belong in Bob's notes.
+    const pk = createPrekey();
+    const stray = signRecord(author, 'note', recordKey.note(bob.userId, author.userId), {
+      boxes: [
+        sealAnonymous(
+          once(),
+          'somedevice',
+          { peer: `${once().userId}.somedevice`, prekey: pk.bundle },
+          utf8.encode('x'),
+        ),
+      ],
+    });
+    expect(validateRecord(stray, ctx([]))).toMatchObject({ ok: false });
+  });
+
+  it('only the recipient deletes them, and nothing brings back an expired one', () => {
+    const n = note();
+    const del = (by: typeof bob) =>
+      signRecord(by, 'note', n.key, { boxes: [], deleted: true }, n.version + 1);
+    expect(validateRecord(del(bob), ctx([n])).ok).toBe(true);
+    expect(validateRecord(del(once()), ctx([n]))).toMatchObject({ ok: false });
+    const old = note(once(), Date.now() - NOTE_TTL_MS - 1000);
+    expect(validateRecord(old, ctx([], false))).toMatchObject({
+      ok: false,
+      reason: 'note expired',
+    });
   });
 });

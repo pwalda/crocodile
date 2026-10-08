@@ -7,11 +7,15 @@ import {
   isSpaceMember,
   keyMatchesUserId,
   linkSecurityCode,
+  openAnonymous,
+  openForSelf,
   openLink,
   openSealed,
   randomDeviceId,
   randomId,
   rotatePrekeys,
+  sealAnonymous,
+  sealForSelf,
   sealLink,
   sealToDevice,
   userIdFromKey,
@@ -25,7 +29,9 @@ import {
 import {
   DELETED_PROFILE_NAME,
   LIMITS,
+  NotePayload,
   fromB64u,
+  isSealedFriends,
   parseSessionId,
   peerIds,
   recordKey,
@@ -40,8 +46,9 @@ import {
   SealedPayload,
   utf8,
   type SealedBox,
-  type FriendsBody,
   type HostCaps,
+  type LegacyFriendsBody,
+  type NoteBody,
   type PresenceStatus,
   type ProfileBody,
   type OperatorInfo,
@@ -54,6 +61,20 @@ import {
 import { CoordinatorLink, type LinkStatus } from './coordinator-link';
 import { CoordinatorConnection, RpcCallError } from './coordinator-connection';
 import { Emitter } from './emitter';
+import {
+  countMine,
+  decodeFriendList,
+  emptyEntry,
+  encodeFriendList,
+  friendsView,
+  mergeEntry,
+  mergeFriendLists,
+  needsNote,
+  pruneFriendList,
+  type FriendEntry,
+  type FriendList,
+  type Mine,
+} from './friend-list';
 import {
   GroupSession,
   defaultTransportFactory,
@@ -230,6 +251,10 @@ export type ClientEvents = {
 const APP_VERSION_FALLBACK = '0.1.0';
 /** How long direct delivery gets before an opted-in DM goes to a mailbox. */
 const MAIL_AFTER_MS = 5000;
+/** How soon to retry a note owed to someone who just came online. */
+const FRIEND_NOTE_RETRY_MS = 5000;
+/** And how often while connected, whoever it is owed to. */
+const FRIEND_NOTE_SWEEP_MS = 10 * 60_000;
 
 /**
  * The whole client behind one object. UIs render `store` and call methods;
@@ -250,6 +275,16 @@ export class CrocodileClient extends Emitter<ClientEvents> {
   private stun: string[] = [];
   private errorId = 0;
   voiceEngine?: VoiceEngine;
+  /** Our relationships, decrypted (see friend-list.ts). */
+  private friendList: FriendList = new Map();
+  /** The list as our stored record has it, encoded; anything else still needs saving. */
+  private friendListStored = '';
+  /** Our stored list is in a form this version can't read: don't overwrite it. */
+  private friendListUnreadable = false;
+  /** Changes to the list run one at a time. */
+  private friendOps: Promise<unknown> = Promise.resolve();
+  private friendRetryTimer?: ReturnType<typeof setTimeout>;
+  private friendSweepTimer?: ReturnType<typeof setInterval>;
 
   constructor(
     readonly platform: PlatformAdapter,
@@ -347,6 +382,10 @@ export class CrocodileClient extends Emitter<ClientEvents> {
       return;
     }
     this.identity = identityFromSeed(fromB64u(seed));
+    // Changes not yet stored on a server (made offline) are kept here.
+    const local = await this.platform.kv.get<string>('friend-list');
+    const kept = local && decodeFriendList(fromB64u(local));
+    if (kept) this.friendList = kept;
     this.refreshDerivedState();
     this.store.set({ phase: 'ready' });
     this.connect();
@@ -517,10 +556,16 @@ export class CrocodileClient extends Emitter<ClientEvents> {
     await this.platform.kv.delete('prekeys');
     await this.platform.kv.delete('device-id');
     await this.platform.kv.delete('outbox');
+    await this.platform.kv.delete('friend-list');
     this.outbox = new Outbox(this.platform.kv);
     clearTimeout(this.mailTimer);
     clearInterval(this.prekeyTimer);
+    clearTimeout(this.friendRetryTimer);
+    clearInterval(this.friendSweepTimer);
     this.prekeys = [];
+    this.friendList = new Map();
+    this.friendListStored = '';
+    this.friendListUnreadable = false;
     await this.loadDevice();
     this.identity = null;
     this.store.set({
@@ -620,6 +665,10 @@ export class CrocodileClient extends Emitter<ClientEvents> {
       void this.forgetLocalAccount({ deleted: true });
     });
     link.on('record', ({ record }) => {
+      if (record.kind === 'note') {
+        void this.readNotes([record]);
+        return;
+      }
       this.records.ingest(record);
       // Membership of ours whose space we have not seen yet (joined on another device).
       if (record.kind === 'member') {
@@ -640,6 +689,10 @@ export class CrocodileClient extends Emitter<ClientEvents> {
       if (p.status !== 'offline' && (was === 'offline' || was === undefined)) {
         const sid = sessionIds.dm(this.userId, p.userId);
         if (this.outbox.forSession(sid).length) void this.pokeDm(sid);
+        // Someone we still owe a note (we couldn't reach their devices before):
+        // try again once their app has had a moment to publish its device.
+        const owed = this.friendList.get(p.userId);
+        if (owed && needsNote(owed)) this.retryFriendNotes(FRIEND_NOTE_RETRY_MS);
       }
     });
     link.on('mail', ({ items }) => void this.onMail(items));
@@ -685,8 +738,19 @@ export class CrocodileClient extends Emitter<ClientEvents> {
       ...myDevices.records,
       ...mine.spaces,
       ...mine.members,
+      // Requests from apps that still write readable lists.
       ...incoming.records,
     ]);
+    // Notes that came while we were away, then whatever our list still owes
+    // the server (a change made offline, or moving an old readable list over)
+    // and our friends (notes not sent yet).
+    const notes = await link.request('records.list', { prefix: recordKey.notePrefix(me) });
+    await this.readNotes(notes.records);
+    await this.queueFriends(() => this.syncFriendList()).catch((err) =>
+      this.log('friends list not saved', { err: String(err) }),
+    );
+    clearInterval(this.friendSweepTimer);
+    this.friendSweepTimer = setInterval(() => this.retryFriendNotes(0), FRIEND_NOTE_SWEEP_MS);
     const spaceIds = mine.spaces.map((s) => s.key.slice('space:'.length));
     // Members of our spaces, so we can verify peers and show member lists.
     for (const id of spaceIds) {
@@ -969,6 +1033,12 @@ export class CrocodileClient extends Emitter<ClientEvents> {
     if (record.kind === 'friends' || record.kind === 'member') {
       void this.fetchProfiles(this.relevantUsers()).catch(() => {});
     }
+    // Another device changed our list, or someone on an old app changed theirs:
+    // store what our copy has that the record lacks.
+    if (record.kind === 'friends' && this.friendListDirty())
+      void this.queueFriends(() => this.saveFriendList()).catch((err) =>
+        this.log('friends list not saved', { err: String(err) }),
+      );
   }
 
   private profileView(r: SignedRecord<'profile'>): ProfileView {
@@ -1016,29 +1086,8 @@ export class CrocodileClient extends Emitter<ClientEvents> {
         .sort((a, b) => Number(b.current) - Number(a.current) || b.lastUpdated - a.lastUpdated);
     }
     if (!changed || changed.kind === 'friends' || changed.kind === 'profile') {
-      const mine = (this.records.get(recordKey.friends(me)) as SignedRecord<'friends'> | undefined)
-        ?.body ?? {
-        friends: [],
-        blocked: [],
-      };
-      const gone = new Set(
-        (this.records.list('profile:') as SignedRecord<'profile'>[])
-          .filter((r) => r.body.deleted)
-          .map((r) => r.key.slice('profile:'.length)),
-      );
-      const listsMe = new Set<string>();
-      for (const r of this.records.list('friends:')) {
-        const owner = r.key.slice('friends:'.length);
-        if (owner !== me && (r.body as FriendsBody).friends.includes(me)) listsMe.add(owner);
-      }
-      const blocked = new Set(mine.blocked);
-      patch.friends = {
-        friends: mine.friends.filter((f) => listsMe.has(f)),
-        // Deleted accounts can't answer a request.
-        outgoing: mine.friends.filter((f) => !listsMe.has(f) && !gone.has(f)),
-        incoming: [...listsMe].filter((u) => !mine.friends.includes(u) && !blocked.has(u)),
-        blocked: mine.blocked,
-      };
+      if (!changed || changed.kind === 'friends') this.absorbFriendRecords();
+      patch.friends = this.friendsView();
     }
     if (!changed || changed.kind === 'space' || changed.kind === 'member') {
       const spaces: Record<string, SpaceView> = {};
@@ -1142,40 +1191,289 @@ export class CrocodileClient extends Emitter<ClientEvents> {
       .map((p) => this.profileView(p));
   }
 
-  private async writeFriends(mutate: (b: FriendsBody) => FriendsBody) {
-    const id = this.identity!;
+  /** Runs changes to the friends list one at a time. */
+  private queueFriends<T>(fn: () => Promise<T>): Promise<T> {
+    const run = this.friendOps.then(fn, fn);
+    this.friendOps = run.catch(() => {});
+    return run;
+  }
+
+  private friendsView() {
+    const gone = new Set(
+      (this.records.list('profile:') as SignedRecord<'profile'>[])
+        .filter((r) => r.body.deleted)
+        .map((r) => r.key.slice('profile:'.length)),
+    );
+    return friendsView(this.friendList, gone);
+  }
+
+  private refreshFriends() {
+    void this.platform.kv.set('friend-list', toB64u(encodeFriendList(this.friendList)));
+    this.store.set({ friends: this.friendsView() });
+    for (const s of this.sessions.values()) s.recheckPeers();
+    void this.fetchProfiles(this.relevantUsers()).catch(() => {});
+  }
+
+  /**
+   * Folds the friends records we hold into our list: our own (sealed, or a
+   * readable one from before sealing, which we take over), and readable ones
+   * from people whose apps haven't updated yet, which say whether they list us.
+   */
+  private absorbFriendRecords() {
+    const id = this.identity;
+    if (!id) return;
+    const me = id.userId;
+    const ownKey = recordKey.friends(me);
+    let list = this.friendList;
+    const own = this.records.get(ownKey) as SignedRecord<'friends'> | undefined;
+    if (own && isSealedFriends(own.body)) {
+      const bytes = openForSelf(id, 'friends', own.body.sealed, ownKey);
+      const stored = bytes && decodeFriendList(bytes);
+      this.friendListUnreadable = !stored;
+      if (stored) {
+        list = mergeFriendLists(list, stored);
+        this.friendListStored = toB64u(encodeFriendList(stored));
+      } else this.log('could not read our friends list');
+    } else if (own) {
+      const body = own.body as LegacyFriendsBody;
+      const legacy: FriendList = new Map();
+      // Everyone we listed is told again, now in a note.
+      for (const f of body.friends)
+        legacy.set(f, { ...emptyEntry(), mine: 'listed', mineAt: own.version });
+      for (const b of body.blocked) {
+        legacy.set(b, {
+          ...emptyEntry(),
+          mine: 'blocked',
+          mineAt: own.version,
+          sentAt: own.version,
+        });
+      }
+      list = mergeFriendLists(list, legacy);
+      this.friendListStored = '';
+    }
+    for (const r of this.records.list('friends:') as SignedRecord<'friends'>[]) {
+      if (r.key === ownKey || isSealedFriends(r.body)) continue;
+      const other = r.key.slice('friends:'.length);
+      const theirs: FriendEntry = {
+        ...emptyEntry(),
+        theirs: r.body.friends.includes(me),
+        theirsAt: r.version,
+      };
+      list.set(other, mergeEntry(list.get(other) ?? emptyEntry(), theirs));
+    }
+    this.friendList = list;
+  }
+
+  private friendListDirty() {
+    return toB64u(encodeFriendList(this.friendList)) !== this.friendListStored;
+  }
+
+  /**
+   * Stores our list, sealed so that only our own devices can read it. If
+   * another device stored a newer one meanwhile, merges with it and retries.
+   */
+  private async saveFriendList() {
+    const id = this.identity;
+    const link = this.link;
+    if (!id || !link || link.status !== 'connected') return;
+    if (this.friendListUnreadable)
+      throw new Error(
+        'Your friends list was saved by a newer version of Crocodile. Update this app to change it.',
+      );
     const key = recordKey.friends(id.userId);
-    const current = (this.records.get(key) as SignedRecord<'friends'> | undefined)?.body ?? {
-      friends: [],
-      blocked: [],
+    for (let attempt = 0; attempt < 3; attempt++) {
+      pruneFriendList(this.friendList, Date.now());
+      const bytes = encodeFriendList(this.friendList);
+      if (toB64u(bytes) === this.friendListStored) return;
+      const record = signRecord(
+        id,
+        'friends',
+        key,
+        { sealed: sealForSelf(id, 'friends', bytes, key) },
+        this.nextVersion(key),
+      );
+      this.records.ingest(record);
+      const res = await link.request('records.put', { record });
+      if (res.accepted) return;
+      this.records.forget(record.key, record.version);
+      this.friendListStored = '';
+      // Newer from another device: ingesting it merges it into ours.
+      if (res.current && res.current.version >= record.version) this.records.ingest(res.current);
+      else throw new Error(res.reason ?? 'rejected by server');
+    }
+    throw new Error('the friends list kept changing; try again');
+  }
+
+  private retryFriendNotes(delayMs: number) {
+    clearTimeout(this.friendRetryTimer);
+    this.friendRetryTimer = setTimeout(() => {
+      if ([...this.friendList.values()].some(needsNote))
+        void this.queueFriends(() => this.syncFriendList()).catch(() => {});
+    }, delayMs);
+  }
+
+  /** Saves the list, then tells people about changes they haven't heard of. */
+  private async syncFriendList() {
+    await this.saveFriendList();
+    const id = this.identity;
+    const link = this.link;
+    if (!id || !link || link.status !== 'connected') return;
+    let told = false;
+    for (const [userId, e] of [...this.friendList]) {
+      if (!needsNote(e)) continue;
+      try {
+        await this.sendFriendNote(userId, e);
+      } catch (err) {
+        // Kept as owed: tried again on the next connection.
+        this.log('friend note not sent', { userId, err: String(err) });
+        continue;
+      }
+      const cur = this.friendList.get(userId);
+      if (cur) this.friendList.set(userId, { ...cur, sentAt: Math.max(cur.sentAt, e.mineAt) });
+      told = true;
+    }
+    if (told) await this.saveFriendList();
+  }
+
+  /**
+   * Tells a user whether we list them, in a note sealed to each of their
+   * devices. The note is signed with a key made for it alone, and our identity
+   * is inside the boxes, so servers can't see who it is from.
+   */
+  private async sendFriendNote(userId: string, e: FriendEntry) {
+    const profile = this.records.get(recordKey.profile(userId)) as
+      SignedRecord<'profile'> | undefined;
+    // A deleted account has no one left to tell.
+    if (profile?.body.deleted) return;
+    const targets = await this.mailTargets([userId]);
+    if (targets.length === 0) throw new Error('no devices to tell');
+    const payload: NotePayload = {
+      type: 'friend',
+      to: userId,
+      listed: e.mine === 'listed',
+      sees: e.theirs,
+      at: e.mineAt,
     };
-    const next = mutate({ friends: [...current.friends], blocked: [...current.blocked] });
-    next.friends = [...new Set(next.friends)].filter((f) => f !== id.userId);
-    next.blocked = [...new Set(next.blocked)];
-    await this.putRecord(signRecord(id, 'friends', key, next, this.nextVersion(key)));
+    const plaintext = utf8.encode(JSON.stringify(payload));
+    const boxes = targets
+      .slice(0, LIMITS.noteBoxesMax)
+      .map((t) => sealAnonymous(this.identity!, this.deviceId, t, plaintext));
+    const author = createIdentity();
+    const record = signRecord(author, 'note', recordKey.note(userId, author.userId), { boxes });
+    const res = await this.link!.request('records.put', { record });
+    if (!res.accepted) throw new Error(res.reason ?? 'note refused');
+  }
+
+  /**
+   * Notes for us: opens this device's box in each, updates the list, and once
+   * the list is stored, deletes the notes from the servers.
+   */
+  private readNotes(records: SignedRecord[]) {
+    return this.queueFriends(async () => {
+      const id = this.identity;
+      if (!id) return;
+      const me = id.userId;
+      const read: SignedRecord[] = [];
+      let changed = false;
+      for (const r of records) {
+        if (r.kind !== 'note' || !r.key.startsWith(recordKey.notePrefix(me))) continue;
+        const body = r.body as NoteBody;
+        if (body.deleted) continue;
+        const box = body.boxes?.find((b) => b.to === this.peer);
+        // No box for this device (linked later): our other devices handle it.
+        if (!box) continue;
+        const opened = openAnonymous(
+          { peer: this.peer },
+          (k) => this.prekeys.find((p) => p.id === k),
+          box,
+          userIdFromKey,
+        );
+        if (!opened) {
+          this.log('could not open note', { key: r.key });
+          continue;
+        }
+        read.push(r);
+        let payload: NotePayload;
+        try {
+          payload = NotePayload.parse(JSON.parse(utf8.decode(opened.plaintext)));
+        } catch {
+          continue;
+        }
+        if (payload.to !== me || opened.fromUser === me) continue;
+        if (this.applyFriendNote(opened.fromUser, payload)) changed = true;
+      }
+      if (changed) {
+        this.refreshFriends();
+        await this.syncFriendList();
+      }
+      if (this.friendListDirty()) return;
+      for (const r of read) {
+        await this.link
+          ?.request('records.put', {
+            record: signRecord(
+              id,
+              'note',
+              r.key,
+              { boxes: [], deleted: true },
+              Math.max(Date.now(), r.version + 1),
+            ),
+          })
+          .catch(() => {});
+      }
+    }).catch((err) => this.log('notes not read', { err: String(err) }));
+  }
+
+  private applyFriendNote(from: string, note: NotePayload): boolean {
+    const e = { ...(this.friendList.get(from) ?? emptyEntry()) };
+    if (note.at <= e.theirsAt) return false;
+    e.theirs = note.listed;
+    e.theirsAt = note.at;
+    // They have an old idea of us (a note of ours got lost): tell them again.
+    if (note.sees !== (e.mine === 'listed') && e.mineAt > 0 && !needsNote(e))
+      e.mineAt = Math.max(Date.now(), e.mineAt + 1);
+    this.friendList.set(from, e);
+    return true;
+  }
+
+  /**
+   * Sets whether we list (or block) someone. The change shows at once and is
+   * stored and sent when connected (now, or on the next connection).
+   */
+  private setMine(userId: string, mine: Mine) {
+    return this.queueFriends(async () => {
+      if (userId === this.userId) throw new Error("You can't add yourself");
+      const prev = this.friendList.get(userId) ?? emptyEntry();
+      if (prev.mine === mine) return;
+      if (mine !== 'none' && countMine(this.friendList, mine) >= LIMITS.friendsMax)
+        throw new Error(
+          mine === 'listed'
+            ? `You can have at most ${LIMITS.friendsMax} friends and requests`
+            : `You can block at most ${LIMITS.friendsMax} people`,
+        );
+      const e = { ...prev, mine, mineAt: Math.max(Date.now(), prev.mineAt + 1) };
+      // Blocking or unblocking someone we don't list changes nothing for them.
+      if (!needsNote(prev) && (prev.mine === 'listed') === (mine === 'listed')) e.sentAt = e.mineAt;
+      this.friendList.set(userId, e);
+      this.refreshFriends();
+      await this.syncFriendList();
+    });
   }
 
   /** Sends a friend request, or accepts one if they already asked. */
   addFriend(userId: string) {
-    return this.writeFriends((b) => ({
-      friends: [...b.friends, userId],
-      blocked: b.blocked.filter((x) => x !== userId),
-    }));
+    return this.setMine(userId, 'listed');
   }
 
   removeFriend(userId: string) {
-    return this.writeFriends((b) => ({ ...b, friends: b.friends.filter((x) => x !== userId) }));
+    return this.setMine(userId, 'none');
   }
 
   block(userId: string) {
-    return this.writeFriends((b) => ({
-      friends: b.friends.filter((x) => x !== userId),
-      blocked: [...b.blocked, userId],
-    }));
+    return this.setMine(userId, 'blocked');
   }
 
   unblock(userId: string) {
-    return this.writeFriends((b) => ({ ...b, blocked: b.blocked.filter((x) => x !== userId) }));
+    return this.setMine(userId, 'none');
   }
 
   async setStatus(status: Settings['status']) {
@@ -1542,7 +1840,6 @@ export class CrocodileClient extends Emitter<ClientEvents> {
     const keys = [recordKey.device(userId, peerIds.device(peer))];
     if (scope.kind !== 'dm')
       keys.push(recordKey.member(scope.spaceId, userId), recordKey.space(scope.spaceId));
-    else keys.push(recordKey.friends(userId));
     const res = await this.link.request('records.get', { keys });
     this.records.ingestAll(res.records);
   }
@@ -2013,6 +2310,8 @@ export class CrocodileClient extends Emitter<ClientEvents> {
 
   async shutdown() {
     clearTimeout(this.mailTimer);
+    clearTimeout(this.friendRetryTimer);
+    clearInterval(this.friendSweepTimer);
     await this.leaveVoice().catch(() => {});
     for (const s of this.sessions.values()) await s.leave().catch(() => {});
     this.link?.stop();

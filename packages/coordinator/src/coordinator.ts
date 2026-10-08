@@ -167,6 +167,7 @@ export class Coordinator {
   >();
   /** Codes this server resolved for a claiming device (code -> target peer). */
   private claims = new Map<string, { peer: string; by: string; expiresAt: number }>();
+  private noteTimer?: ReturnType<typeof setInterval>;
 
   constructor(config: Partial<CoordinatorConfig> & Pick<CoordinatorConfig, 'name'>) {
     this.config = { ...defaultConfig, ...config };
@@ -211,6 +212,11 @@ export class Coordinator {
       if (record.kind === 'profile' && (record.body as ProfileBody).deleted)
         this.purgeAccount(record as SignedRecord<'profile'>);
     });
+    this.noteTimer = setInterval(() => {
+      const n = this.records.expireNotes();
+      if (n) this.log.info('notes expired', { count: n });
+    }, 3600_000);
+    this.noteTimer.unref?.();
   }
 
   /**
@@ -224,6 +230,7 @@ export class Coordinator {
       ...this.store.listPrefix(recordKey.devicePrefix(userId), 100_000).map((r) => r.key),
       recordKey.friends(userId),
       ...this.store.findByTerm(`member-any:${userId}`, 100_000).map((r) => r.key),
+      ...this.store.listPrefix(recordKey.notePrefix(userId), 100_000).map((r) => r.key),
     ];
     for (const key of keys) this.store.delete(key);
     const mail = this.store.mailDeleteUser(userId);
@@ -471,17 +478,24 @@ export class Coordinator {
   }
 
   private pushRecordToClients(record: SignedRecord) {
+    // Requests from apps that still write the readable list. Sealed lists say
+    // nothing; their notes reach the recipient instead.
     let friendOf: Set<string> | undefined;
-    if (record.kind === 'friends')
-      friendOf = new Set((record as SignedRecord<'friends'>).body.friends);
-    // Your own memberships reach all your devices (a space joined on another device).
-    const memberOf =
-      record.kind === 'member' ? (record as SignedRecord<'member'>).body.userId : undefined;
+    const body = record.body as { friends?: string[] };
+    if (record.kind === 'friends' && body.friends) friendOf = new Set(body.friends);
+    // Your own memberships reach all your devices (a space joined on another device),
+    // and so do your notes.
+    const forUser =
+      record.kind === 'member'
+        ? (record as SignedRecord<'member'>).body.userId
+        : record.kind === 'note'
+          ? record.key.split(':')[1]
+          : undefined;
     for (const client of this.presence.localClients()) {
       if (
         (client as ClientConnection).wants(record) ||
         friendOf?.has(client.userId) ||
-        memberOf === client.userId
+        forUser === client.userId
       ) {
         client.send('record', { record });
       }
@@ -671,6 +685,7 @@ export class Coordinator {
     this.mesh.close();
     this.sessions.close();
     this.mailbox.close();
+    clearInterval(this.noteTimer);
     for (const g of this.relayGrants.values()) clearTimeout(g.timer);
     this.turn?.stop();
     this.stunAlt?.close();

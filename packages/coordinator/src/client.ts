@@ -15,6 +15,7 @@ import {
   RpcParams,
   SIG_DOMAIN,
   peerIds,
+  recordKey,
   type LinkBox,
   type SealedBox,
   type Platform,
@@ -233,11 +234,17 @@ export class ClientConnection implements ClientHandle {
       }
       case 'records.get': {
         const { keys } = p as unknown as { keys: string[] };
-        return { records: keys.map((k) => store.get(k)).filter(Boolean) };
+        return {
+          records: keys
+            .map((k) => store.get(k))
+            .filter((r): r is SignedRecord => !!r && this.mayRead(r)),
+        };
       }
       case 'records.list': {
         const { prefix, limit } = p as unknown as { prefix: string; limit?: number };
-        return { records: store.listPrefix(prefix, limit ?? 1000) };
+        return {
+          records: store.listPrefix(prefix, limit ?? 1000).filter((r) => this.mayRead(r)),
+        };
       }
       case 'records.subscribe': {
         const { prefixes } = p as unknown as { prefixes: string[] };
@@ -355,7 +362,16 @@ export class ClientConnection implements ClientHandle {
 
   /** True if this client subscribed to a prefix covering the record key. */
   wants(record: SignedRecord): boolean {
+    if (!this.mayRead(record)) return false;
     for (const prefix of this.subscriptions) if (record.key.startsWith(prefix)) return true;
     return false;
+  }
+
+  /**
+   * Notes are sealed, but how many someone gets, and when, is theirs alone to
+   * see: only the recipient may read them.
+   */
+  mayRead(record: SignedRecord): boolean {
+    return record.kind !== 'note' || record.key.startsWith(recordKey.notePrefix(this.userId));
   }
 }

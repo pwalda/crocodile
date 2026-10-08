@@ -8,12 +8,22 @@ import { LIMITS } from './constants';
  *
  * Voice and text content are never records.
  */
-export const RECORD_KINDS = ['profile', 'device', 'friends', 'space', 'invite', 'member'] as const;
+export const RECORD_KINDS = [
+  'profile',
+  'device',
+  'friends',
+  'space',
+  'invite',
+  'member',
+  'note',
+] as const;
 export type RecordKind = (typeof RECORD_KINDS)[number];
 
 const id = z.string().regex(/^[a-z2-7]{8,64}$/);
 const pubKey = z.string().regex(/^[A-Za-z0-9_-]{43}$/);
+const b64u = /^[A-Za-z0-9_-]*$/;
 export const DeviceId = z.string().regex(/^[a-z2-7]{8,32}$/);
+const peerId = z.string().regex(/^[a-z2-7]{8,64}\.[a-z2-7]{8,32}$/);
 
 /**
  * A device's current one-time-ish prekey: an X25519 key plus an ML-KEM-768
@@ -70,14 +80,83 @@ export type ProfileBody = z.infer<typeof ProfileBody>;
 export const DELETED_PROFILE_NAME = 'Deleted user';
 
 /**
- * A user's own relationship list. A friendship exists when both users list
- * each other; listing someone who does not list you back is a pending request.
+ * The old, readable form of a user's relationship list: everyone could see
+ * whom you listed. Still accepted from apps that have not updated yet, and
+ * read once to move a list into the sealed form.
  */
-export const FriendsBody = z.object({
+export const LegacyFriendsBody = z.object({
   friends: z.array(id).max(LIMITS.friendsMax),
   blocked: z.array(id).max(LIMITS.friendsMax),
 });
-export type FriendsBody = z.infer<typeof FriendsBody>;
+export type LegacyFriendsBody = z.infer<typeof LegacyFriendsBody>;
+
+/**
+ * A user's relationship list (friends, requests, blocks), encrypted with a
+ * key only the user's own devices derive from the account seed. Servers store
+ * and replicate it but can't read it. The other side of each relationship
+ * learns about it from sealed notes (see NoteBody).
+ */
+export const SealedFriendsBody = z.object({
+  sealed: z.string().regex(b64u).max(LIMITS.recordMaxBytes),
+});
+export type SealedFriendsBody = z.infer<typeof SealedFriendsBody>;
+
+export const FriendsBody = z.union([SealedFriendsBody, LegacyFriendsBody]);
+export type FriendsBody = SealedFriendsBody | LegacyFriendsBody;
+
+export function isSealedFriends(body: FriendsBody): body is SealedFriendsBody {
+  return typeof (body as { sealed?: unknown }).sealed === 'string';
+}
+
+/**
+ * A box to one device that hides its sender: the sender's identity and
+ * signature are inside the encryption (hybrid X25519 + ML-KEM-768 against the
+ * device's prekey, like SealedBox), so a server sees only the recipient.
+ */
+export const AnonBox = z.object({
+  v: z.literal(3),
+  /** Recipient peer id. */
+  to: peerId,
+  /** Recipient prekey id. */
+  pk: z.number().int().min(0).max(0xffffffff),
+  /** Ephemeral X25519 public key. */
+  epk: pubKey,
+  /** ML-KEM-768 ciphertext (1088 bytes). */
+  kem: z.string().regex(/^[A-Za-z0-9_-]{1451}$/),
+  ct: z.string().regex(b64u).max(8192),
+});
+export type AnonBox = z.infer<typeof AnonBox>;
+
+/**
+ * A note: a small sealed message to a user that every server keeps until the
+ * user's devices have read it (they then replace it with `deleted`), and at
+ * most NOTE_TTL_MS. Notes carry friend requests and their answers.
+ *
+ * Key `note:<recipient>:<noteId>`. A note is signed by a one-time key with
+ * noteId = userIdFromKey(that key), so servers can check it without learning
+ * who sent it; only the recipient may delete it.
+ */
+export const NoteBody = z.object({
+  boxes: z.array(AnonBox).max(LIMITS.noteBoxesMax),
+  deleted: z.boolean().optional(),
+});
+export type NoteBody = z.infer<typeof NoteBody>;
+
+/** What a note says, inside its boxes. */
+export const NotePayload = z.discriminatedUnion('type', [
+  z.object({
+    type: z.literal('friend'),
+    /** Recipient user id; a note can't be passed on to someone else. */
+    to: id,
+    /** Whether the sender lists the recipient (a request, or a friendship once both do). */
+    listed: z.boolean(),
+    /** Whether the sender thinks the recipient lists them, so a stale side can catch up. */
+    sees: z.boolean(),
+    /** When the sender set `listed`; later ones win. */
+    at: z.number().int().positive(),
+  }),
+]);
+export type NotePayload = z.infer<typeof NotePayload>;
 
 export const ChannelKind = z.enum(['text', 'voice']);
 export type ChannelKind = z.infer<typeof ChannelKind>;
@@ -132,6 +211,7 @@ export interface RecordBodies {
   space: SpaceBody;
   invite: InviteBody;
   member: MemberBody;
+  note: NoteBody;
 }
 
 export const RECORD_BODY_SCHEMAS = {
@@ -141,6 +221,7 @@ export const RECORD_BODY_SCHEMAS = {
   space: SpaceBody,
   invite: InviteBody,
   member: MemberBody,
+  note: NoteBody,
 } as const satisfies Record<RecordKind, z.ZodType>;
 
 export interface SignedRecord<K extends RecordKind = RecordKind> {
@@ -175,6 +256,8 @@ export const recordKey = {
   invite: (code: string) => `invite:${code}`,
   member: (spaceId: string, userId: string) => `member:${spaceId}:${userId}`,
   memberPrefix: (spaceId: string) => `member:${spaceId}:`,
+  note: (userId: string, noteId: string) => `note:${userId}:${noteId}`,
+  notePrefix: (userId: string) => `note:${userId}:`,
 };
 
 /** Replication order: records later in this list may depend on earlier ones. */
@@ -185,4 +268,5 @@ export const RECORD_KIND_ORDER: Record<RecordKind, number> = {
   space: 3,
   invite: 4,
   member: 5,
+  note: 6,
 };
