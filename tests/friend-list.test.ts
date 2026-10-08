@@ -48,6 +48,16 @@ describe('friend list', () => {
     });
   });
 
+  it('merges the same way whichever copy comes first, even on equal clocks', () => {
+    const phone: FriendList = new Map([
+      [id('a'), { mine: 'listed', mineAt: 5, theirs: false, theirsAt: 9, sentAt: 0 }],
+    ]);
+    const laptop: FriendList = new Map([
+      [id('a'), { mine: 'blocked', mineAt: 5, theirs: true, theirsAt: 9, sentAt: 0 }],
+    ]);
+    expect(mergeFriendLists(phone, laptop)).toEqual(mergeFriendLists(laptop, phone));
+  });
+
   it('forgets only entries that say nothing any more', () => {
     const now = Date.now();
     const old = now - NOTE_TTL_MS - 1;

@@ -29,9 +29,19 @@ export function emptyEntry(): FriendEntry {
   return { mine: 'none', mineAt: 0, theirs: false, theirsAt: 0, sentAt: 0 };
 }
 
+const MINE_ORDER: Record<Mine, number> = { none: 0, listed: 1, blocked: 2 };
+
+/**
+ * Commutative: the same result whichever copy comes first. On equal clocks
+ * (two devices in the same millisecond) a fixed order of values decides.
+ */
 export function mergeEntry(a: FriendEntry, b: FriendEntry): FriendEntry {
-  const mine = b.mineAt > a.mineAt ? b : a;
-  const theirs = b.theirsAt > a.theirsAt ? b : a;
+  const mine =
+    b.mineAt > a.mineAt || (b.mineAt === a.mineAt && MINE_ORDER[b.mine] > MINE_ORDER[a.mine])
+      ? b
+      : a;
+  const theirs =
+    b.theirsAt > a.theirsAt || (b.theirsAt === a.theirsAt && b.theirs && !a.theirs) ? b : a;
   return {
     mine: mine.mine,
     mineAt: mine.mineAt,

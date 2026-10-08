@@ -17,9 +17,10 @@ block: each person's list is encrypted so that only their own devices can
 read it, and friend requests and their answers travel as notes sealed to the
 recipient's devices, with the sender's identity inside the encryption. A
 server sees that someone sent a note to a user, when, and its size. The
-server you are connected to does see whose presence you follow and whom you
-start a direct message or call with, while you do; nothing of that is
-replicated to other servers or kept after you disconnect. Blocks are
+server you are connected to does see whose presence you follow, whom you
+send a friend request or answer to, and whom you start a direct message or
+call with, while you do; it doesn't record who sent a note, and nothing of
+that is replicated to other servers or kept after you disconnect. Blocks are
 enforced by your own apps. They pass on signalling (SDP and
 ICE candidates), which includes IP addresses. They never receive message or
 voice content, except that a user who turned on the **opt-in relay** sends

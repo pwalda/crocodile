@@ -528,17 +528,33 @@ export class GroupSession extends Emitter<GroupSessionEvents> {
     return st?.host === from && (st.backup === this.me || !st.backup);
   }
 
-  /** Called when records change: admit peers that became allowed. */
+  /**
+   * Called when records or blocks change: admit peers that became allowed,
+   * and cut off those that no longer are (blocked, banned, removed device):
+   * their keys are dropped and ours is replaced, so neither side can read
+   * the other any more.
+   */
   recheckPeers() {
+    let revoked = false;
     for (const peer of this.peers.keys()) {
-      if (
-        this.keySentTo.get(peer) !== this.keyring.kid &&
-        this.ctx.isAllowedPeer(this.sessionId, peer)
-      ) {
-        void this.sendKeyTo(peer);
+      if (this.ctx.isAllowedPeer(this.sessionId, peer)) {
+        if (this.keySentTo.get(peer) !== this.keyring.kid) void this.sendKeyTo(peer);
+      } else if (this.keySentTo.has(peer) || this.keyring.hasKeyFrom(peer)) {
+        this.keySentTo.delete(peer);
+        this.keyring.forgetPeer(peer);
+        revoked = true;
       }
     }
+    // The new key only goes to peers still allowed.
+    if (revoked) this.keyring.rotate();
     void this.processParkedKeys();
+  }
+
+  /** Whether a peer may be heard, after fetching their records once if not. */
+  private async mayHear(peer: string) {
+    if (this.ctx.isAllowedPeer(this.sessionId, peer)) return true;
+    await this.ctx.refreshPeer(this.sessionId, peer).catch(() => {});
+    return this.ctx.isAllowedPeer(this.sessionId, peer);
   }
 
   private keySentTo = new Map<string, number>();
@@ -641,13 +657,16 @@ export class GroupSession extends Emitter<GroupSessionEvents> {
         await this.flushPending();
         return;
       case 'history_req':
+        if (!(await this.mayHear(from))) return;
         await this.serveHistory(from, payload.since);
         return;
       case 'history':
+        if (!(await this.mayHear(from))) return;
         for (const m of payload.messages) await this.ctx.acceptMessage(this.sessionId, m);
         this.queueAck(from, payload.messages);
         return;
       case 'message':
+        if (!(await this.mayHear(from))) return;
         await this.ctx.acceptMessage(this.sessionId, payload.message);
         this.queueAck(from, [payload.message]);
         return;
@@ -671,6 +690,8 @@ export class GroupSession extends Emitter<GroupSessionEvents> {
     } catch {
       return;
     }
+    // Keys from someone since blocked or removed may still be in flight.
+    if (!this.ctx.isAllowedPeer(this.sessionId, from)) return;
     const fromUser = peerIds.user(from);
     if (payload.type === 'message') {
       if (payload.message.author !== fromUser) return;

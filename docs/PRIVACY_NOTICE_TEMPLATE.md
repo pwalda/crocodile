@@ -47,7 +47,8 @@ that people on different servers can reach each other. They are signed by
 their owners, so servers can't forge them. Profiles, spaces and memberships
 are not hidden from servers; friend lists and friend requests are encrypted.
 While someone is connected, this server also sees whose presence their app
-follows and whom they start a direct message or call with; it doesn't keep
+follows, whom they send a friend request or answer to, and whom they start
+a direct message or call with; it doesn't keep
 that after they disconnect.
 
 ### Legal basis

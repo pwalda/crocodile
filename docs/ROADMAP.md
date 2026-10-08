@@ -55,7 +55,7 @@ report what matters most; issues and discussions are welcome.
 7. **Wayland global shortcuts** (XDG GlobalShortcuts portal) and Flathub.
 8. **Less metadata on servers**: private space memberships, and keeping the
    connected server from seeing whose presence an app follows and whom it
-   messages (for example presence exchanged between friends directly).
+   befriends or messages (for example presence exchanged between friends directly).
 9. **A mesh that scales**: keep each record on a few servers chosen by
    rendezvous hashing instead of on all of them, with a sparse, always
    connected overlay that routes requests, instead of every server linking

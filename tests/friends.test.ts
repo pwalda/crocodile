@@ -7,8 +7,7 @@ import {
 } from '@crocodile/client-core';
 import type { Coordinator } from '@crocodile/coordinator';
 import { createIdentity, encodeRecoveryKey, sealForSelf, signRecord } from '@crocodile/crypto';
-import { utf8 } from '@crocodile/protocol';
-import { recordKey, type SignedRecord } from '@crocodile/protocol';
+import { recordKey, utf8, type NoteBody, type SignedRecord } from '@crocodile/protocol';
 import { FakeRelayNetwork } from './helpers/fake-relay';
 import { connectUser, expectAccepted, startCoordinator, waitFor } from './helpers';
 
@@ -298,5 +297,83 @@ describe('friends', () => {
     expectAccepted(await alice.link!.request('records.put', { record: future }));
     await expect(alice.addFriend(bob.userId)).rejects.toThrow(/newer version/);
     expect(coord.records.get(key)?.sig).toBe(future.sig);
+    // Nothing changed locally either, to be merged in after an update.
+    expect(alice.state.friends.outgoing).toEqual([]);
+    const kept = (await alice.platform.kv.get<string>('friend-list')) ?? '';
+    expect(kept).not.toContain(bob.userId);
+  });
+
+  it('cuts off someone blocked in the middle of a conversation', async () => {
+    const coord = await server();
+    const net = new FakeRelayNetwork();
+    const alice = await signUp(makeClient(net, coord), 'alice');
+    const bob = await signUp(makeClient(net, coord), 'bob');
+    await alice.addFriend(bob.userId);
+    await waitFor(() => bob.state.friends.incoming.includes(alice.userId), 8000, 'request');
+    await bob.addFriend(alice.userId);
+    const dm = await alice.openDm(bob.userId);
+    await waitFor(() => bob.state.dms.includes(alice.userId), 8000, 'dm invite');
+    await alice.openChannel(dm);
+    await bob.openChannel(dm);
+    await waitFor(() => alice.state.sessions[dm]?.peers.includes(bob.userId), 8000, 'dm up');
+    await bob.sendMessage(dm, 'hi');
+    await waitFor(() => (alice.state.messages[dm] ?? []).some((m) => m.body === 'hi'), 8000);
+
+    await alice.block(bob.userId);
+    // Neither his typing, his call nor his messages get through, and he can't
+    // read what she writes after blocking him.
+    bob.sendTyping(dm);
+    // A ring, as callDm sends it (that also needs a microphone).
+    (bob as unknown as { sendCallSignal(s: string, a: 'ring'): void }).sendCallSignal(dm, 'ring');
+    await bob.sendMessage(dm, 'are you there?');
+    await alice.sendMessage(dm, 'note to self');
+    await new Promise((r) => setTimeout(r, 1500));
+    expect(Object.keys(alice.state.typing[dm] ?? {})).toEqual([]);
+    expect(alice.state.incomingCall).toBeNull();
+    expect((alice.state.messages[dm] ?? []).map((m) => m.body)).not.toContain('are you there?');
+    expect((bob.state.messages[dm] ?? []).map((m) => m.body)).not.toContain('note to self');
+  });
+
+  it('stores the list again after a save that never reached the server', async () => {
+    const coord = await server();
+    const net = new FakeRelayNetwork();
+    let alice = await signUp(makeClient(net, coord), 'alice');
+    const link = alice.link!;
+    const request = link.request.bind(link);
+    link.request = ((method: string, params: { record?: SignedRecord }) =>
+      method === 'records.put' && params.record?.kind === 'friends'
+        ? Promise.reject(new Error('connection lost'))
+        : request(method as never, params as never)) as typeof link.request;
+    // A change that sends nobody a note: blocking someone she doesn't list.
+    const pest = createIdentity().userId;
+    await expect(alice.block(pest)).rejects.toThrow(/connection lost/);
+    // Long enough for the local cache to be written.
+    await new Promise((r) => setTimeout(r, 1500));
+    alice = await restart(net, alice, coord);
+    // Another device sees it, so it reached the server.
+    const laptop = await otherDevice(net, alice, coord);
+    await waitFor(() => laptop.state.friends.blocked.includes(pest), 8000, 'stored');
+  });
+
+  it('reaches every device of someone with many', async () => {
+    const coord = await server();
+    const net = new FakeRelayNetwork();
+    const alice = await signUp(makeClient(net, coord), 'alice');
+    const bob = await signUp(makeClient(net, coord), 'bob');
+    const peers = [bob.peer];
+    for (let i = 0; i < 19; i++) {
+      const device = await otherDevice(net, bob, coord);
+      peers.push(device.peer);
+      await waitFor(() => coord.records.get(recordKey.device(bob.userId, device.deviceId)), 5000);
+      await device.shutdown();
+    }
+    const sent: SignedRecord[] = [];
+    coord.records.onAccepted((r) => {
+      if (r.kind === 'note' && !(r.body as NoteBody).deleted) sent.push(r);
+    });
+    await alice.addFriend(bob.userId);
+    const boxed = sent.flatMap((r) => (r.body as NoteBody).boxes.map((b) => b.to));
+    expect(sent.length).toBe(2);
+    expect(boxed.sort()).toEqual(peers.sort());
   });
 });

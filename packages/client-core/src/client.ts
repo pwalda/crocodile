@@ -896,8 +896,8 @@ export class CrocodileClient extends Emitter<ClientEvents> {
     }
   }
 
-  /** Current, unrevoked devices of some users, except this one. */
-  private async mailTargets(userIds: string[]) {
+  /** Current, unrevoked devices of some users, except this one (at most `max`). */
+  private async mailTargets(userIds: string[], max = 20) {
     const out: { peer: string; prekey: DeviceBody['prekey'] }[] = [];
     for (const userId of new Set(userIds)) {
       const res = await this.link!.request('records.list', {
@@ -912,7 +912,7 @@ export class CrocodileClient extends Emitter<ClientEvents> {
         out.push({ peer, prekey: verified.body.prekey });
       }
     }
-    return out.slice(0, 20);
+    return out.slice(0, max);
   }
 
   /** Mail that waited on a server for this device. */
@@ -1264,6 +1264,13 @@ export class CrocodileClient extends Emitter<ClientEvents> {
     this.friendList = list;
   }
 
+  private checkFriendListWritable() {
+    if (this.friendListUnreadable)
+      throw new Error(
+        'Your friends list was saved by a newer version of Crocodile. Update this app to change it.',
+      );
+  }
+
   private friendListDirty() {
     return toB64u(encodeFriendList(this.friendList)) !== this.friendListStored;
   }
@@ -1276,10 +1283,7 @@ export class CrocodileClient extends Emitter<ClientEvents> {
     const id = this.identity;
     const link = this.link;
     if (!id || !link || link.status !== 'connected') return;
-    if (this.friendListUnreadable)
-      throw new Error(
-        'Your friends list was saved by a newer version of Crocodile. Update this app to change it.',
-      );
+    this.checkFriendListWritable();
     const key = recordKey.friends(id.userId);
     for (let attempt = 0; attempt < 3; attempt++) {
       pruneFriendList(this.friendList, Date.now());
@@ -1293,7 +1297,15 @@ export class CrocodileClient extends Emitter<ClientEvents> {
         this.nextVersion(key),
       );
       this.records.ingest(record);
-      const res = await link.request('records.put', { record });
+      let res;
+      try {
+        res = await link.request('records.put', { record });
+      } catch (err) {
+        // Not stored as far as we know: keep it owed, so it is sent again.
+        this.records.forget(record.key, record.version);
+        this.friendListStored = '';
+        throw err;
+      }
       if (res.accepted) return;
       this.records.forget(record.key, record.version);
       this.friendListStored = '';
@@ -1338,14 +1350,16 @@ export class CrocodileClient extends Emitter<ClientEvents> {
   /**
    * Tells a user whether we list them, in a note sealed to each of their
    * devices. The note is signed with a key made for it alone, and our identity
-   * is inside the boxes, so servers can't see who it is from.
+   * is inside the boxes, so the note itself doesn't say who it is from. (The
+   * server we hand it to knows it came from us; the others don't.)
    */
   private async sendFriendNote(userId: string, e: FriendEntry) {
     const profile = this.records.get(recordKey.profile(userId)) as
       SignedRecord<'profile'> | undefined;
     // A deleted account has no one left to tell.
     if (profile?.body.deleted) return;
-    const targets = await this.mailTargets([userId]);
+    // Every device they have: servers' default device quota per account.
+    const targets = await this.mailTargets([userId], 100);
     if (targets.length === 0) throw new Error('no devices to tell');
     const payload: NotePayload = {
       type: 'friend',
@@ -1355,13 +1369,16 @@ export class CrocodileClient extends Emitter<ClientEvents> {
       at: e.mineAt,
     };
     const plaintext = utf8.encode(JSON.stringify(payload));
-    const boxes = targets
-      .slice(0, LIMITS.noteBoxesMax)
-      .map((t) => sealAnonymous(this.identity!, this.deviceId, t, plaintext));
-    const author = createIdentity();
-    const record = signRecord(author, 'note', recordKey.note(userId, author.userId), { boxes });
-    const res = await this.link!.request('records.put', { record });
-    if (!res.accepted) throw new Error(res.reason ?? 'note refused');
+    // One note per few devices, so every device of theirs gets a box.
+    for (let i = 0; i < targets.length; i += LIMITS.noteBoxesMax) {
+      const boxes = targets
+        .slice(i, i + LIMITS.noteBoxesMax)
+        .map((t) => sealAnonymous(this.identity!, this.deviceId, t, plaintext));
+      const author = createIdentity();
+      const record = signRecord(author, 'note', recordKey.note(userId, author.userId), { boxes });
+      const res = await this.link!.request('records.put', { record });
+      if (!res.accepted) throw new Error(res.reason ?? 'note refused');
+    }
   }
 
   /**
@@ -1371,7 +1388,8 @@ export class CrocodileClient extends Emitter<ClientEvents> {
   private readNotes(records: SignedRecord[]) {
     return this.queueFriends(async () => {
       const id = this.identity;
-      if (!id) return;
+      // A list we can't read: leave its notes for an app that can.
+      if (!id || this.friendListUnreadable) return;
       const me = id.userId;
       const read: SignedRecord[] = [];
       let changed = false;
@@ -1442,6 +1460,7 @@ export class CrocodileClient extends Emitter<ClientEvents> {
   private setMine(userId: string, mine: Mine) {
     return this.queueFriends(async () => {
       if (userId === this.userId) throw new Error("You can't add yourself");
+      this.checkFriendListWritable();
       const prev = this.friendList.get(userId) ?? emptyEntry();
       if (prev.mine === mine) return;
       if (mine !== 'none' && countMine(this.friendList, mine) >= LIMITS.friendsMax)
