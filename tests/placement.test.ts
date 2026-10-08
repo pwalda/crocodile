@@ -4,6 +4,7 @@ import { recordKey } from '@crocodile/protocol';
 import {
   HashRing,
   View,
+  dependenciesOf,
   shardOfKey,
   shardOfPrefix,
   shardOfTerm,
@@ -61,5 +62,22 @@ describe('placement', () => {
     expect(shardOfTerm('name:alice')).toBe('name:alice');
     expect(shardOfTerm('invite-space:spacexyz')).toBe('space:spacexyz');
     expect(shardOfTerm(`friend-of:${u}`)).toBeUndefined();
+  });
+
+  it("doesn't count a profile as its own dependency", () => {
+    const alice = createIdentity();
+    const profile = signRecord(alice, 'profile', recordKey.profile(alice.userId), {
+      username: 'alice',
+      encKey: alice.encPublicKey,
+    });
+    expect(dependenciesOf(profile, alice.userId)).toEqual([]);
+    const device = signRecord(alice, 'device', recordKey.device(alice.userId, 'abcdefgh'), {
+      userId: alice.userId,
+      deviceId: 'abcdefgh',
+      name: 'x',
+      platform: 'bot',
+      prekey: { id: 1, x25519: 'a'.repeat(43), mlkem: 'b'.repeat(1579), expiresAt: 0 },
+    });
+    expect(dependenciesOf(device, alice.userId)).toEqual([recordKey.profile(alice.userId)]);
   });
 });

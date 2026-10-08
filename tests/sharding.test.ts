@@ -36,7 +36,7 @@ afterEach(async () => {
 const sharded: Partial<CoordinatorConfig> = {
   replicas: 2,
   mesh: { fullMeshMax: 3, maintainMs: 150, idleMs: 1500 },
-  membership: { beaconMs: 200, liveMs: 1500, settleMs: 300 },
+  membership: { beaconMs: 600, liveMs: 3000, settleMs: 300 },
   distribution: {
     gcStableMs: 1200,
     gcCheckMs: 250,
@@ -359,6 +359,22 @@ describe('staying consistent', () => {
       }),
     );
     await waitFor(() => holders(servers, memberKey).length === 0, 8000, 'membership erased');
+  });
+
+  it('answers a request sent while the link to that server is closing', async () => {
+    const [a, b] = await network(2);
+    const link = (
+      a!.mesh as unknown as {
+        links: Map<string, { idle: boolean; ws: { close(code: number, r: string): void } }>;
+      }
+    ).links.get(b!.info.id)!;
+    // The link starts closing (as for idleness); a request goes out right then.
+    link.idle = true;
+    link.ws.close(4000, 'idle');
+    const res = await a!.mesh.request<{ records: unknown[] }>(b!.info.id, 'rec_get', {
+      keys: [recordKey.profile(createIdentity().userId)],
+    });
+    expect(res.records).toEqual([]);
   });
 
   it('tries an unreachable neighbour again after a while', async () => {

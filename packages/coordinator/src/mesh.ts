@@ -115,6 +115,8 @@ export class Mesh {
     string,
     {
       server: string;
+      /** The link it went out on; unset while it waits for one. */
+      link?: Link;
       resolve: (v: unknown) => void;
       reject: (e: Error) => void;
       timer: ReturnType<typeof setTimeout>;
@@ -257,7 +259,9 @@ export class Mesh {
   sendTo(serverId: string, frame: FedFrame): boolean {
     if (serverId === this.selfId) return false;
     const link = this.links.get(serverId);
-    if (link?.channel) return this.send(link, frame);
+    // A link that is closing (idle, or the other side went) loses what we
+    // write to it: queue instead, and dial again once it has closed.
+    if (link?.channel && link.ws.readyState === link.ws.OPEN) return this.send(link, frame);
     const s = this.known.get(serverId);
     if (!s) return false;
     const now = Date.now();
@@ -283,8 +287,11 @@ export class Mesh {
         reject(new RpcFailure('unavailable', `server ${serverId} did not answer`));
       }, timeoutMs);
       timer.unref?.();
+      const link = this.links.get(serverId);
+      const open = !!link?.channel && link.ws.readyState === link.ws.OPEN;
       this.requests.set(rid, {
         server: serverId,
+        ...(open ? { link } : {}),
         resolve: resolve as (v: unknown) => void,
         reject,
         timer,
@@ -532,8 +539,11 @@ export class Mesh {
       if (peerId && this.links.get(peerId) === link) {
         this.links.delete(peerId);
         this.hub.log.info('mesh link down', { peer: peerId });
-        this.failRequests(peerId);
+        this.failRequests(peerId, link);
         this.hub.membership.linkDown(peerId, !link.idle && code !== IDLE_CLOSE && !this.closed);
+        // Frames queued while it was closing.
+        const s = this.known.get(peerId);
+        if (s && this.queued.get(peerId)?.length && !this.closed) this.ensureDial(s.url);
       }
       if (link.replaced || link.idle || code === IDLE_CLOSE || this.closed) return;
       const redialUrl = link.initiator ? url : link.peer?.url;
@@ -542,9 +552,10 @@ export class Mesh {
     return link;
   }
 
-  private failRequests(serverId: string) {
+  /** Requests sent on a link that went away won't be answered; queued ones still may be. */
+  private failRequests(serverId: string, link: Link) {
     for (const [rid, r] of this.requests) {
-      if (r.server !== serverId) continue;
+      if (r.server !== serverId || r.link !== link) continue;
       clearTimeout(r.timer);
       this.requests.delete(rid);
       r.reject(new RpcFailure('unavailable', `lost the link to server ${serverId}`));
@@ -786,7 +797,14 @@ export class Mesh {
     if (!q) return;
     this.queued.delete(serverId);
     const now = Date.now();
-    for (const e of q) if (now - e.at < QUEUE_MS) this.send(link, e.frame);
+    for (const e of q) {
+      if (now - e.at >= QUEUE_MS) continue;
+      if (e.frame.t === 'req') {
+        const r = this.requests.get(e.frame.rid);
+        if (r) r.link = link;
+      }
+      this.send(link, e.frame);
+    }
   }
 
   /** Streams the records the peer owns that it hasn't seen, respecting backpressure. */

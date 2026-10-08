@@ -203,5 +203,6 @@ export function dependenciesOf(record: SignedRecord, authorId: string): string[]
     if (body.inviteCode) deps.push(`invite:${body.inviteCode}`);
   }
   if (record.kind === 'note') deps.push(`profile:${record.key.split(':')[1]}`);
-  return deps;
+  // A profile's author is the profile itself: nothing to fetch for it.
+  return deps.filter((k) => k !== record.key);
 }
