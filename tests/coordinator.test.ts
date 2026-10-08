@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import {
   createIdentity,
   createPrekey,
+  isSpaceMember,
   randomDeviceId,
   randomId,
   sealAnonymous,
@@ -254,7 +255,7 @@ describe('coordination mesh', () => {
     const s = await createSpace(alice);
     const b = await server({ name: 'B', meshPeers: [a.url] });
     await waitFor(() => b.records.get(`invite:${s.code}`), 3000, 'backlog sync');
-    expect(b.isSpaceMember(s.spaceId, alice.identity.userId)).toBe(true);
+    expect(isSpaceMember(b.records, s.spaceId, alice.identity.userId)).toBe(true);
   });
 
   it('runs sessions across servers and keeps the host when the owner server dies', async () => {
@@ -264,7 +265,11 @@ describe('coordination mesh', () => {
     const s = await createSpace(alice);
     await waitFor(() => b.records.get(`invite:${s.code}`), 3000, 'invite replicated');
     await joinSpace(bob, s.spaceId, s.code);
-    await waitFor(() => a.isSpaceMember(s.spaceId, bob.identity.userId), 3000, 'member replicated');
+    await waitFor(
+      () => isSpaceMember(a.records, s.spaceId, bob.identity.userId),
+      3000,
+      'member replicated',
+    );
 
     // Pick a session id owned by whichever server we will keep alive, then kill the owner.
     const sessionId = `voice:${s.spaceId}:${s.voiceChannel}`;
@@ -343,7 +348,7 @@ describe('coordination mesh', () => {
     const host = await connectUser(b, hostId, 'host', 'hostdevicex');
     cleanup.push(() => host.conn.close());
     await joinSpace(host, s.spaceId, s.code);
-    await waitFor(() => a.isSpaceMember(s.spaceId, hostId.userId), 3000);
+    await waitFor(() => isSpaceMember(a.records, s.spaceId, hostId.userId), 3000);
     const first = await host.conn.request('session.join', {
       sessionId,
       caps: caps({ nat: 'open' }),
@@ -355,7 +360,11 @@ describe('coordination mesh', () => {
     await b.stop();
     const again = await connectUser(c, hostId, 'host', 'hostdevicex');
     cleanup.push(() => again.conn.close());
-    await waitFor(() => c.isSpaceMember(s.spaceId, hostId.userId), 3000, 'membership on C');
+    await waitFor(
+      () => isSpaceMember(c.records, s.spaceId, hostId.userId),
+      3000,
+      'membership on C',
+    );
     const rejoined = await again.conn.request('session.join', {
       sessionId,
       caps: caps({ nat: 'open' }),

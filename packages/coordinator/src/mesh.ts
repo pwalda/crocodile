@@ -13,13 +13,17 @@ import {
 import {
   concatBytes,
   LIMITS,
+  PROTOCOL_VERSION,
   ServerInfo,
   SIG_DOMAIN,
+  type FedFlood,
   type FedFrame,
+  type FedRequest,
   type SignedRecord,
 } from '@crocodile/protocol';
 import type { Coordinator } from './coordinator';
-import { sendJson, toWsUrl } from './util';
+import { fnv1a } from './election';
+import { RateLimiter, RpcFailure, sendJson, toWsUrl } from './util';
 
 interface Link {
   ws: WebSocket;
@@ -27,43 +31,113 @@ interface Link {
   url?: string;
   challenge: string;
   peer?: ServerInfo;
+  peerProtocol?: number;
   authed: boolean;
   replaced: boolean;
+  /** We closed it because it had nothing to do. */
+  idle: boolean;
   syncing: boolean;
   syncDone: boolean;
   sentUpTo: number;
   alive: boolean;
+  /** Last frame that was more than overlay chatter. */
+  lastUsed: number;
   /** Our fresh key-exchange offer for this link. */
   channelKeys: ChannelKeys;
   peerOffer?: { x25519: string; mlkem: string };
   /** Secret from answering the peer's offer. */
   answeredSecret?: Uint8Array;
   channel?: SecureChannel;
+  /** Incoming record batches, applied one after another. */
+  inbox: Promise<void>;
+  /** Requests this peer may make of us. */
+  limiter: RateLimiter;
 }
+
+export interface MeshConfig {
+  /** Up to this many known servers, every server links to every other. */
+  fullMeshMax: number;
+  /** A direct link with nothing to do is closed after this long. */
+  idleMs: number;
+  /** How often the overlay is checked. */
+  maintainMs: number;
+}
+
+export const defaultMeshConfig: MeshConfig = {
+  fullMeshMax: 16,
+  idleMs: 5 * 60_000,
+  maintainMs: 5_000,
+};
 
 const SYNC_BATCH = 500;
 const PING_INTERVAL_MS = 20_000;
+/** Frames waiting for a direct link to come up. */
+const QUEUE_MAX = 2000;
+const QUEUE_MS = 15_000;
+const FLOOD_HOPS = 16;
+/** Close code for a link closed for idleness, so the other side doesn't think we died. */
+const IDLE_CLOSE = 4000;
+/** Servers we keep track of, so made-up identities can't fill our memory. */
+const KNOWN_MAX = 20_000;
+
+/** Frames that keep a direct link in use (overlay chatter doesn't). */
+const USEFUL = new Set([
+  'req',
+  'res',
+  'records',
+  'rec_push',
+  'route',
+  'session_op',
+  'session_op_res',
+  'link_answer',
+]);
 
 /**
- * Coordination-server mesh. Links are mutually authenticated with server
- * identity keys; after authentication each side streams the records the other
- * has not seen (per-peer seq cursor) and then pushes new writes live. Presence,
- * voice occupancy and session operations ride the same links.
+ * Links between coordination servers (docs/MESH.md). Every link is mutually
+ * authenticated with server identity keys and encrypted. A server keeps a few
+ * overlay links (all servers in a small network; ring neighbours and fingers
+ * in a large one) and opens direct links to whichever server it needs to talk
+ * to. Owners of a record copy it to each other; when a link comes up each
+ * side streams what the other owns and hasn't seen (per-peer seq cursor).
  */
 export class Mesh {
   private links = new Map<string, Link>();
   private pendingLinks = new Set<Link>();
   private known = new Map<string, ServerInfo>();
   private dialing = new Map<string, { timer?: ReturnType<typeof setTimeout>; attempts: number }>();
+  private queued = new Map<string, { frame: FedFrame; at: number }[]>();
+  private requests = new Map<
+    string,
+    {
+      server: string;
+      resolve: (v: unknown) => void;
+      reject: (e: Error) => void;
+      timer: ReturnType<typeof setTimeout>;
+    }
+  >();
+  private floodSeen = new Map<string, number>();
   private pingTimer?: ReturnType<typeof setInterval>;
+  private maintainTimer?: ReturnType<typeof setInterval>;
+  private maintainSoon?: ReturnType<typeof setTimeout>;
+  private staticUrls: string[] = [];
   private closed = false;
 
-  constructor(private readonly hub: Coordinator) {}
+  constructor(
+    private readonly hub: Coordinator,
+    readonly config: MeshConfig = defaultMeshConfig,
+  ) {}
+
+  private get selfId() {
+    return this.hub.info.id;
+  }
 
   start(staticPeers: string[]) {
-    for (const url of staticPeers) this.ensureDial(url);
+    this.staticUrls = staticPeers.filter((u) => u !== this.hub.info.url);
+    for (const url of this.staticUrls) this.ensureDial(url);
     this.pingTimer = setInterval(() => this.heartbeat(), PING_INTERVAL_MS);
     this.pingTimer.unref?.();
+    this.maintainTimer = setInterval(() => this.maintain(), this.config.maintainMs);
+    this.maintainTimer.unref?.();
   }
 
   peerIds() {
@@ -78,59 +152,209 @@ export class Mesh {
     return [...this.known.values()];
   }
 
-  /** Learn about servers (from the directory or gossip) and connect to them. */
+  /** Learn about servers (from the directory, gossip or beacons). */
   addKnown(servers: ServerInfo[]) {
+    let added = false;
     for (const s of servers) {
       const parsed = ServerInfo.safeParse(s);
-      if (!parsed.success || s.id === this.hub.info.id || !keyMatchesUserId(s.key, s.id)) continue;
-      this.known.set(s.id, s);
-      if (!this.links.has(s.id)) this.ensureDial(s.url);
+      if (!parsed.success || s.id === this.selfId || !keyMatchesUserId(s.key, s.id)) continue;
+      const before = this.known.get(s.id);
+      if (!before && this.known.size >= KNOWN_MAX) continue;
+      if (!before || before.url !== s.url) added = true;
+      this.known.set(s.id, parsed.data);
+    }
+    if (added) this.scheduleMaintain();
+  }
+
+  // -------------------------------------------------------------------------
+  // Overlay
+  // -------------------------------------------------------------------------
+
+  /** Servers we keep a link to. */
+  desired(): Set<string> {
+    const out = new Set<string>();
+    for (const url of this.staticUrls) {
+      for (const s of this.known.values()) if (s.url === url) out.add(s.id);
+    }
+    const ids = [...this.known.keys()].filter((id) => this.links.has(id) || !this.unreachable(id));
+    if (ids.length + 1 <= this.config.fullMeshMax) {
+      for (const id of ids) out.add(id);
+      return out;
+    }
+    // A ring of server ids: neighbours on both sides plus fingers at halving
+    // distances, so every server is a few hops from every other and no group
+    // of servers can drift apart while the ring holds.
+    const ring = [...ids, this.selfId].sort((a, b) => fnv1a(a) - fnv1a(b) || (a < b ? -1 : 1));
+    const n = ring.length;
+    const i = ring.indexOf(this.selfId);
+    for (const d of [1, 2]) {
+      out.add(ring[(i + d) % n]!);
+      out.add(ring[(i - d + n) % n]!);
+    }
+    for (let step = Math.floor(n / 2); step > 2; step = Math.floor(step / 2))
+      out.add(ring[(i + step) % n]!);
+    out.delete(this.selfId);
+    return out;
+  }
+
+  private unreachable(id: string) {
+    const url = this.known.get(id)?.url;
+    return !!url && (this.dialing.get(url)?.attempts ?? 0) >= 3;
+  }
+
+  private scheduleMaintain() {
+    if (this.maintainSoon || this.closed) return;
+    this.maintainSoon = setTimeout(() => {
+      this.maintainSoon = undefined;
+      this.maintain();
+    }, 50);
+    this.maintainSoon.unref?.();
+  }
+
+  /** Dial missing overlay links; close direct links that have gone quiet. */
+  maintain() {
+    if (this.closed) return;
+    const desired = this.desired();
+    for (const id of desired) {
+      const s = this.known.get(id);
+      if (s && !this.links.has(id)) this.ensureDial(s.url);
+    }
+    const now = Date.now();
+    for (const [id, link] of this.links) {
+      if (
+        link.initiator &&
+        !desired.has(id) &&
+        !this.staticUrls.includes(link.url ?? '') &&
+        now - link.lastUsed > this.config.idleMs &&
+        ![...this.requests.values()].some((r) => r.server === id)
+      ) {
+        link.idle = true;
+        link.ws.close(IDLE_CLOSE, 'idle');
+      }
     }
   }
 
-  sendTo(serverId: string, frame: FedFrame): boolean {
-    const link = this.links.get(serverId);
-    return link ? this.send(link, frame) : false;
+  // -------------------------------------------------------------------------
+  // Sending
+  // -------------------------------------------------------------------------
+
+  private send(link: Link, frame: FedFrame): boolean {
+    if (!link.channel) return false;
+    if (USEFUL.has(frame.t)) link.lastUsed = Date.now();
+    return sendJson(link.ws, link.channel.seal(frame));
   }
 
-  broadcast(frame: FedFrame, except?: string) {
+  /**
+   * Send to one server, opening a direct link if there is none. Returns false
+   * only for a server we don't know how to reach.
+   */
+  sendTo(serverId: string, frame: FedFrame): boolean {
+    if (serverId === this.selfId) return false;
+    const link = this.links.get(serverId);
+    if (link?.channel) return this.send(link, frame);
+    const s = this.known.get(serverId);
+    if (!s) return false;
+    const now = Date.now();
+    const q = (this.queued.get(serverId) ?? []).filter((e) => now - e.at < QUEUE_MS);
+    if (q.length >= QUEUE_MAX) q.shift();
+    q.push({ frame, at: now });
+    this.queued.set(serverId, q);
+    this.ensureDial(s.url);
+    return true;
+  }
+
+  /** Ask one server something; rejects if it doesn't answer in time. */
+  request<T = unknown>(
+    serverId: string,
+    m: FedRequest['m'],
+    p: unknown,
+    timeoutMs = 6000,
+  ): Promise<T> {
+    const rid = randomId(8);
+    return new Promise<T>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.requests.delete(rid);
+        reject(new RpcFailure('unavailable', `server ${serverId} did not answer`));
+      }, timeoutMs);
+      timer.unref?.();
+      this.requests.set(rid, {
+        server: serverId,
+        resolve: resolve as (v: unknown) => void,
+        reject,
+        timer,
+      });
+      if (!this.sendTo(serverId, { t: 'req', rid, m, p })) {
+        clearTimeout(timer);
+        this.requests.delete(rid);
+        reject(new RpcFailure('unavailable', `server ${serverId} is unknown`));
+      }
+    });
+  }
+
+  /** Ask the first of several servers that answers. */
+  async requestAny<T = unknown>(servers: string[], m: FedRequest['m'], p: unknown): Promise<T> {
+    let last: unknown = new RpcFailure('unavailable', 'no server to ask');
+    for (const id of servers) {
+      try {
+        return await this.request<T>(id, m, p);
+      } catch (err) {
+        last = err;
+      }
+    }
+    throw last;
+  }
+
+  /** Pass a frame to every link (except the one it came from). */
+  forward(frame: FedFrame, except?: string) {
     for (const [id, link] of this.links) {
       if (id !== except && link.ws.readyState === link.ws.OPEN) this.send(link, frame);
     }
   }
 
-  // -------------------------------------------------------------------------
-  // Link lifecycle
-  // -------------------------------------------------------------------------
-
-  private send(link: Link, frame: FedFrame): boolean {
-    if (!link.channel) return false;
-    return sendJson(link.ws, link.channel.seal(frame));
+  /** Send a frame to every server, through the overlay. */
+  flood(f: FedFlood['f']) {
+    const frame: FedFlood = { t: 'flood', id: randomId(10), origin: this.selfId, hops: 0, f };
+    this.floodSeen.set(frame.id, Date.now());
+    this.forward(frame);
   }
 
   private linkQueries = new Map<
     string,
     {
-      pending: number;
       resolve: (v: { peer: string; key: string; encKey: string } | undefined) => void;
       timer: ReturnType<typeof setTimeout>;
     }
   >();
 
-  /** Ask every peer server whether it holds a device-link code. */
+  /**
+   * Ask every other server whether it holds a device-link code. Only the one
+   * that does answers (through the overlay, which is already connected), so
+   * an unknown code takes the full wait to come back empty.
+   */
   queryLink(code: string): Promise<{ peer: string; key: string; encKey: string } | undefined> {
-    const peers = [...this.links.values()];
-    if (peers.length === 0) return Promise.resolve(undefined);
+    if (this.hub.membership.liveIds().length <= 1) return Promise.resolve(undefined);
     const qid = randomId(8);
     return new Promise((resolve) => {
       const timer = setTimeout(() => {
         this.linkQueries.delete(qid);
         resolve(undefined);
-      }, 4000);
-      this.linkQueries.set(qid, { pending: peers.length, resolve, timer });
-      for (const l of peers) this.send(l, { t: 'link_query', qid, code });
+      }, 5000);
+      this.linkQueries.set(qid, { resolve, timer });
+      this.flood({ t: 'link_query', qid, code });
     });
   }
+
+  private onLinkAnswer(qid: string, found?: { peer: string; key: string; encKey: string }) {
+    const q = this.linkQueries.get(qid);
+    if (!q || !found) return;
+    this.linkQueries.delete(qid);
+    clearTimeout(q.timer);
+    q.resolve(found);
+  }
+
+  // -------------------------------------------------------------------------
+  // Link lifecycle
+  // -------------------------------------------------------------------------
 
   private ensureDial(url: string) {
     if (this.closed || url === this.hub.info.url) return;
@@ -161,15 +385,23 @@ export class Mesh {
     ws.once('open', () => this.sendHello(link));
   }
 
+  /** Whether we keep trying a URL: a static peer, or an overlay link. */
+  private wantsUrl(url: string) {
+    if (this.staticUrls.includes(url)) return true;
+    const desired = this.desired();
+    for (const s of this.known.values()) if (s.url === url && desired.has(s.id)) return true;
+    return false;
+  }
+
   private scheduleRedial(url: string) {
     if (this.closed) return;
     const state = this.dialing.get(url) ?? { attempts: 0 };
     state.attempts += 1;
-    const isKnown =
-      [...this.known.values()].some((s) => s.url === url) ||
-      this.hub.config.meshPeers.includes(url);
-    if (!isKnown && state.attempts > 5) {
-      this.dialing.delete(url);
+    // Direct links aren't retried on their own: the next frame for them dials again.
+    if (!this.wantsUrl(url) || (!this.isKnownUrl(url) && state.attempts > 5)) {
+      state.timer = undefined;
+      this.dialing.set(url, state);
+      if (state.attempts > 5 && !this.isKnownUrl(url)) this.dialing.delete(url);
       return;
     }
     const delay =
@@ -177,6 +409,10 @@ export class Mesh {
     state.timer = setTimeout(() => this.dial(url), delay);
     state.timer.unref?.();
     this.dialing.set(url, state);
+  }
+
+  private isKnownUrl(url: string) {
+    return [...this.known.values()].some((s) => s.url === url) || this.staticUrls.includes(url);
   }
 
   accept(ws: WebSocket) {
@@ -191,6 +427,7 @@ export class Mesh {
       server: this.hub.info,
       challenge: link.challenge,
       channel: link.channelKeys.offer,
+      protocol: PROTOCOL_VERSION,
     });
   }
 
@@ -202,11 +439,15 @@ export class Mesh {
       challenge: randomId(16),
       authed: false,
       replaced: false,
+      idle: false,
       syncing: false,
       syncDone: false,
       sentUpTo: 0,
       alive: true,
+      lastUsed: Date.now(),
       channelKeys: createChannelKeys(),
+      inbox: Promise.resolve(),
+      limiter: new RateLimiter(500, 5000),
     };
     this.pendingLinks.add(link);
     const authTimer = setTimeout(() => {
@@ -234,29 +475,37 @@ export class Mesh {
       } else if (frame.t !== 'fed_hello' && frame.t !== 'fed_auth') {
         return;
       }
+      if (USEFUL.has(frame.t)) link.lastUsed = Date.now();
       try {
         this.onFrame(link, frame);
       } catch (err) {
         this.hub.log.warn('federation frame failed', { t: frame.t, err: String(err) });
       }
     });
-    ws.on('close', () => {
+    ws.on('close', (code) => {
       clearTimeout(authTimer);
       this.pendingLinks.delete(link);
       const peerId = link.peer?.id;
       if (peerId && this.links.get(peerId) === link) {
         this.links.delete(peerId);
         this.hub.log.info('mesh link down', { peer: peerId });
-        this.hub.onServerDown(peerId);
+        this.failRequests(peerId);
+        this.hub.membership.linkDown(peerId, !link.idle && code !== IDLE_CLOSE && !this.closed);
       }
-      const redialUrl = link.initiator
-        ? url
-        : link.peer && this.known.has(link.peer.id)
-          ? link.peer.url
-          : undefined;
-      if (redialUrl && !link.replaced && !this.closed) this.scheduleRedial(redialUrl);
+      if (link.replaced || link.idle || code === IDLE_CLOSE || this.closed) return;
+      const redialUrl = link.initiator ? url : link.peer?.url;
+      if (redialUrl) this.scheduleRedial(redialUrl);
     });
     return link;
+  }
+
+  private failRequests(serverId: string) {
+    for (const [rid, r] of this.requests) {
+      if (r.server !== serverId) continue;
+      clearTimeout(r.timer);
+      this.requests.delete(rid);
+      r.reject(new RpcFailure('unavailable', `lost the link to server ${serverId}`));
+    }
   }
 
   private onFrame(link: Link, frame: FedFrame) {
@@ -265,12 +514,23 @@ export class Mesh {
       if (
         !parsed.success ||
         !keyMatchesUserId(frame.server.key, frame.server.id) ||
-        frame.server.id === this.hub.info.id
+        frame.server.id === this.selfId
       ) {
         link.ws.close(1008, 'invalid server identity');
         return;
       }
+      if ((frame.protocol ?? 1) < PROTOCOL_VERSION) {
+        this.hub.log.warn('server runs an older protocol; update it to link', {
+          peer: frame.server.id,
+          url: frame.server.url,
+          protocol: frame.protocol ?? 1,
+        });
+        link.replaced = true;
+        link.ws.close(1008, `protocol ${PROTOCOL_VERSION} required`);
+        return;
+      }
       link.peer = parsed.data;
+      link.peerProtocol = frame.protocol;
       link.peerOffer = frame.channel;
       let answer: { epk: string; kem: string };
       try {
@@ -283,7 +543,7 @@ export class Mesh {
       }
       const sig = sign(this.hub.identity, SIG_DOMAIN.federation, {
         challenge: frame.challenge,
-        from: this.hub.info.id,
+        from: this.selfId,
         to: link.peer.id,
         offer: link.channelKeys.offer,
         answer,
@@ -299,7 +559,7 @@ export class Mesh {
         {
           challenge: link.challenge,
           from: link.peer.id,
-          to: this.hub.info.id,
+          to: this.selfId,
           offer: link.peerOffer,
           answer: frame.answer,
         },
@@ -317,7 +577,7 @@ export class Mesh {
         return;
       }
       // Both directions' secrets, ordered by server id so both sides agree.
-      const self = this.hub.info.id;
+      const self = this.selfId;
       const lower = self < link.peer.id;
       const secret = lower
         ? concatBytes(accepted, link.answeredSecret)
@@ -330,14 +590,64 @@ export class Mesh {
     if (!link.authed || !link.peer) return;
     const peerId = link.peer.id;
     switch (frame.t) {
-      case 'records':
-        for (const item of frame.items)
-          this.hub.records.put(item.record, { fresh: false, origin: peerId });
-        this.setCursor(peerId, frame.upTo);
+      case 'records': {
+        const { items, upTo } = frame;
+        link.inbox = link.inbox
+          .then(() => this.hub.dist.onReplicated(items, peerId))
+          .then(() => {
+            if (upTo) this.setCursor(peerId, upTo);
+          })
+          .catch((err) => this.hub.log.warn('replication failed', { err: String(err) }));
+        return;
+      }
+      case 'rec_push':
+        void this.hub.dist.onPush(frame.record);
+        return;
+      case 'beacon':
+        if (this.hub.membership.onBeacon(frame)) this.forward(frame, peerId);
         return;
       case 'presence':
-        this.hub.presence.applyRemote(peerId, frame);
+        if (this.hub.presence.applyRemote(frame)) this.forward(frame, peerId);
         return;
+      case 'voice':
+        if (this.hub.sessions.applyRemoteVoice(frame)) this.forward(frame, peerId);
+        return;
+      case 'flood':
+        this.onFlood(frame, peerId);
+        return;
+      case 'req':
+        if (!link.limiter.take()) {
+          this.send(link, {
+            t: 'res',
+            rid: frame.rid,
+            err: { code: 'rate_limited', message: 'too many requests' },
+          });
+          return;
+        }
+        this.hub.dist
+          .handleRequest(peerId, frame.m, frame.p)
+          .then((ok) => this.send(link, { t: 'res', rid: frame.rid, ok }))
+          .catch((err) =>
+            this.send(link, {
+              t: 'res',
+              rid: frame.rid,
+              err: {
+                code: err instanceof RpcFailure ? err.code : 'internal',
+                message: err instanceof Error ? err.message : String(err),
+              },
+            }),
+          );
+        return;
+      case 'res': {
+        const r = this.requests.get(frame.rid);
+        if (!r || r.server !== peerId) return;
+        clearTimeout(r.timer);
+        this.requests.delete(frame.rid);
+        if (frame.err)
+          r.reject(new RpcFailure(frame.err.code as RpcFailure['code'], frame.err.message));
+        else r.resolve(frame.ok);
+        return;
+      }
       case 'route':
         this.hub.deliverLocal(frame.to, frame.ev as never, frame.d as never);
         return;
@@ -350,39 +660,45 @@ export class Mesh {
       case 'servers':
         this.addKnown(frame.servers);
         return;
-      case 'voice':
-        this.hub.sessions.applyRemoteVoice(peerId, frame);
-        return;
       case 'ping':
         this.send(link, { t: 'pong' });
         return;
+      case 'link_answer':
+        this.onLinkAnswer(frame.qid, frame.found);
+        return;
+    }
+  }
+
+  private onFlood(frame: FedFlood, from: string) {
+    if (this.floodSeen.has(frame.id) || frame.origin === this.selfId) return;
+    const now = Date.now();
+    this.floodSeen.set(frame.id, now);
+    if (this.floodSeen.size > 20_000) {
+      for (const [id, at] of this.floodSeen) if (now - at > 10 * 60_000) this.floodSeen.delete(id);
+    }
+    if (frame.hops < FLOOD_HOPS) this.forward({ ...frame, hops: frame.hops + 1 }, from);
+    const f = frame.f;
+    switch (f.t) {
       case 'mail_query':
-        this.hub.mailbox.onQuery(peerId, frame.peer);
+        this.hub.mailbox.onQuery(frame.origin, f.peer);
         return;
       case 'mail_ack':
-        this.hub.mailbox.onRemoteAck(frame.peer, frame.ids);
+        this.hub.mailbox.onRemoteAck(f.peer, f.ids);
         return;
       case 'link_query': {
-        const found = this.hub.findLink(frame.code);
-        this.send(link, {
+        const found = this.hub.findLink(f.code);
+        if (!found) return;
+        found.claimedBy = `remote:${frame.origin}`;
+        this.flood({
           t: 'link_answer',
-          qid: frame.qid,
-          ...(found ? { found: { peer: found.peer, key: found.key, encKey: found.encKey } } : {}),
+          qid: f.qid,
+          found: { peer: found.peer, key: found.key, encKey: found.encKey },
         });
-        if (found) found.claimedBy = `remote:${peerId}`;
         return;
       }
-      case 'link_answer': {
-        const q = this.linkQueries.get(frame.qid);
-        if (!q) return;
-        q.pending -= 1;
-        if (frame.found || q.pending <= 0) {
-          this.linkQueries.delete(frame.qid);
-          clearTimeout(q.timer);
-          q.resolve(frame.found);
-        }
+      case 'link_answer':
+        this.onLinkAnswer(f.qid, f.found);
         return;
-      }
     }
   }
 
@@ -393,11 +709,12 @@ export class Mesh {
     const existing = this.links.get(peer.id);
     if (existing) {
       // Both sides dialled each other: keep the link dialled by the lower id.
-      const keeperInitiator = this.hub.info.id < peer.id ? this.hub.info.id : peer.id;
-      const initiatorOf = (l: Link) => (l.initiator ? this.hub.info.id : peer.id);
+      const keeperInitiator = this.selfId < peer.id ? this.selfId : peer.id;
+      const initiatorOf = (l: Link) => (l.initiator ? this.selfId : peer.id);
       if (initiatorOf(link) !== keeperInitiator) {
         link.replaced = true;
         link.ws.close(1000, 'duplicate link');
+        this.flushQueue(peer.id, existing);
         return;
       }
       existing.replaced = true;
@@ -409,20 +726,32 @@ export class Mesh {
     this.dialing.delete(peer.url);
     if (link.url) this.dialing.delete(link.url);
     this.hub.log.info('mesh link up', { peer: peer.id, name: peer.name, url: peer.url });
+    this.hub.membership.linkUp(peer.id);
 
     this.send(link, { t: 'servers', servers: [this.hub.info, ...this.knownServers()] });
-    this.send(link, { t: 'presence', full: true, entries: this.hub.presence.localEntries() });
-    for (const v of this.hub.sessions.ownedVoiceFrames()) this.send(link, v);
+    for (const b of this.hub.membership.freshBeacons()) this.send(link, b);
+    for (const p of this.hub.presence.snapshot()) this.send(link, p);
+    for (const v of this.hub.sessions.voiceFrames()) this.send(link, v);
+    this.flushQueue(peer.id, link);
     link.sentUpTo = Math.max(0, Math.min(cursor, this.hub.records.store.latestSeq()));
     void this.pump(link);
-    this.hub.onServerUp(peer.id);
+    this.scheduleMaintain();
   }
 
-  /** Streams the backlog to a freshly authenticated peer, respecting backpressure. */
+  private flushQueue(serverId: string, link: Link) {
+    const q = this.queued.get(serverId);
+    if (!q) return;
+    this.queued.delete(serverId);
+    const now = Date.now();
+    for (const e of q) if (now - e.at < QUEUE_MS) this.send(link, e.frame);
+  }
+
+  /** Streams the records the peer owns that it hasn't seen, respecting backpressure. */
   private async pump(link: Link) {
     if (link.syncing) return;
     link.syncing = true;
     const store = this.hub.records.store;
+    const peerId = link.peer!.id;
     try {
       while (link.ws.readyState === link.ws.OPEN && link.sentUpTo < store.latestSeq()) {
         const batch = store.since(link.sentUpTo, SYNC_BATCH);
@@ -431,7 +760,13 @@ export class Mesh {
           break;
         }
         const upTo = batch[batch.length - 1]!.seq;
-        this.send(link, { t: 'records', items: batch, upTo });
+        const m = this.hub.membership;
+        // Owner by the current view or the settled one: while they differ, a
+        // record the peer owns in either must not be skipped (the cursor moves on).
+        const items = batch.filter(
+          (i) => m.view.owns(peerId, i.record) || m.settled.owns(peerId, i.record),
+        );
+        this.send(link, { t: 'records', items, upTo });
         link.sentUpTo = upTo;
         while (link.ws.readyState === link.ws.OPEN && link.ws.bufferedAmount > 4 * 1024 * 1024) {
           await new Promise((r) => setTimeout(r, 20));
@@ -443,12 +778,47 @@ export class Mesh {
     }
   }
 
-  /** Live replication of an accepted write. */
-  onRecord(record: SignedRecord, seq: number, origin: string | null) {
-    for (const [id, link] of this.links) {
+  /**
+   * A write we accepted: copy it to the other servers that own it (and to the
+   * owners of its previous version, which drop it once they don't own it).
+   */
+  onRecord(
+    record: SignedRecord,
+    seq: number,
+    origin: string | null,
+    previous: SignedRecord | null,
+  ) {
+    const { view, settled } = this.hub.membership;
+    const targets = new Set([...view.placement(record), ...settled.placement(record)]);
+    if (previous) for (const id of view.placement(previous)) targets.add(id);
+    targets.delete(this.selfId);
+    for (const id of targets) {
+      const link = this.links.get(id);
+      if (!link) {
+        // The catch-up stream sends it once the link is up.
+        const s = this.known.get(id);
+        if (s && id !== origin) this.ensureDial(s.url);
+        continue;
+      }
       if (!link.syncDone || seq <= link.sentUpTo) continue;
       if (id !== origin) this.send(link, { t: 'records', items: [{ seq, record }], upTo: seq });
       link.sentUpTo = seq;
+    }
+  }
+
+  /** Send records to a server that has just become an owner (no cursor involved). */
+  async handOver(serverId: string, records: SignedRecord[]) {
+    for (let i = 0; i < records.length; i += 200) {
+      const items = records.slice(i, i + 200).map((record) => ({ seq: 0, record }));
+      this.sendTo(serverId, { t: 'records', items, upTo: 0 });
+      const link = this.links.get(serverId);
+      while (
+        link &&
+        link.ws.readyState === link.ws.OPEN &&
+        link.ws.bufferedAmount > 4 * 1024 * 1024
+      ) {
+        await new Promise((r) => setTimeout(r, 20));
+      }
     }
   }
 
@@ -477,8 +847,11 @@ export class Mesh {
 
   close() {
     this.closed = true;
-    if (this.pingTimer) clearInterval(this.pingTimer);
+    clearInterval(this.pingTimer);
+    clearInterval(this.maintainTimer);
+    clearTimeout(this.maintainSoon);
     for (const d of this.dialing.values()) if (d.timer) clearTimeout(d.timer);
+    for (const r of this.requests.values()) clearTimeout(r.timer);
     for (const link of [...this.links.values(), ...this.pendingLinks]) {
       link.replaced = true;
       link.ws.terminate();

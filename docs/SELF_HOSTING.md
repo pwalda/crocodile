@@ -109,11 +109,15 @@ main server puts the TCP side behind a reverse proxy on 443.
   network (loopback, 10/8, 172.16/12, 192.168/16, link-local, CGNAT, IPv6
   ULA and similar), so relay users cannot reach your router or other home
   devices through it.
-- **Metadata of the people using it, and a copy of everyone's records.**
+- **Metadata of the people using it, and a share of everyone's records.**
   Your server sees who is online and who talks to whom and when, never
-  message content. Like every server in the network it also keeps a copy of
-  every account record: profiles, spaces, memberships, and friend lists and
-  friend requests (these two encrypted, so your server can't read them). See
+  message content. It also stores its share of the network's account
+  records: profiles, spaces, memberships, and friend lists and friend
+  requests (these two encrypted, so your server can't read them). In a
+  network of a few servers that share is everything; in a larger one each
+  record is kept by three servers (`--replicas`), so yours holds a fraction.
+  `--store-all` keeps a copy of everything, for servers with room to spare.
+  See [docs/MESH.md](MESH.md) and
   [If other people use your server](#if-other-people-use-your-server).
 
 **How the directory shows addresses.** The public listing

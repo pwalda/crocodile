@@ -225,7 +225,7 @@ export class ClientConnection implements ClientHandle {
       case 'records.put': {
         if (!this.writeLimiter.take()) throw new RpcFailure('rate_limited', 'too many writes');
         const { record } = p as unknown as { record: SignedRecord };
-        const r = hub.records.put(record, { fresh: true, origin: null });
+        const r = await hub.dist.putFromClient(record);
         return {
           accepted: r.accepted,
           current: r.current,
@@ -234,41 +234,38 @@ export class ClientConnection implements ClientHandle {
       }
       case 'records.get': {
         const { keys } = p as unknown as { keys: string[] };
-        return {
-          records: keys
-            .map((k) => store.get(k))
-            .filter((r): r is SignedRecord => !!r && this.mayRead(r)),
-        };
+        const found = await hub.dist.get(keys.filter((k) => this.mayReadKey(k)));
+        return { records: found.filter((r) => this.mayRead(r)) };
       }
       case 'records.list': {
         const { prefix, limit } = p as unknown as { prefix: string; limit?: number };
-        return {
-          records: store.listPrefix(prefix, limit ?? 1000).filter((r) => this.mayRead(r)),
-        };
+        const found = await hub.dist.list(prefix, limit ?? 1000);
+        return { records: found.filter((r) => this.mayRead(r)) };
       }
       case 'records.subscribe': {
         const { prefixes } = p as unknown as { prefixes: string[] };
         for (const prefix of prefixes) this.subscriptions.add(prefix);
+        hub.dist.refreshWatchesSoon();
         return {};
       }
       case 'users.search': {
         const { query } = p as unknown as { query: string };
-        return { profiles: hub.searchUsers(query) };
+        return { profiles: await hub.searchUsers(query) };
       }
       case 'friends.incoming':
+        // Lists in the old readable form, among those this server holds.
         return { records: store.findByTerm(`friend-of:${this.userId}`, 2000) };
       case 'spaces.mine': {
-        const members = store.findByTerm(
-          `member-user:${this.userId}`,
-          1000,
-        ) as SignedRecord<'member'>[];
-        const spaceIds = new Set(members.map((m) => m.body.spaceId));
+        const [members, owned] = await Promise.all([
+          hub.dist.findByTerm(`member-user:${this.userId}`, 1000),
+          hub.dist.findByTerm(`owner:${this.userId}`, 1000),
+        ]);
+        const spaceIds = new Set((members as SignedRecord<'member'>[]).map((m) => m.body.spaceId));
         // Owned spaces too, even without a membership (e.g. for account deletion).
-        for (const s of store.findByTerm(`owner:${this.userId}`, 1000))
-          spaceIds.add(s.key.slice('space:'.length));
-        const spaces = [...spaceIds]
-          .map((id) => store.get(`space:${id}`))
-          .filter((s): s is SignedRecord<'space'> => !!s && s.kind === 'space');
+        for (const s of owned) spaceIds.add(s.key.slice('space:'.length));
+        const spaces = (await hub.dist.get([...spaceIds].map((id) => `space:${id}`))).filter(
+          (s): s is SignedRecord<'space'> => s.kind === 'space',
+        );
         return { spaces, members };
       }
       case 'presence.subscribe': {
@@ -301,10 +298,8 @@ export class ClientConnection implements ClientHandle {
       }
       case 'voice.watch': {
         const { spaceIds } = p as unknown as { spaceIds: string[] };
-        for (const id of spaceIds) {
-          if (!hub.isSpaceMember(id, this.userId))
-            throw new RpcFailure('forbidden', 'not a member of that space');
-        }
+        const member = await Promise.all(spaceIds.map((id) => hub.isSpaceMember(id, this.userId)));
+        if (member.includes(false)) throw new RpcFailure('forbidden', 'not a member of that space');
         this.voiceWatch = new Set(spaceIds);
         return { voice: hub.sessions.voiceSnapshot(spaceIds) };
       }
@@ -347,7 +342,7 @@ export class ClientConnection implements ClientHandle {
         if (!this.mailLimiter.take())
           throw new RpcFailure('rate_limited', 'sending mail too fast; slow down');
         const { items } = p as unknown as { items: { to: string; box: SealedBox }[] };
-        return hub.mailbox.put(this, items);
+        return await hub.mailbox.put(this, items);
       }
       case 'mail.fetch':
         hub.mailbox.fetch(this);
@@ -372,6 +367,10 @@ export class ClientConnection implements ClientHandle {
    * see: only the recipient may read them.
    */
   mayRead(record: SignedRecord): boolean {
-    return record.kind !== 'note' || record.key.startsWith(recordKey.notePrefix(this.userId));
+    return this.mayReadKey(record.key);
+  }
+
+  mayReadKey(key: string): boolean {
+    return !key.startsWith('note:') || key.startsWith(recordKey.notePrefix(this.userId));
   }
 }

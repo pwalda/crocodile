@@ -68,7 +68,7 @@ export class SessionService {
   }
 
   liveServers(): string[] {
-    return [this.selfId, ...this.hub.mesh.peerIds()].sort();
+    return this.hub.membership.liveIds();
   }
 
   ownerOf(sessionId: string): string {
@@ -79,15 +79,20 @@ export class SessionService {
   // Client-facing operations (called on the member's own server)
   // -------------------------------------------------------------------------
 
-  checkAccess(userId: string, sessionId: string) {
+  async checkAccess(userId: string, sessionId: string) {
     const scope = parseSessionId(sessionId);
     if (!scope) throw new RpcFailure('bad_request', 'invalid session id');
-    const records = this.hub.records;
     if (scope.kind === 'space' || scope.kind === 'voice') {
-      if (!isSpaceMember(records, scope.spaceId, userId))
+      // The space's records may live on other servers.
+      const records = await this.hub.dist.get([
+        `space:${scope.spaceId}`,
+        `member:${scope.spaceId}:${userId}`,
+      ]);
+      const byKey = new Map(records.map((r) => [r.key, r]));
+      if (!isSpaceMember({ get: (k) => byKey.get(k) }, scope.spaceId, userId))
         throw new RpcFailure('forbidden', 'not a member of this space');
       if (scope.kind === 'voice') {
-        const space = records.get(`space:${scope.spaceId}`) as SignedRecord<'space'>;
+        const space = byKey.get(`space:${scope.spaceId}`) as SignedRecord<'space'>;
         const channel = space.body.channels.find((c) => c.id === scope.channelId);
         if (!channel || channel.kind !== 'voice')
           throw new RpcFailure('not_found', 'no such voice channel');
@@ -106,7 +111,7 @@ export class SessionService {
   }
 
   async join(client: ClientHandle, sessionId: string, caps: HostCaps): Promise<SessionState> {
-    this.checkAccess(client.userId, sessionId);
+    await this.checkAccess(client.userId, sessionId);
     const leaveKey = `${sessionId}|${client.peer}`;
     clearTimeout(this.pendingLeaves.get(leaveKey));
     this.pendingLeaves.delete(leaveKey);
@@ -398,13 +403,24 @@ export class SessionService {
   }
 
   private broadcast(s: OwnedSession) {
-    for (const m of s.state.members) this.hub.deliverToPeer(m.peer, 'session', { state: s.state });
+    for (const m of s.state.members) {
+      // We know each member's server: no need to look it up.
+      const server = s.memberServer.get(m.peer);
+      const d = { state: s.state };
+      if (server && server !== this.selfId) {
+        this.hub.mesh.sendTo(server, { t: 'route', to: m.peer, ev: 'session', d });
+      } else this.hub.deliverToPeer(m.peer, 'session', d);
+    }
     this.announceVoice(s.state);
   }
 
   // -------------------------------------------------------------------------
-  // Voice channel occupancy (mesh-wide, so any server can answer voice.watch)
+  // Voice channel occupancy (flooded, so any server can answer voice.watch)
   // -------------------------------------------------------------------------
+
+  /** sessionId -> when its latest announcement was made (kept after it empties). */
+  private voiceAt = new Map<string, number>();
+  private voiceSeq = 0;
 
   private announceVoice(state: SessionState) {
     const scope = parseSessionId(state.id);
@@ -415,17 +431,28 @@ export class SessionService {
       members: [...new Set(state.members.map((m) => m.userId))],
       host: state.host ? peerIds.user(state.host) : null,
     };
+    this.voiceSeq = Math.max(Date.now(), this.voiceSeq + 1);
+    const at = this.voiceSeq;
+    this.voiceAt.set(state.id, at);
     this.setOccupancy(state.id, occ, this.selfId);
-    this.hub.mesh.broadcast({ t: 'voice', sessionId: state.id, occ });
+    this.hub.mesh.forward({ t: 'voice', sessionId: state.id, occ, owner: this.selfId, at });
   }
 
-  applyRemoteVoice(serverId: string, frame: FedVoice) {
-    this.setOccupancy(frame.sessionId, frame.occ, serverId);
+  /** An announcement from another server. Returns true if it was news. */
+  applyRemoteVoice(frame: FedVoice): boolean {
+    if (frame.owner === this.selfId || typeof frame.at !== 'number') return false;
+    if ((this.voiceAt.get(frame.sessionId) ?? 0) >= frame.at) return false;
+    this.voiceAt.set(frame.sessionId, frame.at);
+    this.setOccupancy(frame.sessionId, frame.occ, frame.owner);
+    return true;
   }
 
   private setOccupancy(sessionId: string, occ: VoiceOccupancy, owner: string) {
     if (occ.members.length === 0) this.occupancy.delete(sessionId);
     else this.occupancy.set(sessionId, { occ, owner });
+    if (this.voiceAt.size > 100_000) {
+      for (const id of this.voiceAt.keys()) if (!this.occupancy.has(id)) this.voiceAt.delete(id);
+    }
     for (const client of this.hub.presence.localClients()) {
       if (client.voiceWatch.has(occ.spaceId)) client.send('voice', occ);
     }
@@ -436,10 +463,15 @@ export class SessionService {
     return [...this.occupancy.values()].map((o) => o.occ).filter((o) => wanted.has(o.spaceId));
   }
 
-  ownedVoiceFrames(): FedVoice[] {
-    return [...this.occupancy]
-      .filter(([, o]) => o.owner === this.selfId)
-      .map(([sessionId, o]) => ({ t: 'voice', sessionId, occ: o.occ }));
+  /** Every room we know is occupied, for a server that just linked to us. */
+  voiceFrames(): FedVoice[] {
+    return [...this.occupancy].map(([sessionId, o]) => ({
+      t: 'voice',
+      sessionId,
+      occ: o.occ,
+      owner: o.owner,
+      at: this.voiceAt.get(sessionId) ?? 0,
+    }));
   }
 
   // -------------------------------------------------------------------------
