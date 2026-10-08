@@ -5,3 +5,10 @@ packages:
 onlyBuiltDependencies:
   - electron
   - esbuild
+# Security fixes in build and test tooling (nothing here ships in the app).
+# Drop each once the packages that pull it in require a fixed version.
+overrides:
+  # GHSA-ch52-4w7c-c8xp, via electron-builder > @electron/get > got
+  http-cache-semantics@<4.3.0: ^4.3.0
+  # GHSA-68fv-2mgg-jv7q, via @vitest/coverage-v8 > magicast
+  source-map-js@<1.2.2: ^1.2.2
