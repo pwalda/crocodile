@@ -4,6 +4,8 @@ import {
   createPrekey,
   randomDeviceId,
   randomId,
+  sealAnonymous,
+  sealForSelf,
   sealToDevice,
   signRecord,
   spaceIdFor,
@@ -11,6 +13,7 @@ import {
 } from '@crocodile/crypto';
 import {
   DELETED_PROFILE_NAME,
+  NOTE_TTL_MS,
   peerIds,
   recordKey,
   sessionIds,
@@ -756,6 +759,159 @@ describe('account deletion', () => {
     expect(b.records.put(old, { fresh: false, origin: 'peer' }).reason).toBe('account was deleted');
     // Bob's own records are untouched.
     expect(a.records.get(recordKey.space(space.spaceId))).toBeDefined();
+  });
+});
+
+describe('sealed friends lists and notes', () => {
+  /** A note to `to`, sealed to one of their devices by `from`, signed by a one-time key. */
+  function noteTo(to: TestUser, from = createIdentity(), version = Date.now()) {
+    const author = createIdentity();
+    const box = sealAnonymous(
+      from,
+      randomDeviceId(),
+      { peer: to.conn.peer, prekey: createPrekey().bundle },
+      utf8.encode('{"type":"friend"}'),
+    );
+    return signRecord(
+      author,
+      'note',
+      recordKey.note(to.identity.userId, author.userId),
+      { boxes: [box] },
+      version,
+    );
+  }
+
+  it('stores a sealed friends list without learning anything from it', async () => {
+    const c = await server();
+    const alice = await user(c);
+    const bob = await user(c);
+    const key = recordKey.friends(alice.identity.userId);
+    const list = signRecord(alice.identity, 'friends', key, {
+      sealed: sealForSelf(alice.identity, 'friends', utf8.encode(bob.identity.userId), key),
+    });
+    expectAccepted(await alice.conn.request('records.put', { record: list }));
+    expect(JSON.stringify(c.records.get(key))).not.toContain(bob.identity.userId);
+    expect((await bob.conn.request('friends.incoming', {})).records).toEqual([]);
+    expect(bob.events.some((e) => e.ev === 'record')).toBe(false);
+    // Only Alice may write her list, sealed or not.
+    const forged = signRecord(bob.identity, 'friends', key, { sealed: 'AAAA' });
+    expect((await bob.conn.request('records.put', { record: forged })).accepted).toBe(false);
+  });
+
+  it('gives notes to their recipient alone, without saying who sent them', async () => {
+    const { a, b } = await (async () => {
+      const a = await server({ name: 'A' });
+      const b = await server({ name: 'B', meshPeers: [a.url] });
+      await waitFor(() => b.mesh.peerIds().length === 1, 5000, 'mesh link');
+      return { a, b };
+    })();
+    const alice = await user(a);
+    const bob = await user(b);
+    const eve = await user(b);
+    await eve.conn.request('records.subscribe', { prefixes: ['note:', 'not'] });
+    const note = noteTo(bob, alice.identity);
+    expectAccepted(await alice.conn.request('records.put', { record: note }));
+    // Replicated, and pushed to Bob's devices on his server.
+    await waitFor(
+      () =>
+        bob.events.find(
+          (e) => e.ev === 'record' && (e.d as { record: SignedRecord }).record.key === note.key,
+        ),
+      3000,
+      'note pushed to bob',
+    );
+    const stored = JSON.stringify(b.records.get(note.key));
+    expect(stored).not.toContain(alice.identity.userId);
+    expect(stored).not.toContain(alice.identity.publicKey);
+    expect(
+      (
+        await bob.conn.request('records.list', {
+          prefix: recordKey.notePrefix(bob.identity.userId),
+        })
+      ).records,
+    ).toHaveLength(1);
+    // Nobody else sees Bob's notes: not by key, not by prefix, not by subscription.
+    expect((await eve.conn.request('records.get', { keys: [note.key] })).records).toEqual([]);
+    expect((await eve.conn.request('records.list', { prefix: 'note:' })).records).toEqual([]);
+    expect((await eve.conn.request('records.list', { prefix: 'not' })).records).toEqual([]);
+    expect(
+      eve.events.some(
+        (e) => e.ev === 'record' && (e.d as { record: SignedRecord }).record.kind === 'note',
+      ),
+    ).toBe(false);
+
+    // Only Bob deletes it, and the deletion replicates.
+    const del = (by: TestUser) =>
+      signRecord(by.identity, 'note', note.key, { boxes: [], deleted: true }, note.version + 1);
+    expect((await eve.conn.request('records.put', { record: del(eve) })).accepted).toBe(false);
+    expectAccepted(await bob.conn.request('records.put', { record: del(bob) }));
+    await waitFor(
+      () => (a.records.get(note.key)?.body as { deleted?: boolean }).deleted,
+      3000,
+      'deletion replicated',
+    );
+    // A note can't be written twice, nor a missing one deleted.
+    expect((await alice.conn.request('records.put', { record: note })).accepted).toBe(false);
+    const ghost = signRecord(
+      bob.identity,
+      'note',
+      recordKey.note(bob.identity.userId, createIdentity().userId),
+      { boxes: [], deleted: true },
+    );
+    expect(await bob.conn.request('records.put', { record: ghost })).toMatchObject({
+      accepted: false,
+      reason: 'no such note',
+    });
+  });
+
+  it('limits unread notes per recipient and expires old ones', async () => {
+    const c = await server({ quotas: { notesPerUser: 2 } });
+    const alice = await user(c);
+    const bob = await user(c);
+    const first = noteTo(bob);
+    for (const n of [first, noteTo(bob)])
+      expectAccepted(await alice.conn.request('records.put', { record: n }));
+    expect(await alice.conn.request('records.put', { record: noteTo(bob) })).toMatchObject({
+      accepted: false,
+    });
+    // Reading one frees a place.
+    expectAccepted(
+      await bob.conn.request('records.put', {
+        record: signRecord(
+          bob.identity,
+          'note',
+          first.key,
+          { boxes: [], deleted: true },
+          first.version + 1,
+        ),
+      }),
+    );
+    expectAccepted(await alice.conn.request('records.put', { record: noteTo(bob) }));
+
+    // Old ones go, the deletion marker included, and can't come back.
+    expect(c.records.expireNotes(Date.now() + NOTE_TTL_MS + 60_000)).toBe(3);
+    expect(c.store.listPrefix('note:', 100)).toEqual([]);
+    const stale = noteTo(bob, createIdentity(), Date.now() - NOTE_TTL_MS - 60_000);
+    expect(c.records.put(stale, { fresh: false, origin: 'peer' }).reason).toBe('note expired');
+  });
+
+  it('erases notes to a deleted account', async () => {
+    const c = await server();
+    const alice = await user(c);
+    const bob = await user(c);
+    const n = noteTo(bob);
+    expectAccepted(await alice.conn.request('records.put', { record: n }));
+    expectAccepted(
+      await bob.conn.request('records.put', {
+        record: signRecord(bob.identity, 'profile', recordKey.profile(bob.identity.userId), {
+          username: DELETED_PROFILE_NAME,
+          encKey: bob.identity.encPublicKey,
+          deleted: true,
+        }),
+      }),
+    );
+    expect(c.records.get(n.key)).toBeUndefined();
+    expect((await alice.conn.request('records.put', { record: noteTo(bob) })).accepted).toBe(false);
   });
 });
 

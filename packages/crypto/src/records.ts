@@ -9,7 +9,9 @@ import {
   type SignedRecord,
   type SpaceBody,
   LIMITS,
+  NOTE_TTL_MS,
   canonicalJson,
+  peerIds,
   DELETED_PROFILE_NAME,
 } from '@crocodile/protocol';
 import { sha256, verifyPayload } from './primitives';
@@ -176,8 +178,31 @@ export function validateRecord(input: unknown, ctx: ValidationContext): Validati
       }
       return { ok: true, authorId };
     }
+    case 'note': {
+      const body = record.body as RecordBodies['note'];
+      const [, to, noteId] = parts;
+      if (parts.length !== 3 || !USER_ID.test(to!) || !USER_ID.test(noteId!))
+        return reject('bad note key');
+      // Replicated or not: an expired note can't come back.
+      if (record.version < ctx.now - NOTE_TTL_MS) return reject('note expired');
+      if (body.deleted) {
+        if (authorId !== to) return reject('only the recipient may delete a note');
+        if (body.boxes.length) return reject('a deleted note carries nothing');
+        return { ok: true, authorId };
+      }
+      if (authorId !== noteId) return reject('note id does not match its key');
+      // Written once, by a key used for nothing else.
+      if (existing) return reject('note already exists');
+      const recipient = ctx.get(`profile:${to}`) as SignedRecord<'profile'> | undefined;
+      if (recipient?.body.deleted) return reject('account was deleted');
+      if (body.boxes.some((b) => peerIds.user(b.to) !== to))
+        return reject('note boxes are for someone else');
+      return { ok: true, authorId };
+    }
   }
 }
+
+const USER_ID = /^[a-z2-7]{26}$/;
 
 /** True if the user currently belongs to the space (owner or active, non-banned member). */
 export function isSpaceMember(lookup: RecordLookup, spaceId: string, userId: string): boolean {

@@ -1,5 +1,7 @@
 import { validateRecord } from '@crocodile/crypto';
 import {
+  LIMITS,
+  NOTE_TTL_MS,
   RECORD_KIND_ORDER,
   recordKey,
   type RecordBodies,
@@ -30,6 +32,8 @@ export interface RecordQuotas {
   invitesPerSpace: number;
   /** Spaces a user is an active member of. */
   membershipsPerUser: number;
+  /** Unread notes for one user. */
+  notesPerUser: number;
 }
 
 export const defaultRecordQuotas: RecordQuotas = {
@@ -37,6 +41,7 @@ export const defaultRecordQuotas: RecordQuotas = {
   spacesPerUser: 100,
   invitesPerSpace: 1000,
   membershipsPerUser: 500,
+  notesPerUser: LIMITS.notesPerUser,
 };
 
 export type RecordListener = (record: SignedRecord, seq: number, origin: string | null) => void;
@@ -86,6 +91,12 @@ export class RecordService {
           ? `at most ${q.membershipsPerUser} spaces per account`
           : undefined;
       }
+      case 'note': {
+        const to = record.key.split(':')[1];
+        return this.store.countByTerm(`note-to:${to}`) >= q.notesPerUser
+          ? `at most ${q.notesPerUser} unread notes per account`
+          : undefined;
+      }
       default:
         return undefined;
     }
@@ -130,6 +141,14 @@ export class RecordService {
       (record.body as RecordBodies['member']).left
     )
       return { accepted: false, current, reason: 'not a member of this space' };
+    // So would deleting a note that isn't here.
+    if (
+      opts.fresh &&
+      !current &&
+      record.kind === 'note' &&
+      (record.body as RecordBodies['note']).deleted
+    )
+      return { accepted: false, current, reason: 'no such note' };
     if (opts.fresh && grows) {
       const over = this.overQuota(record);
       if (over) return { accepted: false, current, reason: `quota reached: ${over}` };
@@ -144,6 +163,18 @@ export class RecordService {
     }
     if (this.pending.length) this.retryPending();
     return { accepted: true, current: record, seq };
+  }
+
+  /** Drops notes (and their deletion markers) older than NOTE_TTL_MS; returns how many. */
+  expireNotes(now = Date.now()): number {
+    let n = 0;
+    for (const r of this.store.listPrefix('note:', 1_000_000)) {
+      if (r.version < now - NOTE_TTL_MS) {
+        this.store.delete(r.key);
+        n++;
+      }
+    }
+    return n;
   }
 
   private retrying = false;

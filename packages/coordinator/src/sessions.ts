@@ -97,10 +97,8 @@ export class SessionService {
     const [a, b] = scope.users;
     if (userId !== a && userId !== b)
       throw new RpcFailure('forbidden', 'not part of this conversation');
-    const other = userId === a ? b : a;
-    const theirs = records.get(`friends:${other}`) as SignedRecord<'friends'> | undefined;
-    if (theirs?.body.blocked.includes(userId))
-      throw new RpcFailure('forbidden', 'this user is not accepting messages from you');
+    // Blocks are enforced by the blocking user's apps: block lists are sealed,
+    // so servers can't (and shouldn't) know who blocked whom.
   }
 
   inSession(peer: string, sessionId: string) {

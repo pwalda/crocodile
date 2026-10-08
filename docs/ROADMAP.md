@@ -28,6 +28,9 @@ report what matters most; issues and discussions are welcome.
   up to 7 days, works across the server mesh).
 - Account deletion: erased from every server in the mesh, other devices
   signed out; per-account record quotas on servers.
+- Friend lists hidden from servers: each list is encrypted for its owner's
+  devices, and requests and answers travel as sealed notes that don't name
+  their sender.
 - Main server deployment: directory, install scripts, a first coordinator
   and a placeholder page (`deploy/main`).
 - Desktop app for Windows, macOS and Linux with its own design (light and
@@ -50,13 +53,20 @@ report what matters most; issues and discussions are welcome.
    one sharer per voice room; then 1:1 and group video; remote control last,
    view-only by default and only between friends who allow it each time.
 7. **Wayland global shortcuts** (XDG GlobalShortcuts portal) and Flathub.
-8. **Server-side hardening**: abuse reporting for public directories
-   (per-IP connection limits and per-account record quotas are done).
-9. **Store and signing path** (see [DISTRIBUTION.md](DISTRIBUTION.md)):
-   Microsoft Store listing (MSIX, signed by the Store, with the built-in
-   updater disabled) plus winget; Apple Developer Program for Developer ID
-   signing, notarization and working macOS auto-update; SignPath for the
-   direct Windows download. Until then: the one-line installers.
+8. **Less metadata on servers**: private space memberships, and keeping the
+   connected server from seeing whose presence an app follows and whom it
+   befriends or messages (for example presence exchanged between friends directly).
+9. **A mesh that scales**: keep each record on a few servers chosen by
+   rendezvous hashing instead of on all of them, with a sparse, always
+   connected overlay that routes requests, instead of every server linking
+   to every other.
+10. **Server-side hardening**: abuse reporting for public directories
+    (per-IP connection limits and per-account record quotas are done).
+11. **Store and signing path** (see [DISTRIBUTION.md](DISTRIBUTION.md)):
+    Microsoft Store listing (MSIX, signed by the Store, with the built-in
+    updater disabled) plus winget; Apple Developer Program for Developer ID
+    signing, notarization and working macOS auto-update; SignPath for the
+    direct Windows download. Until then: the one-line installers.
 
 ## Paused
 

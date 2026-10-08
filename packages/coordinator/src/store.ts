@@ -55,7 +55,7 @@ export interface Store {
 }
 
 /** Bump when indexTerms changes; stores rebuild their index on open. */
-export const INDEX_VERSION = 2;
+export const INDEX_VERSION = 3;
 
 /** Secondary index terms so common queries avoid full scans. */
 export function indexTerms(record: SignedRecord): string[] {
@@ -65,8 +65,9 @@ export function indexTerms(record: SignedRecord): string[] {
       return [`name:${name}`];
     }
     case 'friends': {
-      const body = record.body as { friends: string[] };
-      return body.friends.map((f) => `friend-of:${f}`);
+      // Only the legacy, readable form; a sealed list says nothing to index.
+      const body = record.body as { friends?: string[] };
+      return (body.friends ?? []).map((f) => `friend-of:${f}`);
     }
     case 'space':
       return [`owner:${(record.body as { owner: string }).owner}`];
@@ -77,6 +78,11 @@ export function indexTerms(record: SignedRecord): string[] {
       // member-user: active memberships; member-any: all of them (for account deletion).
       const any = `member-any:${body.userId}`;
       return body.left ? [any] : [`member-user:${body.userId}`, any];
+    }
+    case 'note': {
+      // Unread notes count against the recipient's quota.
+      const body = record.body as { deleted?: boolean };
+      return body.deleted ? [] : [`note-to:${record.key.split(':')[1]}`];
     }
     default:
       return [];

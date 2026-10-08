@@ -102,7 +102,8 @@ main server puts the TCP side behind a reverse proxy on 443.
   connections per address (`--max-connections-per-ip`) and in total
   (`--capacity`), and times out connections that don't authenticate. Each
   account can make it store at most 100 devices, 100 spaces and 500
-  memberships, and each space at most 1000 invites, so one account cannot
+  memberships, each space at most 1000 invites, and each account receives at
+  most 200 unread friend notes, so one account cannot
   fill your disk (records replicated from other servers are not counted). The
   built-in relay refuses to send traffic to your own machine or your private
   network (loopback, 10/8, 172.16/12, 192.168/16, link-local, CGNAT, IPv6
@@ -111,7 +112,8 @@ main server puts the TCP side behind a reverse proxy on 443.
 - **Metadata of the people using it, and a copy of everyone's records.**
   Your server sees who is online and who talks to whom and when, never
   message content. Like every server in the network it also keeps a copy of
-  every account record: profiles, friend lists, spaces and memberships. See
+  every account record: profiles, spaces, memberships, and friend lists and
+  friend requests (these two encrypted, so your server can't read them). See
   [If other people use your server](#if-other-people-use-your-server).
 
 **How the directory shows addresses.** The public listing

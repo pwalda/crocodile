@@ -30,20 +30,26 @@ records the Crocodile network needs.
 
 ### What the server keeps
 
-| Data                                                                                                                                                              | Why                                                                   | How long                                                                                    |
-| ----------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------- | ------------------------------------------------------------------------------------------- |
-| Public profiles (name and number tag, avatar and bio if set), public keys and device names                                                                        | So people can find each other and encrypt to each other               | As long as the account exists                                                               |
-| Friends and blocked lists, spaces, their channels and members, and invites                                                                                        | So people's devices and their friends' devices stay in sync           | As long as the account exists, or until changed                                             |
-| Who is online, which voice room they're in, when they connect                                                                                                     | To show presence and choose who hosts a call                          | Only while connected                                                                        |
-| IP addresses, and connection setup data passed between people who call each other (which includes IP addresses)                                                   | To connect people, and to limit connections per address against abuse | In memory while connected; addresses that exceed the connection limit are logged for [days] |
-| _Mailbox, if turned on:_ direct messages for people who are offline, sealed so only the recipient can open them; the server sees sender, recipient, time and size | To deliver messages while the recipient is offline                    | Until delivered, at most [3] days                                                           |
-| _Relay, if turned on:_ already-encrypted call and message traffic; the server sees its size and timing                                                            | For networks that block direct connections                            | Passed through live, nothing stored                                                         |
+| Data                                                                                                                                                               | Why                                                                   | How long                                                                                    |
+| ------------------------------------------------------------------------------------------------------------------------------------------------------------------ | --------------------------------------------------------------------- | ------------------------------------------------------------------------------------------- |
+| Public profiles (name and number tag, avatar and bio if set), public keys and device names                                                                         | So people can find each other and encrypt to each other               | As long as the account exists                                                               |
+| Spaces, their channels and members, and invites                                                                                                                    | So people's devices and their friends' devices stay in sync           | As long as the account exists, or until changed                                             |
+| Each person's friends and blocked list, encrypted so that only their own devices can read it; the server sees whose list it is, its rough size and when it changes | So all of a person's devices have the same list                       | As long as the account exists, or until changed                                             |
+| Friend requests and their answers, sealed so that only the recipient can read them and without the sender's name; the server sees recipient, time and size         | To deliver them, also to people who are offline                       | Until the recipient's app has read them, at most 30 days                                    |
+| Who is online, which voice room they're in, when they connect                                                                                                      | To show presence and choose who hosts a call                          | Only while connected                                                                        |
+| IP addresses, and connection setup data passed between people who call each other (which includes IP addresses)                                                    | To connect people, and to limit connections per address against abuse | In memory while connected; addresses that exceed the connection limit are logged for [days] |
+| _Mailbox, if turned on:_ direct messages for people who are offline, sealed so only the recipient can open them; the server sees sender, recipient, time and size  | To deliver messages while the recipient is offline                    | Until delivered, at most [3] days                                                           |
+| _Relay, if turned on:_ already-encrypted call and message traffic; the server sees its size and timing                                                             | For networks that block direct connections                            | Passed through live, nothing stored                                                         |
 
-The first two rows are records of the whole Crocodile network, not only of
+The first four rows are records of the whole Crocodile network, not only of
 the people who use this server: every coordination server keeps a copy, so
 that people on different servers can reach each other. They are signed by
-their owners, so servers can't forge them, but they are not hidden from
-servers.
+their owners, so servers can't forge them. Profiles, spaces and memberships
+are not hidden from servers; friend lists and friend requests are encrypted.
+While someone is connected, this server also sees whose presence their app
+follows, whom they send a friend request or answer to, and whom they start
+a direct message or call with; it doesn't keep
+that after they disconnect.
 
 ### Legal basis
 
@@ -67,12 +73,12 @@ law requires it.
 You can ask us for a copy of the data we hold about you, or to correct or
 delete it. Most of it you can see and change yourself in the app.
 
-The records in the first two rows are signed by you and kept by every server
+The records in the first four rows are signed by you and kept by every server
 in the network, so no single server can delete them for you: a copy deleted
 here would come back from the others. To delete them everywhere, delete your
 account in the app (Settings → Profile → Delete account). Every server,
-this one included, then erases your devices, friends list, memberships and
-any mail waiting for you. What remains is a marker with your account ID and
+this one included, then erases your devices, friends list, memberships, and
+any friend requests and mail waiting for you. What remains is a marker with your account ID and
 public key, named "Deleted user", and a "Deleted space" marker for each space
 you owned, so the account and its spaces can't be brought back. For data only
 this server has, such as its logs, ask us.

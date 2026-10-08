@@ -44,7 +44,7 @@ hosts a group. This document explains how the pieces fit and why.
 | --------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Voice and text only P2P, always E2E                                   | Voice frames are encrypted by the sender's app (Encoded Transforms, SFrame-style) before they leave the device; text is group-encrypted with ratcheting sender keys. The host relay forwards ciphertext. Coordination servers carry signalling only. If peers cannot reach the host, the host is re-elected first; only users who opted in may then fall back to a coordinator's relay (TURN), which carries the same end-to-end ciphertext, for at most an hour at a time and for a capped number of users per server. |
 | Coordination servers on a good-will basis                             | Anyone can run `crocodile-coordinator` or tick "Host a coordination server" in the app. Servers register with the directory, which verifies they are reachable.                                                                                                                                                                                                                                                                                                                                                         |
-| Servers hold accounts and metadata, shared across a mesh              | Accounts are key pairs. Profiles, friend lists, spaces, invites and memberships are **records signed by their author**; every server replicates every record and every client re-verifies them, so no server has to be trusted for integrity.                                                                                                                                                                                                                                                                           |
+| Servers hold accounts and metadata, shared across a mesh              | Accounts are key pairs. Profiles, friend lists, spaces, invites and memberships are **records signed by their author**; every server replicates every record and every client re-verifies them, so no server has to be trusted for integrity. Friend lists are sealed so that only their owner's devices can read them, and friend requests travel as sealed notes that don't name their sender (only the sender's own server sees whom they wrote to).                                                                 |
 | Lowest-latency server, runner-up as backup                            | Clients fetch the directory (addresses listed obfuscated and signed by each server), probe `/health` round-trip times, connect to the best and fail over to the standby instantly.                                                                                                                                                                                                                                                                                                                                      |
 | Every install can be server and client                                | The coordinator and relay are libraries; the desktop app runs them in Electron utility processes.                                                                                                                                                                                                                                                                                                                                                                                                                       |
 | Hassle-free install                                                   | One-click per-user installers (NSIS/DMG/AppImage/deb/rpm), no accounts, passwords or emails: onboarding is "pick a name".                                                                                                                                                                                                                                                                                                                                                                                               |
@@ -75,14 +75,51 @@ Metadata lives in signed records (`packages/protocol/src/records.ts`):
 | Record  | Key                         | Who may write it                                                              |
 | ------- | --------------------------- | ----------------------------------------------------------------------------- |
 | profile | `profile:<userId>`          | the user (name, avatar, bio, X25519 key)                                      |
-| friends | `friends:<userId>`          | the user; friendship = both list each other; one-sided = request              |
+| friends | `friends:<userId>`          | the user; sealed, readable only by the user's devices (see below)             |
 | space   | `space:<spaceId>`           | the owner; `spaceId = hash(owner key, nonce)` binds ownership without history |
 | invite  | `invite:<code>`             | the space owner                                                               |
 | member  | `member:<spaceId>:<userId>` | the user, referencing a valid invite                                          |
 | device  | `device:<userId>:<device>`  | the user (name, platform, current prekeys, revoked flag)                      |
+| note    | `note:<userId>:<noteId>`    | anyone, once, with a one-time key; only the recipient may delete it           |
 
 Validation (`crypto/src/records.ts`) checks the signature, authority, and
 last-writer-wins versioning, identically on servers and clients.
+
+**Friends without telling the servers.** A friendship exists when both people
+list each other; listing someone who doesn't list you back is a request. No
+server learns who lists whom:
+
+- Each user's list (whom they list or block, and whether each of those lists
+  them back) is one `friends` record, AES-256-GCM-encrypted under a key that
+  only the account's own devices derive from the account seed, and padded.
+  Servers replicate it but see only its owner, its rough size and when it
+  changes. Entries merge field by field, so two devices editing at once
+  don't lose each other's changes (`client-core/src/friend-list.ts`).
+- The other side hears about a change in a **note**: "I list you" or "I don't
+  any more", sealed to each of their devices like a sealed box, but with the
+  sender's identity and signature inside the encryption (an _anonymous box_).
+  The note record is signed by a key made for that note alone, so servers can
+  check it and the note itself doesn't say who sent it. The one server the
+  sender hands it to does know whom it is from and for, since the sender is
+  signed in there; the servers it is replicated to don't. Servers keep notes until the
+  recipient's app has read them and replaces them with a deletion marker, and
+  at most 30 days; only the recipient can list or fetch their notes, and each
+  account holds at most 200 unread ones.
+- A note also says whether its sender thinks the recipient lists them, so if
+  a note gets lost, the other side notices and sends its state again.
+- **Blocks** are enforced by the blocking user's apps (they ignore the
+  blocked user's invitations, messages and mail), since no server knows
+  about them. The blocked user is only told that they are no longer listed.
+- Apps that predate sealed lists wrote them in the open. Servers still accept
+  such lists, and updated apps read them and move their own into the sealed
+  form on first connection, telling everyone they list in a note.
+
+What this does not hide: while you are connected, your server sees whose
+presence you follow, whom you send a friend request or answer to, and whom
+you start a direct message or call with (it doesn't keep or replicate who
+sent a note; hiding even that would need an anonymising relay), and
+every server sees space memberships (it uses them to admit members to a
+space's sessions). See [docs/ROADMAP.md](docs/ROADMAP.md).
 
 ## 4. Coordination servers and the mesh
 
@@ -278,6 +315,12 @@ See [docs/ROADMAP.md](docs/ROADMAP.md). The main ones:
 - **Mesh trust.** Servers cannot forge records or read content. A malicious
   server could still lie about presence or drop signalling; clients verify
   membership themselves before sharing keys.
+- **Metadata on servers.** Friend lists are sealed, but the server you're
+  connected to sees whose presence you follow and whom you befriend, message
+  or call while you do, and space memberships are visible to every server.
+- **Every server holds every record.** Fine for a small network; a larger one
+  should keep each record on a few servers chosen by rendezvous hashing and
+  link servers in a sparse overlay rather than a full mesh.
 - **Global push-to-talk** needs X11 on Linux (not Wayland) and the
   Accessibility permission on macOS; otherwise it works while the app is
   focused.

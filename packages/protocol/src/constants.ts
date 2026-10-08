@@ -17,7 +17,14 @@ export const LIMITS = {
   recordMaxBytes: 400 * 1024,
   wsMessageMaxBytes: 1024 * 1024,
   sessionMembersMax: 100,
+  /** Unread notes a server holds for one user. */
+  notesPerUser: 200,
+  /** One box per recipient device. */
+  noteBoxesMax: 16,
 } as const;
+
+/** Notes, and the markers that delete them, are dropped this long after they were written. */
+export const NOTE_TTL_MS = 30 * 24 * 3600_000;
 
 /** Signature domain separation prefixes. Never reuse one for a different purpose. */
 export const SIG_DOMAIN = {
@@ -30,4 +37,5 @@ export const SIG_DOMAIN = {
   message: 'croc/v1/message',
   senderKey: 'croc/v1/sender-key',
   sealed: 'croc/v1/sealed',
+  anon: 'croc/v1/anon',
 } as const;

@@ -10,9 +10,18 @@
 
 ## What servers see
 
-Coordination servers see **metadata**: public profiles, friend lists, space
-names, channel lists, memberships, device names, who is online, who is in
-which voice room, and when people connect. They pass on signalling (SDP and
+Coordination servers see **metadata**: public profiles, space names, channel
+lists, memberships, device names, who is online, who is in which voice room,
+and when people connect. They do **not** see whom you list as a friend or
+block: each person's list is encrypted so that only their own devices can
+read it, and friend requests and their answers travel as notes sealed to the
+recipient's devices, with the sender's identity inside the encryption. A
+server sees that someone sent a note to a user, when, and its size. The
+server you are connected to does see whose presence you follow, whom you
+send a friend request or answer to, and whom you start a direct message or
+call with, while you do; it doesn't record who sent a note, and nothing of
+that is replicated to other servers or kept after you disconnect. Blocks are
+enforced by your own apps. They pass on signalling (SDP and
 ICE candidates), which includes IP addresses. They never receive message or
 voice content, except that a user who turned on the **opt-in relay** sends
 their already end-to-end encrypted media through one; that server then also
@@ -24,7 +33,7 @@ size and time, keeps them at most 7 days, and cannot read them.
 **Deleting an account** (Settings → Profile) deletes the spaces the user
 owns, leaves the others, and replaces the profile with a signed "deleted"
 marker. Every server that receives the marker erases the account's devices,
-friends list, memberships and mailbox items, signs out its devices and
+friends list, memberships, notes and mailbox items, signs out its devices and
 refuses anything the identity signs afterwards, so stale copies elsewhere in
 the mesh can't bring it back. The marker itself stays: the user id, the
 public keys and the words "Deleted user". Messages already delivered to other
