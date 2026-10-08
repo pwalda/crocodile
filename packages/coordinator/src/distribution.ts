@@ -32,6 +32,10 @@ export interface DistributionConfig {
   cacheMs: number;
   /** How often we compare what we hold with one other owner, and fix the difference. */
   repairMs: number;
+  /** After the live set changes, owners also ask the other owners for this long. */
+  freshOwnerMs: number;
+  /** How often deletion markers not yet confirmed by a space's owners are sent again. */
+  deletionRetryMs: number;
 }
 
 export const defaultDistributionConfig: DistributionConfig = {
@@ -41,6 +45,8 @@ export const defaultDistributionConfig: DistributionConfig = {
   watchRenewMs: 2 * 60_000,
   cacheMs: 5 * 60_000,
   repairMs: 5 * 60_000,
+  freshOwnerMs: 2 * 60_000,
+  deletionRetryMs: 60_000,
 };
 
 const CACHE_MAX = 20_000;
@@ -68,6 +74,7 @@ export class Distribution {
   private retries: { record: SignedRecord; from: string; tries: number }[] = [];
   private retryTimer?: ReturnType<typeof setTimeout>;
   private repairTimer?: ReturnType<typeof setInterval>;
+  private deletionTimer?: ReturnType<typeof setInterval>;
   private repairing = false;
 
   constructor(
@@ -98,6 +105,8 @@ export class Distribution {
     this.gcTimer.unref?.();
     this.repairTimer = setInterval(() => void this.repair(), this.config.repairMs);
     this.repairTimer.unref?.();
+    this.deletionTimer = setInterval(() => void this.sendDeletions(), this.config.deletionRetryMs);
+    this.deletionTimer.unref?.();
   }
 
   stop() {
@@ -106,6 +115,7 @@ export class Distribution {
     clearTimeout(this.watchSoon);
     clearTimeout(this.retryTimer);
     clearInterval(this.repairTimer);
+    clearInterval(this.deletionTimer);
   }
 
   ownsShard(shard: string) {
@@ -207,7 +217,27 @@ export class Distribution {
   ): Promise<PutResult> {
     if (SignedRecordEnvelope.safeParse(input).success)
       await this.ensureDependencies(input as SignedRecord);
-    return this.hub.records.put(input, opts);
+    const res = this.hub.records.put(input, opts);
+    if (res.accepted && opts.fresh) await this.storeOnOtherShards(input as SignedRecord);
+    return res;
+  }
+
+  /**
+   * A new record whose other shards we don't own: before the write is
+   * confirmed, make sure an owner of each holds it, so a read right after
+   * (a space's member list, say, just after joining) finds it. Replication
+   * reaches the rest of the owners as usual.
+   */
+  private async storeOnOtherShards(record: SignedRecord) {
+    await Promise.all(
+      shardsOf(record)
+        .filter((shard) => !this.ownsShard(shard))
+        .map((shard) =>
+          this.hub.mesh
+            .requestAny(this.others(shard), 'rec_store', { records: [record] })
+            .catch(() => {}),
+        ),
+    );
   }
 
   /** Records another server copied to us, as an owner. */
@@ -248,38 +278,77 @@ export class Distribution {
   // Reads
   // -------------------------------------------------------------------------
 
+  /**
+   * Whether we should check with the other owners too, though we own the
+   * shard: the live set changed recently, so records may still be on their
+   * way to us.
+   */
+  private catchingUp() {
+    const m = this.hub.membership;
+    return !m.settled.equals(m.view) || Date.now() - m.stableSince < this.config.freshOwnerMs;
+  }
+
+  /**
+   * Ask every other owner of a shard and keep the newest copy of each record:
+   * one owner may not have a record yet that another has. Null if none answered.
+   */
+  private async fromOwners(
+    shard: string,
+    m: 'rec_get' | 'rec_list' | 'rec_term',
+    p: unknown,
+  ): Promise<SignedRecord[] | null> {
+    const answers = await this.hub.mesh.gather<{ records: SignedRecord[] }>(
+      this.others(shard),
+      m,
+      p,
+    );
+    if (answers.length === 0) return null;
+    const newest = new Map<string, SignedRecord>();
+    for (const a of answers) {
+      for (const r of a.records ?? []) {
+        if (!SignedRecordEnvelope.safeParse(r).success) continue;
+        if ((newest.get(r.key)?.version ?? 0) < r.version) newest.set(r.key, r);
+      }
+    }
+    const found = [...newest.values()];
+    this.remember(found);
+    return found;
+  }
+
+  /** Newest copy per key across several lists. */
+  private static merge(...lists: SignedRecord[][]): SignedRecord[] {
+    const newest = new Map<string, SignedRecord>();
+    for (const list of lists)
+      for (const r of list) if ((newest.get(r.key)?.version ?? 0) < r.version) newest.set(r.key, r);
+    return [...newest.values()];
+  }
+
   /** Records by key, from our store for shards we own and from their owners otherwise. */
   async get(keys: string[]): Promise<SignedRecord[]> {
     const out = new Map<string, SignedRecord>();
-    const remote = new Map<string, string[]>();
+    const ask = new Map<string, string[]>();
+    const catchingUp = this.catchingUp();
     for (const key of new Set(keys)) {
       const shard = shardOfKey(key);
-      if (!shard || this.ownsShard(shard)) {
-        const r = this.hub.records.store.get(key);
-        if (r) out.set(key, r);
-      } else {
-        const list = remote.get(shard) ?? [];
+      const owned = !shard || this.ownsShard(shard);
+      const local = owned ? this.hub.records.store.get(key) : undefined;
+      if (local) out.set(key, local);
+      // Not ours, or ours but missing or possibly behind: ask the other owners.
+      if (shard && (!owned || !local || catchingUp)) {
+        const list = ask.get(shard) ?? [];
         list.push(key);
-        remote.set(shard, list);
+        ask.set(shard, list);
       }
     }
     await Promise.all(
-      [...remote].map(async ([shard, group]) => {
-        let found: SignedRecord[] = [];
-        try {
-          found = (
-            await this.hub.mesh.requestAny<{ records: SignedRecord[] }>(
-              this.others(shard),
-              'rec_get',
-              { keys: group },
-            )
-          ).records.filter((r) => group.includes(r.key));
-          this.remember(found);
-        } catch {
-          // Owners unreachable: what we still hold is better than nothing.
+      [...ask].map(async ([shard, group]) => {
+        const found = (await this.fromOwners(shard, 'rec_get', { keys: group })) ?? [];
+        for (const r of found) {
+          if (group.includes(r.key) && (out.get(r.key)?.version ?? 0) < r.version)
+            out.set(r.key, r);
         }
-        for (const r of found) out.set(r.key, r);
-        // A record we wrote a moment ago may not have reached the owner we asked.
+        // A record we wrote a moment ago may not have reached the owners yet;
+        // if they can't be reached, what we still hold is better than nothing.
         for (const key of group) {
           const mine = this.lookup(key);
           if (mine && (out.get(key)?.version ?? 0) < mine.version) out.set(key, mine);
@@ -292,33 +361,26 @@ export class Distribution {
   async list(prefix: string, limit: number): Promise<SignedRecord[]> {
     const shard = shardOfPrefix(prefix);
     const store = this.hub.records.store;
-    if (!shard || this.ownsShard(shard)) return store.listPrefix(prefix, limit);
-    try {
-      const { records } = await this.hub.mesh.requestAny<{ records: SignedRecord[] }>(
-        this.others(shard),
-        'rec_list',
-        { prefix, limit },
-      );
-      return records.filter((r) => r.key.startsWith(prefix)).slice(0, limit);
-    } catch {
-      return store.listPrefix(prefix, limit);
-    }
+    const owned = !shard || this.ownsShard(shard);
+    const local = owned ? store.listPrefix(prefix, limit) : [];
+    if (!shard || (owned && !this.catchingUp())) return local;
+    const remote = await this.fromOwners(shard, 'rec_list', { prefix, limit });
+    if (!remote) return owned ? local : store.listPrefix(prefix, limit);
+    return Distribution.merge(
+      local,
+      remote.filter((r) => r.key.startsWith(prefix)),
+    ).slice(0, limit);
   }
 
   async findByTerm(term: string, limit: number): Promise<SignedRecord[]> {
     const shard = shardOfTerm(term);
     const store = this.hub.records.store;
-    if (!shard || this.ownsShard(shard)) return store.findByTerm(term, limit);
-    try {
-      const { records } = await this.hub.mesh.requestAny<{ records: SignedRecord[] }>(
-        this.others(shard),
-        'rec_term',
-        { term, limit },
-      );
-      return records.slice(0, limit);
-    } catch {
-      return store.findByTerm(term, limit);
-    }
+    const owned = !shard || this.ownsShard(shard);
+    const local = owned ? store.findByTerm(term, limit) : [];
+    if (!shard || (owned && !this.catchingUp())) return local;
+    const remote = await this.fromOwners(shard, 'rec_term', { term, limit });
+    if (!remote) return owned ? local : store.findByTerm(term, limit);
+    return Distribution.merge(local, remote).slice(0, limit);
   }
 
   // -------------------------------------------------------------------------
@@ -353,6 +415,16 @@ export class Distribution {
         const { term, limit } = parsed.data as { term: string; limit?: number };
         return { records: store.findByTerm(term, limit ?? 1000) };
       }
+      case 'rec_store': {
+        const { records } = parsed.data as { records: SignedRecord[] };
+        await this.onReplicated(
+          records.map((record) => ({ seq: 0, record })),
+          from,
+        );
+        return {};
+      }
+      case 'presence_state':
+        return this.hub.presence.fullState();
       case 'digest': {
         const { buckets } = parsed.data as { buckets: number[] };
         const mine = this.digest(from);
@@ -592,6 +664,74 @@ export class Distribution {
       // Unreachable or busy: another round will try someone else.
     } finally {
       this.repairing = false;
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // Account deletion: the marker must reach the owners of the user's spaces
+  // -------------------------------------------------------------------------
+
+  /**
+   * Remember to send a deletion marker to the owners of the spaces the user
+   * was in, until each has confirmed (kept across restarts, for 30 days).
+   */
+  trackDeletion(marker: SignedRecord<'profile'>, spaceIds: string[]) {
+    if (spaceIds.length === 0) return;
+    const userId = marker.key.slice('profile:'.length);
+    const store = this.hub.records.store;
+    store.setMeta(
+      `deletion:${userId}`,
+      JSON.stringify({ marker, spaces: spaceIds, done: [], since: Date.now() }),
+    );
+    const index = new Set<string>(JSON.parse(store.getMeta('deletions') ?? '[]') as string[]);
+    index.add(userId);
+    store.setMeta('deletions', JSON.stringify([...index]));
+    void this.sendDeletions();
+  }
+
+  private sendingDeletions = false;
+
+  async sendDeletions() {
+    if (this.sendingDeletions) return;
+    this.sendingDeletions = true;
+    const store = this.hub.records.store;
+    try {
+      const index = JSON.parse(store.getMeta('deletions') ?? '[]') as string[];
+      const left: string[] = [];
+      for (const userId of index) {
+        const raw = store.getMeta(`deletion:${userId}`);
+        if (!raw) continue;
+        const job = JSON.parse(raw) as {
+          marker: SignedRecord;
+          spaces: string[];
+          done: string[];
+          since: number;
+        };
+        if (Date.now() - job.since > 30 * 24 * 3600_000) {
+          store.setMeta(`deletion:${userId}`, '');
+          continue;
+        }
+        const targets = new Set<string>();
+        for (const spaceId of job.spaces)
+          for (const id of this.others(`space:${spaceId}`)) targets.add(id);
+        for (const id of job.done) targets.delete(id);
+        for (const id of targets) {
+          try {
+            await this.hub.mesh.request(id, 'rec_store', { records: [job.marker] });
+            job.done.push(id);
+          } catch {
+            // Tried again on the next round.
+          }
+        }
+        const pending = [...targets].some((id) => !job.done.includes(id));
+        if (pending) {
+          left.push(userId);
+          store.setMeta(`deletion:${userId}`, JSON.stringify(job));
+        } else store.setMeta(`deletion:${userId}`, '');
+      }
+      store.setMeta('deletions', JSON.stringify(left));
+    } finally {
+      this.sendingDeletions = false;
     }
   }
 

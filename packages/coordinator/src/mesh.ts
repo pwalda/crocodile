@@ -79,6 +79,8 @@ const FLOOD_HOPS = 16;
 const IDLE_CLOSE = 4000;
 /** Servers we keep track of, so made-up identities can't fill our memory. */
 const KNOWN_MAX = 20_000;
+/** A server we failed to reach three times is skipped for this long, then tried again. */
+const UNREACHABLE_COOLDOWN_MS = 5 * 60_000;
 
 /** Frames that keep a direct link in use (overlay chatter doesn't). */
 const USEFUL = new Set([
@@ -104,7 +106,10 @@ export class Mesh {
   private links = new Map<string, Link>();
   private pendingLinks = new Set<Link>();
   private known = new Map<string, ServerInfo>();
-  private dialing = new Map<string, { timer?: ReturnType<typeof setTimeout>; attempts: number }>();
+  private dialing = new Map<
+    string,
+    { timer?: ReturnType<typeof setTimeout>; attempts: number; failedAt?: number }
+  >();
   private queued = new Map<string, { frame: FedFrame; at: number }[]>();
   private requests = new Map<
     string,
@@ -199,7 +204,8 @@ export class Mesh {
 
   private unreachable(id: string) {
     const url = this.known.get(id)?.url;
-    return !!url && (this.dialing.get(url)?.attempts ?? 0) >= 3;
+    const d = url ? this.dialing.get(url) : undefined;
+    return !!d && d.attempts >= 3 && Date.now() - (d.failedAt ?? 0) < UNREACHABLE_COOLDOWN_MS;
   }
 
   private scheduleMaintain() {
@@ -304,6 +310,42 @@ export class Mesh {
     throw last;
   }
 
+  /**
+   * Ask several servers at once. Resolves with every answer, once all have
+   * answered or `graceMs` after the first; empty if none could answer.
+   */
+  gather<T = unknown>(
+    servers: string[],
+    m: FedRequest['m'],
+    p: unknown,
+    graceMs = 250,
+  ): Promise<T[]> {
+    if (servers.length === 0) return Promise.resolve([]);
+    return new Promise((resolve) => {
+      const got: T[] = [];
+      let left = servers.length;
+      let done = false;
+      let grace: ReturnType<typeof setTimeout> | undefined;
+      const finish = () => {
+        if (done) return;
+        done = true;
+        clearTimeout(grace);
+        resolve(got);
+      };
+      for (const id of servers) {
+        this.request<T>(id, m, p)
+          .then((v) => {
+            got.push(v);
+            if (!grace && !done) grace = setTimeout(finish, graceMs);
+          })
+          .catch(() => {})
+          .finally(() => {
+            if (--left === 0) finish();
+          });
+      }
+    });
+  }
+
   /** Pass a frame to every link (except the one it came from). */
   forward(frame: FedFrame, except?: string) {
     for (const [id, link] of this.links) {
@@ -397,6 +439,7 @@ export class Mesh {
     if (this.closed) return;
     const state = this.dialing.get(url) ?? { attempts: 0 };
     state.attempts += 1;
+    state.failedAt = Date.now();
     // Direct links aren't retried on their own: the next frame for them dials again.
     if (!this.wantsUrl(url) || (!this.isKnownUrl(url) && state.attempts > 5)) {
       state.timer = undefined;

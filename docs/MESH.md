@@ -39,7 +39,9 @@ main server runs with it.
 - **Direct links** are opened when a server needs to talk to a specific other
   server (a record's owner, a session's owner, the server a user is on) and
   closed again after five idle minutes. Every listed server is reachable (the
-  directory checks), so two servers never depend on a third to talk.
+  directory checks), so two servers never depend on a third to talk. A server
+  that couldn't be reached three times in a row is skipped for five minutes,
+  then tried again.
 - **Flooding** carries what every server needs to hear: beacons, presence,
   voice-room occupancy, mailbox and device-link queries. A flooded frame has an
   id and a hop limit; each server forwards a frame it hasn't seen to its other
@@ -69,10 +71,15 @@ by name goes to `name:<name>`.
   owners of its home shard (the last column). The first one that answers
   validates it with the usual rules, including per-account quotas (it holds
   everything the quota counts), stores it and copies it to the other owners.
-  Records a check depends on that live elsewhere (the author's profile, a
+  Before the write is confirmed, an owner of each of the record's other shards
+  holds it too, so a read right after the write finds it wherever it looks
+  (a space's member list just after joining, say). Records a check depends on that live elsewhere (the author's profile, a
   space, an invite) are fetched from their owners and kept for a few minutes.
 - **Reads.** A server answers from its own store for shards it owns and asks
-  the owners otherwise.
+  the owners otherwise: all of them at once, keeping the newest copy of each
+  record, since one owner may not have a record yet that another has. For a
+  while after the live set changes, and for a record it lacks, an owner asks
+  the other owners too.
 - **Live updates.** A server whose clients follow records it doesn't own asks
   the owners to **watch** them for it; owners push each change to the
   watching servers, which pass it on to their clients. Watches last five
@@ -96,11 +103,15 @@ by name goes to `name:<name>`.
   before; members' servers reach it over a direct link.
 - **Presence and voice occupancy** are flooded, with a sequence number per
   origin server, and a server sends everything it knows when an overlay link
-  comes up. Servers forget what came from a server that has stopped being
-  live.
+  comes up, including rooms that emptied in the last hour. Each beacon carries
+  its server's latest presence sequence number: a server that has seen less
+  missed something and fetches that server's full presence directly. Servers
+  forget what came from a server that has stopped being live.
 - **Account deletion.** The deletion marker reaches the owners of the user's
   shard, which erase what they hold and send the marker on to the owners of
-  every space the user was a member of, which erase the memberships.
+  every space the user was a member of, which erase the memberships. They keep
+  sending it (across restarts, for up to 30 days) until each of those owners
+  has confirmed.
 
 ## Limits
 

@@ -99,6 +99,36 @@ describe('records', () => {
   });
 });
 
+describe('writes sent twice', () => {
+  it('counts the same record sent again as stored, and still refuses a different one', async () => {
+    const c = await server();
+    const alice = await user(c);
+    const key = recordKey.profile(alice.identity.userId);
+    const version = Date.now();
+    const profile = signRecord(
+      alice.identity,
+      'profile',
+      key,
+      { username: 'alice', encKey: alice.identity.encPublicKey },
+      version,
+    );
+    expectAccepted(await alice.conn.request('records.put', { record: profile }));
+    // A retry after a lost answer, or a copy that got there first by another path.
+    expectAccepted(await alice.conn.request('records.put', { record: profile }));
+    const other = signRecord(
+      alice.identity,
+      'profile',
+      key,
+      { username: 'mallory', encKey: alice.identity.encPublicKey },
+      version,
+    );
+    expect(await alice.conn.request('records.put', { record: other })).toMatchObject({
+      accepted: false,
+      reason: 'stale version',
+    });
+  });
+});
+
 describe('sessions and host election', () => {
   async function setup() {
     const c = await server();
@@ -921,6 +951,30 @@ describe('sealed friends lists and notes', () => {
     );
     expect(c.records.get(n.key)).toBeUndefined();
     expect((await alice.conn.request('records.put', { record: noteTo(bob) })).accepted).toBe(false);
+  });
+});
+
+describe('account deletion, answered', () => {
+  it('answers the request that deleted the account before signing the device out', async () => {
+    const c = await server();
+    const alice = await user(c);
+    // A slow write (owners elsewhere to reach first, a busy server).
+    const put = c.dist.putFromClient.bind(c.dist);
+    c.dist.putFromClient = async (record) => {
+      const res = await put(record);
+      await new Promise((r) => setTimeout(r, 400));
+      return res;
+    };
+    const closed = new Promise<number>((resolve) =>
+      alice.conn.on('close', ({ code }) => resolve(code)),
+    );
+    const marker = signRecord(alice.identity, 'profile', recordKey.profile(alice.identity.userId), {
+      username: DELETED_PROFILE_NAME,
+      encKey: alice.identity.encPublicKey,
+      deleted: true,
+    });
+    expectAccepted(await alice.conn.request('records.put', { record: marker }));
+    expect(await closed).toBe(4010);
   });
 });
 

@@ -20,6 +20,8 @@ export interface ClientHandle {
   voiceWatch: Set<string>;
   send<E extends keyof ServerEvents>(ev: E, d: ServerEvents[E]): void;
   close(code: number, reason: string): void;
+  /** Close once the requests in progress have been answered. */
+  closeAfterRequests?(code: number, reason: string): void;
 }
 
 const STATUS_RANK: Record<string, number> = {
@@ -51,6 +53,10 @@ export class PresenceService {
   /** `${origin}|${userId}` -> seq of the latest news applied (also for users who left). */
   private seqs = new Map<string, number>();
   private ownSeq = 0;
+  /** origin -> the newest seq we have applied from it. */
+  private originSeq = new Map<string, number>();
+  /** origin -> when we last asked it for its full presence. */
+  private askedAt = new Map<string, number>();
   private watchers = new Map<string, Set<ClientHandle>>();
 
   constructor(private readonly hub: Coordinator) {}
@@ -180,6 +186,42 @@ export class PresenceService {
     return [...this.localDevices.keys()].map((u) => this.fedEntry(u));
   }
 
+  /** Our latest presence seq, announced in beacons. */
+  get latestSeq() {
+    return this.ownSeq;
+  }
+
+  /**
+   * A beacon says `origin`'s presence is at `seq`. If we have seen less, we
+   * missed something (an offline user, say): fetch its full presence.
+   */
+  checkOrigin(origin: string, seq: number) {
+    if (seq <= (this.originSeq.get(origin) ?? 0)) return;
+    const now = Date.now();
+    // At most once per beacon period, so a lost answer is asked again soon.
+    if (now - (this.askedAt.get(origin) ?? 0) < this.hub.membership.timing.beaconMs) return;
+    this.askedAt.set(origin, now);
+    this.hub.mesh
+      .request<FedPresence>(origin, 'presence_state', {})
+      .then((frame) => {
+        if (frame?.origin === origin) this.applyRemote(frame);
+      })
+      .catch(() => {});
+  }
+
+  /** Our users, all of them, for a server that asked. */
+  fullState(): FedPresence {
+    // Not a new seq: a snapshot isn't news, and a new seq here would make
+    // every server that didn't get the snapshot ask us for it.
+    return {
+      t: 'presence',
+      origin: this.hub.info.id,
+      seq: this.ownSeq,
+      full: true,
+      entries: this.localEntries(),
+    };
+  }
+
   private nextSeq() {
     this.ownSeq = Math.max(Date.now(), this.ownSeq + 1);
     return this.ownSeq;
@@ -189,6 +231,7 @@ export class PresenceService {
   applyRemote(frame: FedPresence): boolean {
     const origin = frame.origin;
     if (!origin || origin === this.hub.info.id || typeof frame.seq !== 'number') return false;
+    if (frame.seq > (this.originSeq.get(origin) ?? 0)) this.originSeq.set(origin, frame.seq);
     const touched = new Set<string>();
     const isNew = (userId: string) => (this.seqs.get(`${origin}|${userId}`) ?? 0) < frame.seq;
     const listed = new Set(frame.entries.map((e) => e.userId));
@@ -233,11 +276,7 @@ export class PresenceService {
 
   /** Everything we know, for a server that just linked to us. */
   snapshot(): FedPresence[] {
-    const self = this.hub.info.id;
-    if (!this.ownSeq) this.nextSeq();
-    const out: FedPresence[] = [
-      { t: 'presence', origin: self, seq: this.ownSeq, full: true, entries: this.localEntries() },
-    ];
+    const out: FedPresence[] = [this.fullState()];
     const byFrame = new Map<string, FedPresence>();
     for (const [userId, entries] of this.remote) {
       for (const [origin, e] of entries) {

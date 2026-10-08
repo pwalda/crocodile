@@ -28,7 +28,12 @@ export interface FedBeacon {
   seq: number;
   /** The sender keeps a copy of every record. */
   full: boolean;
-  /** Ed25519 by the server key over { server, seq, full }. */
+  /**
+   * Sequence number of the sender's latest presence news: a server that has
+   * seen less missed some, and fetches the sender's full presence.
+   */
+  presence?: number;
+  /** Ed25519 by the server key over { server, seq, full, presence }. */
   sig: string;
 }
 
@@ -47,7 +52,16 @@ export interface FedFlood {
 export interface FedRequest {
   t: 'req';
   rid: string;
-  m: 'rec_put' | 'rec_get' | 'rec_list' | 'rec_term' | 'watch' | 'digest' | 'digest_keys';
+  m:
+    | 'rec_put'
+    | 'rec_get'
+    | 'rec_list'
+    | 'rec_term'
+    | 'rec_store'
+    | 'watch'
+    | 'digest'
+    | 'digest_keys'
+    | 'presence_state';
   p: unknown;
 }
 
@@ -64,6 +78,10 @@ export const FedRequestParams = {
     term: z.string().min(3).max(300),
     limit: z.number().int().min(1).max(5000).optional(),
   }),
+  /** Records the receiver should store as an owner; answered once applied. */
+  rec_store: z.object({ records: z.array(z.unknown()).max(200) }),
+  /** The receiver's full presence (FedPresence with full: true). */
+  presence_state: z.object({}),
   /** Push changes to these shards (records whose key starts with prefix) for ttlMs. */
   watch: z.object({
     items: z

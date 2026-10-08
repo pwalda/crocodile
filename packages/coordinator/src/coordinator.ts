@@ -267,12 +267,8 @@ export class Coordinator {
         .findByTerm(`member-any:${userId}`, 100_000)
         .map((r) => (r as SignedRecord<'member'>).body.spaceId),
     );
-    const targets = new Set<string>();
-    for (const spaceId of spaces)
-      for (const id of this.membership.view.ownersOf(`space:${spaceId}`)) targets.add(id);
-    targets.delete(this.info.id);
-    for (const id of targets)
-      this.mesh.sendTo(id, { t: 'records', items: [{ seq: 0, record: marker }], upTo: 0 });
+    // Kept until each of their owners confirms, across restarts.
+    this.dist.trackDeletion(marker, [...spaces]);
     const keys = [
       ...this.store.listPrefix(recordKey.devicePrefix(userId), 100_000).map((r) => r.key),
       recordKey.friends(userId),
@@ -292,7 +288,8 @@ export class Coordinator {
     setTimeout(() => {
       for (const client of this.presence.localOf(userId)) {
         client.send('record', { record: marker });
-        client.close(4010, 'account deleted');
+        if (client.closeAfterRequests) client.closeAfterRequests(4010, 'account deleted');
+        else client.close(4010, 'account deleted');
       }
     }, 100).unref?.();
   }

@@ -196,10 +196,33 @@ export class ClientConnection implements ClientHandle {
     this.hub.onClientAuthed(this);
   }
 
+  private inFlight = 0;
+  private closeWhenIdle?: { code: number; reason: string };
+
+  /**
+   * Sign out once the requests in progress are answered: the request that
+   * deleted the account gets its answer before the connection goes.
+   */
+  closeAfterRequests(code: number, reason: string) {
+    if (this.inFlight === 0) this.close(code, reason);
+    else this.closeWhenIdle = { code, reason };
+  }
+
   private async onRequest(msg: unknown) {
     const req = msg as { t?: unknown; id?: unknown; m?: unknown; p?: unknown };
     if (req.t !== 'req' || typeof req.id !== 'number' || typeof req.m !== 'string') return;
     const id = req.id;
+    this.inFlight++;
+    try {
+      await this.answer(id, req as { m: string; p?: unknown });
+    } finally {
+      this.inFlight--;
+      if (this.inFlight === 0 && this.closeWhenIdle)
+        this.close(this.closeWhenIdle.code, this.closeWhenIdle.reason);
+    }
+  }
+
+  private async answer(id: number, req: { m: string; p?: unknown }) {
     try {
       if (!(req.m in RpcParams)) throw new RpcFailure('not_found', `unknown method ${req.m}`);
       const method = req.m as RpcMethod;

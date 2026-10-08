@@ -128,6 +128,10 @@ export class RecordService {
       fresh: opts.fresh,
     });
     const current = typeof key === 'string' ? (this.store.get(key) ?? null) : null;
+    // The same record again (a retry after an answer was lost, or a copy that
+    // arrived first by another path): it is stored, which is what was asked.
+    if (current && current.sig === (input as { sig?: unknown })?.sig)
+      return { accepted: true, current };
     if (!result.ok) {
       if (result.retryable && !opts.fresh && opts.origin) {
         if (this.pending.length >= RecordService.MAX_PENDING) this.pending.shift();

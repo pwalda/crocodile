@@ -110,12 +110,14 @@ export class Membership {
     // Timestamps as sequence numbers keep increasing across restarts.
     const seq = Math.max(Date.now(), (this.own?.seq ?? 0) + 1);
     const full = !!this.hub.config.storeAll;
+    const presence = this.hub.presence.latestSeq;
     this.own = {
       t: 'beacon',
       server,
       seq,
       full,
-      sig: sign(this.hub.identity, SIG_DOMAIN.beacon, { server, seq, full }),
+      presence,
+      sig: sign(this.hub.identity, SIG_DOMAIN.beacon, { server, seq, full, presence }),
     };
     this.hub.mesh.forward(this.own);
     this.recompute();
@@ -136,7 +138,7 @@ export class Membership {
       !verifyPayload(
         key,
         SIG_DOMAIN.beacon,
-        { server: frame.server, seq: frame.seq, full: frame.full },
+        { server: frame.server, seq: frame.seq, full: frame.full, presence: frame.presence },
         frame.sig,
       )
     )
@@ -144,6 +146,7 @@ export class Membership {
     this.beacons.set(id, { frame: { ...frame, server: parsed.data }, at: now });
     this.hub.mesh.addKnown([parsed.data]);
     this.recompute();
+    if (typeof frame.presence === 'number') this.hub.presence.checkOrigin(id, frame.presence);
     return true;
   }
 

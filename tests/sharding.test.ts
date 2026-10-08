@@ -17,6 +17,7 @@ import {
 } from '@crocodile/protocol';
 import { FakeRelayNetwork } from './helpers/fake-relay';
 import {
+  caps,
   connectUser,
   createSpace,
   expectAccepted,
@@ -36,7 +37,13 @@ const sharded: Partial<CoordinatorConfig> = {
   replicas: 2,
   mesh: { fullMeshMax: 3, maintainMs: 150, idleMs: 1500 },
   membership: { beaconMs: 200, liveMs: 1500, settleMs: 300 },
-  distribution: { gcStableMs: 1200, gcCheckMs: 250, watchRenewMs: 1000, watchTtlMs: 3000 },
+  distribution: {
+    gcStableMs: 1200,
+    gcCheckMs: 250,
+    watchRenewMs: 1000,
+    watchTtlMs: 3000,
+    deletionRetryMs: 300,
+  },
 };
 
 async function server(name: string, overrides: Partial<CoordinatorConfig> = {}) {
@@ -296,6 +303,127 @@ describe('sharded records', () => {
       );
     });
     expect(await closed).toMatch(/protocol 2 required/);
+  });
+});
+
+describe('staying consistent', () => {
+  it('reads every owner, so one that lacks a record does not hide it', async () => {
+    const servers = await network(6);
+    const alice = await user(servers[0]!, 'alice');
+    const { space } = await createSpace(alice, 'Swamp');
+    await waitFor(
+      () => holders(servers, space.key).sort().join() === owners(servers, space).join(),
+      8000,
+      'stored by its owners',
+    );
+    const reader = servers.find((c) => !owners(servers, space).includes(c.info.id))!;
+    // The owner the reader would ask first has lost its copy.
+    const first = reader.membership.view
+      .ownersOf(`space:${space.key.slice('space:'.length)}`)
+      .find((id) => id !== reader.info.id)!;
+    servers.find((c) => c.info.id === first)!.store.delete(space.key);
+    const r = await user(reader);
+    for (let i = 0; i < 3; i++) {
+      const { records } = await r.conn.request('records.get', { keys: [space.key] });
+      expect(records.map((x) => x.sig)).toEqual([space.sig]);
+    }
+  });
+
+  it('keeps sending a deletion until the space owners confirm it', async () => {
+    const servers = await network(5);
+    const alice = await user(servers[0]!, 'alice');
+    const { spaceId, code } = await createSpace(alice, 'Swamp');
+    const bob = await user(servers[3]!, 'bob');
+    await joinSpace(bob, spaceId, code);
+    const memberKey = recordKey.member(spaceId, bob.identity.userId);
+    await waitFor(() => holders(servers, memberKey).length >= 2, 5000, 'membership stored');
+    // For a second, every delivery of the deletion marker between servers is lost.
+    const lostUntil = Date.now() + 1000;
+    for (const c of servers) {
+      const original = c.dist.onReplicated.bind(c.dist);
+      c.dist.onReplicated = async (items, from) => {
+        if (
+          Date.now() < lostUntil &&
+          items.some((i) => i.record.key === recordKey.profile(bob.identity.userId))
+        )
+          throw new Error('lost on the way');
+        return original(items, from);
+      };
+    }
+    await put(
+      bob,
+      signRecord(bob.identity, 'profile', recordKey.profile(bob.identity.userId), {
+        username: DELETED_PROFILE_NAME,
+        encKey: bob.identity.encPublicKey,
+        deleted: true,
+      }),
+    );
+    await waitFor(() => holders(servers, memberKey).length === 0, 8000, 'membership erased');
+  });
+
+  it('tries an unreachable neighbour again after a while', async () => {
+    const servers = await network(6);
+    const s0 = servers[0]!;
+    const mesh = s0.mesh as unknown as {
+      dialing: Map<string, { attempts: number; failedAt?: number }>;
+      unreachable(id: string): boolean;
+    };
+    const other = s0.mesh.knownServers()[0]!;
+    mesh.dialing.set(other.url, { attempts: 3, failedAt: Date.now() });
+    expect(mesh.unreachable(other.id)).toBe(true);
+    // Not forever: after the cooldown it counts as worth dialling again.
+    mesh.dialing.set(other.url, { attempts: 3, failedAt: Date.now() - 6 * 60_000 });
+    expect(mesh.unreachable(other.id)).toBe(false);
+  });
+
+  it('catches up on presence news it missed', async () => {
+    const servers = await network(4);
+    const [x, o] = [servers[0]!, servers[2]!];
+    const watcher = await user(x);
+    const target = await user(o);
+    await waitFor(
+      () => x.presence.publicEntry(target.identity.userId).status === 'online',
+      3000,
+      'online at x',
+    );
+    // x misses everything for a moment, including the user going offline.
+    const apply = x.presence.applyRemote.bind(x.presence);
+    x.presence.applyRemote = () => false;
+    target.conn.close();
+    await waitFor(() => o.presence.localOf(target.identity.userId).length === 0, 3000);
+    await new Promise((r) => setTimeout(r, 500));
+    x.presence.applyRemote = apply;
+    expect(x.presence.publicEntry(target.identity.userId).status).toBe('online');
+    // The next beacon from o says x is behind; x asks o directly.
+    await waitFor(
+      () => x.presence.publicEntry(target.identity.userId).status === 'offline',
+      3000,
+      'offline at x',
+    );
+    void watcher;
+  });
+
+  it('hears about a voice room that emptied while it was not listening', async () => {
+    const servers = await network(3);
+    const alice = await user(servers[0]!, 'alice');
+    const { spaceId, voiceChannel } = await createSpace(alice, 'Swamp');
+    const sid = sessionIds.voice(spaceId, voiceChannel);
+    await alice.conn.request('session.join', { sessionId: sid, caps: caps() });
+    const owner = servers.find((c) => c.sessions.ownedState(sid))!;
+    const [x, y] = servers.filter((c) => c !== owner) as [Coordinator, Coordinator];
+    const occupied = (c: Coordinator) => c.sessions.voiceSnapshot([spaceId]).length > 0;
+    await waitFor(() => occupied(x) && occupied(y), 3000, 'occupied everywhere');
+    const apply = x.sessions.applyRemoteVoice.bind(x.sessions);
+    x.sessions.applyRemoteVoice = () => false;
+    await alice.conn.request('session.leave', { sessionId: sid });
+    await waitFor(() => !occupied(y), 3000, 'empty at y');
+    x.sessions.applyRemoteVoice = apply;
+    expect(occupied(x)).toBe(true);
+    // x links to y again: y's snapshot includes the room that emptied.
+    (x.mesh as unknown as { links: Map<string, { ws: { terminate(): void } }> }).links
+      .get(y.info.id)!
+      .ws.terminate();
+    await waitFor(() => !occupied(x), 5000, 'empty at x');
   });
 });
 

@@ -420,6 +420,8 @@ export class SessionService {
 
   /** sessionId -> when its latest announcement was made (kept after it empties). */
   private voiceAt = new Map<string, number>();
+  /** Rooms that emptied in the last hour, so a server that missed it hears it in a snapshot. */
+  private emptied = new Map<string, { occ: VoiceOccupancy; owner: string; at: number }>();
   private voiceSeq = 0;
 
   private announceVoice(state: SessionState) {
@@ -448,8 +450,13 @@ export class SessionService {
   }
 
   private setOccupancy(sessionId: string, occ: VoiceOccupancy, owner: string) {
-    if (occ.members.length === 0) this.occupancy.delete(sessionId);
-    else this.occupancy.set(sessionId, { occ, owner });
+    if (occ.members.length === 0) {
+      this.occupancy.delete(sessionId);
+      this.emptied.set(sessionId, { occ, owner, at: Date.now() });
+    } else {
+      this.occupancy.set(sessionId, { occ, owner });
+      this.emptied.delete(sessionId);
+    }
     if (this.voiceAt.size > 100_000) {
       for (const id of this.voiceAt.keys()) if (!this.occupancy.has(id)) this.voiceAt.delete(id);
     }
@@ -465,7 +472,9 @@ export class SessionService {
 
   /** Every room we know is occupied, for a server that just linked to us. */
   voiceFrames(): FedVoice[] {
-    return [...this.occupancy].map(([sessionId, o]) => ({
+    const hourAgo = Date.now() - 3600_000;
+    for (const [id, e] of this.emptied) if (e.at < hourAgo) this.emptied.delete(id);
+    return [...this.occupancy, ...this.emptied].map(([sessionId, o]) => ({
       t: 'voice',
       sessionId,
       occ: o.occ,
