@@ -734,6 +734,42 @@ describe('client and server quotas', () => {
     const cached = alice.records.list('space:').map((r) => (r.body as { name: string }).name);
     expect(cached).toEqual(['One']);
   });
+
+  it('joining a big space fetches the members profiles in one go', async () => {
+    const coord = await server();
+    const net = new FakeRelayNetwork();
+    const bob = await signUp(makeClient(net, coord), 'bob');
+    const spaceId = await bob.createSpace('Crowd');
+    const code = await bob.createInvite(spaceId);
+    for (let i = 0; i < 40; i++) {
+      const u = await connectUser(coord);
+      cleanup.push(() => u.conn.close());
+      await joinSpace(u, spaceId, code);
+    }
+    const alice = await signUp(makeClient(net, coord), 'alice');
+    const link = alice.link!;
+    const request = link.request.bind(link);
+    let gets = 0;
+    link.request = ((m: string, p: unknown) => {
+      if (m === 'records.get') gets++;
+      return request(m as never, p as never);
+    }) as typeof link.request;
+    await alice.joinWithInvite(`croc://join/${code}`);
+    await waitFor(() => alice.state.spaces[spaceId]?.members.length === 42, 5000, 'members');
+    await new Promise((r) => setTimeout(r, 300));
+    // Not one request per member record (which the server would rate-limit).
+    expect(gets).toBeLessThan(10);
+  });
+
+  it('follows more users than one request may name', async () => {
+    const coord = await server();
+    const alice = await signUp(makeClient(new FakeRelayNetwork(), coord), 'alice');
+    // 2500 people in our DMs: past the 2000 prefixes one subscribe request takes.
+    const dms = Array.from({ length: 2500 }, () => createIdentity().userId);
+    alice.store.set({ dms });
+    await (alice as unknown as { syncProfiles(): Promise<void> }).syncProfiles();
+    expect(Object.keys(alice.state.presence).length).toBeGreaterThanOrEqual(2500);
+  }, 30_000);
 });
 
 describe('leaving', () => {

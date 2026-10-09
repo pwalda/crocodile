@@ -233,7 +233,7 @@ export const RpcParams = {
   'records.get': z.object({ keys: z.array(z.string().max(200)).max(500) }),
   'records.list': z.object({
     prefix: z.string().min(3).max(200),
-    limit: z.number().int().max(5000).optional(),
+    limit: z.number().int().min(1).max(5000).optional(),
   }),
   'records.subscribe': z.object({ prefixes: z.array(z.string().min(3).max(200)).max(2000) }),
   'users.search': z.object({ query: z.string().min(1).max(64) }),

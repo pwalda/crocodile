@@ -29,6 +29,9 @@ import type { Coordinator } from './coordinator';
 import type { ClientHandle, OwnStatus } from './presence';
 import { RateLimiter, RpcFailure, sendJson } from './util';
 
+/** Record prefixes, and users' presence, one connection may follow. */
+const MAX_SUBSCRIPTIONS = 20_000;
+
 let nextConnId = 1;
 
 /**
@@ -268,7 +271,10 @@ export class ClientConnection implements ClientHandle {
       }
       case 'records.subscribe': {
         const { prefixes } = p as unknown as { prefixes: string[] };
-        for (const prefix of prefixes) this.subscriptions.add(prefix);
+        const fresh = prefixes.filter((x) => !this.subscriptions.has(x));
+        if (this.subscriptions.size + fresh.length > MAX_SUBSCRIPTIONS)
+          throw new RpcFailure('bad_request', `at most ${MAX_SUBSCRIPTIONS} subscriptions`);
+        for (const prefix of fresh) this.subscriptions.add(prefix);
         hub.dist.refreshWatchesSoon();
         return {};
       }
@@ -294,6 +300,9 @@ export class ClientConnection implements ClientHandle {
       }
       case 'presence.subscribe': {
         const { userIds } = p as unknown as { userIds: string[] };
+        const fresh = userIds.filter((id) => !this.presenceWatch.has(id));
+        if (this.presenceWatch.size + fresh.length > MAX_SUBSCRIPTIONS)
+          throw new RpcFailure('bad_request', `at most ${MAX_SUBSCRIPTIONS} watched users`);
         return { presence: hub.presence.watch(this, userIds) };
       }
       case 'presence.set': {

@@ -55,6 +55,7 @@ import {
   type OperatorInfo,
   type ServerInfo,
   type SessionState,
+  type PresenceEntry,
   type SignedRecord,
   type SpaceBody,
   type VoiceOccupancy,
@@ -793,14 +794,12 @@ export class CrocodileClient extends Emitter<ClientEvents> {
       const members = await link.request('records.list', { prefix: recordKey.memberPrefix(id) });
       this.records.ingestAll(members.records);
     }
-    await link.request('records.subscribe', {
-      prefixes: [
-        recordKey.profile(me),
-        recordKey.friends(me),
-        recordKey.devicePrefix(me),
-        ...spaceIds.flatMap((id) => [recordKey.space(id), recordKey.memberPrefix(id)]),
-      ],
-    });
+    await this.subscribe([
+      recordKey.profile(me),
+      recordKey.friends(me),
+      recordKey.devicePrefix(me),
+      ...spaceIds.flatMap((id) => [recordKey.space(id), recordKey.memberPrefix(id)]),
+    ]);
     await this.syncProfiles();
     if (this.state.settings.status !== 'online')
       await link.request('presence.set', { status: this.state.settings.status });
@@ -1010,16 +1009,22 @@ export class CrocodileClient extends Emitter<ClientEvents> {
   private async syncProfiles() {
     const ids = this.relevantUsers();
     const missing = ids.filter((id) => id !== this.userId);
-    for (let i = 0; i < missing.length; i += 400) {
-      const keys = missing.slice(i, i + 400).map((id) => recordKey.profile(id));
+    for (const part of chunks(missing, 400)) {
+      const keys = part.map((id) => recordKey.profile(id));
       const res = await this.link!.request('records.get', { keys });
       this.records.ingestAll(res.records);
     }
-    await this.link!.request('records.subscribe', {
-      prefixes: missing.map((id) => recordKey.profile(id)),
-    });
-    const { presence } = await this.link!.request('presence.subscribe', { userIds: missing });
+    await this.subscribe(missing.map((id) => recordKey.profile(id)));
+    const presence: PresenceEntry[] = [];
+    for (const userIds of chunks(missing, 5000))
+      presence.push(...(await this.link!.request('presence.subscribe', { userIds })).presence);
     this.store.set({ presence: Object.fromEntries(presence.map((p) => [p.userId, p.status])) });
+  }
+
+  /** Subscribe to record prefixes, at most as many per request as the server takes. */
+  private async subscribe(prefixes: string[]) {
+    for (const part of chunks(prefixes, 2000))
+      await this.link!.request('records.subscribe', { prefixes: part });
   }
 
   private relevantUsers(): string[] {
@@ -1034,24 +1039,50 @@ export class CrocodileClient extends Emitter<ClientEvents> {
     return [...set];
   }
 
-  private async fetchProfiles(userIds: string[]) {
+  private profileQueue = new Set<string>();
+  private profileBatch?: Promise<void>;
+
+  /**
+   * Profiles we don't have yet. Calls close together (one per record of a
+   * long member list, say) share one batch of requests.
+   */
+  private fetchProfiles(userIds: string[]): Promise<void> {
+    for (const id of userIds)
+      if (!this.records.get(recordKey.profile(id))) this.profileQueue.add(id);
+    if (!this.profileQueue.size) return Promise.resolve();
+    this.profileBatch ??= new Promise((r) => setTimeout(r, 20)).then(() => {
+      this.profileBatch = undefined;
+      const ids = [...this.profileQueue];
+      this.profileQueue.clear();
+      return this.loadProfiles(ids);
+    });
+    return this.profileBatch;
+  }
+
+  private async loadProfiles(userIds: string[]) {
+    const link = this.link;
     const missing = userIds.filter((id) => !this.records.get(recordKey.profile(id)));
-    if (!missing.length || !this.link) return;
-    const res = await this.link
-      .request('records.get', { keys: missing.map((id) => recordKey.profile(id)) })
-      .catch(() => null);
-    if (res) this.records.ingestAll(res.records);
-    await this.link
-      .request('records.subscribe', { prefixes: missing.map((id) => recordKey.profile(id)) })
-      .catch(() => {});
-    const p = await this.link.request('presence.subscribe', { userIds: missing }).catch(() => null);
-    if (p)
-      this.store.set((s) => ({
-        presence: {
-          ...s.presence,
-          ...Object.fromEntries(p.presence.map((e) => [e.userId, e.status])),
-        },
-      }));
+    if (!missing.length || !link) return;
+    for (const part of chunks(missing, 400)) {
+      const res = await link
+        .request('records.get', { keys: part.map((id) => recordKey.profile(id)) })
+        .catch(() => null);
+      if (res) this.records.ingestAll(res.records);
+    }
+    for (const part of chunks(missing, 2000))
+      await link
+        .request('records.subscribe', { prefixes: part.map((id) => recordKey.profile(id)) })
+        .catch(() => {});
+    for (const userIds of chunks(missing, 5000)) {
+      const p = await link.request('presence.subscribe', { userIds }).catch(() => null);
+      if (p)
+        this.store.set((s) => ({
+          presence: {
+            ...s.presence,
+            ...Object.fromEntries(p.presence.map((e) => [e.userId, e.status])),
+          },
+        }));
+    }
   }
 
   // ===========================================================================
@@ -2557,5 +2588,11 @@ export function foldEdits(messages: MessageView[]): MessageView[] {
     byId.set(m.id, m);
     out.push(m);
   }
+  return out;
+}
+
+function chunks<T>(items: T[], size: number): T[][] {
+  const out: T[][] = [];
+  for (let i = 0; i < items.length; i += size) out.push(items.slice(i, i + size));
   return out;
 }

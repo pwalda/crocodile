@@ -99,6 +99,40 @@ describe('records', () => {
   });
 });
 
+describe('request limits', () => {
+  it('refuses a list limit below one, which would list everything', async () => {
+    const c = await server();
+    const alice = await user(c);
+    await expect(
+      alice.conn.request('records.list', { prefix: 'profile:', limit: -1 }),
+    ).rejects.toThrow();
+  });
+
+  it('caps the prefixes and users one connection follows', async () => {
+    const c = await server();
+    const alice = await user(c);
+    const b32 = 'abcdefghijklmnopqrstuvwxyz234567';
+    const id = (n: number) =>
+      Array.from({ length: 10 }, (_, i) => b32[Math.floor(n / 32 ** i) % 32]).join('');
+    const prefixes = (i: number) =>
+      Array.from({ length: 2000 }, (_, j) => recordKey.profile(id(i * 2000 + j)));
+    for (let i = 0; i < 10; i++)
+      await alice.conn.request('records.subscribe', { prefixes: prefixes(i) });
+    await expect(
+      alice.conn.request('records.subscribe', { prefixes: prefixes(10) }),
+    ).rejects.toThrow(/at most/);
+    // Following again what it already follows is fine.
+    await alice.conn.request('records.subscribe', { prefixes: prefixes(0) });
+
+    const users = (i: number) => Array.from({ length: 5000 }, (_, j) => id(i * 5000 + j));
+    for (let i = 0; i < 4; i++)
+      await alice.conn.request('presence.subscribe', { userIds: users(i) });
+    await expect(alice.conn.request('presence.subscribe', { userIds: users(4) })).rejects.toThrow(
+      /at most/,
+    );
+  });
+});
+
 describe('writes sent twice', () => {
   it('counts the same record sent again as stored, and still refuses a different one', async () => {
     const c = await server();
