@@ -16,6 +16,8 @@ import { Avatar, IconButton, cx } from './ui';
 /** Floating controls for the active call, visible from anywhere in the app. */
 export function CallDock() {
   const voiceSession = useCroc((s) => s.voiceSession);
+  // We called someone who hasn't answered: the call isn't on yet.
+  const ringing = useCroc((s) => !!s.voiceSession && s.outgoingCall?.sessionId === s.voiceSession);
   const session = useCroc((s) => (s.voiceSession ? s.sessions[s.voiceSession] : undefined));
   const spaces = useCroc((s) => s.spaces);
   const muted = useCroc((s) => s.muted);
@@ -26,7 +28,8 @@ export function CallDock() {
   const vad = useUi((s) => s.voiceSettings.vadThresholdDb);
   const [since, setSince] = useState(Date.now());
   const [, tick] = useState(0);
-  useEffect(() => setSince(Date.now()), [voiceSession]);
+  // The call's clock starts when the other side picks up.
+  useEffect(() => setSince(Date.now()), [voiceSession, ringing]);
   useEffect(() => {
     const t = setInterval(() => tick((n) => n + 1), 1000);
     return () => clearInterval(t);
@@ -46,7 +49,7 @@ export function CallDock() {
     go = () => navigate({ kind: 'dm', userId: other });
   }
   const status = session?.status ?? 'joining';
-  const connected = status === 'connected';
+  const connected = status === 'connected' && !ringing;
   const secs = Math.floor((Date.now() - since) / 1000);
   const clock = `${Math.floor(secs / 60)}:${String(secs % 60).padStart(2, '0')}`;
   const talking = !muted && micLevel > vad;
@@ -67,7 +70,13 @@ export function CallDock() {
           <div className="text-left leading-tight">
             <div className="max-w-[160px] truncate text-[13px] font-bold">{where}</div>
             <div className="text-[11px] text-muted">
-              {connected ? clock : status === 'no-host' ? 'Waiting for a host' : 'Connecting…'}
+              {ringing
+                ? 'Ringing…'
+                : connected
+                  ? clock
+                  : status === 'no-host'
+                    ? 'Waiting for a host'
+                    : 'Connecting…'}
             </div>
           </div>
         </button>
