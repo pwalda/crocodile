@@ -19,7 +19,7 @@ import {
   type SpaceBody,
 } from '@crocodile/protocol';
 import { FakeRelayNetwork } from './helpers/fake-relay';
-import { startCoordinator, waitFor } from './helpers';
+import { caps, connectUser, joinSpace, startCoordinator, waitFor } from './helpers';
 
 const cleanup: (() => Promise<unknown> | unknown)[] = [];
 afterEach(async () => {
@@ -426,6 +426,52 @@ describe('calls', () => {
       micTrack: () => null,
       frameCrypto: () => undefined,
     }) as unknown as VoiceEngine;
+
+  it('falls back to the relay even while other members keep coming and going', async () => {
+    const coord = await server({ relay: { enabled: true, maxUsers: 5 }, stunPort: 0 });
+    const net = new FakeRelayNetwork();
+    const alice = await signUp(makeClient(net, coord, { nat: 'open' }), 'alice');
+    const bob = await signUp(makeClient(net, coord, { canHost: false }), 'bob');
+    await bob.updateSettings({ allowServerRelay: true });
+    // Bob's network lets nothing through directly.
+    net.blocked.add(bob.userId);
+    const spaceId = await alice.createSpace('Busy');
+    const code = await alice.createInvite(spaceId);
+    await bob.joinWithInvite(code);
+    // Carol (another app) joins and leaves the space's session over and over:
+    // every change sends Bob a new session state while he can't connect.
+    const carol = await connectUser(coord);
+    await joinSpace(carol, spaceId, code);
+    const sid = sessionIds.space(spaceId);
+    let churning = true;
+    let churned = 0;
+    const churn = (async () => {
+      while (churning) {
+        churned++;
+        await carol.conn.request('session.join', {
+          sessionId: sid,
+          caps: caps({ canHost: false }),
+        });
+        await new Promise((r) => setTimeout(r, 200));
+        await carol.conn.request('session.leave', { sessionId: sid });
+        await new Promise((r) => setTimeout(r, 200));
+      }
+    })();
+    cleanup.push(async () => {
+      churning = false;
+      await churn.catch(() => {});
+    });
+    await waitFor(() => churned >= 3, 5000, 'churn under way');
+    const ch = channelOf(alice, spaceId);
+    await alice.openChannel(ch);
+    await bob.openChannel(ch);
+    await waitFor(
+      () => bob.state.sessions[sid]?.status === 'connected' && bob.state.sessions[sid]?.relay,
+      20000,
+      'relayed despite the churn',
+    );
+    expect(bob.state.sessions[sid]!.route).toBe('relay');
+  });
 
   it('hangs up a call nobody answers, instead of staying in it alone', async () => {
     const coord = await server();

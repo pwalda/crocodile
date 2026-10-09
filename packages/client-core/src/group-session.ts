@@ -241,7 +241,11 @@ export class GroupSession extends Emitter<GroupSessionEvents> {
       this.transport.epoch !== state.epoch ||
       this.transport.host !== state.host
     ) {
-      this.failures = 0;
+      // Failures count against one host at one epoch: other changes (members
+      // coming and going) mustn't reset them, or the host is never reported
+      // and the relay never tried.
+      const target = this.attempted;
+      if (!target || target.epoch !== state.epoch || target.host !== state.host) this.failures = 0;
       this.connectTransport();
     }
     this.emit('update', undefined);
@@ -315,10 +319,16 @@ export class GroupSession extends Emitter<GroupSessionEvents> {
   // Connection to the host relay
   // -------------------------------------------------------------------------
 
+  /** The host and epoch of the latest connection attempt. */
+  private attempted?: { epoch: number; host: string };
+
   private connectTransport() {
+    // A retry scheduled for an earlier attempt must not tear this one down.
+    clearTimeout(this.retryTimer);
     this.closeTransport();
     const state = this.state;
     if (!state?.host || this.left) return;
+    this.attempted = { epoch: state.epoch, host: state.host };
     const slots = this.voice && this.isVoice ? state.relaySlots : 0;
     const grant =
       this.relayGrant && this.relayGrant.expiresAt > Date.now() ? this.relayGrant : null;
@@ -406,7 +416,8 @@ export class GroupSession extends Emitter<GroupSessionEvents> {
       clearTimeout(this.retryTimer);
       this.retryTimer = setTimeout(
         () => {
-          if (!this.left && this.state?.epoch === entry.epoch) this.connectTransport();
+          if (!this.left && !this.transport && this.state?.epoch === entry.epoch)
+            this.connectTransport();
         },
         Math.min(10_000, 500 * 2 ** this.failures),
       );
