@@ -1,5 +1,10 @@
 import { describe, expect, it } from 'vitest';
-import { networkVerdict, probeNetwork, routeFromStats } from '@crocodile/client-core';
+import {
+  createNetworkProber,
+  networkVerdict,
+  probeNetwork,
+  routeFromStats,
+} from '@crocodile/client-core';
 
 /** A stand-in RTCPeerConnection: per STUN URL, the reflexive candidates it finds, or no answer. */
 function fakePeerConnection(byUrl: Record<string, string[] | 'no answer'>) {
@@ -61,6 +66,35 @@ describe('network check', () => {
     expect((await check([srflx('203.0.113.9', 1)], 'no answer')).verdict).toBe('unknown');
   });
 
+  it('tests again when the app moves to another server, and reuses a recent result otherwise', async () => {
+    let gathered = 0;
+    const PC = fakePeerConnection({
+      'stun:a.example:7443': [srflx('203.0.113.9', 1)],
+      'stun:a.example:7444': [srflx('203.0.113.9', 1)],
+      'stun:b.example:7443': [srflx('203.0.113.9', 1)],
+      'stun:b.example:7444': [srflx('203.0.113.9', 2)],
+    });
+    const Counting = class extends (PC as unknown as new (c: unknown) => object) {
+      constructor(c: unknown) {
+        super(c);
+        gathered++;
+      }
+    } as unknown as typeof RTCPeerConnection;
+    let server = 'a';
+    const probe = createNetworkProber(Counting, () => [
+      `stun:${server}.example:7443`,
+      `stun:${server}.example:7444`,
+    ]);
+    expect(networkVerdict(await probe())).toBe('good');
+    expect(networkVerdict(await probe())).toBe('good');
+    expect(gathered).toBe(2);
+    server = 'b';
+    expect(networkVerdict(await probe())).toBe('limited');
+    expect(gathered).toBe(4);
+    await probe(true);
+    expect(gathered).toBe(6);
+  });
+
   it('reads how a connection travels from WebRTC stats', () => {
     const stats = (local: string, remote: string, remoteAddress = '203.0.113.9') =>
       new Map<string, Record<string, unknown>>([
@@ -71,6 +105,7 @@ describe('network check', () => {
       ]) as unknown as RTCStatsReport;
     expect(routeFromStats(stats('host', 'host', '192.168.1.7'))).toBe('lan');
     expect(routeFromStats(stats('host', 'host', '127.0.0.1'))).toBe('local');
+    expect(routeFromStats(stats('host', 'host', '127.0.0.2'))).toBe('local');
     // Found during connectivity checks: still the same network.
     expect(routeFromStats(stats('host', 'prflx', '10.0.0.8'))).toBe('lan');
     expect(routeFromStats(stats('host', 'host', 'b1c2d3e4.local'))).toBe('lan');
@@ -81,5 +116,7 @@ describe('network check', () => {
     expect(routeFromStats(stats('prflx', 'host', '2001:db8::7'))).toBe('internet');
     expect(routeFromStats(stats('relay', 'host'))).toBe('relay');
     expect(routeFromStats(new Map() as unknown as RTCStatsReport)).toBeNull();
+    // A peer-reflexive address the browser hides: not known yet.
+    expect(routeFromStats(stats('host', 'prflx', ''))).toBeNull();
   });
 });

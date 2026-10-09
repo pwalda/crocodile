@@ -40,8 +40,8 @@ function makeClient(
     nat?: 'open' | 'cone' | 'symmetric';
     kv?: MemoryKeyValueStore;
     directories?: string[];
-    /** How far this device's clock is off, in ms. */
-    clockOffsetMs?: number;
+    /** How far this device's clock is off, in ms (a number, or read each time). */
+    clockOffsetMs?: number | (() => number);
     /** What a network check finds. */
     probe?: NetworkProbe;
     ringTimeoutMs?: number;
@@ -60,7 +60,13 @@ function makeClient(
     directories: opts.directories ?? [],
     preferredServers: [coordinator.url],
     transportFactory: net.transportFactory(),
-    ...(opts.clockOffsetMs ? { now: () => Date.now() + opts.clockOffsetMs! } : {}),
+    ...(opts.clockOffsetMs
+      ? {
+          now: () =>
+            Date.now() +
+            (typeof opts.clockOffsetMs === 'function' ? opts.clockOffsetMs() : opts.clockOffsetMs!),
+        }
+      : {}),
     ...(opts.ringTimeoutMs ? { ringTimeoutMs: opts.ringTimeoutMs } : {}),
     log: process.env.DBG ? (m, e) => console.log('client', m, JSON.stringify(e)) : undefined,
   });
@@ -162,6 +168,31 @@ describe('client', () => {
 
     expect(bodies(alice, dm)).toEqual(['ping', 'pong', 'and again']);
     expect(bodies(bob, dm)).toEqual(['ping', 'pong', 'and again']);
+  });
+
+  it('keeps sending after a clock that was far ahead is corrected', async () => {
+    const coord = await server();
+    const net = new FakeRelayNetwork();
+    const alice = await signUp(makeClient(net, coord), 'alice');
+    // Bob's clock starts a day ahead.
+    let offset = 24 * 3600_000;
+    const bob = await signUp(makeClient(net, coord, { clockOffsetMs: () => offset }), 'bob');
+    await alice.addFriend(bob.userId);
+    await waitFor(() => bob.state.friends.incoming.includes(alice.userId), 12000);
+    await bob.addFriend(alice.userId);
+    const dm = await alice.openDm(bob.userId);
+    await waitFor(() => bob.state.dms.includes(alice.userId), 12000, 'dm invite');
+    await alice.openChannel(dm);
+    await bob.openChannel(dm);
+    await waitFor(() => alice.state.sessions[dm]?.peers.includes(bob.userId), 12000, 'dm');
+
+    await bob.sendMessage(dm, 'from tomorrow');
+    // Then his clock is put right; what he writes next must still arrive.
+    offset = 0;
+    await bob.sendMessage(dm, 'clock fixed');
+    await waitFor(() => bodies(alice, dm).includes('clock fixed'), 12000, 'alice receives');
+    // The message stamped a day ahead was never accepted.
+    expect(bodies(alice, dm)).toEqual(['clock fixed']);
   });
 
   it('syncs history to members who join later, peer to peer', async () => {

@@ -347,7 +347,7 @@ export class GroupSession extends Emitter<GroupSessionEvents> {
       this.failedInARow = 0;
       this.unreachable = null;
       this.setStatus('connected');
-      // ICE may still switch pairs just after connecting: read it twice.
+      // ICE may still switch pairs just after connecting: read it again a few times.
       const readRoute = () =>
         void t
           .route?.()
@@ -357,8 +357,7 @@ export class GroupSession extends Emitter<GroupSessionEvents> {
             this.emit('update', undefined);
           })
           .catch(() => {});
-      readRoute();
-      setTimeout(readRoute, 3000);
+      for (const ms of [0, 1000, 3000, 10_000]) setTimeout(readRoute, ms);
       t.send({ t: 'state', muted: this.voiceState.muted, deafened: this.voiceState.deafened });
     });
     t.on('message', (msg) => {

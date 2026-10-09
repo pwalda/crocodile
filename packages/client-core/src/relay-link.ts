@@ -69,7 +69,9 @@ export function routeFromStats(stats: RTCStatsReport): ConnectionRoute | null {
   // during checks is "peer-reflexive" even between two local addresses.
   const ip = String(remote.address ?? remote.ip ?? '').toLowerCase();
   const own = String(local.address ?? local.ip ?? '').toLowerCase();
-  if (ip === '127.0.0.1' || ip === '::1') return 'local';
+  // Browsers hide some addresses (peer-reflexive ones): not known yet.
+  if (!ip) return null;
+  if (ip.startsWith('127.') || ip === '::1') return 'local';
   // The same address at both ends: the same device, or behind the same router.
   if (ip && ip === own) return local.candidateType === 'host' ? 'local' : 'lan';
   return isLocalAddress(ip) ? 'lan' : 'internet';

@@ -85,6 +85,34 @@ export async function probeNetwork(
   return { nat: ports.size === 1 ? 'cone' : 'symmetric', udp: true };
 }
 
+/**
+ * probeNetwork with a cache: one probe serves the network check and host
+ * election for `ttlMs`, as long as the STUN servers (the coordination server
+ * we're on) stay the same.
+ */
+export function createNetworkProber(
+  RTCPeerConnectionImpl: typeof RTCPeerConnection,
+  stunUrls: () => string[],
+  ttlMs = 10 * 60_000,
+) {
+  let cache: { at: number; servers: string; probe: Promise<NetworkProbe> } | undefined;
+  return (fresh = false): Promise<NetworkProbe> => {
+    const urls = stunUrls();
+    const servers = urls.join(' ');
+    if (fresh || !cache || cache.servers !== servers || Date.now() - cache.at > ttlMs) {
+      cache = {
+        at: Date.now(),
+        servers,
+        probe: probeNetwork(RTCPeerConnectionImpl, urls).catch((): NetworkProbe => ({
+          nat: 'unknown',
+          udp: true,
+        })),
+      };
+    }
+    return cache.probe;
+  };
+}
+
 /** How well direct connections can work from here. */
 export type NetworkVerdict = 'good' | 'limited' | 'blocked' | 'unknown';
 

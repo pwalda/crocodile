@@ -1,9 +1,8 @@
 import { openDB, type IDBPDatabase } from 'idb';
 import {
   browserCapabilities,
-  probeNetwork as probeNetworkWith,
+  createNetworkProber,
   type HostRelayAdapter,
-  type NetworkProbe,
   type KeyValueStore,
   type MessageStore,
   type PlatformAdapter,
@@ -238,28 +237,14 @@ function relayAdapter(api: DesktopApi): HostRelayAdapter {
   };
 }
 
-let probeCache: { at: number; probe: Promise<NetworkProbe> } | undefined;
-
 export function createPlatform(opts: {
   version: string;
   cpuCores?: number;
   stun: () => string[];
 }): PlatformAdapter {
-  /** One probe serves the network check and host election for ten minutes. */
-  const probeNetwork = (fresh = false) => {
-    if (fresh || !probeCache || Date.now() - probeCache.at > 10 * 60_000) {
-      // Only the coordination server's own STUN ports (it serves two, see
-      // stunAltPort): no third-party server learns the user's address.
-      probeCache = {
-        at: Date.now(),
-        probe: probeNetworkWith(RTCPeerConnection, opts.stun()).catch((): NetworkProbe => ({
-          nat: 'unknown',
-          udp: true,
-        })),
-      };
-    }
-    return probeCache.probe;
-  };
+  // Only the coordination server's own STUN ports (it serves two, see
+  // stunAltPort): no third-party server learns the user's address.
+  const probeNetwork = createNetworkProber(RTCPeerConnection, opts.stun);
   return {
     platform: desktop ? 'desktop' : 'web',
     appVersion: opts.version,

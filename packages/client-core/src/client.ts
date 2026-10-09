@@ -273,6 +273,8 @@ export type ClientEvents = {
 };
 
 const APP_VERSION_FALLBACK = '0.1.0';
+/** How far ahead of our clock a message's time may be before it is refused. */
+const MAX_AHEAD_MS = 5 * 60_000;
 /** How long direct delivery gets before an opted-in DM goes to a mailbox. */
 const MAIL_AFTER_MS = 5000;
 /** How soon to retry a note owed to someone who just came online. */
@@ -2237,13 +2239,15 @@ export class CrocodileClient extends Emitter<ClientEvents> {
     // Chats are ordered by the time in each message, which comes from its
     // author's clock. Never stamp one earlier than what this channel already
     // holds, so a reply stays below the message it answers even when this
-    // computer's clock is behind the other person's.
+    // computer's clock is behind the other person's. A time further ahead
+    // than others accept (a clock that was wrong when it was stamped) is not
+    // followed: messages after it would be refused.
     const now = this.config.now?.() ?? Date.now();
     const latest = Math.max(
       await this.platform.messages.latestTs(channel),
       ...(this.state.messages[channel] ?? []).map((m) => m.ts),
     );
-    const ts = Math.max(now, latest + 1);
+    const ts = latest + 1 > now && latest + 1 <= now + MAX_AHEAD_MS - 60_000 ? latest + 1 : now;
     const message = createChatMessage(this.identity!, { ch: channel, body: text, ...opts }, ts);
     await this.platform.messages.put(message);
     this.outbox.add(message, sessionId);
@@ -2276,7 +2280,7 @@ export class CrocodileClient extends Emitter<ClientEvents> {
     if (!this.historyChannels(sessionId).includes(message.ch)) return false;
     if (message.author !== this.userId && !this.isAllowedPeer(sessionId, message.author))
       return false;
-    if (message.ts > Date.now() + 5 * 60_000) return false;
+    if (message.ts > (this.config.now?.() ?? Date.now()) + MAX_AHEAD_MS) return false;
     const fresh = await this.platform.messages.put(message);
     if (!fresh) return false;
     this.addToTimeline(message.ch, message);
