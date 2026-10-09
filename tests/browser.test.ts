@@ -173,6 +173,21 @@ async function waitForAudio(page: Page) {
   return best;
 }
 
+describe.skipIf(!haveChromium)('network check in Chromium', () => {
+  it("finds nothing wrong with a machine that talks to the server's STUN ports directly", async () => {
+    const context = await browser.newContext();
+    const page = await context.newPage();
+    await page.goto(harness.url);
+    const stun = coord.stunUrls();
+    expect(stun).toHaveLength(2);
+    const verdict = await page.evaluate((s) => window.checkNetwork(s), stun);
+    // No NAT in between: the answers match our own address. Never "limited"
+    // (two sockets' mappings compared) or "blocked".
+    expect(['good', 'unknown']).toContain(verdict);
+    await context.close();
+  }, 30_000);
+});
+
 describe.skipIf(!haveChromium)('server relay with Chromium', () => {
   it("Chromium's TURN client relays through a coordinator's TURN server", async () => {
     const turn = coord.turn!;
