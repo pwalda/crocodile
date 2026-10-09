@@ -45,6 +45,57 @@ export type RelayLinkEvents = {
 };
 
 /**
+ * How a connection's packets travel: `local` on this computer, `lan` on the
+ * same network, `internet` directly across networks, `relay` through a
+ * coordination server's relay.
+ */
+export type ConnectionRoute = 'local' | 'lan' | 'internet' | 'relay';
+
+/** The route of the candidate pair ICE selected, from `getStats()`. */
+export function routeFromStats(stats: RTCStatsReport): ConnectionRoute | null {
+  const all = [...(stats as unknown as Map<string, Record<string, unknown>>).values()];
+  const byId = new Map(all.map((s) => [s.id as string, s]));
+  const selectedId = all.find((s) => s.type === 'transport' && s.selectedCandidatePairId)
+    ?.selectedCandidatePairId as string | undefined;
+  const pair =
+    (selectedId && byId.get(selectedId)) ||
+    all.find((s) => s.type === 'candidate-pair' && s.nominated && s.state === 'succeeded');
+  if (!pair) return null;
+  const local = byId.get(pair.localCandidateId as string);
+  const remote = byId.get(pair.remoteCandidateId as string);
+  if (!local || !remote) return null;
+  if (local.candidateType === 'relay' || remote.candidateType === 'relay') return 'relay';
+  // By the other end's address rather than candidate types: a pair found
+  // during checks is "peer-reflexive" even between two local addresses.
+  const ip = String(remote.address ?? remote.ip ?? '').toLowerCase();
+  const own = String(local.address ?? local.ip ?? '').toLowerCase();
+  // Browsers hide some addresses (peer-reflexive ones): not known yet.
+  if (!ip) return null;
+  if (ip.startsWith('127.') || ip === '::1') return 'local';
+  // The same address at both ends: the same device, or behind the same router.
+  if (ip && ip === own) return local.candidateType === 'host' ? 'local' : 'lan';
+  return isLocalAddress(ip) ? 'lan' : 'internet';
+}
+
+/** Private, link-local and mDNS (.local) addresses: only reachable on the same network. */
+function isLocalAddress(ip: string): boolean {
+  if (ip.endsWith('.local')) return true;
+  const v4 = ip.match(/^(\d+)\.(\d+)\.\d+\.\d+$/);
+  if (v4) {
+    const [a, b] = [Number(v4[1]), Number(v4[2])];
+    return (
+      a === 10 ||
+      a === 127 ||
+      (a === 172 && b >= 16 && b <= 31) ||
+      (a === 192 && b === 168) ||
+      (a === 169 && b === 254) ||
+      (a === 100 && b >= 64 && b <= 127)
+    );
+  }
+  return /^(fc|fd|fe[89ab])/.test(ip);
+}
+
+/**
  * The member side of a connection to the host relay: one RTCPeerConnection
  * with the microphone upstream, `slots` downstream audio tracks and the
  * control/data channel. Trickle ICE both ways; SDP is identity-signed.
@@ -107,6 +158,12 @@ export class RelayLink extends Emitter<RelayLinkEvents> {
       if (index >= 1)
         this.emit('track', { slot: index - 1, track: ev.track, receiver: ev.receiver });
     };
+  }
+
+  /** How this connection travels, once it is up. */
+  async route(): Promise<ConnectionRoute | null> {
+    if (this.closed) return null;
+    return routeFromStats(await this.pc.getStats());
   }
 
   async connect() {

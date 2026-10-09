@@ -136,6 +136,13 @@ export async function copyText(text: string) {
 }
 
 /** Human label for a push-to-talk binding (a KeyboardEvent.code or Mouse4/Mouse5). */
+const isMac = typeof navigator !== 'undefined' && /Mac/i.test(navigator.platform);
+
+/** A Ctrl shortcut as people on this system write it: "⌘K" on a Mac, "Ctrl K" elsewhere. */
+export function shortcutLabel(key: string) {
+  return isMac ? `⌘${key}` : `Ctrl ${key}`;
+}
+
 export function keyLabel(code: string) {
   if (code === 'Mouse4') return 'Mouse back';
   if (code === 'Mouse5') return 'Mouse forward';

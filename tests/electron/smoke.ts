@@ -136,6 +136,12 @@ await b.page
   .fill('Wow, **end-to-end** and peer-to-peer. `nice`');
 await b.page.keyboard.press('Enter');
 await a.page.getByText('peer-to-peer.').waitFor({ timeout: 15_000 });
+// Bob's header says how his connection to Alice's device travels.
+await b.page.waitForFunction(
+  () => /peers? connected · (same network|on this device|direct)/.test(document.body.innerText),
+  undefined,
+  { timeout: 15_000 },
+);
 await shot(a.page, '06-chat');
 // Panel shadows stay as faint as designed (12% opaque) whatever the accent.
 const shadow = await a.page.evaluate(() => {
@@ -172,7 +178,32 @@ await a.page.getByRole('button', { name: /Requests/ }).click();
 await a.page.getByText('Wants to be friends').waitFor({ timeout: 10_000 });
 await shot(a.page, '10-friend-request');
 
+// A call shows as ringing, not as on, until the friend picks up.
+await a.page.getByRole('button', { name: 'Accept' }).click();
+await a.page.getByRole('button', { name: /^All/ }).click();
+await a.page.getByRole('button', { name: 'Call', exact: true }).click();
+await a.page.getByText('Ringing…').waitFor({ timeout: 15_000 });
+await b.page.getByText('is calling you').waitFor({ timeout: 15_000 });
+await a.page.waitForTimeout(1500);
+if (!(await a.page.getByText('Ringing…').isVisible()))
+  throw new Error('the call looks answered before the friend picked up');
+await shot(a.page, '10b-ringing');
+await b.page.getByRole('button', { name: 'Accept' }).click();
+await a.page.getByText('Ringing…').waitFor({ state: 'detached', timeout: 15_000 });
+await a.page.waitForFunction(() => /\b0:0\d\b/.test(document.body.innerText), undefined, {
+  timeout: 15_000,
+});
+await a.page.getByRole('button', { name: 'Leave call' }).click();
+
 // Command palette + settings.
+// The search button shows a search icon and this system's shortcut, not the Mac ⌘ key.
+const jump = a.page.getByRole('button', { name: /Jump to/ });
+if (
+  (await jump.locator('svg.lucide-search').count()) !== 1 ||
+  (await jump.locator('svg.lucide-command').count()) !== 0 ||
+  !(await jump.innerText()).includes('Ctrl K')
+)
+  throw new Error('the search button should show a search icon and "Ctrl K" off the Mac');
 await a.page.keyboard.press('Control+K');
 await a.page.waitForTimeout(200);
 await shot(a.page, '11-palette');
@@ -182,6 +213,13 @@ await a.page.getByText('Settings', { exact: true }).click();
 await a.page.getByRole('button', { name: 'Voice' }).click();
 await shot(a.page, '12-settings-voice');
 await a.page.getByRole('button', { name: 'Network' }).click();
+// The network check ran on connecting, and can run again.
+const test = a.page.getByRole('region', { name: 'Connection test' });
+const verdicts = /Direct connections (work|are limited|are blocked)|couldn't be fully tested/;
+await test.getByText(verdicts).waitFor({ timeout: 15_000 });
+await test.getByRole('button', { name: 'Test again' }).click();
+await test.getByRole('button', { name: 'Test again' }).waitFor({ timeout: 15_000 });
+await test.getByText(verdicts).waitFor({ timeout: 15_000 });
 // Who runs the connected server, as it says.
 await a.page.getByRole('button', { name: 'https://example.org/privacy/' }).waitFor();
 // The public server list from the directory, with the connected server marked.

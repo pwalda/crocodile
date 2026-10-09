@@ -1,16 +1,16 @@
 import {
   Bell,
-  Command,
   Home,
   LogOut,
   Plus,
+  Search,
   Settings,
   ShieldCheck,
   Smartphone,
   WifiOff,
 } from 'lucide-react';
 import { getClient, navigate, openModal, ui, useCroc, useUi } from '../croc';
-import { colorFor, initials } from '../lib/format';
+import { colorFor, initials, shortcutLabel } from '../lib/format';
 import { Logo } from './Logo';
 import { Avatar, Menu, MenuItem, StatusDot, cx } from './ui';
 
@@ -76,8 +76,10 @@ export function TopBar() {
         onClick={() => ui.set({ palette: true })}
         className="hidden h-9 w-56 shrink-0 items-center gap-2 rounded-full border border-line bg-island px-3 text-sm text-faint transition hover:text-muted md:flex"
       >
-        <Command size={14} /> Jump to…
-        <kbd className="ml-auto rounded-md bg-raised px-1.5 text-[11px] text-muted">Ctrl K</kbd>
+        <Search size={14} /> Jump to…
+        <kbd className="ml-auto rounded-md bg-raised px-1.5 text-[11px] text-muted">
+          {shortcutLabel('K')}
+        </kbd>
       </button>
       <ConnectionPill />
       <AccountMenu />
@@ -211,7 +213,7 @@ function AccountMenu() {
           <MenuItem
             icon={<Settings size={16} />}
             label="Settings"
-            hint="Ctrl ,"
+            hint={shortcutLabel(',')}
             onClick={() => {
               close();
               openModal({ kind: 'settings' });

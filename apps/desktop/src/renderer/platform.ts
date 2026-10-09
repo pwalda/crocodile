@@ -1,7 +1,7 @@
 import { openDB, type IDBPDatabase } from 'idb';
 import {
   browserCapabilities,
-  detectNat,
+  createNetworkProber,
   type HostRelayAdapter,
   type KeyValueStore,
   type MessageStore,
@@ -9,13 +9,7 @@ import {
   type RelayHandle,
 } from '@crocodile/client-core';
 import { randomId } from '@crocodile/crypto';
-import {
-  fromB64u,
-  toB64u,
-  type ChatMessage,
-  type NatType,
-  type SignalData,
-} from '@crocodile/protocol';
+import { fromB64u, toB64u, type ChatMessage, type SignalData } from '@crocodile/protocol';
 import type { DesktopApi } from '../preload/preload';
 
 declare global {
@@ -243,13 +237,14 @@ function relayAdapter(api: DesktopApi): HostRelayAdapter {
   };
 }
 
-let natCache: { at: number; nat: NatType } | undefined;
-
 export function createPlatform(opts: {
   version: string;
   cpuCores?: number;
   stun: () => string[];
 }): PlatformAdapter {
+  // Only the coordination server's own STUN ports (it serves two, see
+  // stunAltPort): no third-party server learns the user's address.
+  const probeNetwork = createNetworkProber(RTCPeerConnection, opts.stun);
   return {
     platform: desktop ? 'desktop' : 'web',
     appVersion: opts.version,
@@ -257,18 +252,11 @@ export function createPlatform(opts: {
     messages,
     ...(desktop ? { relay: relayAdapter(desktop) } : {}),
     rtc: { RTCPeerConnection, getUserMedia: (c) => navigator.mediaDevices.getUserMedia(c) },
+    probeNetwork,
     async capabilities() {
       const caps = await browserCapabilities();
-      if (!natCache || Date.now() - natCache.at > 10 * 60_000) {
-        // Only the coordination server's own STUN ports (it serves two, see
-        // stunAltPort): no third-party server learns the user's address.
-        const stun = opts.stun();
-        natCache = {
-          at: Date.now(),
-          nat: await detectNat(RTCPeerConnection, stun).catch(() => 'unknown' as const),
-        };
-      }
-      return { ...caps, cpuCores: opts.cpuCores ?? caps.cpuCores, nat: natCache.nat };
+      const { nat } = await probeNetwork();
+      return { ...caps, cpuCores: opts.cpuCores ?? caps.cpuCores, nat };
     },
   };
 }

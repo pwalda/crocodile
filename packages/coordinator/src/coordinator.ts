@@ -89,6 +89,8 @@ export interface CoordinatorConfig {
     enabled: boolean;
     maxUsers: number;
     publicIp?: string;
+    /** UDP ports for relayed addresses (see TurnServerOptions.relayPorts). */
+    ports?: { min: number; max: number };
     /** Allow relaying to private/loopback addresses (LAN-only setups, tests). */
     allowPrivatePeers?: boolean;
   };
@@ -378,6 +380,7 @@ export class Coordinator {
           port: this.config.stunPort,
           host: this.config.host.includes(':') ? '::' : '0.0.0.0',
           relayIp: await this.relayIp(publicUrl),
+          ...(this.config.relay.ports ? { relayPorts: this.config.relay.ports } : {}),
           secret: Buffer.from(randomBytes(32)),
           limits: { maxUsers: this.config.relay.maxUsers },
           allowPrivatePeers: this.config.relay.allowPrivatePeers,

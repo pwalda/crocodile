@@ -210,6 +210,26 @@ describe('sessions and host election', () => {
     expect(st.members).toHaveLength(3);
   });
 
+  it('keeps a reported host when nobody else can host, rather than leaving no host', async () => {
+    const { alice, bob, sessionId } = await setup();
+    const { state } = await alice.conn.request('session.join', {
+      sessionId,
+      caps: caps({ nat: 'open' }),
+    });
+    await bob.conn.request('session.join', {
+      sessionId,
+      caps: caps({ platform: 'web', canHost: false }),
+    });
+    await bob.conn.request('session.report', {
+      sessionId,
+      epoch: state.epoch,
+      issue: 'host_unreachable',
+    });
+    await new Promise((r) => setTimeout(r, 200));
+    // Bob may still get through another way (the relay), but only with a host.
+    expect(lastSession(bob, sessionId)!.host).toBe(alice.conn.peer);
+  });
+
   it('routes signalling only between session members and rejects outsiders', async () => {
     const { c, alice, bob, sessionId } = await setup();
     const outsider = await user(c);

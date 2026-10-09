@@ -4,7 +4,9 @@ import {
   CrocodileClient,
   MemoryKeyValueStore,
   MemoryMessageStore,
+  type NetworkProbe,
   type PlatformAdapter,
+  type VoiceEngine,
 } from '@crocodile/client-core';
 import type { Coordinator } from '@crocodile/coordinator';
 import { Directory } from '@crocodile/directory';
@@ -38,6 +40,11 @@ function makeClient(
     nat?: 'open' | 'cone' | 'symmetric';
     kv?: MemoryKeyValueStore;
     directories?: string[];
+    /** How far this device's clock is off, in ms (a number, or read each time). */
+    clockOffsetMs?: number | (() => number);
+    /** What a network check finds. */
+    probe?: NetworkProbe;
+    ringTimeoutMs?: number;
   } = {},
 ) {
   const platform: PlatformAdapter = {
@@ -47,11 +54,20 @@ function makeClient(
     messages: new MemoryMessageStore(),
     ...(opts.canHost === false ? {} : { relay: net.adapter() }),
     capabilities: async () => ({ nat: opts.nat ?? 'cone', cpuCores: 8 }),
+    ...(opts.probe ? { probeNetwork: async () => opts.probe! } : {}),
   };
   const client = new CrocodileClient(platform, {
     directories: opts.directories ?? [],
     preferredServers: [coordinator.url],
     transportFactory: net.transportFactory(),
+    ...(opts.clockOffsetMs
+      ? {
+          now: () =>
+            Date.now() +
+            (typeof opts.clockOffsetMs === 'function' ? opts.clockOffsetMs() : opts.clockOffsetMs!),
+        }
+      : {}),
+    ...(opts.ringTimeoutMs ? { ringTimeoutMs: opts.ringTimeoutMs } : {}),
     log: process.env.DBG ? (m, e) => console.log('client', m, JSON.stringify(e)) : undefined,
   });
   cleanup.push(() => client.shutdown());
@@ -126,6 +142,57 @@ describe('client', () => {
     await alice.editMessage(ch, original.id, 'hello swamp!');
     await waitFor(() => bodies(bob, ch).includes('hello swamp!'), 12000, 'edit');
     expect(bob.state.messages[ch]!.find((m) => m.id === original.id)!.edited).toBe(true);
+  });
+
+  it('keeps a reply after the message it answers when the clocks disagree', async () => {
+    const coord = await server();
+    const net = new FakeRelayNetwork();
+    const alice = await signUp(makeClient(net, coord), 'alice');
+    // Bob's computer clock is two minutes behind Alice's.
+    const bob = await signUp(makeClient(net, coord, { clockOffsetMs: -120_000 }), 'bob');
+    await alice.addFriend(bob.userId);
+    await waitFor(() => bob.state.friends.incoming.includes(alice.userId), 12000);
+    await bob.addFriend(alice.userId);
+    const dm = await alice.openDm(bob.userId);
+    await waitFor(() => bob.state.dms.includes(alice.userId), 12000, 'dm invite');
+    await alice.openChannel(dm);
+    await bob.openChannel(dm);
+    await waitFor(() => alice.state.sessions[dm]?.peers.includes(bob.userId), 12000, 'dm');
+
+    await alice.sendMessage(dm, 'ping');
+    await waitFor(() => bodies(bob, dm).includes('ping'), 12000, 'bob receives');
+    await bob.sendMessage(dm, 'pong');
+    await waitFor(() => bodies(alice, dm).includes('pong'), 12000, 'alice receives');
+    await bob.sendMessage(dm, 'and again');
+    await waitFor(() => bodies(alice, dm).includes('and again'), 12000, 'alice receives');
+
+    expect(bodies(alice, dm)).toEqual(['ping', 'pong', 'and again']);
+    expect(bodies(bob, dm)).toEqual(['ping', 'pong', 'and again']);
+  });
+
+  it('keeps sending after a clock that was far ahead is corrected', async () => {
+    const coord = await server();
+    const net = new FakeRelayNetwork();
+    const alice = await signUp(makeClient(net, coord), 'alice');
+    // Bob's clock starts a day ahead.
+    let offset = 24 * 3600_000;
+    const bob = await signUp(makeClient(net, coord, { clockOffsetMs: () => offset }), 'bob');
+    await alice.addFriend(bob.userId);
+    await waitFor(() => bob.state.friends.incoming.includes(alice.userId), 12000);
+    await bob.addFriend(alice.userId);
+    const dm = await alice.openDm(bob.userId);
+    await waitFor(() => bob.state.dms.includes(alice.userId), 12000, 'dm invite');
+    await alice.openChannel(dm);
+    await bob.openChannel(dm);
+    await waitFor(() => alice.state.sessions[dm]?.peers.includes(bob.userId), 12000, 'dm');
+
+    await bob.sendMessage(dm, 'from tomorrow');
+    // Then his clock is put right; what he writes next must still arrive.
+    offset = 0;
+    await bob.sendMessage(dm, 'clock fixed');
+    await waitFor(() => bodies(alice, dm).includes('clock fixed'), 12000, 'alice receives');
+    // The message stamped a day ahead was never accepted.
+    expect(bodies(alice, dm)).toEqual(['clock fixed']);
   });
 
   it('syncs history to members who join later, peer to peer', async () => {
@@ -246,6 +313,97 @@ describe('client', () => {
     await waitFor(() => bodies(bob, ch).includes('across the mesh'), 12000);
     expect(bob.state.server!.info.id).toBe(b.info.id);
     expect(alice.state.server!.info.id).toBe(a.info.id);
+  });
+});
+
+describe('connection help', () => {
+  it('checks the network on connecting and says when direct connections are limited', async () => {
+    const coord = await server();
+    const net = new FakeRelayNetwork();
+    const blocked = await signUp(
+      makeClient(net, coord, { probe: { nat: 'unknown', udp: false } }),
+      'blocked',
+    );
+    const strict = await signUp(
+      makeClient(net, coord, { probe: { nat: 'symmetric', udp: true } }),
+      'strict',
+    );
+    const fine = await signUp(makeClient(net, coord, { probe: { nat: 'cone', udp: true } }), 'ok');
+    await waitFor(() => blocked.state.network?.checkedAt, 3000, 'checked');
+    expect(blocked.state.network).toMatchObject({ verdict: 'blocked', checking: false });
+    await waitFor(() => strict.state.network?.checkedAt, 3000, 'checked');
+    expect(strict.state.network!.verdict).toBe('limited');
+    await waitFor(() => fine.state.network?.checkedAt, 3000, 'checked');
+    expect(fine.state.network!.verdict).toBe('good');
+  });
+
+  it('offers the relay when a friend cannot be reached directly, and connects through it', async () => {
+    const coord = await server({ relay: { enabled: true, maxUsers: 5 }, stunPort: 0 });
+    const net = new FakeRelayNetwork();
+    const alice = await signUp(makeClient(net, coord, { nat: 'open' }), 'alice');
+    // Bob can't host (like the web app), so Alice stays the host.
+    const bob = await signUp(makeClient(net, coord, { canHost: false }), 'bob');
+    await alice.addFriend(bob.userId);
+    await waitFor(() => bob.state.friends.incoming.includes(alice.userId), 12000);
+    await bob.addFriend(alice.userId);
+    // Bob's network lets nothing through directly.
+    net.blocked.add(bob.userId);
+    const dm = await alice.openDm(bob.userId);
+    await waitFor(() => bob.state.dms.includes(alice.userId), 12000, 'dm invite');
+    await alice.openChannel(dm);
+    await bob.openChannel(dm);
+    const host = await waitFor(() => bob.state.sessions[dm]?.host, 12000, 'host elected');
+    expect(host).toBe(alice.userId);
+
+    const trouble = await waitFor(() => bob.state.connectionTrouble, 12000, 'trouble noticed');
+    expect(trouble).toEqual({ sessionId: dm, with: alice.userId });
+    expect(bob.state.sessions[dm]!.trouble).toBe(true);
+
+    await bob.useRelay(dm);
+    expect(bob.state.settings.allowServerRelay).toBe(true);
+    await waitFor(() => bob.state.sessions[dm]?.status === 'connected', 12000, 'relayed');
+    expect(bob.state.sessions[dm]!.route).toBe('relay');
+    expect(bob.state.sessions[dm]!.relay).not.toBeNull();
+    expect(bob.state.connectionTrouble).toBeNull();
+    await bob.sendMessage(dm, 'through the relay');
+    await waitFor(() => bodies(alice, dm).includes('through the relay'), 12000, 'delivered');
+    // Alice reached her own relay directly.
+    expect(alice.state.sessions[dm]!.trouble).toBe(false);
+  });
+});
+
+describe('calls', () => {
+  /** Enough of a voice engine to place a call without a microphone. */
+  const silentVoice = () =>
+    ({
+      start: async () => {},
+      stop: () => {},
+      stopSession: () => {},
+      setMuted: () => {},
+      setDeafened: () => {},
+      playSlot: () => {},
+      micTrack: () => null,
+      frameCrypto: () => undefined,
+    }) as unknown as VoiceEngine;
+
+  it('hangs up a call nobody answers, instead of staying in it alone', async () => {
+    const coord = await server();
+    const net = new FakeRelayNetwork();
+    const alice = await signUp(makeClient(net, coord, { ringTimeoutMs: 1500 }), 'alice');
+    const bob = await signUp(makeClient(net, coord), 'bob');
+    alice.voiceEngine = silentVoice();
+    await alice.addFriend(bob.userId);
+    await waitFor(() => bob.state.friends.incoming.includes(alice.userId), 12000);
+    await bob.addFriend(alice.userId);
+    await waitFor(() => alice.state.friends.friends.includes(bob.userId), 12000, 'friends');
+
+    await alice.callDm(bob.userId);
+    expect(alice.state.outgoingCall?.to).toBe(bob.userId);
+    await waitFor(() => bob.state.incomingCall, 12000, 'bob rings');
+    await waitFor(() => !alice.state.voiceSession, 6000, 'hung up');
+    expect(alice.state.outgoingCall).toBeNull();
+    expect(alice.state.errors.map((e) => e.message)).toContain('No answer');
+    await waitFor(() => !bob.state.incomingCall, 6000, 'stops ringing for bob');
   });
 });
 

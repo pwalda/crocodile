@@ -41,6 +41,7 @@ import {
   useUi,
 } from '../croc';
 import { copyText, imageToDataUrl, keyLabel, openLink, stampOf } from '../lib/format';
+import { NETWORK_TEXT } from '../lib/network';
 
 const SOURCE_URL = 'https://github.com/pwalda/crocodile';
 const WEBSITE_URL = 'https://crocodilechat.com';
@@ -777,6 +778,58 @@ function PrivacyTab() {
   );
 }
 
+/** The result of the network check, with a way to run it again. */
+function NetworkTest() {
+  const network = useCroc((s) => s.network);
+  const relayOn = useCroc((s) => s.settings.allowServerRelay);
+  const client = getClient();
+  const verdict = network?.verdict ?? 'unknown';
+  const text = NETWORK_TEXT[verdict];
+  const ok = verdict === 'good';
+  return (
+    <section aria-label="Connection test">
+      <Card className="mt-3 flex items-start gap-3">
+        <span
+          className={cx(
+            'flex h-10 w-10 shrink-0 items-center justify-center rounded-xl',
+            ok ? 'bg-accent-soft text-accent' : 'bg-warn/15 text-warn',
+          )}
+        >
+          <Wifi size={19} />
+        </span>
+        <div className="min-w-0 flex-1">
+          <div className="font-bold">
+            {network?.checking && !network.checkedAt ? 'Testing your network…' : text.title}
+          </div>
+          <p className="mt-0.5 text-xs leading-relaxed text-muted">
+            {network?.checkedAt ? text.detail : 'Crocodile tests your network when it connects.'}
+            {!ok && network?.checkedAt && relayOn ? ' The relay is on.' : ''}
+          </p>
+          {!ok &&
+            network?.checkedAt &&
+            !relayOn &&
+            (verdict === 'limited' || verdict === 'blocked') && (
+              <Button
+                className="mt-3 h-9"
+                onClick={() => void client.updateSettings({ allowServerRelay: true })}
+              >
+                Turn on the relay
+              </Button>
+            )}
+        </div>
+        <Button
+          variant="secondary"
+          className="h-9 shrink-0"
+          disabled={!!network?.checking}
+          onClick={() => void client.checkNetwork(true)}
+        >
+          {network?.checking ? 'Testing…' : 'Test again'}
+        </Button>
+      </Card>
+    </section>
+  );
+}
+
 function ConnectionTab() {
   const server = useCroc((s) => s.server);
   const servers = useCroc((s) => s.servers);
@@ -829,6 +882,7 @@ function ConnectionTab() {
           Reconnect
         </Button>
       </Card>
+      <NetworkTest />
       {server && <OperatorLine contact={server.operator?.contact} />}
 
       <div className="mb-2 mt-8 flex items-center justify-between">

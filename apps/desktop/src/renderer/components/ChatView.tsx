@@ -16,6 +16,7 @@ import {
 import type { MessageView } from '@crocodile/client-core';
 import { getClient, openModal, ui, useCroc, useUi } from '../croc';
 import { colorFor, dayOf, renderMessage, timeOf } from '../lib/format';
+import { ROUTE_TEXT } from '../lib/network';
 import { Avatar, IconButton, UserName, cx } from './ui';
 
 export function ChatView({
@@ -90,6 +91,9 @@ export function ChatView({
             ) : (
               <span>
                 End-to-end encrypted · {peers} peer{peers === 1 ? '' : 's'} connected
+                {session?.route && !session.iAmHost && peers > 0
+                  ? ` · ${ROUTE_TEXT[session.route]}`
+                  : ''}
               </span>
             )}
           </div>

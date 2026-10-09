@@ -53,6 +53,18 @@ export function elect({ members, host, backup, penalties, now }: ElectionInput):
     if (standby && available(standby)) nextHost = standby.peer;
     else nextHost = ranked[0]?.peer ?? null;
   }
+  // A penalty means "prefer someone else". With nobody else, keep (or take)
+  // a penalised host: members who can't reach it directly may still get
+  // through the relay, and nobody can without a host.
+  if (!nextHost) {
+    if (current && isHostEligible(current)) nextHost = current.peer;
+    else
+      nextHost =
+        members
+          .filter(isHostEligible)
+          .sort((a, b) => hostScore(b, now) - hostScore(a, now) || a.peer.localeCompare(b.peer))[0]
+          ?.peer ?? null;
+  }
 
   // Keep the backup stable unless a clearly better candidate appears.
   const candidates = ranked.filter((m) => m.peer !== nextHost);
