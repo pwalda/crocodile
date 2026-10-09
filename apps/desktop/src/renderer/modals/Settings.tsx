@@ -3,9 +3,11 @@ import {
   AppWindow,
   Check,
   Code,
+  Coffee,
   Copy,
   Eye,
   Globe,
+  Heart,
   Info,
   Laptop,
   LogOut,
@@ -42,6 +44,8 @@ import { copyText, imageToDataUrl, keyLabel, openLink, stampOf } from '../lib/fo
 
 const SOURCE_URL = 'https://github.com/pwalda/crocodile';
 const WEBSITE_URL = 'https://crocodilechat.com';
+const SPONSORS_URL = 'https://github.com/sponsors/pwalda';
+const KOFI_URL = 'https://ko-fi.com/pwalda';
 const HOSTING_GUIDE_URL = `${SOURCE_URL}/blob/main/docs/SELF_HOSTING.md#if-other-people-use-your-server`;
 import { isOperatorContact } from '@crocodile/protocol';
 import { desktop } from '../platform';
@@ -1333,6 +1337,25 @@ function AboutTab() {
           <DiagnosticsButton />
         </div>
       </Card>
+      <section aria-label="Support Crocodile">
+        <Card className="mt-3 text-sm leading-relaxed text-text-2">
+          <h3 className="flex items-center gap-2 text-base font-bold text-text">
+            <Heart size={16} className="text-accent" /> Support Crocodile
+          </h3>
+          <p className="mt-1">
+            Crocodile has no ads, no tracking and no paid features. Donations pay for the main
+            server and development, and everyone gets the same app whether they give or not.
+          </p>
+          <div className="flex flex-wrap gap-2 pt-3">
+            <Button variant="secondary" onClick={() => openLink(SPONSORS_URL)}>
+              <Heart size={15} /> GitHub Sponsors
+            </Button>
+            <Button variant="secondary" onClick={() => openLink(KOFI_URL)}>
+              <Coffee size={15} /> Ko-fi
+            </Button>
+          </div>
+        </Card>
+      </section>
     </>
   );
 }
