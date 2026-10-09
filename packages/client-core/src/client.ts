@@ -2019,7 +2019,7 @@ export class CrocodileClient extends Emitter<ClientEvents> {
           role: 'new',
           step: 'claimed',
           code: code.toUpperCase(),
-          securityCode: linkSecurityCode(temp.publicKey, key),
+          securityCode: linkSecurityCode(temp.publicKey, temp.encPublicKey, key),
           account: userId,
         },
       });
@@ -2054,7 +2054,9 @@ export class CrocodileClient extends Emitter<ClientEvents> {
   /** Existing device: enter the code the new device shows. */
   async claimDeviceLink(code: string): Promise<string> {
     const res = await this.link!.request('link.claim', { code });
-    const securityCode = linkSecurityCode(res.key, this.identity!.publicKey);
+    // The code covers the key the account will be sealed to: a server that
+    // swapped it would make the two devices show different codes.
+    const securityCode = linkSecurityCode(res.key, res.encKey, this.identity!.publicKey);
     this.pendingLinkTarget = { code, encKey: res.encKey };
     this.store.set({ linking: { role: 'existing', step: 'confirm', code, securityCode } });
     return securityCode;

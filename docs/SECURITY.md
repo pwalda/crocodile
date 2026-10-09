@@ -83,7 +83,9 @@ RFC 6464 audio-level header). It holds the same keys as every other member
   `(kid, generation, counter)`; constant-bitrate Opus.
 - Text: author-signed, Padmé-padded, encrypted with the text chain.
 - Device linking: short one-time code plus a 6-digit security code compared
-  on both screens, then a hybrid-encrypted, signed transfer.
+  on both screens, then a hybrid-encrypted, signed transfer. The code covers
+  the new device's signing key and the encryption key the account is sent
+  to, so a server that swaps either makes the codes differ.
 - Every signature is domain-separated (`SIG_DOMAIN` in `protocol/constants.ts`).
 - Local data (identity, prekeys, history) is encrypted at rest with a key
   kept in the OS keychain (Electron `safeStorage`).

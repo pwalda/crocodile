@@ -131,10 +131,17 @@ export function decodeEncKey(encPublicKey: string): Uint8Array {
 
 /**
  * Six-digit code both devices show while linking. If they match, nobody
- * (including the coordination server) swapped the new device's key.
+ * (including the coordination server) swapped the new device's signing key
+ * or the encryption key the account is sent to.
  */
-export function linkSecurityCode(newDeviceKey: string, accountKey: string): string {
-  const d = sha256(utf8.encode(`croc/v1/link-sas\n${newDeviceKey}\n${accountKey}`));
+export function linkSecurityCode(
+  newDeviceKey: string,
+  newDeviceEncKey: string,
+  accountKey: string,
+): string {
+  const d = sha256(
+    utf8.encode(`croc/v2/link-sas\n${newDeviceKey}\n${newDeviceEncKey}\n${accountKey}`),
+  );
   const n = ((d[0]! << 16) | (d[1]! << 8) | d[2]!) % 1_000_000;
   const s = String(n).padStart(6, '0');
   return `${s.slice(0, 3)} ${s.slice(3)}`;

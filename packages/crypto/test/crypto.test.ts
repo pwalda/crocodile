@@ -293,7 +293,12 @@ describe('hybrid post-quantum sealed boxes', () => {
     expect(openLink(temp, box, account.userId)).toEqual(account.seed);
     expect(openLink(temp, box, createIdentity().userId)).toBeNull();
     expect(openLink(createIdentity(), box, account.userId)).toBeNull();
-    expect(linkSecurityCode(temp.publicKey, account.publicKey)).toMatch(/^\d{3} \d{3}$/);
+    const shown = linkSecurityCode(temp.publicKey, temp.encPublicKey, account.publicKey);
+    expect(shown).toMatch(/^\d{3} \d{3}$/);
+    // A different encryption key gives a different code (a swap shows).
+    expect(
+      linkSecurityCode(temp.publicKey, createIdentity().encPublicKey, account.publicKey),
+    ).not.toBe(shown);
   });
 });
 

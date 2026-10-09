@@ -555,6 +555,38 @@ describe('multiple devices', () => {
     expect(fresh.identity).toBeNull();
     fresh.cancelDeviceLink();
   });
+
+  it('shows different security codes when the server swaps the key the account is sent to', async () => {
+    const coord = await server();
+    const net = new FakeRelayNetwork();
+    const alice = await signUp(makeClient(net, coord), 'alice');
+    const fresh = makeClient(net, coord);
+    await fresh.init();
+    await fresh.startDeviceLink();
+    const code = await waitFor(
+      () => (fresh.state.linking?.role === 'new' ? fresh.state.linking.code : undefined),
+      5000,
+    );
+    // A dishonest server answers the claim with its own encryption key, so the
+    // account would be sealed to the server instead of the new device.
+    const mallory = createIdentity();
+    const link = alice.link!;
+    const request = link.request.bind(link);
+    link.request = (async (method: string, params: unknown) => {
+      const res = await request(method as never, params as never);
+      return method === 'link.claim' ? { ...(res as object), encKey: mallory.encPublicKey } : res;
+    }) as typeof link.request;
+
+    const shownOnAlice = await alice.claimDeviceLink(code);
+    const shownOnNew = await waitFor(
+      () => (fresh.state.linking?.role === 'new' ? fresh.state.linking.securityCode : undefined),
+      5000,
+      'claimed',
+    );
+    // The person comparing the screens sees a mismatch and doesn't confirm.
+    expect(shownOnAlice).not.toBe(shownOnNew);
+    fresh.cancelDeviceLink();
+  });
 });
 
 describe('client and server quotas', () => {
