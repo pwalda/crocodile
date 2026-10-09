@@ -1,12 +1,14 @@
+import { z } from 'zod';
 import type { SignedRecord } from './records';
 import type { ServerInfo } from './rpc';
 import type { HostCaps, VoiceOccupancy } from './session';
 
 /**
- * Server-to-server mesh protocol (WebSocket /v1/federation). Every coordination
- * server keeps a link to every other server it learns about from the
- * directory (or from gossip). Records are replicated by anti-entropy using
- * per-server sequence cursors; presence and session operations are routed.
+ * Server-to-server protocol (WebSocket /v1/federation). Servers keep a few
+ * overlay links and open direct ones as needed; records live on a few owner
+ * servers each (docs/MESH.md). Owners copy records to each other, with
+ * per-server sequence cursors to catch up; what every server needs to hear is
+ * flooded through the overlay.
  */
 export interface FedHello {
   t: 'fed_hello';
@@ -14,6 +16,103 @@ export interface FedHello {
   challenge: string;
   /** Fresh hybrid key-exchange offer for the encrypted link. */
   channel: { x25519: string; mlkem: string };
+  /** PROTOCOL_VERSION of the sender; absent before 2. */
+  protocol?: number;
+}
+
+/** "I'm alive", flooded every few seconds. Signed, so it can travel through others. */
+export interface FedBeacon {
+  t: 'beacon';
+  server: ServerInfo;
+  /** Increases with every beacon (a timestamp). */
+  seq: number;
+  /** The sender keeps a copy of every record. */
+  full: boolean;
+  /**
+   * Sequence number of the sender's latest presence news: a server that has
+   * seen less missed some, and fetches the sender's full presence.
+   */
+  presence?: number;
+  /** Ed25519 by the server key over { server, seq, full, presence }. */
+  sig: string;
+}
+
+/** A frame for every server, passed on by each to its other links. */
+export interface FedFlood {
+  t: 'flood';
+  /** Unique; a server passes each id on once. */
+  id: string;
+  /** The server it came from. */
+  origin: string;
+  hops: number;
+  f: FedLinkQuery | FedLinkAnswer | FedMailQuery | FedMailAck;
+}
+
+/** A request to one server; answered with FedResponse. */
+export interface FedRequest {
+  t: 'req';
+  rid: string;
+  m:
+    | 'rec_put'
+    | 'rec_get'
+    | 'rec_list'
+    | 'rec_term'
+    | 'rec_store'
+    | 'watch'
+    | 'digest'
+    | 'digest_keys'
+    | 'presence_state';
+  p: unknown;
+}
+
+/** Parameters of each FedRequest method; servers check them like client input. */
+export const FedRequestParams = {
+  /** A client's new record, for an owner of its home shard to check (fresh) and store. */
+  rec_put: z.object({ record: z.unknown() }),
+  rec_get: z.object({ keys: z.array(z.string().max(200)).max(1000) }),
+  rec_list: z.object({
+    prefix: z.string().min(3).max(200),
+    limit: z.number().int().min(1).max(5000).optional(),
+  }),
+  rec_term: z.object({
+    term: z.string().min(3).max(300),
+    limit: z.number().int().min(1).max(5000).optional(),
+  }),
+  /** Records the receiver should store as an owner; answered once applied. */
+  rec_store: z.object({ records: z.array(z.unknown()).max(200) }),
+  /** The receiver's full presence (FedPresence with full: true). */
+  presence_state: z.object({}),
+  /** Push changes to these shards (records whose key starts with prefix) for ttlMs. */
+  watch: z.object({
+    items: z
+      .array(z.object({ shard: z.string().min(3).max(300), prefix: z.string().max(200) }))
+      .max(5000),
+    ttlMs: z
+      .number()
+      .int()
+      .min(1000)
+      .max(15 * 60_000),
+  }),
+  /**
+   * Repair: 256 bucket sums over the records both servers own; the answer
+   * lists the buckets that differ.
+   */
+  digest: z.object({ buckets: z.array(z.number().int().min(0)).length(256) }),
+  /** Repair: (key, version) of the records both own, in these buckets. */
+  digest_keys: z.object({ buckets: z.array(z.number().int().min(0).max(255)).max(256) }),
+} as const;
+
+export interface FedResponse {
+  t: 'res';
+  rid: string;
+  ok?: unknown;
+  err?: { code: string; message: string };
+}
+
+/** A record a watching server asked to hear about; not for storing. */
+export interface FedRecordPush {
+  t: 'rec_push';
+  record: SignedRecord;
 }
 
 export interface FedAuth {
@@ -61,7 +160,11 @@ export interface FedRecords {
 
 export interface FedPresence {
   t: 'presence';
-  /** true: replace everything known about the sender's users. */
+  /** The server these users are connected to. */
+  origin: string;
+  /** Increases with every update from the origin; older ones are ignored. */
+  seq: number;
+  /** true: replace everything known about the origin's users. */
   full: boolean;
   /**
    * Status of users connected to the sender. 'invisible' users still need to be
@@ -120,16 +223,25 @@ export interface FedServers {
   servers: ServerInfo[];
 }
 
-/** Voice channel occupancy announced by the session owner to the whole mesh. */
+/** Voice channel occupancy announced by the session owner to every server. */
 export interface FedVoice {
   t: 'voice';
   sessionId: string;
   occ: VoiceOccupancy;
+  /** The session's owner. */
+  owner: string;
+  /** When the owner announced it; the latest per session wins. */
+  at: number;
 }
 
 export type FedFrame =
   | FedHello
   | FedAuth
+  | FedBeacon
+  | FedFlood
+  | FedRequest
+  | FedResponse
+  | FedRecordPush
   | FedRecords
   | FedPresence
   | FedRoute

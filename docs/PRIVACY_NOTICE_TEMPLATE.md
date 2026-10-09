@@ -42,8 +42,9 @@ records the Crocodile network needs.
 | _Relay, if turned on:_ already-encrypted call and message traffic; the server sees its size and timing                                                             | For networks that block direct connections                            | Passed through live, nothing stored                                                         |
 
 The first four rows are records of the whole Crocodile network, not only of
-the people who use this server: every coordination server keeps a copy, so
-that people on different servers can reach each other. They are signed by
+the people who use this server: each is kept by a few coordination servers
+[(this server keeps a copy of all of them)], so that people on different
+servers can reach each other. They are signed by
 their owners, so servers can't forge them. Profiles, spaces and memberships
 are not hidden from servers; friend lists and friend requests are encrypted.
 While someone is connected, this server also sees whose presence their app

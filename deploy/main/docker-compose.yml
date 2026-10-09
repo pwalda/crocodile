@@ -49,6 +49,9 @@ services:
       CROC_CONTACT: https://${CROC_DOMAIN}/privacy/
       # Behind the proxy: take client addresses from X-Forwarded-For.
       CROC_TRUST_PROXY: '1'
+      # Keep a copy of every record, so the network never depends on a few
+      # home computers for its data (docs/MESH.md).
+      CROC_STORE_ALL: '1'
     volumes:
       - coordinator-data:/data
     depends_on: [directory]

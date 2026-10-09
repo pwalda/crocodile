@@ -1,4 +1,5 @@
-export const PROTOCOL_VERSION = 1;
+/** 2: sharded records and a sparse server overlay (docs/MESH.md). */
+export const PROTOCOL_VERSION = 2;
 export const APP_NAME = 'Crocodile';
 
 /** Number of simultaneous speaker slots a host relay forwards to each listener. */
@@ -38,4 +39,5 @@ export const SIG_DOMAIN = {
   senderKey: 'croc/v1/sender-key',
   sealed: 'croc/v1/sealed',
   anon: 'croc/v1/anon',
+  beacon: 'croc/v1/beacon',
 } as const;

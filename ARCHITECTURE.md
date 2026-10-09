@@ -44,7 +44,7 @@ hosts a group. This document explains how the pieces fit and why.
 | --------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Voice and text only P2P, always E2E                                   | Voice frames are encrypted by the sender's app (Encoded Transforms, SFrame-style) before they leave the device; text is group-encrypted with ratcheting sender keys. The host relay forwards ciphertext. Coordination servers carry signalling only. If peers cannot reach the host, the host is re-elected first; only users who opted in may then fall back to a coordinator's relay (TURN), which carries the same end-to-end ciphertext, for at most an hour at a time and for a capped number of users per server. |
 | Coordination servers on a good-will basis                             | Anyone can run `crocodile-coordinator` or tick "Host a coordination server" in the app. Servers register with the directory, which verifies they are reachable.                                                                                                                                                                                                                                                                                                                                                         |
-| Servers hold accounts and metadata, shared across a mesh              | Accounts are key pairs. Profiles, friend lists, spaces, invites and memberships are **records signed by their author**; every server replicates every record and every client re-verifies them, so no server has to be trusted for integrity. Friend lists are sealed so that only their owner's devices can read them, and friend requests travel as sealed notes that don't name their sender (only the sender's own server sees whom they wrote to).                                                                 |
+| Servers hold accounts and metadata, shared across a mesh              | Accounts are key pairs. Profiles, friend lists, spaces, invites and memberships are **records signed by their author**; each record is stored by a few owner servers (all of them in a small network), and every server and client re-verifies them, so no server has to be trusted for integrity. Friend lists are sealed so that only their owner's devices can read them, and friend requests travel as sealed notes that don't name their sender (only the sender's own server sees whom they wrote to).            |
 | Lowest-latency server, runner-up as backup                            | Clients fetch the directory (addresses listed obfuscated and signed by each server), probe `/health` round-trip times, connect to the best and fail over to the standby instantly.                                                                                                                                                                                                                                                                                                                                      |
 | Every install can be server and client                                | The coordinator and relay are libraries; the desktop app runs them in Electron utility processes.                                                                                                                                                                                                                                                                                                                                                                                                                       |
 | Hassle-free install                                                   | One-click per-user installers (NSIS/DMG/AppImage/deb/rpm), no accounts, passwords or emails: onboarding is "pick a name".                                                                                                                                                                                                                                                                                                                                                                                               |
@@ -135,15 +135,24 @@ A coordinator (`packages/coordinator`) offers a WebSocket JSON-RPC API:
    watch presence and voice-channel occupancy, join or leave sessions, and
    send signalling messages to other session members.
 
-**Mesh.** Servers learn about each other from the directory (and gossip) and
-keep mutually authenticated WebSocket links. Replication is anti-entropy by
-per-peer sequence cursors: on connect each side streams what the other has
-not seen, then pushes new writes live. Records may arrive before their
-dependencies (an invite before its space) and are retried. Presence is
-gossiped. A client event for a user on another server is routed there.
+**Mesh.** Servers learn about each other from the directory, gossip and
+signed beacons that every server floods through the overlay; a server is live
+while it is linked or its beacon is recent. Links are mutually authenticated
+WebSocket connections. In a small network every server links to every other;
+in a larger one each keeps a few **overlay** links (ring neighbours and
+fingers) and opens **direct** links to the servers it needs, closing them when
+idle. Each record lives on its **owners**: the first few servers on a
+consistent-hash ring for each of its shards (a user, a space, an invite code,
+a name), plus servers that keep a full copy (`--store-all`). A server answers
+from its store for shards it owns and asks their owners otherwise; it asks
+owners to push changes its clients follow. Owners copy writes to each other,
+catch up by per-peer sequence cursors when a link comes up, hand records to
+new owners when servers join or leave, and drop copies they no longer own.
+Presence, voice-room occupancy and mailbox and device-link queries are
+flooded. See [docs/MESH.md](docs/MESH.md).
 
 **Sessions.** Each session (a space's text mesh, a voice channel, a DM) is
-owned by one server chosen by rendezvous hashing over the live mesh, so every
+owned by one server chosen by rendezvous hashing over the live servers, so every
 server independently agrees on the owner. Member servers keep a registry of
 their local members and forward operations to the owner. When the mesh changes
 and ownership moves, member servers re-submit their joins with a hint of the
@@ -318,9 +327,9 @@ See [docs/ROADMAP.md](docs/ROADMAP.md). The main ones:
 - **Metadata on servers.** Friend lists are sealed, but the server you're
   connected to sees whose presence you follow and whom you befriend, message
   or call while you do, and space memberships are visible to every server.
-- **Every server holds every record.** Fine for a small network; a larger one
-  should keep each record on a few servers chosen by rendezvous hashing and
-  link servers in a sparse overlay rather than a full mesh.
+- **Every server hears every beacon and presence change.** Fine for
+  thousands of servers; presence would move to the owners of each user's
+  shard for much more than that.
 - **Global push-to-talk** needs X11 on Linux (not Wayland) and the
   Accessibility permission on macOS; otherwise it works while the app is
   focused.

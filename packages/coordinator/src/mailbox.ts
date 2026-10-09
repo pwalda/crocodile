@@ -50,7 +50,7 @@ export class MailboxService {
     return Math.min(this.config.ttlMs, MAILBOX_MAX_TTL_MS);
   }
 
-  put(client: ClientConnection, items: { to: string; box: SealedBox }[]) {
+  async put(client: ClientConnection, items: { to: string; box: SealedBox }[]) {
     if (!this.config.enabled)
       throw new RpcFailure('unavailable', 'this server does not keep mail for offline devices');
     const store = this.hub.store;
@@ -58,6 +58,14 @@ export class MailboxService {
       throw new RpcFailure('unavailable', 'the mailbox on this server is full');
     if (store.mailCount({ from: client.userId }) + items.length > this.config.maxPerSender)
       throw new RpcFailure('rate_limited', 'you have too much undelivered mail on this server');
+    // The recipients' device records may live on other servers.
+    const devices = new Map(
+      (
+        await this.hub.dist.get(
+          items.map(({ to }) => recordKey.device(peerIds.user(to), peerIds.device(to))),
+        )
+      ).map((r) => [r.key, r]),
+    );
     const now = Date.now();
     const expiresAt = now + this.ttlMs;
     const stored: StoredMail[] = [];
@@ -65,7 +73,7 @@ export class MailboxService {
       if (box.to !== to || box.from !== client.publicKey || box.fromDevice !== client.deviceId)
         throw new RpcFailure('bad_request', 'box does not match its sender or recipient');
       const toUser = peerIds.user(to);
-      const device = this.hub.store.get(recordKey.device(toUser, peerIds.device(to)));
+      const device = devices.get(recordKey.device(toUser, peerIds.device(to)));
       if (!device || (device.body as { revoked?: boolean }).revoked)
         throw new RpcFailure('not_found', 'unknown recipient device');
       const json = JSON.stringify(box);
@@ -100,7 +108,7 @@ export class MailboxService {
   /** A device is ready for its mail: send ours and ask the mesh for theirs. */
   fetch(client: ClientConnection) {
     this.deliverTo(client.peer);
-    this.hub.mesh.broadcast({ t: 'mail_query', peer: client.peer });
+    this.hub.mesh.flood({ t: 'mail_query', peer: client.peer });
   }
 
   onQuery(fromServer: string, peer: string) {
@@ -109,7 +117,7 @@ export class MailboxService {
 
   ack(client: ClientConnection, ids: string[]) {
     this.hub.store.mailDelete(client.peer, ids);
-    this.hub.mesh.broadcast({ t: 'mail_ack', peer: client.peer, ids });
+    this.hub.mesh.flood({ t: 'mail_ack', peer: client.peer, ids });
     this.deliverTo(client.peer);
   }
 

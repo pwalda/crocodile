@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import {
   createIdentity,
   createPrekey,
+  isSpaceMember,
   randomDeviceId,
   randomId,
   sealAnonymous,
@@ -95,6 +96,36 @@ describe('records', () => {
       prefix: recordKey.memberPrefix(spaceId),
     });
     expect(members.records).toHaveLength(2);
+  });
+});
+
+describe('writes sent twice', () => {
+  it('counts the same record sent again as stored, and still refuses a different one', async () => {
+    const c = await server();
+    const alice = await user(c);
+    const key = recordKey.profile(alice.identity.userId);
+    const version = Date.now();
+    const profile = signRecord(
+      alice.identity,
+      'profile',
+      key,
+      { username: 'alice', encKey: alice.identity.encPublicKey },
+      version,
+    );
+    expectAccepted(await alice.conn.request('records.put', { record: profile }));
+    // A retry after a lost answer, or a copy that got there first by another path.
+    expectAccepted(await alice.conn.request('records.put', { record: profile }));
+    const other = signRecord(
+      alice.identity,
+      'profile',
+      key,
+      { username: 'mallory', encKey: alice.identity.encPublicKey },
+      version,
+    );
+    expect(await alice.conn.request('records.put', { record: other })).toMatchObject({
+      accepted: false,
+      reason: 'stale version',
+    });
   });
 });
 
@@ -254,7 +285,7 @@ describe('coordination mesh', () => {
     const s = await createSpace(alice);
     const b = await server({ name: 'B', meshPeers: [a.url] });
     await waitFor(() => b.records.get(`invite:${s.code}`), 3000, 'backlog sync');
-    expect(b.isSpaceMember(s.spaceId, alice.identity.userId)).toBe(true);
+    expect(isSpaceMember(b.records, s.spaceId, alice.identity.userId)).toBe(true);
   });
 
   it('runs sessions across servers and keeps the host when the owner server dies', async () => {
@@ -264,7 +295,11 @@ describe('coordination mesh', () => {
     const s = await createSpace(alice);
     await waitFor(() => b.records.get(`invite:${s.code}`), 3000, 'invite replicated');
     await joinSpace(bob, s.spaceId, s.code);
-    await waitFor(() => a.isSpaceMember(s.spaceId, bob.identity.userId), 3000, 'member replicated');
+    await waitFor(
+      () => isSpaceMember(a.records, s.spaceId, bob.identity.userId),
+      3000,
+      'member replicated',
+    );
 
     // Pick a session id owned by whichever server we will keep alive, then kill the owner.
     const sessionId = `voice:${s.spaceId}:${s.voiceChannel}`;
@@ -343,7 +378,7 @@ describe('coordination mesh', () => {
     const host = await connectUser(b, hostId, 'host', 'hostdevicex');
     cleanup.push(() => host.conn.close());
     await joinSpace(host, s.spaceId, s.code);
-    await waitFor(() => a.isSpaceMember(s.spaceId, hostId.userId), 3000);
+    await waitFor(() => isSpaceMember(a.records, s.spaceId, hostId.userId), 3000);
     const first = await host.conn.request('session.join', {
       sessionId,
       caps: caps({ nat: 'open' }),
@@ -355,7 +390,11 @@ describe('coordination mesh', () => {
     await b.stop();
     const again = await connectUser(c, hostId, 'host', 'hostdevicex');
     cleanup.push(() => again.conn.close());
-    await waitFor(() => c.isSpaceMember(s.spaceId, hostId.userId), 3000, 'membership on C');
+    await waitFor(
+      () => isSpaceMember(c.records, s.spaceId, hostId.userId),
+      3000,
+      'membership on C',
+    );
     const rejoined = await again.conn.request('session.join', {
       sessionId,
       caps: caps({ nat: 'open' }),
@@ -912,6 +951,30 @@ describe('sealed friends lists and notes', () => {
     );
     expect(c.records.get(n.key)).toBeUndefined();
     expect((await alice.conn.request('records.put', { record: noteTo(bob) })).accepted).toBe(false);
+  });
+});
+
+describe('account deletion, answered', () => {
+  it('answers the request that deleted the account before signing the device out', async () => {
+    const c = await server();
+    const alice = await user(c);
+    // A slow write (owners elsewhere to reach first, a busy server).
+    const put = c.dist.putFromClient.bind(c.dist);
+    c.dist.putFromClient = async (record) => {
+      const res = await put(record);
+      await new Promise((r) => setTimeout(r, 400));
+      return res;
+    };
+    const closed = new Promise<number>((resolve) =>
+      alice.conn.on('close', ({ code }) => resolve(code)),
+    );
+    const marker = signRecord(alice.identity, 'profile', recordKey.profile(alice.identity.userId), {
+      username: DELETED_PROFILE_NAME,
+      encKey: alice.identity.encPublicKey,
+      deleted: true,
+    });
+    expectAccepted(await alice.conn.request('records.put', { record: marker }));
+    expect(await closed).toBe(4010);
   });
 });
 

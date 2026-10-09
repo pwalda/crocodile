@@ -79,7 +79,7 @@ export function rendezvousOwner(sessionId: string, serverIds: string[]): string 
   return best;
 }
 
-function fnv1a(text: string): number {
+export function fnv1a(text: string): number {
   let h = 0x811c9dc5;
   for (let i = 0; i < text.length; i++) {
     h ^= text.charCodeAt(i);

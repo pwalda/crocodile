@@ -284,6 +284,8 @@ export class CrocodileClient extends Emitter<ClientEvents> {
   /** Changes to the list run one at a time. */
   private friendOps: Promise<unknown> = Promise.resolve();
   private friendRetryTimer?: ReturnType<typeof setTimeout>;
+  /** Grows while notes keep failing, so an unreachable person isn't asked about constantly. */
+  private friendRetryDelay = FRIEND_NOTE_RETRY_MS;
   private friendSweepTimer?: ReturnType<typeof setInterval>;
 
   constructor(
@@ -1316,9 +1318,16 @@ export class CrocodileClient extends Emitter<ClientEvents> {
     throw new Error('the friends list kept changing; try again');
   }
 
+  private friendRetryAt = 0;
+
+  /** Try owed notes again in `delayMs`, unless a try is already due sooner. */
   private retryFriendNotes(delayMs: number) {
+    const at = Date.now() + delayMs;
+    if (this.friendRetryTimer && this.friendRetryAt <= at) return;
     clearTimeout(this.friendRetryTimer);
+    this.friendRetryAt = at;
     this.friendRetryTimer = setTimeout(() => {
+      this.friendRetryTimer = undefined;
       if ([...this.friendList.values()].some(needsNote))
         void this.queueFriends(() => this.syncFriendList()).catch(() => {});
     }, delayMs);
@@ -1331,13 +1340,15 @@ export class CrocodileClient extends Emitter<ClientEvents> {
     const link = this.link;
     if (!id || !link || link.status !== 'connected') return;
     let told = false;
+    let failed = false;
     for (const [userId, e] of [...this.friendList]) {
       if (!needsNote(e)) continue;
       try {
         await this.sendFriendNote(userId, e);
       } catch (err) {
-        // Kept as owed: tried again on the next connection.
+        // Kept as owed: tried again soon, then less and less often.
         this.log('friend note not sent', { userId, err: String(err) });
+        failed = true;
         continue;
       }
       const cur = this.friendList.get(userId);
@@ -1345,6 +1356,10 @@ export class CrocodileClient extends Emitter<ClientEvents> {
       told = true;
     }
     if (told) await this.saveFriendList();
+    if (failed) {
+      this.retryFriendNotes(this.friendRetryDelay);
+      this.friendRetryDelay = Math.min(this.friendRetryDelay * 2, FRIEND_NOTE_SWEEP_MS);
+    } else this.friendRetryDelay = FRIEND_NOTE_RETRY_MS;
   }
 
   /**

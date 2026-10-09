@@ -20,6 +20,8 @@ export interface ClientHandle {
   voiceWatch: Set<string>;
   send<E extends keyof ServerEvents>(ev: E, d: ServerEvents[E]): void;
   close(code: number, reason: string): void;
+  /** Close once the requests in progress have been answered. */
+  closeAfterRequests?(code: number, reason: string): void;
 }
 
 const STATUS_RANK: Record<string, number> = {
@@ -32,8 +34,10 @@ const STATUS_RANK: Record<string, number> = {
 
 /**
  * Who is online, on which devices, and where. A user is online if any device
- * is; their shown status is the "most present" across devices. Remote users
- * are learned from mesh gossip, per server and device.
+ * is; their shown status is the "most present" across devices. Each server
+ * floods changes to its own users through the overlay; they can arrive by
+ * several paths and out of order, so every entry keeps the sequence number
+ * its origin server gave it, and older news is ignored.
  */
 export class PresenceService {
   /** userId -> deviceId -> connection */
@@ -41,8 +45,18 @@ export class PresenceService {
   /** userId -> serverId -> state of that user's devices on that server */
   private remote = new Map<
     string,
-    Map<string, { status: FedEntry['status']; text?: string; since: number; devices: string[] }>
+    Map<
+      string,
+      { status: FedEntry['status']; text?: string; since: number; devices: string[]; seq: number }
+    >
   >();
+  /** `${origin}|${userId}` -> seq of the latest news applied (also for users who left). */
+  private seqs = new Map<string, number>();
+  private ownSeq = 0;
+  /** origin -> the newest seq we have applied from it. */
+  private originSeq = new Map<string, number>();
+  /** origin -> when we last asked it for its full presence. */
+  private askedAt = new Map<string, number>();
   private watchers = new Map<string, Set<ClientHandle>>();
 
   constructor(private readonly hub: Coordinator) {}
@@ -172,40 +186,127 @@ export class PresenceService {
     return [...this.localDevices.keys()].map((u) => this.fedEntry(u));
   }
 
-  applyRemote(serverId: string, frame: FedPresence) {
+  /** Our latest presence seq, announced in beacons. */
+  get latestSeq() {
+    return this.ownSeq;
+  }
+
+  /**
+   * A beacon says `origin`'s presence is at `seq`. If we have seen less, we
+   * missed something (an offline user, say): fetch its full presence.
+   */
+  checkOrigin(origin: string, seq: number) {
+    if (seq <= (this.originSeq.get(origin) ?? 0)) return;
+    const now = Date.now();
+    // At most once per beacon period, so a lost answer is asked again soon.
+    if (now - (this.askedAt.get(origin) ?? 0) < this.hub.membership.timing.beaconMs) return;
+    this.askedAt.set(origin, now);
+    this.hub.mesh
+      .request<FedPresence>(origin, 'presence_state', {})
+      .then((frame) => {
+        if (frame?.origin === origin) this.applyRemote(frame);
+      })
+      .catch(() => {});
+  }
+
+  /** Our users, all of them, for a server that asked. */
+  fullState(): FedPresence {
+    // Not a new seq: a snapshot isn't news, and a new seq here would make
+    // every server that didn't get the snapshot ask us for it.
+    return {
+      t: 'presence',
+      origin: this.hub.info.id,
+      seq: this.ownSeq,
+      full: true,
+      entries: this.localEntries(),
+    };
+  }
+
+  private nextSeq() {
+    this.ownSeq = Math.max(Date.now(), this.ownSeq + 1);
+    return this.ownSeq;
+  }
+
+  /** News from another server. Returns true if any of it was new (so it travels on). */
+  applyRemote(frame: FedPresence): boolean {
+    const origin = frame.origin;
+    if (!origin || origin === this.hub.info.id || typeof frame.seq !== 'number') return false;
+    if (frame.seq > (this.originSeq.get(origin) ?? 0)) this.originSeq.set(origin, frame.seq);
     const touched = new Set<string>();
+    const isNew = (userId: string) => (this.seqs.get(`${origin}|${userId}`) ?? 0) < frame.seq;
+    const listed = new Set(frame.entries.map((e) => e.userId));
     if (frame.full) {
       for (const [userId, entries] of this.remote) {
-        if (entries.delete(serverId)) touched.add(userId);
+        if (!entries.has(origin) || listed.has(userId) || !isNew(userId)) continue;
+        entries.delete(origin);
         if (entries.size === 0) this.remote.delete(userId);
+        this.seqs.set(`${origin}|${userId}`, frame.seq);
+        touched.add(userId);
       }
     }
     for (const e of frame.entries) {
+      if (!isNew(e.userId)) continue;
+      this.seqs.set(`${origin}|${e.userId}`, frame.seq);
       let entries = this.remote.get(e.userId);
       if (!entries) this.remote.set(e.userId, (entries = new Map()));
-      if (e.status === 'offline' || e.devices.length === 0) entries.delete(serverId);
+      if (e.status === 'offline' || e.devices.length === 0) entries.delete(origin);
       else
-        entries.set(serverId, {
+        entries.set(origin, {
           status: e.status,
           text: e.text,
           since: e.since,
           devices: e.devices,
+          seq: frame.seq,
         });
       if (entries.size === 0) this.remote.delete(e.userId);
       touched.add(e.userId);
     }
     for (const userId of touched) this.changed(userId, false);
+    return touched.size > 0;
   }
 
+  /** A server stopped being live: forget its users (newer news brings them back). */
   dropServer(serverId: string) {
-    this.applyRemote(serverId, { t: 'presence', full: true, entries: [] });
+    for (const [userId, entries] of [...this.remote]) {
+      if (!entries.delete(serverId)) continue;
+      if (entries.size === 0) this.remote.delete(userId);
+      this.changed(userId, false);
+    }
+  }
+
+  /** Everything we know, for a server that just linked to us. */
+  snapshot(): FedPresence[] {
+    const out: FedPresence[] = [this.fullState()];
+    const byFrame = new Map<string, FedPresence>();
+    for (const [userId, entries] of this.remote) {
+      for (const [origin, e] of entries) {
+        const k = `${origin}|${e.seq}`;
+        let f = byFrame.get(k);
+        if (!f)
+          byFrame.set(k, (f = { t: 'presence', origin, seq: e.seq, full: false, entries: [] }));
+        f.entries.push({
+          userId,
+          status: e.status,
+          ...(e.text ? { text: e.text } : {}),
+          since: e.since,
+          devices: e.devices,
+        });
+      }
+    }
+    return [...out, ...byFrame.values()];
   }
 
   private lastPublished = new Map<string, string>();
 
   private changed(userId: string, local: boolean) {
     if (local)
-      this.hub.mesh.broadcast({ t: 'presence', full: false, entries: [this.fedEntry(userId)] });
+      this.hub.mesh.forward({
+        t: 'presence',
+        origin: this.hub.info.id,
+        seq: this.nextSeq(),
+        full: false,
+        entries: [this.fedEntry(userId)],
+      });
     const entry = this.publicEntry(userId);
     const fingerprint = `${entry.status}|${entry.text ?? ''}`;
     if ((this.lastPublished.get(userId) ?? 'offline|') === fingerprint) return;

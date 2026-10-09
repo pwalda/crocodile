@@ -30,7 +30,9 @@ import {
 } from '@crocodile/protocol';
 import { ClientConnection } from './client';
 import { DirectoryClient } from './directory-client';
-import { Mesh } from './mesh';
+import { Distribution, defaultDistributionConfig, type DistributionConfig } from './distribution';
+import { Membership, defaultMembershipTiming, type MembershipTiming } from './membership';
+import { Mesh, defaultMeshConfig, type MeshConfig } from './mesh';
 import { PresenceService } from './presence';
 import { RecordService, defaultRecordQuotas, type RecordQuotas } from './records';
 import { SessionService } from './sessions';
@@ -114,6 +116,20 @@ export interface CoordinatorConfig {
   operatorContact?: string;
   /** Version shown in /health and the server info; defaults to COORDINATOR_VERSION. */
   version?: string;
+  /** How many servers hold each record (docs/MESH.md). */
+  replicas: number;
+  /**
+   * Keep a copy of every record, as well as answering for the shards this
+   * server owns. For well-provisioned servers, so the network never depends
+   * on a few home computers for its data.
+   */
+  storeAll?: boolean;
+  /** Overlay and direct links; defaults in defaultMeshConfig. */
+  mesh?: Partial<MeshConfig>;
+  /** Beacons and the live set; defaults in defaultMembershipTiming. */
+  membership?: Partial<MembershipTiming>;
+  /** Watches, moving and dropping records; defaults in defaultDistributionConfig. */
+  distribution?: Partial<DistributionConfig>;
 }
 
 /** Source of the unmodified coordinator (AGPL-3.0). */
@@ -134,6 +150,7 @@ export const defaultConfig: CoordinatorConfig = {
   mailbox: defaultMailboxConfig,
   maxConnectionsPerIp: 50,
   trustProxy: false,
+  replicas: 3,
 };
 
 /**
@@ -150,6 +167,8 @@ export class Coordinator {
   readonly presence: PresenceService;
   readonly sessions: SessionService;
   readonly mesh: Mesh;
+  readonly membership: Membership;
+  readonly dist: Distribution;
   readonly mailbox: MailboxService;
   private directory?: DirectoryClient;
   private app?: FastifyInstance;
@@ -174,6 +193,7 @@ export class Coordinator {
     // A typo (NaN) or zero here would silently switch a protection off.
     for (const [name, n] of [
       ['capacity', this.config.capacity],
+      ['replicas', this.config.replicas],
       ['maxConnectionsPerIp', this.config.maxConnectionsPerIp],
       ['relay.maxUsers', this.config.relay.maxUsers],
       ...Object.entries(this.config.quotas ?? {}).map(([k, v]) => [`quotas.${k}`, v] as const),
@@ -204,11 +224,25 @@ export class Coordinator {
     });
     this.presence = new PresenceService(this);
     this.sessions = new SessionService(this);
-    this.mesh = new Mesh(this);
+    this.mesh = new Mesh(this, { ...defaultMeshConfig, ...this.config.mesh });
+    this.membership = new Membership(this, {
+      ...defaultMembershipTiming,
+      ...this.config.membership,
+    });
+    this.dist = new Distribution(this, {
+      ...defaultDistributionConfig,
+      ...this.config.distribution,
+    });
+    this.records.lookup = (key) => this.dist.lookup(key);
     this.mailbox = new MailboxService(this);
-    this.records.onAccepted((record, seq, origin) => {
-      this.mesh.onRecord(record, seq, origin);
+    this.membership.on({
+      up: (id) => this.onServerUp(id),
+      down: (id) => this.onServerDown(id),
+    });
+    this.records.onAccepted((record, seq, origin, previous) => {
+      this.mesh.onRecord(record, seq, origin, previous);
       this.pushRecordToClients(record);
+      this.dist.onAccepted(record);
       if (record.kind === 'profile' && (record.body as ProfileBody).deleted)
         this.purgeAccount(record as SignedRecord<'profile'>);
     });
@@ -226,6 +260,15 @@ export class Coordinator {
    */
   private purgeAccount(marker: SignedRecord<'profile'>) {
     const userId = marker.key.slice('profile:'.length);
+    // The spaces the user was in keep their memberships on other servers:
+    // send those servers the marker, so they erase them too.
+    const spaces = new Set(
+      this.store
+        .findByTerm(`member-any:${userId}`, 100_000)
+        .map((r) => (r as SignedRecord<'member'>).body.spaceId),
+    );
+    // Kept until each of their owners confirms, across restarts.
+    this.dist.trackDeletion(marker, [...spaces]);
     const keys = [
       ...this.store.listPrefix(recordKey.devicePrefix(userId), 100_000).map((r) => r.key),
       recordKey.friends(userId),
@@ -235,19 +278,25 @@ export class Coordinator {
     for (const key of keys) this.store.delete(key);
     const mail = this.store.mailDeleteUser(userId);
     this.log.info('account deleted', { records: keys.length, mail });
+    this.signOutDeleted(userId, marker);
+  }
+
+  /** Sign out a deleted account's devices connected here. */
+  signOutDeleted(userId: string, marker: SignedRecord<'profile'>) {
     // After the request that deleted it has been answered. The marker goes
     // first: devices only sign out on a deletion they can verify.
     setTimeout(() => {
       for (const client of this.presence.localOf(userId)) {
         client.send('record', { record: marker });
-        client.close(4010, 'account deleted');
+        if (client.closeAfterRequests) client.closeAfterRequests(4010, 'account deleted');
+        else client.close(4010, 'account deleted');
       }
     }, 100).unref?.();
   }
 
-  /** The signed deletion marker, if this account was deleted. */
+  /** The signed deletion marker, if we know this account was deleted. */
   deletionMarker(userId: string): SignedRecord<'profile'> | undefined {
-    const profile = this.store.get(recordKey.profile(userId)) as
+    const profile = this.dist.lookup(recordKey.profile(userId)) as
       SignedRecord<'profile'> | undefined;
     return profile?.body.deleted ? profile : undefined;
   }
@@ -361,6 +410,8 @@ export class Coordinator {
     }
 
     this.mesh.start(this.config.meshPeers);
+    this.membership.start();
+    this.dist.start();
     if (this.config.directoryUrls.length) {
       this.directory = new DirectoryClient(this, this.config.directoryUrls);
       this.directory.start();
@@ -477,7 +528,7 @@ export class Coordinator {
     return true;
   }
 
-  private pushRecordToClients(record: SignedRecord) {
+  pushRecordToClients(record: SignedRecord) {
     // Requests from apps that still write the readable list. Sealed lists say
     // nothing; their notes reach the recipient instead.
     let friendOf: Set<string> | undefined;
@@ -622,19 +673,24 @@ export class Coordinator {
       throw new RpcFailure('unavailable', 'the new device went offline');
   }
 
-  isSpaceMember(spaceId: string, userId: string) {
-    return isSpaceMember(this.records, spaceId, userId);
+  /** Whether a user belongs to a space, asking the space's owners if need be. */
+  async isSpaceMember(spaceId: string, userId: string) {
+    const records = await this.dist.get([
+      recordKey.space(spaceId),
+      recordKey.member(spaceId, userId),
+    ]);
+    const byKey = new Map(records.map((r) => [r.key, r]));
+    return isSpaceMember({ get: (k) => byKey.get(k) }, spaceId, userId);
   }
 
-  searchUsers(query: string): SignedRecord<'profile'>[] {
+  async searchUsers(query: string): Promise<SignedRecord<'profile'>[]> {
     const q = query.trim().toLowerCase();
     const [name, tag] = q.split('#') as [string, string?];
     // Exact user id lookups are handy for invites and QR codes.
     if (/^[a-z2-7]{26}$/.test(q)) {
-      const p = this.store.get(`profile:${q}`);
-      return p ? [p as SignedRecord<'profile'>] : [];
+      return (await this.dist.get([`profile:${q}`])) as SignedRecord<'profile'>[];
     }
-    const found = this.store.findByTerm(`name:${name}`, 50) as SignedRecord<'profile'>[];
+    const found = (await this.dist.findByTerm(`name:${name}`, 50)) as SignedRecord<'profile'>[];
     if (!tag) return found;
     return found.filter((p) => userTag(p.key.slice('profile:'.length)) === tag);
   }
@@ -655,6 +711,15 @@ export class Coordinator {
 
   onClientAuthed(client: ClientConnection) {
     const previous = this.presence.attach(client);
+    this.dist.refreshWatchesSoon();
+    // The account's records may live elsewhere: check it wasn't deleted.
+    void this.dist
+      .get([recordKey.profile(client.userId)])
+      .then(([profile]) => {
+        if ((profile?.body as ProfileBody | undefined)?.deleted)
+          this.signOutDeleted(client.userId, profile as SignedRecord<'profile'>);
+      })
+      .catch(() => {});
     if (previous && previous !== client) {
       previous.send('replaced', { reason: 'this device connected again elsewhere' });
       previous.close(4009, 'replaced');
@@ -682,6 +747,8 @@ export class Coordinator {
     if (this.stopped) return;
     this.stopped = true;
     this.directory?.stop();
+    this.membership.stop();
+    this.dist.stop();
     this.mesh.close();
     this.sessions.close();
     this.mailbox.close();

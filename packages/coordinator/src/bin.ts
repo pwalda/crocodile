@@ -34,6 +34,8 @@ const { values } = parseArgs({
     'trust-proxy': { type: 'boolean' },
     'max-connections-per-ip': { type: 'string' },
     'mailbox-days': { type: 'string' },
+    replicas: { type: 'string' },
+    'store-all': { type: 'boolean' },
     'log-level': { type: 'string' },
     help: { type: 'boolean', short: 'h' },
   },
@@ -52,6 +54,10 @@ Options (environment variable in brackets):
   --storage sqlite|memory                                 [CROC_STORAGE]
   --directory <urls>     comma-separated directory URLs   [CROC_DIRECTORY]
   --peers <urls>         static mesh peers                [CROC_PEERS]
+  --replicas <n>         servers holding each record (3)  [CROC_REPLICAS]
+  --store-all            keep a copy of every record, for [CROC_STORE_ALL=1]
+                         well-provisioned servers (see
+                         docs/MESH.md)
   --stun-port <n|off>    built-in STUN UDP port (7443)    [CROC_STUN_PORT]
   --stun-alt-port <n|off>  second STUN-only UDP port for  [CROC_STUN_ALT_PORT]
                          NAT detection (STUN port + 1)
@@ -96,6 +102,8 @@ const coordinator = new Coordinator({
   storage: (pick(values.storage, 'CROC_STORAGE') as 'sqlite' | 'memory' | undefined) ?? 'sqlite',
   directoryUrls: list(pick(values.directory, 'CROC_DIRECTORY')),
   meshPeers: list(pick(values.peers, 'CROC_PEERS')),
+  replicas: Number(pick(values.replicas, 'CROC_REPLICAS') ?? defaultConfig.replicas),
+  storeAll: values['store-all'] === true || env.CROC_STORE_ALL === '1',
   stunPort: stunPort === 'off' ? null : stunPort ? Number(stunPort) : port,
   ...(stunAltPort ? { stunAltPort: stunAltPort === 'off' ? null : Number(stunAltPort) } : {}),
   extraStun: list(pick(values.stun, 'CROC_STUN')),

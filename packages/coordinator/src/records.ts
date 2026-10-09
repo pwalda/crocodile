@@ -44,7 +44,12 @@ export const defaultRecordQuotas: RecordQuotas = {
   notesPerUser: LIMITS.notesPerUser,
 };
 
-export type RecordListener = (record: SignedRecord, seq: number, origin: string | null) => void;
+export type RecordListener = (
+  record: SignedRecord,
+  seq: number,
+  origin: string | null,
+  previous: SignedRecord | null,
+) => void;
 
 /**
  * Validates and stores signed records. Records arriving by replication whose
@@ -55,6 +60,8 @@ export class RecordService {
   private listeners = new Set<RecordListener>();
   private pending: { record: SignedRecord; origin: string; at: number }[] = [];
   private static readonly MAX_PENDING = 10_000;
+  /** Records a check may look at besides the store (fetched from their owners). */
+  lookup: (key: string) => SignedRecord | undefined = (key) => this.store.get(key);
 
   constructor(
     readonly store: Store,
@@ -112,13 +119,19 @@ export class RecordService {
   }
 
   put(input: unknown, opts: { fresh: boolean; origin: string | null }): PutResult {
+    const key = (input as { key?: unknown })?.key;
     const result = validateRecord(input, {
-      get: (k) => this.store.get(k),
+      // The record's own key: only what we store counts as already having it.
+      // Anything else (an author's profile, a space) may come from the lookup.
+      get: (k) => (k === key ? this.store.get(k) : this.lookup(k)),
       now: Date.now(),
       fresh: opts.fresh,
     });
-    const key = (input as { key?: unknown })?.key;
     const current = typeof key === 'string' ? (this.store.get(key) ?? null) : null;
+    // The same record again (a retry after an answer was lost, or a copy that
+    // arrived first by another path): it is stored, which is what was asked.
+    if (current && current.sig === (input as { sig?: unknown })?.sig)
+      return { accepted: true, current };
     if (!result.ok) {
       if (result.retryable && !opts.fresh && opts.origin) {
         if (this.pending.length >= RecordService.MAX_PENDING) this.pending.shift();
@@ -156,7 +169,7 @@ export class RecordService {
     const seq = this.store.put(record);
     for (const fn of this.listeners) {
       try {
-        fn(record, seq, opts.origin);
+        fn(record, seq, opts.origin, current);
       } catch (err) {
         this.log.error('record listener failed', { err: String(err) });
       }
