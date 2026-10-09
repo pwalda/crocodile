@@ -31,7 +31,8 @@ export interface SessionContext {
   identity: Identity;
   /** This device's peer id. */
   peer: string;
-  link: CoordinatorLink;
+  /** The client's current link: it is replaced when the client changes server. */
+  link(): CoordinatorLink;
   platform: PlatformAdapter;
   messages: MessageStore;
   iceServers(): { urls: string }[];
@@ -189,7 +190,7 @@ export class GroupSession extends Emitter<GroupSessionEvents> {
     this.left = false;
     if (this.status === 'idle' || this.status === 'left') this.setStatus('joining');
     const caps = await this.ctx.caps();
-    const { state } = await this.ctx.link.request('session.join', {
+    const { state } = await this.ctx.link().request('session.join', {
       sessionId: this.sessionId,
       caps,
     });
@@ -199,7 +200,8 @@ export class GroupSession extends Emitter<GroupSessionEvents> {
   async updateCaps() {
     if (this.left) return;
     const caps = await this.ctx.caps();
-    await this.ctx.link
+    await this.ctx
+      .link()
       .request('session.update', { sessionId: this.sessionId, caps })
       .catch(() => {});
   }
@@ -212,7 +214,10 @@ export class GroupSession extends Emitter<GroupSessionEvents> {
     this.stopHosting();
     this.keyring.dispose();
     this.setStatus('left');
-    await this.ctx.link.request('session.leave', { sessionId: this.sessionId }).catch(() => {});
+    await this.ctx
+      .link()
+      .request('session.leave', { sessionId: this.sessionId })
+      .catch(() => {});
   }
 
   // -------------------------------------------------------------------------
@@ -260,7 +265,10 @@ export class GroupSession extends Emitter<GroupSessionEvents> {
             .map((m) => m.peer)
             .filter((p) => this.ctx.isAllowedPeer(sessionId, p)),
         sendSignal: (to, data) => {
-          void this.ctx.link.request('signal.send', { to, sessionId, data }).catch(() => {});
+          void this.ctx
+            .link()
+            .request('signal.send', { to, sessionId, data })
+            .catch(() => {});
         },
       })
       .catch((err) => {
@@ -331,7 +339,9 @@ export class GroupSession extends Emitter<GroupSessionEvents> {
       micTrack: this.voice?.micTrack() ?? null,
       crypto: slots > 0 ? this.voice?.frameCrypto(this.keyring) : undefined,
       sendSignal: (data) =>
-        this.ctx.link.request('signal.send', { to: state.host!, sessionId: this.sessionId, data }),
+        this.ctx
+          .link()
+          .request('signal.send', { to: state.host!, sessionId: this.sessionId, data }),
     });
     const entry = { epoch: state.epoch, host: state.host, t };
     this.transport = entry;
@@ -376,7 +386,8 @@ export class GroupSession extends Emitter<GroupSessionEvents> {
       this.emit('update', undefined);
       if (this.failures >= 2 && this.reportedEpoch !== entry.epoch && entry.host !== this.me) {
         this.reportedEpoch = entry.epoch;
-        void this.ctx.link
+        void this.ctx
+          .link()
           .request('session.report', {
             sessionId: this.sessionId,
             epoch: entry.epoch,

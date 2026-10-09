@@ -1764,7 +1764,7 @@ export class CrocodileClient extends Emitter<ClientEvents> {
       {
         identity: this.identity!,
         peer: this.peer,
-        link: this.link!,
+        link: () => this.link!,
         platform: this.platform,
         messages: this.platform.messages,
         iceServers: () => this.stun.map((urls) => ({ urls })),

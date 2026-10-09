@@ -314,6 +314,47 @@ describe('client', () => {
     expect(bob.state.server!.info.id).toBe(b.info.id);
     expect(alice.state.server!.info.id).toBe(a.info.id);
   });
+
+  it('keeps its conversations after switching to another server', async () => {
+    const a = await server({ name: 'A' });
+    const b = await server({ name: 'B', meshPeers: [a.url] });
+    await waitFor(() => a.mesh.peerIds().length === 1, 12000, 'mesh');
+    const net = new FakeRelayNetwork();
+    const alice = await signUp(makeClient(net, a, { nat: 'open' }), 'alice');
+    const bob = await signUp(makeClient(net, a), 'bob');
+    const spaceId = await alice.createSpace('Swamp');
+    const code = await alice.createInvite(spaceId);
+    await bob.joinWithInvite(code);
+    const ch = channelOf(alice, spaceId);
+    await alice.openChannel(ch);
+    await bob.openChannel(ch);
+    const sid = sessionIds.space(spaceId);
+    await waitFor(() => bob.state.sessions[sid]?.peers.includes(alice.userId), 8000, 'mesh');
+
+    // Bob picks the other server (Settings → Network → Use).
+    await bob.preferServer(b.url);
+    await waitFor(() => bob.state.server?.info.id === b.info.id, 12000, 'on B');
+    // Leaving A ended Bob's membership there; he must have joined again through B.
+    await new Promise((r) => setTimeout(r, 1500));
+    await waitFor(
+      () => alice.state.sessions[sid]?.members.includes(bob.userId),
+      8000,
+      'bob back in the session',
+    );
+    // A new connection to the host is set up through the new server.
+    net.killRelaysOf(alice.userId);
+    await waitFor(
+      () =>
+        bob.state.sessions[sid]?.status === 'connected' &&
+        bob.state.sessions[sid]?.peers.includes(alice.userId),
+      15000,
+      'reconnected through B',
+    );
+    await alice.sendMessage(ch, 'still here?');
+    await waitFor(() => bodies(bob, ch).includes('still here?'), 12000, 'bob receives on B');
+    await bob.sendMessage(ch, 'yes, from B');
+    await waitFor(() => bodies(alice, ch).includes('yes, from B'), 12000, 'alice receives');
+  });
 });
 
 describe('connection help', () => {
