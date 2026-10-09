@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { Phone, PhoneOff, Server, WifiOff } from 'lucide-react';
+import { Phone, PhoneOff, Server, Wifi, WifiOff } from 'lucide-react';
 import { sessionIds } from '@crocodile/protocol';
 import { closeModal, getClient, navigate, openModal, ui, useCroc, useUi } from './croc';
 import { desktop } from './platform';
@@ -13,6 +13,7 @@ import { CallDock } from './components/CallDock';
 import { CommandPalette } from './components/CommandPalette';
 import { Avatar, Button, Toasts, UserName } from './components/ui';
 import { CrocMark, Logo } from './components/Logo';
+import { NETWORK_TEXT } from './lib/network';
 import {
   AddSpaceModal,
   CreateChannelModal,
@@ -216,6 +217,16 @@ function CallPrompts() {
   const incoming = useCroc((s) => s.incomingCall);
   const outgoing = useCroc((s) => s.outgoingCall);
   const relayEnded = useCroc((s) => s.relayEnded);
+  const trouble = useCroc((s) => s.connectionTrouble);
+  const network = useCroc((s) => s.network);
+  const relayOn = useCroc((s) => s.settings.allowServerRelay);
+  const [noticeSeen, setNoticeSeen] = useState(() => {
+    try {
+      return localStorage.getItem('croc.networkNotice') ?? '';
+    } catch {
+      return '';
+    }
+  });
   const client = getClient();
   if (incoming) {
     return (
@@ -249,6 +260,36 @@ function CallPrompts() {
           </button>
         </div>
       </div>
+    );
+  }
+  if (trouble) {
+    return (
+      <section
+        aria-label="Can't connect directly"
+        className="island rise fixed right-5 top-20 z-[55] w-96 rounded-3xl p-5"
+      >
+        <div className="flex items-center gap-2 font-bold">
+          <WifiOff size={18} className="text-warn" />
+          {trouble.with ? (
+            <span>
+              Can't connect to <UserName userId={trouble.with} /> directly
+            </span>
+          ) : (
+            "Can't connect directly"
+          )}
+        </div>
+        <p className="mt-2 text-sm text-muted">
+          Your network or theirs blocks a direct connection. Relay through a coordination server?
+          Voice and messages stay end-to-end encrypted; the server sees only their size and timing,
+          for up to an hour at a time.
+        </p>
+        <div className="mt-4 flex justify-end gap-2">
+          <Button variant="ghost" onClick={() => client.dismissConnectionTrouble()}>
+            Not now
+          </Button>
+          <Button onClick={() => void client.useRelay(trouble.sessionId)}>Use the relay</Button>
+        </div>
+      </section>
     );
   }
   if (relayEnded) {
@@ -285,6 +326,47 @@ function CallPrompts() {
           <PhoneOff size={16} />
         </button>
       </div>
+    );
+  }
+  // At launch: the network check found direct connections limited and the relay is off.
+  const verdict = network?.verdict;
+  if (
+    !relayOn &&
+    network?.checkedAt &&
+    (verdict === 'limited' || verdict === 'blocked') &&
+    noticeSeen !== verdict
+  ) {
+    const seen = () => {
+      setNoticeSeen(verdict);
+      try {
+        localStorage.setItem('croc.networkNotice', verdict);
+      } catch {
+        // Shown again next time; harmless.
+      }
+    };
+    return (
+      <section
+        aria-label="Network check"
+        className="island rise fixed right-5 top-20 z-[55] w-96 rounded-3xl p-5"
+      >
+        <div className="flex items-center gap-2 font-bold">
+          <Wifi size={18} className="text-warn" /> {NETWORK_TEXT[verdict].title}
+        </div>
+        <p className="mt-2 text-sm text-muted">{NETWORK_TEXT[verdict].detail}</p>
+        <div className="mt-4 flex justify-end gap-2">
+          <Button variant="ghost" onClick={seen}>
+            Not now
+          </Button>
+          <Button
+            onClick={() => {
+              seen();
+              void client.updateSettings({ allowServerRelay: true });
+            }}
+          >
+            Turn on the relay
+          </Button>
+        </div>
+      </section>
     );
   }
   return null;

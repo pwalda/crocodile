@@ -20,6 +20,7 @@ import { GroupKeyring } from './keyring';
 import type { MessageStore, PlatformAdapter, RelayHandle } from './platform';
 import {
   RelayLink,
+  type ConnectionRoute,
   type FrameCryptoHooks,
   type RelayLinkEvents,
   type RelayLinkOptions,
@@ -80,6 +81,8 @@ export interface RelayTransport extends Emitter<RelayLinkEvents> {
   close(): void;
   readonly isOpen: boolean;
   setMicTrack?(track: MediaStreamTrack | null): Promise<void>;
+  /** How the connection travels once it is up. */
+  route?(): Promise<ConnectionRoute | null>;
 }
 
 export type TransportFactory = (
@@ -128,6 +131,18 @@ export class GroupSession extends Emitter<GroupSessionEvents> {
   private hosting?: { epoch: number; handle: Promise<RelayHandle | null> };
   private transport?: { epoch: number; host: string; t: RelayTransport };
   private failures = 0;
+  /** How the connection to the host travels, once known. */
+  route: ConnectionRoute | null = null;
+
+  /** Failed connection attempts since the last one that worked, whoever hosted. */
+  private failedInARow = 0;
+  /** Peer id of the host we last failed to reach. */
+  unreachable: string | null = null;
+
+  /** Connecting to the host keeps failing: a direct path may not exist. */
+  get trouble() {
+    return this.failedInARow >= 2 && this.status !== 'connected' && !this.isHost;
+  }
   private reportedEpoch = -1;
   private retryTimer?: ReturnType<typeof setTimeout>;
   private left = false;
@@ -325,10 +340,25 @@ export class GroupSession extends Emitter<GroupSessionEvents> {
     this.speaking = [];
     this.setStatus(this.failures > 0 ? 'reconnecting' : 'connecting');
 
+    this.route = null;
     t.on('open', () => {
       if (this.transport !== entry) return;
       this.failures = 0;
+      this.failedInARow = 0;
+      this.unreachable = null;
       this.setStatus('connected');
+      // ICE may still switch pairs just after connecting: read it twice.
+      const readRoute = () =>
+        void t
+          .route?.()
+          .then((route) => {
+            if (this.transport !== entry || !route || route === this.route) return;
+            this.route = route;
+            this.emit('update', undefined);
+          })
+          .catch(() => {});
+      readRoute();
+      setTimeout(readRoute, 3000);
       t.send({ t: 'state', muted: this.voiceState.muted, deafened: this.voiceState.deafened });
     });
     t.on('message', (msg) => {
@@ -340,7 +370,11 @@ export class GroupSession extends Emitter<GroupSessionEvents> {
       this.transport = undefined;
       this.ctx.log('relay connection failed', { sessionId: this.sessionId, reason });
       this.failures += 1;
+      this.failedInARow += 1;
+      this.unreachable = entry.host;
+      this.route = null;
       this.setStatus('reconnecting');
+      this.emit('update', undefined);
       if (this.failures >= 2 && this.reportedEpoch !== entry.epoch && entry.host !== this.me) {
         this.reportedEpoch = entry.epoch;
         void this.ctx.link

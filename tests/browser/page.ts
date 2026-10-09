@@ -9,6 +9,7 @@ import {
   MemoryKeyValueStore,
   MemoryMessageStore,
   VoiceEngine,
+  routeFromStats,
   type HostRelayAdapter,
   type RelayHandle,
 } from '@crocodile/client-core';
@@ -17,6 +18,7 @@ import { toB64u, type SignalData } from '@crocodile/protocol';
 declare global {
   interface Window {
     croc: CrocodileClient;
+    routeFromStats: typeof routeFromStats;
     __relayStart(opts: {
       seed: string;
       hostPeer: string;
@@ -93,6 +95,8 @@ async function toneMicrophone(): Promise<MediaStream> {
   osc.start();
   return dst.stream;
 }
+
+window.routeFromStats = routeFromStats;
 
 window.startClient = async ({ server, name, canHost, nat }) => {
   const client = new CrocodileClient(

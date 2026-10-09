@@ -136,6 +136,12 @@ await b.page
   .fill('Wow, **end-to-end** and peer-to-peer. `nice`');
 await b.page.keyboard.press('Enter');
 await a.page.getByText('peer-to-peer.').waitFor({ timeout: 15_000 });
+// Bob's header says how his connection to Alice's device travels.
+await b.page.waitForFunction(
+  () => /peers? connected · (same network|on this device|direct)/.test(document.body.innerText),
+  undefined,
+  { timeout: 15_000 },
+);
 await shot(a.page, '06-chat');
 // Panel shadows stay as faint as designed (12% opaque) whatever the accent.
 const shadow = await a.page.evaluate(() => {
@@ -207,6 +213,13 @@ await a.page.getByText('Settings', { exact: true }).click();
 await a.page.getByRole('button', { name: 'Voice' }).click();
 await shot(a.page, '12-settings-voice');
 await a.page.getByRole('button', { name: 'Network' }).click();
+// The network check ran on connecting, and can run again.
+const test = a.page.getByRole('region', { name: 'Connection test' });
+const verdicts = /Direct connections (work|are limited|are blocked)|couldn't be fully tested/;
+await test.getByText(verdicts).waitFor({ timeout: 15_000 });
+await test.getByRole('button', { name: 'Test again' }).click();
+await test.getByRole('button', { name: 'Test again' }).waitFor({ timeout: 15_000 });
+await test.getByText(verdicts).waitFor({ timeout: 15_000 });
 // Who runs the connected server, as it says.
 await a.page.getByRole('button', { name: 'https://example.org/privacy/' }).waitFor();
 // The public server list from the directory, with the connected server marked.

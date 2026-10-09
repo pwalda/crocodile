@@ -174,6 +174,19 @@ the desktop app) and rate-limited per allocation. The relayed packets are the
 same DTLS-SRTP-wrapped, end-to-end encrypted frames: the server sees only
 ciphertext, sizes and timing.
 
+Each relayed connection gets its own UDP port on the server, from
+`--relay-ports` when set (49160-49259 in the Docker image), which the
+operator opens along with the STUN ports.
+
+**Telling people when to use the relay.** On connecting, the app checks its
+network against the server's two STUN ports: direct connections work (open
+or cone NAT), are limited (symmetric NAT) or are blocked (no STUN answer).
+When they are limited or blocked and the relay is off, it says so and
+offers to turn the relay on. When connecting to a session's host fails twice
+with the relay off, it names the person it couldn't reach and offers the
+relay for that connection. Once connected, the selected ICE candidate pair
+shows how the connection travels: same network, direct, or relayed.
+
 ## 5. Host election and failover
 
 Members report `HostCaps` when joining: whether they can and may host (desktop

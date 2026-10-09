@@ -82,6 +82,8 @@ import {
   type TransportFactory,
 } from './group-session';
 import type { PlatformAdapter } from './platform';
+import { networkVerdict, type NetworkVerdict } from './caps';
+import type { ConnectionRoute } from './relay-link';
 import { Outbox } from './outbox';
 import { RecordCache } from './records-cache';
 import type { RankedServer } from './server-selection';
@@ -97,6 +99,8 @@ export interface ClientConfig {
   transportFactory?: TransportFactory;
   /** This device's clock (tests). */
   now?: () => number;
+  /** How long an unanswered call rings before hanging up (45 s; tests). */
+  ringTimeoutMs?: number;
   log?: (msg: string, extra?: Record<string, unknown>) => void;
 }
 
@@ -171,6 +175,17 @@ export interface SessionView {
   iAmHost: boolean;
   /** Connected through a coordination server's relay until this time. */
   relay: { server: string; expiresAt: number } | null;
+  /** How the connection to the host travels, once connected. */
+  route: ConnectionRoute | null;
+  /** Connecting to the host keeps failing. */
+  trouble: boolean;
+}
+
+/** What the network allows for direct connections (see checkNetwork). */
+export interface NetworkStatus {
+  verdict: NetworkVerdict;
+  checking: boolean;
+  checkedAt: number;
 }
 
 export interface DeviceView {
@@ -243,6 +258,13 @@ export interface ClientState {
   relayEnded: { sessionId: string; reason: string } | null;
   /** This device was signed out because the account was deleted. */
   accountDeleted: boolean;
+  /** Result of the latest network check; null before the first one. */
+  network: NetworkStatus | null;
+  /**
+   * Connecting to someone keeps failing and the relay is off: the UI offers
+   * it (useRelay). `with` is the person we were trying to reach.
+   */
+  connectionTrouble: { sessionId: string; with: string | null } | null;
 }
 
 export type ClientEvents = {
@@ -327,6 +349,8 @@ export class CrocodileClient extends Emitter<ClientEvents> {
       linking: null,
       relayEnded: null,
       accountDeleted: false,
+      network: null,
+      connectionTrouble: null,
     });
     this.records.on('changed', (r) => this.onRecordChanged(r));
     this.records.on('wanted', (keys) => this.fetchWanted(keys));
@@ -645,6 +669,7 @@ export class CrocodileClient extends Emitter<ClientEvents> {
     });
     link.on('connected', ({ server, rttMs, stun, operator }) => {
       this.stun = stun;
+      void this.checkNetwork();
       this.store.set({ server: { info: server, rttMs, operator } });
       void this.onConnected().catch((err) =>
         this.log('post-connect sync failed', { err: String(err) }),
@@ -1812,8 +1837,29 @@ export class CrocodileClient extends Emitter<ClientEvents> {
       deafened: [...users(peers.filter((p) => p.deafened).map((p) => p.id)), ...selfDeaf],
       iAmHost: session.isHost,
       relay: grant ? { server: grant.server, expiresAt: grant.expiresAt } : null,
+      route: session.status === 'connected' ? session.route : null,
+      trouble: session.trouble,
     };
     this.store.set((s) => ({ sessions: { ...s.sessions, [session.sessionId]: view } }));
+    this.noteTrouble(view);
+  }
+
+  /** Offer the relay when a session can't connect directly and it's off. */
+  private noteTrouble(view: SessionView) {
+    const current = this.state.connectionTrouble;
+    const stuck =
+      view.trouble &&
+      !view.relay &&
+      !this.state.settings.allowServerRelay &&
+      !this.troubleDismissed.has(view.id);
+    if (stuck && !current) {
+      const peer = this.sessions.get(view.id)?.unreachable;
+      this.store.set({
+        connectionTrouble: { sessionId: view.id, with: peer ? peerIds.user(peer) : view.host },
+      });
+    } else if (!stuck && current?.sessionId === view.id) {
+      this.store.set({ connectionTrouble: null });
+    }
   }
 
   sessionFor(sessionId: string) {
@@ -2033,6 +2079,58 @@ export class CrocodileClient extends Emitter<ClientEvents> {
     this.store.set({ relayEnded: null });
   }
 
+  private networkCheck?: Promise<void>;
+
+  /**
+   * Checks what the network allows for direct connections, using the
+   * coordination server's STUN ports. Runs on every server connection;
+   * `fresh` re-tests instead of using a recent result.
+   */
+  checkNetwork(fresh = false): Promise<void> {
+    const probe = this.platform.probeNetwork;
+    if (!probe) return Promise.resolve();
+    if (this.networkCheck) return this.networkCheck;
+    this.store.set((s) => ({
+      network: {
+        verdict: s.network?.verdict ?? 'unknown',
+        checkedAt: s.network?.checkedAt ?? 0,
+        checking: true,
+      },
+    }));
+    this.networkCheck = probe(fresh)
+      .then((result) => {
+        const verdict = networkVerdict(result);
+        this.log('network check', { ...result, verdict });
+        this.store.set({ network: { verdict, checking: false, checkedAt: Date.now() } });
+      })
+      .catch((err) => {
+        this.log('network check failed', { err: String(err) });
+        this.store.set((s) => ({
+          network: { verdict: 'unknown', checking: false, checkedAt: s.network?.checkedAt ?? 0 },
+        }));
+      })
+      .finally(() => {
+        this.networkCheck = undefined;
+      });
+    return this.networkCheck;
+  }
+
+  /** Turns the relay on and reconnects a session that can't connect directly. */
+  async useRelay(sessionId: string) {
+    this.store.set({ connectionTrouble: null });
+    if (!this.state.settings.allowServerRelay)
+      await this.updateSettings({ allowServerRelay: true });
+    await this.sessions.get(sessionId)?.useServerRelay();
+  }
+
+  dismissConnectionTrouble() {
+    const trouble = this.state.connectionTrouble;
+    if (trouble) this.troubleDismissed.add(trouble.sessionId);
+    this.store.set({ connectionTrouble: null });
+  }
+
+  private troubleDismissed = new Set<string>();
+
   private historyChannels(sessionId: string): string[] {
     const scope = parseSessionId(sessionId);
     if (!scope) return [];
@@ -2238,17 +2336,24 @@ export class CrocodileClient extends Emitter<ClientEvents> {
   private ringLoop(sessionId: string) {
     clearInterval(this.ringTimer);
     const started = Date.now();
+    const timeout = this.config.ringTimeoutMs ?? 45_000;
     const ring = () => {
       const out = this.state.outgoingCall;
-      if (!out || out.sessionId !== sessionId || Date.now() - started > 45_000) {
+      if (!out || out.sessionId !== sessionId) {
         clearInterval(this.ringTimer);
-        if (out?.sessionId === sessionId) this.store.set({ outgoingCall: null });
+        return;
+      }
+      if (Date.now() - started > timeout) {
+        // Nobody picked up: hang up rather than sit in an empty call.
+        clearInterval(this.ringTimer);
+        this.reportError('No answer');
+        void this.leaveVoice();
         return;
       }
       this.sendCallSignal(sessionId, 'ring');
     };
     ring();
-    this.ringTimer = setInterval(ring, 2500);
+    this.ringTimer = setInterval(ring, Math.min(2500, timeout / 2));
   }
 
   private sendCallSignal(sessionId: string, action: 'ring' | 'accept' | 'decline' | 'end') {

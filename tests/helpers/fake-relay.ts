@@ -35,7 +35,20 @@ export class FakeRelayNetwork {
 
   transportFactory(): TransportFactory {
     return (opts) =>
-      new FakeTransport(this, `${opts.sessionId}|${opts.epoch}|${opts.host}`, opts.self);
+      new FakeTransport(
+        this,
+        `${opts.sessionId}|${opts.epoch}|${opts.host}`,
+        opts.self,
+        opts.iceServers.some((s) => [s.urls].flat().some((u) => u.startsWith('turn:'))),
+      );
+  }
+
+  /** Users whose network allows no direct connections (only a TURN relay gets through). */
+  readonly blocked = new Set<string>();
+
+  blocksDirect(peerA: string, peerB: string) {
+    const user = (p: string) => p.split('.')[0]!;
+    return this.blocked.has(user(peerA)) || this.blocked.has(user(peerB));
   }
 
   find(key: string) {
@@ -104,8 +117,14 @@ class FakeTransport extends Emitter<RelayLinkEvents> implements RelayTransport {
     private readonly net: FakeRelayNetwork,
     private readonly key: string,
     readonly userId: string,
+    private readonly viaTurn = false,
   ) {
     super();
+  }
+
+  async route() {
+    if (!this.isOpen) return null;
+    return this.viaTurn ? ('relay' as const) : ('lan' as const);
   }
 
   get isOpen() {
@@ -116,6 +135,11 @@ class FakeTransport extends Emitter<RelayLinkEvents> implements RelayTransport {
     // Like a real offer, give the host a moment to learn it was elected.
     for (let i = 0; i < 100 && !this.closed; i++) {
       const relay = this.net.find(this.key);
+      if (relay && !this.viaTurn && this.net.blocksDirect(this.userId, relay.host)) {
+        // Like ICE with no working candidate pair.
+        setTimeout(() => this.drop('connection failed'), 30);
+        return;
+      }
       if (relay) {
         this.relay = relay;
         setTimeout(() => {

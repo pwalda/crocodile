@@ -1,5 +1,6 @@
 import type { ChatMessage, HostCaps, Platform, SignalData } from '@crocodile/protocol';
 import type { Identity } from '@crocodile/crypto';
+import type { NetworkProbe } from './caps';
 
 /** Small async key-value store (settings, identity, caches). */
 export interface KeyValueStore {
@@ -62,6 +63,11 @@ export interface PlatformAdapter {
   };
   /** Device capability hints for host election. */
   capabilities?: () => Promise<Partial<HostCaps>>;
+  /**
+   * What the network allows for direct connections, from the coordination
+   * server's STUN ports; `fresh` skips any cached result.
+   */
+  probeNetwork?: (fresh?: boolean) => Promise<NetworkProbe>;
   fetch?: typeof fetch;
   WebSocketImpl?: typeof WebSocket;
 }

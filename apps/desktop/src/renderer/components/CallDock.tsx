@@ -12,6 +12,7 @@ import {
 import { parseSessionId } from '@crocodile/protocol';
 import { getClient, navigate, useCroc, useUi } from '../croc';
 import { Avatar, IconButton, cx } from './ui';
+import { ROUTE_TEXT } from '../lib/network';
 
 /** Floating controls for the active call, visible from anywhere in the app. */
 export function CallDock() {
@@ -109,6 +110,9 @@ export function CallDock() {
               <span className="flex items-center gap-1">
                 <Radio size={12} />{' '}
                 {session.iAmHost ? 'you host' : hostName ? `hosted by ${hostName}` : 'finding host'}
+                {session.route && !session.iAmHost && !ringing
+                  ? ` · ${ROUTE_TEXT[session.route]}`
+                  : ''}
               </span>
             )}
           </div>
