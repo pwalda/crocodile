@@ -172,9 +172,21 @@ function frameNonce(salt: Uint8Array, counter: number) {
   return nonce;
 }
 
+/** A random 32-bit start for a frame counter (see AudioSender). */
+function randomCounter(): number {
+  return new DataView(randomBytes(4).buffer).getUint32(0);
+}
+
+/**
+ * Encrypts outgoing voice frames with the audio chain's current message key.
+ * The AES-GCM nonce is the key's salt XOR a per-frame counter, so a counter
+ * must never repeat under one key. It starts at a random point, so a sender
+ * rebuilt from the same key state (a new connection, a restarted worker)
+ * doesn't replay the nonces of the one before it.
+ */
 export class AudioSender {
   private mk: MessageKey;
-  private counter = 0;
+  private counter = randomCounter();
   constructor(
     readonly kid: number,
     private chain: ChainState,
@@ -191,7 +203,7 @@ export class AudioSender {
     if (chain.gen <= this.chain.gen) return;
     this.chain = chain;
     this.mk = messageKey(chain, this.kid, 'audio');
-    this.counter = 0;
+    this.counter = randomCounter();
   }
 
   encrypt(frame: Uint8Array): Uint8Array {

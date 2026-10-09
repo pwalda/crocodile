@@ -342,6 +342,22 @@ describe('ratcheting sender keys', () => {
     const other = createSenderKey();
     expect(new AudioReceiver(other.kid, other.audio).decrypt(f2)).toBeNull();
   });
+
+  it('audio: a sender rebuilt from the same key does not reuse its nonces', () => {
+    const sk = createSenderKey();
+    const counterOf = (f: Uint8Array) =>
+      new DataView(f.buffer, f.byteOffset + f.length - 11, 11).getUint32(6);
+    // Two senders from one key state, as after a reconnect: their frame
+    // counters (and so their nonces) start apart.
+    const first = Array.from({ length: 5 }, () =>
+      counterOf(new AudioSender(sk.kid, sk.audio).encrypt(new Uint8Array(40))),
+    );
+    expect(new Set(first).size).toBe(5);
+    const rx = new AudioReceiver(sk.kid, importChain(exportChains(sk).audio));
+    expect(rx.decrypt(new AudioSender(sk.kid, sk.audio).encrypt(new Uint8Array(40)))).toEqual(
+      new Uint8Array(40),
+    );
+  });
 });
 
 describe('secure channel', () => {
