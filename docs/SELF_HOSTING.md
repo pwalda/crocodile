@@ -27,11 +27,16 @@ CROC_REGION=eu-west \
 docker compose up -d coordinator
 ```
 
-Expose **TCP 7443** (HTTP + WebSocket), **UDP 7443** (STUN and relay) and
+Expose **TCP 7443** (HTTP + WebSocket), **UDP 7443** (STUN and relay),
 **UDP 7444** (a second STUN port: apps compare the two to detect their NAT
-type without asking third-party STUN servers). For HTTPS,
+type without asking third-party STUN servers) and **UDP 49160-49259**
+(relayed traffic, one port per relayed connection). For HTTPS,
 put any reverse proxy in front of TCP 7443 with WebSocket upgrades enabled,
 and set `CROC_PUBLIC_URL` to the https URL. Keep the UDP ports open directly.
+The compose file runs the coordinator on the host's network, so these are
+its own ports; with `docker run`, use `--network host` too, or publish all
+of them (`-p 49160-49259:49160-49259/udp`), which starts a Docker proxy
+process per port.
 
 ## Without Docker
 
@@ -40,26 +45,27 @@ pnpm install && pnpm --filter @crocodile/coordinator build
 node packages/coordinator/dist/bin.js --help
 ```
 
-| Option                     | Env                          | Default                          |
-| -------------------------- | ---------------------------- | -------------------------------- |
-| `--name`                   | `CROC_NAME`                  | Crocodile coordinator            |
-| `--port`                   | `CROC_PORT`                  | 7443                             |
-| `--public-url`             | `CROC_PUBLIC_URL`            | `http://<host>:<port>`           |
-| `--data-dir`               | `CROC_DATA_DIR`              | `.crocodile-data`                |
-| `--directory`              | `CROC_DIRECTORY`             | none                             |
-| `--peers`                  | `CROC_PEERS`                 | none (static mesh peers)         |
-| `--stun-port`              | `CROC_STUN_PORT`             | same as port, `off` to disable   |
-| `--stun-alt-port`          | `CROC_STUN_ALT_PORT`         | STUN port + 1, `off` to disable  |
-| `--private`                | `CROC_PRIVATE=1`             | announce to directory            |
-| `--relay`                  | `CROC_RELAY`                 | `on` (`off` to disable)          |
-| `--relay-max-users`        | `CROC_RELAY_MAX_USERS`       | 25                               |
-| `--relay-ip`               | `CROC_RELAY_IP`              | public IP from `--public-url`    |
-| `--mailbox`                | `CROC_MAILBOX`               | `on` (`off` to disable)          |
-| `--mailbox-days`           | `CROC_MAILBOX_DAYS`          | 3 (max 7)                        |
-| `--relay-allow-private`    | `CROC_RELAY_ALLOW_PRIVATE=1` | off (LAN-only setups)            |
-| `--max-connections-per-ip` | `CROC_MAX_CONN_PER_IP`       | 50                               |
-| `--trust-proxy`            | `CROC_TRUST_PROXY=1`         | off (set behind a reverse proxy) |
-| `--contact`                | `CROC_CONTACT`               | none (email or `https://` page)  |
+| Option                     | Env                          | Default                               |
+| -------------------------- | ---------------------------- | ------------------------------------- |
+| `--name`                   | `CROC_NAME`                  | Crocodile coordinator                 |
+| `--port`                   | `CROC_PORT`                  | 7443                                  |
+| `--public-url`             | `CROC_PUBLIC_URL`            | `http://<host>:<port>`                |
+| `--data-dir`               | `CROC_DATA_DIR`              | `.crocodile-data`                     |
+| `--directory`              | `CROC_DIRECTORY`             | none                                  |
+| `--peers`                  | `CROC_PEERS`                 | none (static mesh peers)              |
+| `--stun-port`              | `CROC_STUN_PORT`             | same as port, `off` to disable        |
+| `--stun-alt-port`          | `CROC_STUN_ALT_PORT`         | STUN port + 1, `off` to disable       |
+| `--private`                | `CROC_PRIVATE=1`             | announce to directory                 |
+| `--relay`                  | `CROC_RELAY`                 | `on` (`off` to disable)               |
+| `--relay-max-users`        | `CROC_RELAY_MAX_USERS`       | 25                                    |
+| `--relay-ip`               | `CROC_RELAY_IP`              | public IP from `--public-url`         |
+| `--relay-ports`            | `CROC_RELAY_PORTS`           | any free port (49160-49259 in Docker) |
+| `--mailbox`                | `CROC_MAILBOX`               | `on` (`off` to disable)               |
+| `--mailbox-days`           | `CROC_MAILBOX_DAYS`          | 3 (max 7)                             |
+| `--relay-allow-private`    | `CROC_RELAY_ALLOW_PRIVATE=1` | off (LAN-only setups)                 |
+| `--max-connections-per-ip` | `CROC_MAX_CONN_PER_IP`       | 50                                    |
+| `--trust-proxy`            | `CROC_TRUST_PROXY=1`         | off (set behind a reverse proxy)      |
+| `--contact`                | `CROC_CONTACT`               | none (email or `https://` page)       |
 
 ### The opt-in mailbox
 
@@ -73,7 +79,11 @@ thousand messages). Turn it off with `--mailbox off`.
 
 Some users sit behind networks that block direct connections. If they turn
 on "Relay through a coordination server", your server can relay their
-already end-to-end encrypted media over the STUN UDP port (TURN). Each
+already end-to-end encrypted media (TURN). Apps reach the relay on the STUN
+UDP port; the other end of each relayed connection gets its own UDP port,
+from `--relay-ports` if you set it. Behind a firewall or Docker, set a range
+and open it (four ports per relay user is plenty: 49160-49259 covers the
+default 25 users), or relayed connections never get through. Each
 grant lasts at most one hour, `--relay-max-users` caps how many people use
 it at once, and each allocation is rate-limited (about 100 kbit/s of voice
 per person). Your server only ever sees ciphertext. Turn it off with
@@ -139,7 +149,8 @@ the servers it measures and uses.
 - For a public server, prefer a small VPS or a separate machine with Docker
   over the computer you use every day, so a compromise doesn't reach your
   files. Keep it updated (`docker compose pull && docker compose up -d`).
-- Only forward the server's ports (TCP+UDP 7443, UDP 7444). Don't put the machine in your
+- Only forward the server's ports (TCP+UDP 7443, UDP 7444, and the relay
+  ports if you offer a relay). Don't put the machine in your
   router's "DMZ".
 - If your home IP is sensitive, host on a VPS or behind a reverse proxy
   instead of sharing it.

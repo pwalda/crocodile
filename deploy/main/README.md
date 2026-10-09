@@ -18,9 +18,12 @@ website come from the reverse proxy already running on the machine.
 1. A small VPS (1 vCPU, 1 GB RAM is plenty to start) with Docker and a
    reverse proxy that handles HTTPS.
 2. DNS: `A`/`AAAA` records for `DOMAIN` and `coord.DOMAIN` pointing to it.
-3. Firewall: TCP 80 and 443 (the proxy), UDP 7443 (STUN and relay) and UDP 7444 (STUN, for NAT detection). Do
-   **not** open TCP 7400 or 7443: those services listen on 127.0.0.1 and must
-   only be reached through the proxy.
+3. Firewall: TCP 80 and 443 (the proxy), UDP 7443 (STUN and relay), UDP 7444
+   (STUN, for NAT detection) and UDP 49160-49259 (relayed traffic, one port
+   per relayed connection). Do **not** open TCP 7400 or 7443: those services
+   listen on 127.0.0.1 and must only be reached through the proxy. The
+   coordinator uses the host's network (see the compose file), so these UDP
+   ports are its own.
 4. On the server:
 
    ```sh

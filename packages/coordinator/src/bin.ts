@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { parseArgs } from 'node:util';
 import { Coordinator, defaultConfig } from './coordinator';
+import { parsePortRange } from './turn';
 
 const list = (v: string | undefined) =>
   (v ?? '')
@@ -27,6 +28,7 @@ const { values } = parseArgs({
     relay: { type: 'string' },
     'relay-max-users': { type: 'string' },
     'relay-ip': { type: 'string' },
+    'relay-ports': { type: 'string' },
     'relay-allow-private': { type: 'boolean' },
     mailbox: { type: 'string' },
     source: { type: 'string' },
@@ -67,6 +69,10 @@ Options (environment variable in brackets):
   --relay on|off         opt-in relay for blocked users   [CROC_RELAY]
   --relay-max-users <n>  concurrent relay users (25)      [CROC_RELAY_MAX_USERS]
   --relay-ip <addr>      public IP for relay candidates   [CROC_RELAY_IP]
+  --relay-ports <a-b>    UDP ports for relayed traffic,   [CROC_RELAY_PORTS]
+                         one per relayed connection (any
+                         free port); set and open a range
+                         behind Docker or a firewall
   --relay-allow-private  let the relay reach private and  [CROC_RELAY_ALLOW_PRIVATE=1]
                          loopback addresses (LAN-only
                          deployments; unsafe on the internet)
@@ -89,6 +95,7 @@ Options (environment variable in brackets):
 const env = process.env;
 const pick = (flag: string | undefined, envName: string) => flag ?? env[envName];
 const stunPort = pick(values['stun-port'], 'CROC_STUN_PORT');
+const relayPorts = pick(values['relay-ports'], 'CROC_RELAY_PORTS');
 const stunAltPort = pick(values['stun-alt-port'], 'CROC_STUN_ALT_PORT');
 const port = Number(pick(values.port, 'CROC_PORT') ?? defaultConfig.port);
 
@@ -115,6 +122,7 @@ const coordinator = new Coordinator({
       pick(values['relay-max-users'], 'CROC_RELAY_MAX_USERS') ?? defaultConfig.relay.maxUsers,
     ),
     publicIp: pick(values['relay-ip'], 'CROC_RELAY_IP'),
+    ...(relayPorts ? { ports: parsePortRange(relayPorts) } : {}),
     allowPrivatePeers:
       values['relay-allow-private'] === true || env.CROC_RELAY_ALLOW_PRIVATE === '1',
   },

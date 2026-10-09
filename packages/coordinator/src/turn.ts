@@ -276,6 +276,13 @@ export interface TurnServerOptions {
   host?: string;
   /** Public IP advertised in XOR-RELAYED-ADDRESS. */
   relayIp: string;
+  /**
+   * UDP ports for relayed addresses, one per allocation. Without a range the
+   * system picks any free port, which only works when the machine is directly
+   * on the internet with no firewall: behind Docker or a firewall the range
+   * has to be published and opened, like the STUN port.
+   */
+  relayPorts?: { min: number; max: number };
   /** Shared secret for REST-API style credentials. */
   secret: Buffer;
   limits?: Partial<TurnLimits>;
@@ -286,6 +293,16 @@ export interface TurnServerOptions {
    */
   allowPrivatePeers?: boolean;
   log?: (msg: string, extra?: Record<string, unknown>) => void;
+}
+
+/** `"49160-49259"` → `{ min: 49160, max: 49259 }`; throws on anything else. */
+export function parsePortRange(text: string): { min: number; max: number } {
+  const m = text.trim().match(/^(\d{1,5})\s*-\s*(\d{1,5})$/);
+  const min = m ? Number(m[1]) : NaN;
+  const max = m ? Number(m[2]) : NaN;
+  if (!(min >= 1024 && max <= 65535 && min <= max))
+    throw new Error(`relay ports must look like 49160-49259 (from 1024 to 65535), not "${text}"`);
+  return { min, max };
 }
 
 /**
@@ -420,6 +437,37 @@ export class TurnServer {
   }
 
   // ---------------------------------------------------------------------------
+
+  private nextRelayPort = 0;
+
+  /** A socket for a relayed address: any free port, or one from `relayPorts`. */
+  private async bindRelaySocket(type: 'udp4' | 'udp6'): Promise<Socket | null> {
+    const range = this.opts.relayPorts;
+    const ports = range
+      ? Array.from({ length: range.max - range.min + 1 }, (_, i) => {
+          const n = range.max - range.min + 1;
+          return range.min + ((this.nextRelayPort + i) % n);
+        })
+      : [0];
+    for (const port of ports) {
+      const socket = createSocket({ type });
+      const bound = await new Promise<boolean>((resolve) => {
+        socket.once('error', () => resolve(false));
+        socket.bind(port, () => resolve(true));
+      });
+      if (bound) {
+        socket.removeAllListeners('error');
+        if (range) this.nextRelayPort = (port - range.min + 1) % (range.max - range.min + 1);
+        return socket;
+      }
+      try {
+        socket.close();
+      } catch {
+        // Never bound.
+      }
+    }
+    return null;
+  }
 
   private nonce(): string {
     const ts = Math.floor(Date.now() / 1000).toString(16);
@@ -578,16 +626,8 @@ export class TurnServer {
       );
       return;
     }
-    const socket = createSocket({ type: isIPv4(rinfo.address) ? 'udp4' : 'udp6' });
-    try {
-      await new Promise<void>((resolve, reject) => {
-        socket.once('error', reject);
-        socket.bind(0, () => {
-          socket.off('error', reject);
-          resolve();
-        });
-      });
-    } catch {
+    const socket = await this.bindRelaySocket(isIPv4(rinfo.address) ? 'udp4' : 'udp6');
+    if (!socket) {
       this.reply(via, m, rinfo, CLASS.error, [errorAttr(508, 'Insufficient Capacity')], auth.key);
       return;
     }
