@@ -215,8 +215,26 @@ await shot(a.page, '14b-accent-purple');
 await a.page.getByRole('button', { name: 'Accent #34c77b' }).click();
 // Bug-report diagnostics: copied as JSON, without message content.
 await a.page.getByRole('button', { name: 'About' }).click();
-await a.page.getByRole('heading', { name: 'Crocodile' }).waitFor();
+await a.page.getByRole('heading', { name: 'Crocodile', exact: true }).waitFor();
 await shot(a.page, '14c-about');
+// Donation links open in the browser; nothing from those sites loads in the app.
+await a.app.evaluate(({ shell }) => {
+  const opened: string[] = [];
+  (globalThis as { opened?: string[] }).opened = opened;
+  shell.openExternal = async (url: string) => void opened.push(url);
+});
+const support = a.page.getByRole('region', { name: 'Support Crocodile' });
+await support.scrollIntoViewIfNeeded();
+await shot(a.page, '14d-support');
+await support.getByRole('button', { name: 'GitHub Sponsors' }).click();
+await support.getByRole('button', { name: 'Ko-fi' }).click();
+await a.page.waitForTimeout(300);
+const opened = await a.app.evaluate(() => (globalThis as { opened?: string[] }).opened);
+if (
+  JSON.stringify(opened) !==
+  JSON.stringify(['https://github.com/sponsors/pwalda', 'https://ko-fi.com/pwalda'])
+)
+  throw new Error(`donation links opened ${JSON.stringify(opened)}`);
 await a.page.getByRole('button', { name: 'Copy diagnostics' }).click();
 await a.page.getByText('Copied').first().waitFor();
 const report = JSON.parse(await a.app.evaluate(({ clipboard }) => clipboard.readText()));

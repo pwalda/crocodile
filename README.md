@@ -117,6 +117,14 @@ It needs TCP and UDP on port 7443 (UDP also carries the opt-in relay) and
 UDP 7444 (a second STUN port for NAT detection). See
 [docs/SELF_HOSTING.md](docs/SELF_HOSTING.md).
 
+## Support Crocodile
+
+Crocodile has no ads, no tracking and no paid features. If it's useful to
+you, you can help pay for the main server and development through
+[GitHub Sponsors](https://github.com/sponsors/pwalda) or
+[Ko-fi](https://ko-fi.com/pwalda). Donations are gifts: everyone gets the same
+app whether they give or not.
+
 ## License
 
 Crocodile is free software.
