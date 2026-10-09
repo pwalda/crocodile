@@ -571,3 +571,63 @@ describe('the app across a sharded network', () => {
     await waitFor(() => alice.state.presence[bob.userId] === 'online', 8000, 'presence');
   });
 });
+
+describe('records from other servers', () => {
+  it('ignores a forged account deletion pushed by another server', async () => {
+    const [x] = await network(2);
+    const victim = await user(x!, 'victim');
+    const victimId = victim.identity.userId;
+    // A malicious server pushes "deleted" for someone else's account, signed
+    // with its own key (it can't sign as the victim).
+    const mallory = createIdentity();
+    const forged = signRecord(mallory, 'profile', recordKey.profile(victimId), {
+      username: DELETED_PROFILE_NAME,
+      encKey: mallory.encPublicKey,
+      deleted: true,
+    });
+    await x!.dist.onPush(forged);
+    await new Promise((r) => setTimeout(r, 500));
+    expect(x!.presence.localOf(victimId).length).toBe(1);
+    expect(
+      (x!.dist.lookup(recordKey.profile(victimId))?.body as { deleted?: boolean })?.deleted,
+    ).not.toBe(true);
+  });
+
+  it("doesn't let an owner's forged invite admit someone to a space", async () => {
+    const servers = await network(4);
+    const alice = await user(servers[0]!, 'alice');
+    const { spaceId } = await createSpace(alice);
+    const mallory = createIdentity();
+    const code = 'malloryinvite';
+    // A malicious owner of the invite's shard answers with an invite to
+    // Alice's space that Mallory signed herself.
+    const forgedInvite = signRecord(mallory, 'invite', recordKey.invite(code), {
+      spaceId,
+      code,
+      expiresAt: null,
+    });
+    const via = servers.find((c) => !c.dist.ownsShard(`invite:${code}`))!;
+    for (const c of servers) {
+      const gather = c.mesh.gather.bind(c.mesh);
+      c.mesh.gather = (async (ids: string[], m: string, p: { keys?: string[] }) =>
+        m === 'rec_get' && p?.keys?.includes(recordKey.invite(code))
+          ? [{ records: [forgedInvite] }]
+          : gather(ids as never, m as never, p as never)) as typeof c.mesh.gather;
+      const requestAny = c.mesh.requestAny.bind(c.mesh);
+      c.mesh.requestAny = (async (ids: string[], m: string, p: { keys?: string[] }) =>
+        m === 'rec_get' && p?.keys?.includes(recordKey.invite(code))
+          ? { records: [forgedInvite] }
+          : requestAny(ids as never, m as never, p as never)) as typeof c.mesh.requestAny;
+    }
+    const m = await user(via, 'mallory');
+    const res = await m.conn.request('records.put', {
+      record: signRecord(m.identity, 'member', recordKey.member(spaceId, m.identity.userId), {
+        spaceId,
+        userId: m.identity.userId,
+        inviteCode: code,
+      }),
+    });
+    expect(res.accepted).toBe(false);
+    expect(via.dist.lookup(recordKey.invite(code))).toBeUndefined();
+  });
+});

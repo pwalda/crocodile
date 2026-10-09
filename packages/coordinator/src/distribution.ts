@@ -1,4 +1,4 @@
-import { userIdFromKey } from '@crocodile/crypto';
+import { userIdFromKey, validateRecord } from '@crocodile/crypto';
 import {
   FedRequestParams,
   SignedRecordEnvelope,
@@ -140,9 +140,44 @@ export class Distribution {
     return undefined;
   }
 
-  private remember(records: SignedRecord[]) {
+  /**
+   * Records another server sent us, sorted by how far they can be trusted:
+   * `valid` passed every check that needs nothing else (signature, and the
+   * author may write that key), so they can be passed on to clients, which
+   * check them again. `trusted` also passed the checks that need other
+   * records (an invite signed by its space's owner, a membership with a valid
+   * invite), against what we hold and the batch itself: only those are
+   * cached and used for our own decisions.
+   */
+  private sift(input: unknown[]): { valid: SignedRecord[]; trusted: SignedRecord[] } {
     const now = Date.now();
+    const order = ['profile', 'friends', 'device', 'space', 'note', 'invite', 'member'];
+    const records = input
+      .filter((r): r is SignedRecord => SignedRecordEnvelope.safeParse(r).success)
+      .sort((a, b) => order.indexOf(a.kind) - order.indexOf(b.kind));
+    const accepted = new Map<string, SignedRecord>();
+    const valid: SignedRecord[] = [];
+    const trusted: SignedRecord[] = [];
     for (const r of records) {
+      const own = (k: string) => (k === r.key ? undefined : (accepted.get(k) ?? this.lookup(k)));
+      const full = validateRecord(r, { get: own, now, fresh: false });
+      if (full.ok) {
+        valid.push(r);
+        trusted.push(r);
+        if ((accepted.get(r.key)?.version ?? 0) < r.version) accepted.set(r.key, r);
+        continue;
+      }
+      // Only a missing dependency kept it from full trust: still well signed.
+      const alone = validateRecord(r, { get: () => undefined, now, fresh: false });
+      if (alone.ok || alone.retryable) valid.push(r);
+    }
+    return { valid, trusted };
+  }
+
+  /** Keep checked records from other servers for a few minutes (see sift). */
+  private remember(input: unknown[]) {
+    const now = Date.now();
+    for (const r of this.sift(input).trusted) {
       const have = this.cache.get(r.key);
       if (have && have.record.version > r.version) continue;
       this.cache.set(r.key, { record: r, at: now });
@@ -175,7 +210,7 @@ export class Distribution {
       if (!this.lookup(key) && owners.length) {
         await this.hub.mesh
           .requestAny<{ records: SignedRecord[] }>(owners, 'rec_get', { keys: [key] })
-          .then(({ records }) => this.remember(records.filter((r) => r.key === key)))
+          .then(({ records }) => this.remember((records ?? []).filter((r) => r.key === key)))
           .catch(() => {});
       }
     }
@@ -303,13 +338,10 @@ export class Distribution {
       p,
     );
     if (answers.length === 0) return null;
+    // Only well-signed records count: an owner can't hand us a forged newer copy.
+    const { valid } = this.sift(answers.flatMap((a) => a.records ?? []));
     const newest = new Map<string, SignedRecord>();
-    for (const a of answers) {
-      for (const r of a.records ?? []) {
-        if (!SignedRecordEnvelope.safeParse(r).success) continue;
-        if ((newest.get(r.key)?.version ?? 0) < r.version) newest.set(r.key, r);
-      }
-    }
+    for (const r of valid) if ((newest.get(r.key)?.version ?? 0) < r.version) newest.set(r.key, r);
     const found = [...newest.values()];
     this.remember(found);
     return found;
@@ -489,11 +521,14 @@ export class Distribution {
 
   /** Watcher side: a record our clients may want, from its owner. */
   async onPush(input: SignedRecord) {
-    if (!SignedRecordEnvelope.safeParse(input).success) return;
-    const record = input as SignedRecord;
-    this.remember([record]);
+    // Pushed by another server: act on it only if it checks out (a forged
+    // "deleted" profile would otherwise sign the user out everywhere).
+    const { valid, trusted } = this.sift([input]);
+    const record = valid[0];
+    if (!record) return;
+    this.remember(trusted);
     this.hub.pushRecordToClients(record);
-    if (record.kind === 'profile' && (record.body as ProfileBody).deleted)
+    if (trusted[0] && record.kind === 'profile' && (record.body as ProfileBody).deleted)
       this.hub.signOutDeleted(
         record.key.slice('profile:'.length),
         record as SignedRecord<'profile'>,
