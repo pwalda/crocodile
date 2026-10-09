@@ -87,10 +87,29 @@ export interface ServerHello {
   channel: ChannelOffer;
   /** Server signature over (challenge, server.id, time, channel). */
   sig: string;
-  /** Optional services this server offers (not signed; informational). */
+  /**
+   * Server signature over the whole hello (helloFullPayload). Clients use
+   * the STUN servers and operator details only when it checks out; servers
+   * from before it existed send none.
+   */
+  sigFull?: string;
+  /** Optional services this server offers. */
   features?: { relay?: boolean; mailbox?: { ttlMs: number } };
-  /** Who runs the server, if they say (not signed; informational). */
+  /** Who runs the server, if they say. */
   operator?: OperatorInfo;
+}
+
+/** What `sigFull` covers: everything in the hello but the signatures. */
+export function helloFullPayload(h: Omit<ServerHello, 'sig' | 'sigFull'>) {
+  return {
+    challenge: h.challenge,
+    server: h.server,
+    time: h.time,
+    channel: h.channel,
+    stun: h.stun,
+    features: h.features ?? null,
+    operator: h.operator ?? null,
+  };
 }
 
 export const ClientAuth = z.object({

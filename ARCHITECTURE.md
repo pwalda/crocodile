@@ -126,7 +126,9 @@ space's sessions). See [docs/ROADMAP.md](docs/ROADMAP.md).
 A coordinator (`packages/coordinator`) offers a WebSocket JSON-RPC API:
 
 1. Server sends a signed `hello` with a challenge and a fresh hybrid
-   key-exchange offer (X25519 + ML-KEM-768). The client checks the signature
+   key-exchange offer (X25519 + ML-KEM-768). A second signature covers the
+   rest of the hello (the STUN servers apps use, the operator's contact),
+   which apps ignore when it is missing. The client checks the signatures
    against the key in the directory listing, answers the key exchange and
    signs the transcript. From then on every frame is AES-256-GCM encrypted
    and padded, so metadata is confidential even over plain `ws://` to a

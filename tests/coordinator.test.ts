@@ -23,6 +23,7 @@ import {
   type ProfileBody,
   type SignedRecord,
 } from '@crocodile/protocol';
+import { CoordinatorConnection } from '@crocodile/client-core';
 import { Coordinator, rendezvousOwner } from '@crocodile/coordinator';
 import {
   caps,
@@ -96,6 +97,60 @@ describe('records', () => {
       prefix: recordKey.memberPrefix(spaceId),
     });
     expect(members.records).toHaveLength(2);
+  });
+});
+
+describe('server hello', () => {
+  /** A WebSocket that lets someone on the path rewrite the server's hello. */
+  function tampered(change: (hello: Record<string, unknown>) => Record<string, unknown>) {
+    return class extends WebSocket {
+      private handler: ((ev: MessageEvent) => void) | null = null;
+      override get onmessage() {
+        return this.handler;
+      }
+      override set onmessage(fn: ((ev: MessageEvent) => void) | null) {
+        this.handler = fn;
+        super.onmessage = (ev: MessageEvent) => {
+          let data = ev.data as string;
+          const frame = JSON.parse(String(data)) as Record<string, unknown>;
+          if (frame.t === 'hello') data = JSON.stringify(change(frame));
+          fn?.({ data } as MessageEvent);
+        };
+      }
+    };
+  }
+  const connect = (c: Coordinator, impl?: typeof WebSocket) =>
+    CoordinatorConnection.connect({
+      url: c.url,
+      identity: createIdentity(),
+      deviceId: randomDeviceId(),
+      platform: 'bot',
+      version: 'test',
+      ...(impl ? { WebSocketImpl: impl } : {}),
+    });
+
+  it('the STUN servers and operator come signed, and a changed list is refused', async () => {
+    const c = await server({
+      extraStun: ['stun:stun.example.org:3478'],
+      operatorContact: 'ops@example.org',
+    });
+    const plain = await connect(c);
+    expect(plain.stun).toContain('stun:stun.example.org:3478');
+    expect(plain.operator).toEqual({ contact: 'ops@example.org' });
+    plain.close();
+
+    // Someone on the path points the app at their own STUN server.
+    const evil = tampered((h) => ({ ...h, stun: ['stun:watching.example:3478'] }));
+    await expect(connect(c, evil)).rejects.toThrow(/did not sign/);
+    // A server from before the full signature: its unsigned list isn't used.
+    const old = tampered(({ sigFull: _, ...h }) => ({
+      ...h,
+      stun: ['stun:watching.example:3478'],
+    }));
+    const conn = await connect(c, old);
+    expect(conn.stun).toEqual([]);
+    expect(conn.operator).toBeUndefined();
+    conn.close();
   });
 });
 

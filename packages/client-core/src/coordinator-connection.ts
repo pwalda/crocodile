@@ -8,6 +8,7 @@ import {
 import {
   OperatorInfo,
   SIG_DOMAIN,
+  helloFullPayload,
   type Platform,
   type RpcError,
   type RpcMethod,
@@ -136,6 +137,21 @@ export class CoordinatorConnection extends Emitter<ConnectionEvents> {
             frame.sig,
           );
           if (!ok) return fail(new Error('server failed to prove its identity'));
+          // The rest of the hello (STUN servers, operator) counts only when
+          // signed too; a server too old to sign it gets none of it used.
+          if (
+            frame.sigFull === undefined ||
+            !verifyPayload(
+              frame.server.key,
+              SIG_DOMAIN.serverHelloFull,
+              helloFullPayload(frame),
+              frame.sigFull,
+            )
+          ) {
+            if (frame.sigFull !== undefined)
+              return fail(new Error('server sent a hello it did not sign'));
+            hello = { ...frame, stun: [], operator: undefined };
+          }
           if (opts.expectedServerKey && opts.expectedServerKey !== frame.server.key) {
             return fail(new Error('server key does not match the directory listing'));
           }

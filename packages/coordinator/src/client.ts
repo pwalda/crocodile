@@ -14,6 +14,7 @@ import {
   ClientAuth,
   RpcParams,
   SIG_DOMAIN,
+  helloFullPayload,
   peerIds,
   recordKey,
   type LinkBox,
@@ -74,8 +75,8 @@ export class ClientConnection implements ClientHandle {
     const time = Date.now();
     const info = hub.info;
     const channel = this.channelKeys.offer;
-    this.frame({
-      t: 'hello',
+    const hello = {
+      t: 'hello' as const,
       server: info,
       challenge: this.challenge,
       stun: hub.stunUrls(),
@@ -86,12 +87,16 @@ export class ClientConnection implements ClientHandle {
         ...(hub.config.mailbox.enabled ? { mailbox: { ttlMs: hub.mailbox.ttlMs } } : {}),
       },
       ...hub.operatorInfo(),
+    };
+    this.frame({
+      ...hello,
       sig: sign(hub.identity, SIG_DOMAIN.serverHello, {
         challenge: this.challenge,
         server: info.id,
         time,
         channel,
       }),
+      sigFull: sign(hub.identity, SIG_DOMAIN.serverHelloFull, helloFullPayload(hello)),
     });
     const authTimer = setTimeout(() => {
       if (!this.authed) ws.close(4001, 'authentication timeout');

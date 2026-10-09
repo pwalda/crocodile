@@ -32,6 +32,8 @@ export const SIG_DOMAIN = {
   record: 'croc/v1/record',
   auth: 'croc/v1/auth',
   serverHello: 'croc/v1/server-hello',
+  /** The whole hello: what the server says about itself, its STUN servers included. */
+  serverHelloFull: 'croc/v2/server-hello',
   federation: 'croc/v1/federation',
   directory: 'croc/v1/directory',
   signal: 'croc/v1/signal',
