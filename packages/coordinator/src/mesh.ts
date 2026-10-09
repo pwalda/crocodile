@@ -12,6 +12,7 @@ import {
 } from '@crocodile/crypto';
 import {
   concatBytes,
+  FedFrameSchema,
   LIMITS,
   PROTOCOL_VERSION,
   ServerInfo,
@@ -525,6 +526,13 @@ export class Mesh {
       } else if (frame.t !== 'fed_hello' && frame.t !== 'fed_auth') {
         return;
       }
+      // Checked like client input: a malformed frame from a peer is dropped.
+      const checked = FedFrameSchema.safeParse(frame);
+      if (!checked.success) {
+        this.hub.log.debug('dropped malformed federation frame', { t: String(frame.t) });
+        return;
+      }
+      frame = checked.data as FedFrame;
       if (USEFUL.has(frame.t)) link.lastUsed = Date.now();
       try {
         this.onFrame(link, frame);
@@ -702,9 +710,17 @@ export class Mesh {
         else r.resolve(frame.ok);
         return;
       }
-      case 'route':
+      case 'route': {
+        // Only events servers route (ROUTED_EVENTS); a session's state only
+        // from the server that owns it.
+        if (frame.ev === 'session') {
+          const state = (frame.d as { state?: { id?: unknown } })?.state;
+          if (typeof state?.id !== 'string' || this.hub.sessions.ownerOf(state.id) !== peerId)
+            return;
+        }
         this.hub.deliverLocal(frame.to, frame.ev as never, frame.d as never);
         return;
+      }
       case 'session_op':
         this.hub.sessions.handleRemoteOp(peerId, frame);
         return;
@@ -734,10 +750,10 @@ export class Mesh {
     const f = frame.f;
     switch (f.t) {
       case 'mail_query':
-        this.hub.mailbox.onQuery(frame.origin, f.peer);
+        this.hub.mailbox.onQuery(frame.origin, f.peer, f.proof);
         return;
       case 'mail_ack':
-        this.hub.mailbox.onRemoteAck(f.peer, f.ids);
+        this.hub.mailbox.onRemoteAck(f.peer, f.ids, f.proof);
         return;
       case 'link_query': {
         const found = this.hub.findLink(f.code);

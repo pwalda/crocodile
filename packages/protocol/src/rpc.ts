@@ -12,6 +12,7 @@ import {
 import { DeviceId } from './records';
 import type { PublicServerInfo } from './directory';
 import { SealedBox } from './relay';
+import { MailProof } from './federation';
 
 /** Public identity of a coordination server. */
 export const ServerInfo = z.object({
@@ -274,9 +275,13 @@ export const RpcParams = {
       .max(20),
   }),
   /** Recipient: deliver mail held for this device anywhere in the mesh. */
-  'mail.fetch': z.object({}),
-  /** Recipient: these mailbox items arrived; delete them everywhere. */
-  'mail.ack': z.object({ ids: z.array(z.string().max(40)).min(1).max(500) }),
+  /** `proof` lets other servers send their mail for this device here (MailProof). */
+  'mail.fetch': z.object({ proof: MailProof.optional() }),
+  /** Recipient: these mailbox items arrived; delete them everywhere (with `proof`). */
+  'mail.ack': z.object({
+    ids: z.array(z.string().max(40)).min(1).max(500),
+    proof: MailProof.optional(),
+  }),
 } as const;
 
 export interface RpcMethods {

@@ -1,5 +1,23 @@
-import { bytesEqual, fromB32, fromB64u, toB32, toB64u, utf8 } from '@crocodile/protocol';
-import { ed25519, hkdfSha256, randomBytes, sha256, signPayload, x25519 } from './primitives';
+import {
+  bytesEqual,
+  fromB32,
+  fromB64u,
+  mailProofPayload,
+  SIG_DOMAIN,
+  toB32,
+  toB64u,
+  utf8,
+  type MailProof,
+} from '@crocodile/protocol';
+import {
+  ed25519,
+  hkdfSha256,
+  randomBytes,
+  sha256,
+  signPayload,
+  verifyPayload,
+  x25519,
+} from './primitives';
 
 /**
  * A user's (or a server's) identity. Everything derives from one 32-byte seed,
@@ -149,4 +167,34 @@ export function linkSecurityCode(
 
 export function randomDeviceId(): string {
   return toB32(randomBytes(10));
+}
+
+// ---------------------------------------------------------------------------
+// Mailbox proofs: a device's signature on a mailbox request, so servers other
+// than its own act on it only for that device (MailProof).
+// ---------------------------------------------------------------------------
+
+export function signMailProof(
+  identity: Pick<Identity, 'signSecret' | 'publicKey'>,
+  req: Parameters<typeof mailProofPayload>[0],
+  at = Date.now(),
+): MailProof {
+  return {
+    key: identity.publicKey,
+    at,
+    sig: sign(identity, SIG_DOMAIN.mail, mailProofPayload(req, at)),
+  };
+}
+
+/** Whether `proof` is a recent signature by `peer`'s account on `req`. */
+export function verifyMailProof(
+  peer: string,
+  req: Parameters<typeof mailProofPayload>[0],
+  proof: MailProof | undefined,
+  now = Date.now(),
+  maxAgeMs = 5 * 60_000,
+): boolean {
+  if (!proof || Math.abs(now - proof.at) > maxAgeMs) return false;
+  if (!keyMatchesUserId(proof.key, peer.split('.')[0]!)) return false;
+  return verifyPayload(proof.key, SIG_DOMAIN.mail, mailProofPayload(req, proof.at), proof.sig);
 }

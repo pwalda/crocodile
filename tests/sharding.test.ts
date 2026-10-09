@@ -6,7 +6,13 @@ import {
   type PlatformAdapter,
 } from '@crocodile/client-core';
 import type { Coordinator, CoordinatorConfig } from '@crocodile/coordinator';
-import { createIdentity, createPrekey, sealToDevice, signRecord } from '@crocodile/crypto';
+import {
+  createIdentity,
+  createPrekey,
+  sealToDevice,
+  signMailProof,
+  signRecord,
+} from '@crocodile/crypto';
 import {
   DELETED_PROFILE_NAME,
   peerIds,
@@ -484,13 +490,32 @@ describe('across servers that are not linked', () => {
 
     bob = await connectUser(y, bobId, 'bob', deviceId);
     cleanup.push(() => bob.conn.close());
+    // Without the device's signature, other servers keep their mail.
     await bob.conn.request('mail.fetch', {});
+    await new Promise((r) => setTimeout(r, 1500));
+    expect(bob.events.some((e) => e.ev === 'mail')).toBe(false);
+    // Signed for another server: not answered either.
+    await bob.conn.request('mail.fetch', {
+      proof: signMailProof(bobId, { t: 'mail_fetch', peer: bob.conn.peer, server: x.info.id }),
+    });
+    await new Promise((r) => setTimeout(r, 1500));
+    expect(bob.events.some((e) => e.ev === 'mail')).toBe(false);
+    await bob.conn.request('mail.fetch', {
+      proof: signMailProof(bobId, { t: 'mail_fetch', peer: bob.conn.peer, server: y.info.id }),
+    });
     await waitFor(
       () => bob.events.some((e) => e.ev === 'mail'),
       5000,
       'mail from the other server',
     );
+    // An acknowledgement without the device's signature deletes nothing elsewhere.
     await bob.conn.request('mail.ack', { ids });
+    await new Promise((r) => setTimeout(r, 1500));
+    expect(x.store.mailCount({})).toBe(1);
+    await bob.conn.request('mail.ack', {
+      ids,
+      proof: signMailProof(bobId, { t: 'mail_ack', peer: bob.conn.peer, ids }),
+    });
     await waitFor(() => x.store.mailCount({}) === 0, 5000, 'acknowledged everywhere');
   });
 
@@ -629,5 +654,43 @@ describe('records from other servers', () => {
     });
     expect(res.accepted).toBe(false);
     expect(via.dist.lookup(recordKey.invite(code))).toBeUndefined();
+  });
+});
+
+describe('frames from other servers', () => {
+  it('passes on only the events servers route, and session states only from their owner', async () => {
+    const [x, y] = await network(2);
+    const victim = await user(x!, 'victim');
+    const sid = sessionIds.dm(victim.identity.userId, createIdentity().userId);
+    // "replaced" would stop the victim's app from reconnecting.
+    y!.mesh.sendTo(x!.info.id, {
+      t: 'route',
+      to: victim.conn.peer,
+      ev: 'replaced',
+      d: { reason: 'evil' },
+    } as never);
+    // A session state from a server that doesn't own the session.
+    const forger = x!.sessions.ownerOf(sid) === y!.info.id ? x! : y!;
+    if (forger === y)
+      y!.mesh.sendTo(x!.info.id, {
+        t: 'route',
+        to: victim.conn.peer,
+        ev: 'session',
+        d: { state: { id: sid, epoch: 99, host: 'mallory.dev', backup: null, members: [] } },
+      } as never);
+    // Malformed: dropped without disturbing the link.
+    y!.mesh.sendTo(x!.info.id, { t: 'records', items: 'nonsense', upTo: 'x' } as never);
+    await new Promise((r) => setTimeout(r, 800));
+    expect(victim.events.map((e) => e.ev)).not.toContain('replaced');
+    expect(victim.events.map((e) => e.ev)).not.toContain('session');
+    expect(x!.mesh.peerIds()).toContain(y!.info.id);
+    // Events servers do route still arrive.
+    y!.mesh.sendTo(x!.info.id, {
+      t: 'route',
+      to: victim.conn.peer,
+      ev: 'relay_expired',
+      d: { reason: 'grant ended' },
+    } as never);
+    await waitFor(() => victim.events.some((e) => e.ev === 'relay_expired'), 3000, 'routed');
   });
 });

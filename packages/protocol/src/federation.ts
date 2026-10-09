@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import type { SignedRecord } from './records';
 import type { ServerInfo } from './rpc';
-import type { HostCaps, VoiceOccupancy } from './session';
+import { HostCaps, PeerId, SessionId, type VoiceOccupancy } from './session';
 
 /**
  * Server-to-server protocol (WebSocket /v1/federation). Servers keep a few
@@ -138,10 +138,34 @@ export interface FedLinkAnswer {
   found?: { peer: string; key: string; encKey: string };
 }
 
+/**
+ * A device's signature on a mailbox request, so servers other than its own
+ * act on it only for that device: `key` is the device user's Ed25519 key,
+ * `sig` covers the request (see mailProofPayload) and `at`, its time.
+ */
+export const MailProof = z.object({
+  key: z.string().regex(/^[A-Za-z0-9_-]{43}$/),
+  at: z.number().int(),
+  sig: z.string().max(200),
+});
+export type MailProof = z.infer<typeof MailProof>;
+
+/** What a MailProof signs: the request, and where it may be answered. */
+export function mailProofPayload(
+  req:
+    | { t: 'mail_fetch'; peer: string; server: string }
+    | { t: 'mail_ack'; peer: string; ids: string[] },
+  at: number,
+) {
+  return { ...req, at };
+}
+
 /** Mailbox: a device connected here; servers holding mail for it send it over. */
 export interface FedMailQuery {
   t: 'mail_query';
   peer: string;
+  /** Signed by the device for the origin server. Without one, only its own server answers. */
+  proof?: MailProof;
 }
 
 /** Mailbox: the device received these items; everyone may delete them. */
@@ -149,6 +173,8 @@ export interface FedMailAck {
   t: 'mail_ack';
   peer: string;
   ids: string[];
+  /** Signed by the device; other servers delete nothing without it. */
+  proof?: MailProof;
 }
 
 export interface FedRecords {
@@ -233,6 +259,159 @@ export interface FedVoice {
   /** When the owner announced it; the latest per session wins. */
   at: number;
 }
+
+/** Client events another server may route to our clients (FedRoute.ev). */
+export const ROUTED_EVENTS = [
+  'session',
+  'signal',
+  'session_invite',
+  'link_claimed',
+  'link_payload',
+  'mail',
+  'relay_expired',
+] as const;
+
+const str = (max: number) => z.string().max(max);
+const id = str(200);
+const anyJson = z.unknown();
+
+const FloodBody = z.discriminatedUnion('t', [
+  z.object({ t: z.literal('link_query'), qid: id, code: str(32) }),
+  z.object({
+    t: z.literal('link_answer'),
+    qid: id,
+    found: z.object({ peer: PeerId, key: str(64), encKey: str(64) }).optional(),
+  }),
+  z.object({ t: z.literal('mail_query'), peer: PeerId, proof: MailProof.optional() }),
+  z.object({
+    t: z.literal('mail_ack'),
+    peer: PeerId,
+    ids: z.array(str(40)).max(500),
+    proof: MailProof.optional(),
+  }),
+]);
+
+const PresenceEntry = z.object({
+  userId: id,
+  status: z.enum(['online', 'idle', 'dnd', 'invisible', 'offline']),
+  text: str(128).optional(),
+  since: z.number(),
+  devices: z.array(id).max(100),
+});
+
+const SessionOpSchema = z.discriminatedUnion('op', [
+  z.object({
+    op: z.literal('join'),
+    caps: HostCaps,
+    hint: z
+      .object({ epoch: z.number().int(), host: id.nullable(), backup: id.nullable() })
+      .optional(),
+  }),
+  z.object({ op: z.literal('update'), caps: HostCaps }),
+  z.object({ op: z.literal('leave') }),
+  z.object({
+    op: z.literal('report'),
+    epoch: z.number().int(),
+    issue: z.literal('host_unreachable'),
+  }),
+]);
+
+const errorBody = z.object({ code: str(64), message: str(2000) }).optional();
+
+/**
+ * Every frame a server accepts from another, checked like client input
+ * before it is acted on. Records and request parameters are checked again
+ * where they are used (validateRecord, FedRequestParams).
+ */
+export const FedFrameSchema = z.discriminatedUnion('t', [
+  z.object({
+    t: z.literal('fed_hello'),
+    // Checked (ServerInfo) where used; left as sent so signatures still verify.
+    server: anyJson,
+    challenge: str(200),
+    channel: z.object({ x25519: str(100), mlkem: str(4000) }),
+    protocol: z.number().int().optional(),
+  }),
+  z.object({
+    t: z.literal('fed_auth'),
+    answer: z.object({ epk: str(100), kem: str(4000) }),
+    sig: str(200),
+    cursor: z.number().int().min(0),
+  }),
+  z.object({
+    t: z.literal('beacon'),
+    // Checked (ServerInfo) where used; left as sent so signatures still verify.
+    server: anyJson,
+    seq: z.number(),
+    full: z.boolean(),
+    presence: z.number().optional(),
+    sig: str(200),
+  }),
+  z.object({
+    t: z.literal('flood'),
+    id: str(64),
+    origin: id,
+    hops: z.number().int().min(0).max(64),
+    f: FloodBody,
+  }),
+  z.object({
+    t: z.literal('req'),
+    rid: str(64),
+    m: z.enum([
+      'rec_put',
+      'rec_get',
+      'rec_list',
+      'rec_term',
+      'rec_store',
+      'watch',
+      'digest',
+      'digest_keys',
+      'presence_state',
+    ]),
+    p: anyJson,
+  }),
+  z.object({ t: z.literal('res'), rid: str(64), ok: anyJson.optional(), err: errorBody }),
+  z.object({ t: z.literal('rec_push'), record: anyJson }),
+  z.object({
+    t: z.literal('records'),
+    items: z.array(z.object({ seq: z.number().int(), record: anyJson })).max(1000),
+    upTo: z.number().int(),
+  }),
+  z.object({
+    t: z.literal('presence'),
+    origin: id,
+    seq: z.number(),
+    full: z.boolean(),
+    entries: z.array(PresenceEntry).max(100_000),
+  }),
+  z.object({ t: z.literal('route'), to: str(200), ev: z.enum(ROUTED_EVENTS), d: anyJson }),
+  z.object({
+    t: z.literal('session_op'),
+    opId: str(64),
+    sessionId: SessionId,
+    peer: PeerId,
+    op: SessionOpSchema,
+  }),
+  z.object({
+    t: z.literal('session_op_res'),
+    opId: str(64),
+    ok: anyJson.optional(),
+    err: errorBody,
+  }),
+  z.object({ t: z.literal('servers'), servers: z.array(anyJson).max(5000) }),
+  z.object({
+    t: z.literal('voice'),
+    sessionId: SessionId,
+    occ: anyJson,
+    owner: id,
+    at: z.number(),
+  }),
+  // Sent directly as well as flooded.
+  ...FloodBody.options,
+  z.object({ t: z.literal('x'), n: z.number().int(), c: z.string() }),
+  z.object({ t: z.literal('ping') }),
+  z.object({ t: z.literal('pong') }),
+]);
 
 export type FedFrame =
   | FedHello

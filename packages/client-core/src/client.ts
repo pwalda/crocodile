@@ -19,6 +19,7 @@ import {
   sealLink,
   sealToDevice,
   userIdFromKey,
+  signMailProof,
   signRecord,
   spaceIdFor,
   userTag,
@@ -814,7 +815,16 @@ export class CrocodileClient extends Emitter<ClientEvents> {
     for (const s of this.sessions.values())
       void s.join().catch((err) => this.log('join failed', { id: s.sessionId, err: String(err) }));
     // Mail held for this device while it was offline, anywhere in the mesh.
-    void link.request('mail.fetch', {}).catch(() => {});
+    // Signed for this server, so the others send their mail for us here too.
+    const server = this.state.server?.info.id;
+    void link
+      .request(
+        'mail.fetch',
+        server
+          ? { proof: signMailProof(this.identity!, { t: 'mail_fetch', peer: this.peer, server }) }
+          : {},
+      )
+      .catch(() => {});
     this.scheduleMail();
   }
 
@@ -973,7 +983,13 @@ export class CrocodileClient extends Emitter<ClientEvents> {
         if (await this.acceptMessage(m.ch, m)) this.addDm(other);
       }
     }
-    if (done.length) await this.link?.request('mail.ack', { ids: done }).catch(() => {});
+    if (done.length)
+      await this.link
+        ?.request('mail.ack', {
+          ids: done,
+          proof: signMailProof(this.identity!, { t: 'mail_ack', peer: this.peer, ids: done }),
+        })
+        .catch(() => {});
   }
 
   private async ensureProfilePublished() {

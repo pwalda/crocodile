@@ -40,4 +40,5 @@ export const SIG_DOMAIN = {
   sealed: 'croc/v1/sealed',
   anon: 'croc/v1/anon',
   beacon: 'croc/v1/beacon',
+  mail: 'croc/v1/mail',
 } as const;

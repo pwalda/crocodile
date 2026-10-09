@@ -23,6 +23,7 @@ import {
   type ServerEvents,
   type ServerFrame,
   type SignedRecord,
+  type MailProof,
 } from '@crocodile/protocol';
 import type { Coordinator } from './coordinator';
 import type { ClientHandle, OwnStatus } from './presence';
@@ -367,12 +368,14 @@ export class ClientConnection implements ClientHandle {
         const { items } = p as unknown as { items: { to: string; box: SealedBox }[] };
         return await hub.mailbox.put(this, items);
       }
-      case 'mail.fetch':
-        hub.mailbox.fetch(this);
+      case 'mail.fetch': {
+        const { proof } = p as unknown as { proof?: MailProof };
+        hub.mailbox.fetch(this, proof);
         return {};
+      }
       case 'mail.ack': {
-        const { ids } = p as unknown as { ids: string[] };
-        hub.mailbox.ack(this, ids);
+        const { ids, proof } = p as unknown as { ids: string[]; proof?: MailProof };
+        hub.mailbox.ack(this, ids, proof);
         return {};
       }
     }
