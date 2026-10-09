@@ -113,3 +113,31 @@ export function chunkByBytes<T>(items: T[], budget = FRAME_BUDGET, max = Infinit
 export function withinBytes<T>(items: T[], budget = FRAME_BUDGET): T[] {
   return chunkByBytes(items, budget)[0] ?? [];
 }
+
+/**
+ * A number from a command-line option or environment variable: the fallback
+ * when unset, an error for anything that isn't a number in range (a typo
+ * would otherwise become NaN, and NaN comparisons are always false).
+ */
+export function numberOption(
+  raw: string | undefined,
+  name: string,
+  fallback: number,
+  range: { min?: number; max?: number; integer?: boolean } = {},
+): number {
+  if (raw === undefined || raw.trim() === '') return fallback;
+  const n = Number(raw.trim());
+  const { min = -Infinity, max = Infinity, integer = true } = range;
+  if (!Number.isFinite(n) || (integer && !Number.isInteger(n)) || n < min || n > max) {
+    const bounds = [
+      min > -Infinity ? `at least ${min}` : '',
+      max < Infinity ? `at most ${max}` : '',
+    ]
+      .filter(Boolean)
+      .join(' and ');
+    throw new Error(
+      `${name} must be ${integer ? 'a whole number' : 'a number'}${bounds ? ` ${bounds}` : ''}, not "${raw}"`,
+    );
+  }
+  return n;
+}
