@@ -95,6 +95,8 @@ export interface ClientConfig {
   preferredServers?: string[];
   /** Override the WebRTC transport (tests). */
   transportFactory?: TransportFactory;
+  /** This device's clock (tests). */
+  now?: () => number;
   log?: (msg: string, extra?: Record<string, unknown>) => void;
 }
 
@@ -2134,7 +2136,17 @@ export class CrocodileClient extends Emitter<ClientEvents> {
       throw new Error(`Messages are limited to ${LIMITS.messageMaxChars} characters`);
     const sessionId = this.sessionOfChannel(channel);
     if (!sessionId) throw new Error('unknown channel');
-    const message = createChatMessage(this.identity!, { ch: channel, body: text, ...opts });
+    // Chats are ordered by the time in each message, which comes from its
+    // author's clock. Never stamp one earlier than what this channel already
+    // holds, so a reply stays below the message it answers even when this
+    // computer's clock is behind the other person's.
+    const now = this.config.now?.() ?? Date.now();
+    const latest = Math.max(
+      await this.platform.messages.latestTs(channel),
+      ...(this.state.messages[channel] ?? []).map((m) => m.ts),
+    );
+    const ts = Math.max(now, latest + 1);
+    const message = createChatMessage(this.identity!, { ch: channel, body: text, ...opts }, ts);
     await this.platform.messages.put(message);
     this.outbox.add(message, sessionId);
     const session = this.sessions.get(sessionId);

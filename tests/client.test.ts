@@ -38,6 +38,8 @@ function makeClient(
     nat?: 'open' | 'cone' | 'symmetric';
     kv?: MemoryKeyValueStore;
     directories?: string[];
+    /** How far this device's clock is off, in ms. */
+    clockOffsetMs?: number;
   } = {},
 ) {
   const platform: PlatformAdapter = {
@@ -52,6 +54,7 @@ function makeClient(
     directories: opts.directories ?? [],
     preferredServers: [coordinator.url],
     transportFactory: net.transportFactory(),
+    ...(opts.clockOffsetMs ? { now: () => Date.now() + opts.clockOffsetMs! } : {}),
     log: process.env.DBG ? (m, e) => console.log('client', m, JSON.stringify(e)) : undefined,
   });
   cleanup.push(() => client.shutdown());
@@ -126,6 +129,32 @@ describe('client', () => {
     await alice.editMessage(ch, original.id, 'hello swamp!');
     await waitFor(() => bodies(bob, ch).includes('hello swamp!'), 12000, 'edit');
     expect(bob.state.messages[ch]!.find((m) => m.id === original.id)!.edited).toBe(true);
+  });
+
+  it('keeps a reply after the message it answers when the clocks disagree', async () => {
+    const coord = await server();
+    const net = new FakeRelayNetwork();
+    const alice = await signUp(makeClient(net, coord), 'alice');
+    // Bob's computer clock is two minutes behind Alice's.
+    const bob = await signUp(makeClient(net, coord, { clockOffsetMs: -120_000 }), 'bob');
+    await alice.addFriend(bob.userId);
+    await waitFor(() => bob.state.friends.incoming.includes(alice.userId), 12000);
+    await bob.addFriend(alice.userId);
+    const dm = await alice.openDm(bob.userId);
+    await waitFor(() => bob.state.dms.includes(alice.userId), 12000, 'dm invite');
+    await alice.openChannel(dm);
+    await bob.openChannel(dm);
+    await waitFor(() => alice.state.sessions[dm]?.peers.includes(bob.userId), 12000, 'dm');
+
+    await alice.sendMessage(dm, 'ping');
+    await waitFor(() => bodies(bob, dm).includes('ping'), 12000, 'bob receives');
+    await bob.sendMessage(dm, 'pong');
+    await waitFor(() => bodies(alice, dm).includes('pong'), 12000, 'alice receives');
+    await bob.sendMessage(dm, 'and again');
+    await waitFor(() => bodies(alice, dm).includes('and again'), 12000, 'alice receives');
+
+    expect(bodies(alice, dm)).toEqual(['ping', 'pong', 'and again']);
+    expect(bodies(bob, dm)).toEqual(['ping', 'pong', 'and again']);
   });
 
   it('syncs history to members who join later, peer to peer', async () => {
