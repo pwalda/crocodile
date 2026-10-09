@@ -70,6 +70,8 @@ async function secureSet(key: string, value: string) {
 let dataKey: Promise<CryptoKey> | undefined;
 function localKey(): Promise<CryptoKey> {
   dataKey ??= (async () => {
+    // Throws if the key is stored but the keychain is locked: never make a
+    // new one then, or everything sealed with the old one is lost.
     let raw = await secureGet('local-data-key');
     if (!raw) {
       raw = toB64u(crypto.getRandomValues(new Uint8Array(32)));
@@ -79,7 +81,10 @@ function localKey(): Promise<CryptoKey> {
       'encrypt',
       'decrypt',
     ]);
-  })();
+  })().catch((err) => {
+    dataKey = undefined;
+    throw err;
+  });
   return dataKey;
 }
 

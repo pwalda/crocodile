@@ -12,10 +12,11 @@ import {
   utilityProcess,
   type UtilityProcess,
 } from 'electron';
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { cpus } from 'node:os';
 import { configureGlobalPtt, stopGlobalPtt } from './global-ptt';
+import { SecureStore } from './secure-store';
 import type {
   CoordinatorProcessOut,
   CoordinatorSettings,
@@ -53,54 +54,11 @@ const resource = (...p: string[]) =>
 // Secure storage (identity seed): encrypted with the OS keychain via safeStorage.
 // ---------------------------------------------------------------------------
 
-const securePath = () => join(userData(), 'secure.json');
+const secure = new SecureStore(join(userData(), 'secure.json'), safeStorage);
 
-function readSecure(): Record<string, string> {
-  if (!existsSync(securePath())) return {};
-  try {
-    return JSON.parse(readFileSync(securePath(), 'utf8')) as Record<string, string>;
-  } catch {
-    return {};
-  }
-}
-
-function writeSecure(data: Record<string, string>) {
-  mkdirSync(userData(), { recursive: true });
-  writeFileSync(`${securePath()}.tmp`, JSON.stringify(data), { mode: 0o600 });
-  renameSync(`${securePath()}.tmp`, securePath());
-}
-
-function encrypt(value: string): string {
-  if (safeStorage.isEncryptionAvailable())
-    return `enc:${safeStorage.encryptString(value).toString('base64')}`;
-  return `raw:${value}`;
-}
-
-function decrypt(stored: string): string | undefined {
-  if (stored.startsWith('enc:')) {
-    try {
-      return safeStorage.decryptString(Buffer.from(stored.slice(4), 'base64'));
-    } catch {
-      return undefined;
-    }
-  }
-  return stored.startsWith('raw:') ? stored.slice(4) : undefined;
-}
-
-ipcMain.handle('secure:get', (_e, key: string) => {
-  const v = readSecure()[key];
-  return v === undefined ? undefined : decrypt(v);
-});
-ipcMain.handle('secure:set', (_e, key: string, value: string) => {
-  const data = readSecure();
-  data[key] = encrypt(value);
-  writeSecure(data);
-});
-ipcMain.handle('secure:delete', (_e, key: string) => {
-  const data = readSecure();
-  delete data[key];
-  writeSecure(data);
-});
+ipcMain.handle('secure:get', (_e, key: string) => secure.get(key));
+ipcMain.handle('secure:set', (_e, key: string, value: string) => secure.set(key, value));
+ipcMain.handle('secure:delete', (_e, key: string) => secure.delete(key));
 
 // ---------------------------------------------------------------------------
 // Host relay utility process
