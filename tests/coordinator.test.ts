@@ -23,7 +23,7 @@ import {
   type ProfileBody,
   type SignedRecord,
 } from '@crocodile/protocol';
-import { Coordinator } from '@crocodile/coordinator';
+import { Coordinator, rendezvousOwner } from '@crocodile/coordinator';
 import {
   caps,
   connectUser,
@@ -421,6 +421,58 @@ describe('coordination mesh', () => {
     });
     expect(rejoined.state.host).toBe(host.conn.peer);
     expect(rejoined.state.epoch).toBe(first.state.epoch);
+  });
+
+  it("re-joins again when a session's new owner was briefly unreachable", async () => {
+    const a = await server({ name: 'A' });
+    const b = await server({ name: 'B', meshPeers: [a.url] });
+    const c = await server({ name: 'C', meshPeers: [a.url, b.url] });
+    await waitFor(() => [a, b, c].every((x) => x.mesh.peerIds().length === 2), 5000, 'full mesh');
+
+    const owner = await user(a);
+    const s = await createSpace(owner);
+    // A session owned by C that falls to A once C is gone.
+    let sessionId = `voice:${s.spaceId}:${s.voiceChannel}`;
+    const channels = [...s.space.body.channels];
+    const fits = () =>
+      a.sessions.ownerOf(sessionId) === c.info.id &&
+      rendezvousOwner(sessionId, [a.info.id, b.info.id]) === a.info.id;
+    for (let i = 0; !fits() && i < 100; i++) {
+      const id = randomId();
+      channels.push({ id, name: `v${i}`, kind: 'voice' });
+      sessionId = `voice:${s.spaceId}:${id}`;
+    }
+    expect(fits()).toBe(true);
+    await owner.conn.request('records.put', {
+      record: signRecord(
+        owner.identity,
+        'space',
+        `space:${s.spaceId}`,
+        { ...s.space.body, channels },
+        Date.now() + 1,
+      ),
+    });
+    await waitFor(() => b.records.get(`invite:${s.code}`), 3000, 'replicated');
+    const bob = await user(b);
+    await joinSpace(bob, s.spaceId, s.code);
+    await waitFor(() => isSpaceMember(c.records, s.spaceId, bob.identity.userId), 3000);
+    await bob.conn.request('session.join', { sessionId, caps: caps() });
+
+    // C dies; B's first re-join with A is lost on the way.
+    let dropped = 0;
+    const sendTo = b.mesh.sendTo.bind(b.mesh);
+    b.mesh.sendTo = ((id: string, frame: { t: string }) => {
+      if (frame.t === 'session_op' && id === a.info.id && dropped++ === 0) return false;
+      return sendTo(id as never, frame as never);
+    }) as typeof b.mesh.sendTo;
+    await c.stop();
+    const st = await waitFor(
+      () => a.sessions.ownedState(sessionId),
+      8000,
+      'A rebuilt the session from the re-join',
+    );
+    expect(st.members.map((m) => m.peer)).toEqual([bob.conn.peer]);
+    expect(dropped).toBeGreaterThan(1);
   });
 });
 

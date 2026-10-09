@@ -33,6 +33,8 @@ const PENDING_HOST_GRACE_MS = 4000;
 const HOST_PENALTY_MS = 60_000;
 const OP_TIMEOUT_MS = 8000;
 const MEMBER_RECONNECT_GRACE_MS = 10_000;
+/** A member server re-joins a session whose new owner it could not reach this soon. */
+const REJOIN_RETRY_MS = 1000;
 
 /**
  * Sessions and host election.
@@ -524,7 +526,11 @@ export class SessionService {
     this.rebalance();
   }
 
+  private rebalanceTimer: ReturnType<typeof setTimeout> | undefined;
+
   private rebalance() {
+    clearTimeout(this.rebalanceTimer);
+    this.rebalanceTimer = undefined;
     for (const sessionId of [...this.owned.keys()]) {
       if (this.ownerOf(sessionId) !== this.selfId) this.dropOwned(sessionId, false);
     }
@@ -534,14 +540,22 @@ export class SessionService {
       this.lastOwner.set(sessionId, owner);
       const hint = this.lastKnown.get(sessionId);
       for (const [peer, caps] of members) {
-        this.submit(sessionId, peer, { op: 'join', caps, ...(hint ? { hint } : {}) }).catch((err) =>
-          this.hub.log.warn('re-join after owner change failed', { sessionId, err: String(err) }),
+        this.submit(sessionId, peer, { op: 'join', caps, ...(hint ? { hint } : {}) }).catch(
+          (err) => {
+            this.hub.log.warn('re-join after owner change failed', { sessionId, err: String(err) });
+            // Try again shortly, unless the owner changed meanwhile (that re-joins anyway).
+            if (this.lastOwner.get(sessionId) !== owner) return;
+            this.lastOwner.delete(sessionId);
+            this.rebalanceTimer ??= setTimeout(() => this.rebalance(), REJOIN_RETRY_MS);
+            this.rebalanceTimer.unref?.();
+          },
         );
       }
     }
   }
 
   close() {
+    clearTimeout(this.rebalanceTimer);
     for (const t of this.pendingLeaves.values()) clearTimeout(t);
     for (const t of this.orphanTimers.values()) clearTimeout(t);
     for (const s of this.owned.values()) if (s.timer) clearTimeout(s.timer);
