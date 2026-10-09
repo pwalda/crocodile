@@ -1009,6 +1009,20 @@ describe('sealed friends lists and notes', () => {
     });
   });
 
+  it('refuses an empty note, which would only fill the quota', async () => {
+    const c = await server();
+    const alice = await user(c);
+    const bob = await user(c);
+    const author = createIdentity();
+    const empty = signRecord(author, 'note', recordKey.note(bob.identity.userId, author.userId), {
+      boxes: [],
+    });
+    expect(await alice.conn.request('records.put', { record: empty })).toMatchObject({
+      accepted: false,
+      reason: 'a note carries at least one box',
+    });
+  });
+
   it('limits unread notes per recipient and expires old ones', async () => {
     const c = await server({ quotas: { notesPerUser: 2 } });
     const alice = await user(c);
