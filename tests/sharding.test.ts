@@ -368,6 +368,41 @@ describe('staying consistent', () => {
     await waitFor(() => holders(servers, memberKey).length === 0, 8000, 'membership erased');
   });
 
+  it('keeps a deletion added while earlier ones are being sent', async () => {
+    const servers = await network(2);
+    const a = servers[0]!;
+    const marker = () => {
+      const id = createIdentity();
+      return signRecord(id, 'profile', recordKey.profile(id.userId), {
+        username: DELETED_PROFILE_NAME,
+        encKey: id.encPublicKey,
+        deleted: true,
+      });
+    };
+    // B holds every shard; it answers slowly and loses the first marker.
+    const sent: string[] = [];
+    const request = a.mesh.request.bind(a.mesh);
+    a.mesh.request = (async (id: string, m: string, p: { records?: SignedRecord[] }) => {
+      if (m !== 'rec_store') return request(id as never, m as never, p as never);
+      await new Promise((r) => setTimeout(r, 200));
+      const key = p.records![0]!.key;
+      if (!sent.length) {
+        sent.push(key);
+        throw new Error('lost');
+      }
+      sent.push(key);
+      return {};
+    }) as typeof a.mesh.request;
+    const first = marker();
+    const second = marker();
+    a.dist.trackDeletion(first, ['aaaaaaaaaaaaaaaaaaaaaaaaaa']);
+    // Added while the first is still on its way.
+    await new Promise((r) => setTimeout(r, 50));
+    a.dist.trackDeletion(second, ['bbbbbbbbbbbbbbbbbbbbbbbbbb']);
+    await waitFor(() => sent.includes(second.key), 5000, 'second deletion sent');
+    await waitFor(() => sent.filter((k) => k === first.key).length === 2, 5000, 'first sent again');
+  });
+
   it('answers a request sent while the link to that server is closing', async () => {
     const [a, b] = await network(2);
     const link = (

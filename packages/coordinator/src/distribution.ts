@@ -785,17 +785,26 @@ export class Distribution {
   }
 
   private sendingDeletions = false;
+  private deletionsAgain = false;
 
-  async sendDeletions() {
-    if (this.sendingDeletions) return;
+  async sendDeletions(): Promise<void> {
+    if (this.sendingDeletions) {
+      // Jobs added meanwhile are sent as soon as this round is over.
+      this.deletionsAgain = true;
+      return;
+    }
     this.sendingDeletions = true;
+    this.deletionsAgain = false;
     const store = this.hub.records.store;
+    const finished = new Set<string>();
     try {
       const index = JSON.parse(store.getMeta('deletions') ?? '[]') as string[];
-      const left: string[] = [];
       for (const userId of index) {
         const raw = store.getMeta(`deletion:${userId}`);
-        if (!raw) continue;
+        if (!raw) {
+          finished.add(userId);
+          continue;
+        }
         const job = JSON.parse(raw) as {
           marker: SignedRecord;
           spaces: string[];
@@ -804,6 +813,7 @@ export class Distribution {
         };
         if (Date.now() - job.since > 30 * 24 * 3600_000) {
           store.setMeta(`deletion:${userId}`, '');
+          finished.add(userId);
           continue;
         }
         const targets = new Set<string>();
@@ -818,16 +828,23 @@ export class Distribution {
             // Tried again on the next round.
           }
         }
+        // The job may have been replaced while we were sending (the same
+        // account deleted again): that newer one stays as it is.
+        if (store.getMeta(`deletion:${userId}`) !== raw) continue;
         const pending = [...targets].some((id) => !job.done.includes(id));
-        if (pending) {
-          left.push(userId);
-          store.setMeta(`deletion:${userId}`, JSON.stringify(job));
-        } else store.setMeta(`deletion:${userId}`, '');
+        if (pending) store.setMeta(`deletion:${userId}`, JSON.stringify(job));
+        else {
+          store.setMeta(`deletion:${userId}`, '');
+          finished.add(userId);
+        }
       }
-      store.setMeta('deletions', JSON.stringify(left));
+      // Read again: accounts added while we were sending stay listed.
+      const now = JSON.parse(store.getMeta('deletions') ?? '[]') as string[];
+      store.setMeta('deletions', JSON.stringify(now.filter((id) => !finished.has(id))));
     } finally {
       this.sendingDeletions = false;
     }
+    if (this.deletionsAgain) return this.sendDeletions();
   }
 
   /** Delete records we don't own, once the live set has been stable for a while. */
