@@ -1,4 +1,4 @@
-import { validateRecord } from '@crocodile/crypto';
+import { userIdFromKey, validateRecord } from '@crocodile/crypto';
 import {
   LIMITS,
   NOTE_TTL_MS,
@@ -7,6 +7,7 @@ import {
   type RecordBodies,
   type SignedRecord,
 } from '@crocodile/protocol';
+import { dependenciesOf } from './placement';
 import type { Store } from './store';
 import type { Logger } from './util';
 
@@ -51,15 +52,30 @@ export type RecordListener = (
   previous: SignedRecord | null,
 ) => void;
 
+interface Pending {
+  record: SignedRecord;
+  origin: string;
+  at: number;
+  /** Keys of the records it waits for. */
+  waitingFor: string[];
+}
+
 /**
  * Validates and stores signed records. Records arriving by replication whose
- * dependencies are not here yet (e.g. a membership before its invite) wait in
- * a bounded pending queue and are retried after each accepted write.
+ * dependencies are not here yet (e.g. a membership before its invite) wait,
+ * indexed by what they wait for, and are retried when that arrives: a write
+ * retries only the records that depend on it, never the whole queue.
  */
 export class RecordService {
   private listeners = new Set<RecordListener>();
-  private pending: { record: SignedRecord; origin: string; at: number }[] = [];
+  private pending = new Set<Pending>();
+  /** Pending records by the key they wait for. */
+  private waiting = new Map<string, Set<Pending>>();
+  private pendingFrom = new Map<string, number>();
   private static readonly MAX_PENDING = 10_000;
+  /** One server can't fill the queue for everyone else. */
+  private static readonly MAX_PENDING_PER_ORIGIN = 2_000;
+  private static readonly PENDING_MS = 10 * 60_000;
   /** Records a check may look at besides the store (fetched from their owners). */
   lookup: (key: string) => SignedRecord | undefined = (key) => this.store.get(key);
 
@@ -133,10 +149,8 @@ export class RecordService {
     if (current && current.sig === (input as { sig?: unknown })?.sig)
       return { accepted: true, current };
     if (!result.ok) {
-      if (result.retryable && !opts.fresh && opts.origin) {
-        if (this.pending.length >= RecordService.MAX_PENDING) this.pending.shift();
-        this.pending.push({ record: input as SignedRecord, origin: opts.origin, at: Date.now() });
-      }
+      if (result.retryable && !opts.fresh && opts.origin)
+        this.addPending(input as SignedRecord, opts.origin);
       return { accepted: false, current, reason: result.reason };
     }
     const record = input as SignedRecord;
@@ -174,7 +188,7 @@ export class RecordService {
         this.log.error('record listener failed', { err: String(err) });
       }
     }
-    if (this.pending.length) this.retryPending();
+    this.retryWaitingFor(record.key);
     return { accepted: true, current: record, seq };
   }
 
@@ -190,22 +204,78 @@ export class RecordService {
     return n;
   }
 
-  private retrying = false;
-  private retryPending() {
-    if (this.retrying) return;
-    this.retrying = true;
+  private addPending(record: SignedRecord, origin: string) {
+    let deps: string[];
     try {
-      const cutoff = Date.now() - 10 * 60_000;
-      const queue = this.pending
-        .filter((p) => p.at > cutoff)
-        .sort((a, b) => RECORD_KIND_ORDER[a.record.kind] - RECORD_KIND_ORDER[b.record.kind]);
-      this.pending = [];
-      for (const p of queue) {
-        // put() re-queues the record itself if its dependency is still missing.
-        this.put(p.record, { fresh: false, origin: p.origin });
-      }
-    } finally {
-      this.retrying = false;
+      deps = dependenciesOf(record, userIdFromKey(record.author));
+    } catch {
+      return;
     }
+    const missing = deps.filter((k) => !this.lookup(k));
+    const entry: Pending = {
+      record,
+      origin,
+      at: Date.now(),
+      waitingFor: missing.length ? missing : deps,
+    };
+    this.dropExpired();
+    if ((this.pendingFrom.get(origin) ?? 0) >= RecordService.MAX_PENDING_PER_ORIGIN)
+      this.dropOldest((p) => p.origin === origin);
+    if (this.pending.size >= RecordService.MAX_PENDING) this.dropOldest(() => true);
+    this.pending.add(entry);
+    this.pendingFrom.set(origin, (this.pendingFrom.get(origin) ?? 0) + 1);
+    for (const k of entry.waitingFor) {
+      let set = this.waiting.get(k);
+      if (!set) this.waiting.set(k, (set = new Set()));
+      set.add(entry);
+    }
+  }
+
+  private removePending(entry: Pending) {
+    if (!this.pending.delete(entry)) return;
+    const n = (this.pendingFrom.get(entry.origin) ?? 1) - 1;
+    if (n > 0) this.pendingFrom.set(entry.origin, n);
+    else this.pendingFrom.delete(entry.origin);
+    for (const k of entry.waitingFor) {
+      const set = this.waiting.get(k);
+      set?.delete(entry);
+      if (set?.size === 0) this.waiting.delete(k);
+    }
+  }
+
+  private dropOldest(match: (p: Pending) => boolean) {
+    for (const p of this.pending) {
+      if (match(p)) {
+        this.removePending(p);
+        return;
+      }
+    }
+  }
+
+  private dropExpired() {
+    const cutoff = Date.now() - RecordService.PENDING_MS;
+    // Oldest first (insertion order): stop at the first one still fresh.
+    for (const p of this.pending) {
+      if (p.at > cutoff) break;
+      this.removePending(p);
+    }
+  }
+
+  /** Records that waited for `key`, which just arrived: try them again. */
+  private retryWaitingFor(key: string) {
+    const set = this.waiting.get(key);
+    if (!set) return;
+    this.dropExpired();
+    const queue = [...set]
+      .filter((p) => this.pending.has(p))
+      .sort((a, b) => RECORD_KIND_ORDER[a.record.kind] - RECORD_KIND_ORDER[b.record.kind]);
+    for (const p of queue) this.removePending(p);
+    // put() queues a record again if it still waits for something.
+    for (const p of queue) this.put(p.record, { fresh: false, origin: p.origin });
+  }
+
+  /** How many replicated records wait for a dependency (tests and diagnostics). */
+  get pendingCount() {
+    return this.pending.size;
   }
 }
