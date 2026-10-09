@@ -12,6 +12,7 @@ import {
   sealToDevice,
   signMailProof,
   signRecord,
+  spaceIdFor,
 } from '@crocodile/crypto';
 import {
   DELETED_PROFILE_NAME,
@@ -617,6 +618,31 @@ describe('large records between servers', () => {
     await converged([a, b]);
     await waitFor(() => keys.every((k) => b.store.get(k)), 20_000, 'B holds every large record');
   }, 60_000);
+
+  it('a replicated batch looks up what it needs in one round, not one record at a time', async () => {
+    const a = await server('A');
+    // Memberships of 40 spaces nobody here holds; every lookup takes 150 ms.
+    const items = Array.from({ length: 40 }, () => {
+      const id = createIdentity();
+      const spaceId = spaceIdFor(id.publicKey, 'nonce-of-a-space');
+      const record = signRecord(id, 'member', recordKey.member(spaceId, id.userId), {
+        spaceId,
+        userId: id.userId,
+      });
+      return { seq: 0, record };
+    });
+    let calls = 0;
+    a.mesh.gather = (async () => {
+      calls++;
+      await new Promise((r) => setTimeout(r, 150));
+      return [];
+    }) as typeof a.mesh.gather;
+    const started = Date.now();
+    await a.dist.onReplicated(items, 'elsewhere');
+    expect(calls).toBeGreaterThan(0);
+    // One record after another would take 40 × 150 ms at least.
+    expect(Date.now() - started).toBeLessThan(2000);
+  });
 });
 
 describe('records from other servers', () => {

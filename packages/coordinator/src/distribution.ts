@@ -1,6 +1,7 @@
 import { userIdFromKey, validateRecord } from '@crocodile/crypto';
 import {
   FedRequestParams,
+  RECORD_KIND_ORDER,
   SignedRecordEnvelope,
   type FedRequest,
   type ProfileBody,
@@ -194,26 +195,45 @@ export class Distribution {
     if (missing.length) await this.get(missing);
   }
 
-  private async ensureDependencies(record: SignedRecord) {
-    let authorId: string;
-    try {
-      authorId = userIdFromKey(record.author);
-    } catch {
-      return;
-    }
-    await this.fetchMissing(dependenciesOf(record, authorId)).catch(() => {});
-    // An invite reaches the owners of its space before those of its code.
-    const body = record.body as { spaceId?: string; inviteCode?: string };
-    if (record.kind === 'member' && body.inviteCode && body.spaceId) {
-      const key = `invite:${body.inviteCode}`;
-      const owners = this.others(`space:${body.spaceId}`);
-      if (!this.lookup(key) && owners.length) {
-        await this.hub.mesh
-          .requestAny<{ records: SignedRecord[] }>(owners, 'rec_get', { keys: [key] })
-          .then(({ records }) => this.remember((records ?? []).filter((r) => r.key === key)))
-          .catch(() => {});
+  /**
+   * Fetch what a group of records needs to pass validation, all at once: a
+   * batch of hundreds waits for one round of lookups, not one per record.
+   */
+  private async ensureDependencies(records: SignedRecord[]) {
+    const inBatch = new Set(records.map((r) => r.key));
+    const need = (k: string) => !inBatch.has(k) && !this.lookup(k);
+    const keys = new Set<string>();
+    const invites = new Map<string, Set<string>>();
+    for (const record of records) {
+      let authorId: string;
+      try {
+        authorId = userIdFromKey(record.author);
+      } catch {
+        continue;
+      }
+      for (const k of dependenciesOf(record, authorId)) if (need(k)) keys.add(k);
+      // An invite reaches the owners of its space before those of its code.
+      const body = record.body as { spaceId?: string; inviteCode?: string };
+      if (record.kind === 'member' && body.inviteCode && body.spaceId) {
+        const key = `invite:${body.inviteCode}`;
+        if (!need(key)) continue;
+        const set = invites.get(body.spaceId) ?? new Set();
+        invites.set(body.spaceId, set.add(key));
       }
     }
+    if (keys.size) await this.get([...keys]).catch(() => {});
+    // Invites the code's own owners didn't have: ask the space's.
+    await Promise.all(
+      [...invites].map(async ([spaceId, wanted]) => {
+        const left = [...wanted].filter((k) => !this.lookup(k));
+        const owners = this.others(`space:${spaceId}`);
+        if (!left.length || !owners.length) return;
+        await this.hub.mesh
+          .requestAny<{ records: SignedRecord[] }>(owners, 'rec_get', { keys: left })
+          .then(({ records }) => this.remember((records ?? []).filter((r) => wanted.has(r.key))))
+          .catch(() => {});
+      }),
+    );
   }
 
   // -------------------------------------------------------------------------
@@ -251,7 +271,7 @@ export class Distribution {
     opts: { fresh: boolean; origin: string | null },
   ): Promise<PutResult> {
     if (SignedRecordEnvelope.safeParse(input).success)
-      await this.ensureDependencies(input as SignedRecord);
+      await this.ensureDependencies([input as SignedRecord]);
     const res = this.hub.records.put(input, opts);
     if (res.accepted && opts.fresh) await this.storeOnOtherShards(input as SignedRecord);
     return res;
@@ -277,14 +297,21 @@ export class Distribution {
 
   /** Records another server copied to us, as an owner. */
   async onReplicated(items: { seq: number; record: SignedRecord }[], from: string) {
-    for (const item of items) {
-      if (!SignedRecordEnvelope.safeParse(item.record).success) continue;
-      const have = this.hub.records.store.get(item.record.key);
-      if (have && have.version >= item.record.version) continue;
-      await this.ensureDependencies(item.record);
-      const res = this.hub.records.put(item.record, { fresh: false, origin: from });
+    const records = items
+      .map((i) => i.record)
+      .filter((r) => {
+        if (!SignedRecordEnvelope.safeParse(r).success) return false;
+        const have = this.hub.records.store.get(r.key);
+        return !have || have.version < r.version;
+      });
+    if (!records.length) return;
+    await this.ensureDependencies(records);
+    // What others in the batch depend on goes first (a space before its members).
+    records.sort((a, b) => RECORD_KIND_ORDER[a.kind] - RECORD_KIND_ORDER[b.kind]);
+    for (const record of records) {
+      const res = this.hub.records.put(record, { fresh: false, origin: from });
       if (!res.accepted && /^unknown /.test(res.reason ?? ''))
-        this.retryLater({ record: item.record, from, tries: 0 });
+        this.retryLater({ record, from, tries: 0 });
     }
   }
 
@@ -296,10 +323,13 @@ export class Distribution {
       this.retryTimer = undefined;
       const due = this.retries.splice(0);
       void (async () => {
-        for (const r of due) {
+        const todo = due.filter((r) => {
           const have = this.hub.records.store.get(r.record.key);
-          if (have && have.version >= r.record.version) continue;
-          await this.ensureDependencies(r.record);
+          return !have || have.version < r.record.version;
+        });
+        await this.ensureDependencies(todo.map((r) => r.record));
+        todo.sort((a, b) => RECORD_KIND_ORDER[a.record.kind] - RECORD_KIND_ORDER[b.record.kind]);
+        for (const r of todo) {
           const res = this.hub.records.put(r.record, { fresh: false, origin: r.from });
           if (!res.accepted && /^unknown /.test(res.reason ?? ''))
             this.retryLater({ ...r, tries: r.tries + 1 });
@@ -376,20 +406,23 @@ export class Distribution {
     }
     await Promise.all(
       [...ask].map(async ([shard, group]) => {
-        // An answer too large for one frame comes in parts.
+        // At most 1000 keys a request, and an answer too large for one
+        // frame comes in parts: ask again for what it left out.
         const found: SignedRecord[] = [];
-        for (let left = group; left.length;) {
-          const more = { value: false };
-          const part = (await this.fromOwners(shard, 'rec_get', { keys: left }, more)) ?? [];
-          found.push(...part);
-          const got = new Set(part.map((r) => r.key));
-          const rest = left.filter((k) => !got.has(k));
-          if (!more.value || rest.length === left.length) break;
-          left = rest;
+        for (let i = 0; i < group.length; i += 1000) {
+          let left = group.slice(i, i + 1000);
+          while (left.length) {
+            const more = { value: false };
+            const part = (await this.fromOwners(shard, 'rec_get', { keys: left }, more)) ?? [];
+            found.push(...part);
+            const got = new Set(part.map((r) => r.key));
+            const rest = left.filter((k) => !got.has(k));
+            left = more.value && rest.length < left.length ? rest : [];
+          }
         }
+        const asked = new Set(group);
         for (const r of found) {
-          if (group.includes(r.key) && (out.get(r.key)?.version ?? 0) < r.version)
-            out.set(r.key, r);
+          if (asked.has(r.key) && (out.get(r.key)?.version ?? 0) < r.version) out.set(r.key, r);
         }
         // A record we wrote a moment ago may not have reached the owners yet;
         // if they can't be reached, what we still hold is better than nothing.
