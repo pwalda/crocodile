@@ -597,6 +597,28 @@ describe('the app across a sharded network', () => {
   });
 });
 
+describe('large records between servers', () => {
+  it('a server joining catches up on records too large for one frame together', async () => {
+    const a = await server('A');
+    // Profiles with the largest avatars: about 350 KiB each, 10 MB in all.
+    const avatar = `data:image/png;base64,${'A'.repeat(Math.ceil(256 * 1024 * 1.37))}`;
+    const keys: string[] = [];
+    for (let i = 0; i < 30; i++) {
+      const id = createIdentity();
+      const r = signRecord(id, 'profile', recordKey.profile(id.userId), {
+        username: `big${i}`,
+        encKey: id.encPublicKey,
+        avatar,
+      });
+      expect(a.records.put(r, { fresh: true, origin: null }).accepted).toBe(true);
+      keys.push(r.key);
+    }
+    const b = await server('B', { meshPeers: [a.url] });
+    await converged([a, b]);
+    await waitFor(() => keys.every((k) => b.store.get(k)), 20_000, 'B holds every large record');
+  }, 60_000);
+});
+
 describe('records from other servers', () => {
   it('ignores a forged account deletion pushed by another server', async () => {
     const [x] = await network(2);

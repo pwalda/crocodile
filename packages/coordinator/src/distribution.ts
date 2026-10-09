@@ -18,7 +18,7 @@ import {
   type View,
 } from './placement';
 import type { PutResult } from './records';
-import { RpcFailure } from './util';
+import { RpcFailure, withinBytes } from './util';
 
 export interface DistributionConfig {
   /** Records we no longer own go once the live set has been stable this long. */
@@ -331,13 +331,15 @@ export class Distribution {
     shard: string,
     m: 'rec_get' | 'rec_list' | 'rec_term',
     p: unknown,
+    more?: { value: boolean },
   ): Promise<SignedRecord[] | null> {
-    const answers = await this.hub.mesh.gather<{ records: SignedRecord[] }>(
+    const answers = await this.hub.mesh.gather<{ records: SignedRecord[]; more?: boolean }>(
       this.others(shard),
       m,
       p,
     );
     if (answers.length === 0) return null;
+    if (more) more.value = answers.some((a) => a.more === true);
     // Only well-signed records count: an owner can't hand us a forged newer copy.
     const { valid } = this.sift(answers.flatMap((a) => a.records ?? []));
     const newest = new Map<string, SignedRecord>();
@@ -374,7 +376,17 @@ export class Distribution {
     }
     await Promise.all(
       [...ask].map(async ([shard, group]) => {
-        const found = (await this.fromOwners(shard, 'rec_get', { keys: group })) ?? [];
+        // An answer too large for one frame comes in parts.
+        const found: SignedRecord[] = [];
+        for (let left = group; left.length;) {
+          const more = { value: false };
+          const part = (await this.fromOwners(shard, 'rec_get', { keys: left }, more)) ?? [];
+          found.push(...part);
+          const got = new Set(part.map((r) => r.key));
+          const rest = left.filter((k) => !got.has(k));
+          if (!more.value || rest.length === left.length) break;
+          left = rest;
+        }
         for (const r of found) {
           if (group.includes(r.key) && (out.get(r.key)?.version ?? 0) < r.version)
             out.set(r.key, r);
@@ -437,15 +449,18 @@ export class Distribution {
       }
       case 'rec_get': {
         const { keys } = parsed.data as { keys: string[] };
-        return { records: keys.map((k) => store.get(k)).filter(Boolean) };
+        // As many as fit in one frame; the asker comes back for the rest.
+        const found = keys.map((k) => store.get(k)).filter((r) => r !== undefined);
+        const records = withinBytes(found);
+        return records.length < found.length ? { records, more: true } : { records };
       }
       case 'rec_list': {
         const { prefix, limit } = parsed.data as { prefix: string; limit?: number };
-        return { records: store.listPrefix(prefix, limit ?? 1000) };
+        return { records: withinBytes(store.listPrefix(prefix, limit ?? 1000)) };
       }
       case 'rec_term': {
         const { term, limit } = parsed.data as { term: string; limit?: number };
-        return { records: store.findByTerm(term, limit ?? 1000) };
+        return { records: withinBytes(store.findByTerm(term, limit ?? 1000)) };
       }
       case 'rec_store': {
         const { records } = parsed.data as { records: SignedRecord[] };
@@ -466,10 +481,12 @@ export class Distribution {
         const { buckets } = parsed.data as { buckets: number[] };
         const wanted = new Set(buckets);
         return {
-          keys: this.shared(from)
-            .filter((r) => wanted.has(bucketOf(r.key)))
-            .slice(0, 20_000)
-            .map((r) => ({ key: r.key, version: r.version })),
+          keys: withinBytes(
+            this.shared(from)
+              .filter((r) => wanted.has(bucketOf(r.key)))
+              .slice(0, 20_000)
+              .map((r) => ({ key: r.key, version: r.version })),
+          ),
         };
       }
       case 'watch': {
@@ -678,12 +695,22 @@ export class Distribution {
         .filter((k) => (store.get(k.key)?.version ?? 0) < k.version)
         .map((k) => k.key);
       if (send.length) await this.hub.mesh.handOver(target, send);
-      for (let i = 0; i < fetch.length; i += 500) {
+      // A large answer comes in parts: ask again for what didn't fit.
+      let left = fetch;
+      while (left.length) {
+        const ask = left.slice(0, 500);
         const { records } = await this.hub.mesh.request<{ records: SignedRecord[] }>(
           target,
           'rec_get',
-          { keys: fetch.slice(i, i + 500) },
+          { keys: ask },
         );
+        const got = new Set(records.map((r) => r.key));
+        const missing = ask.filter((k) => !got.has(k));
+        // What they no longer have isn't coming: stop once an answer adds nothing.
+        left =
+          missing.length < ask.length
+            ? [...missing, ...left.slice(ask.length)]
+            : left.slice(ask.length);
         await this.onReplicated(
           records.map((record) => ({ seq: 0, record })),
           target,

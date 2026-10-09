@@ -77,3 +77,39 @@ export class RpcFailure extends Error {
     super(message);
   }
 }
+
+/**
+ * Bytes of JSON one frame between servers may carry. Sealed (padded, then
+ * base64) it stays under LIMITS.wsMessageMaxBytes, which the receiving side
+ * enforces by closing the link.
+ */
+export const FRAME_BUDGET = 512 * 1024;
+
+const jsonBytes = (v: unknown) => Buffer.byteLength(JSON.stringify(v));
+
+/**
+ * Splits items into runs whose JSON fits in `budget` bytes and `max` items.
+ * A single item larger than the budget goes alone (records are smaller).
+ */
+export function chunkByBytes<T>(items: T[], budget = FRAME_BUDGET, max = Infinity): T[][] {
+  const out: T[][] = [];
+  let run: T[] = [];
+  let size = 0;
+  for (const item of items) {
+    const n = jsonBytes(item) + 1;
+    if (run.length && (size + n > budget || run.length >= max)) {
+      out.push(run);
+      run = [];
+      size = 0;
+    }
+    run.push(item);
+    size += n;
+  }
+  if (run.length) out.push(run);
+  return out;
+}
+
+/** The longest leading run of items that fits in `budget` bytes. */
+export function withinBytes<T>(items: T[], budget = FRAME_BUDGET): T[] {
+  return chunkByBytes(items, budget)[0] ?? [];
+}

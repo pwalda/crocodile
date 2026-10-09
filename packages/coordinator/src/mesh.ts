@@ -24,7 +24,7 @@ import {
 } from '@crocodile/protocol';
 import type { Coordinator } from './coordinator';
 import { fnv1a } from './election';
-import { RateLimiter, RpcFailure, sendJson, toWsUrl } from './util';
+import { RateLimiter, RpcFailure, chunkByBytes, sendJson, toWsUrl } from './util';
 
 interface Link {
   ws: WebSocket;
@@ -843,7 +843,13 @@ export class Mesh {
         const items = batch.filter(
           (i) => m.view.owns(peerId, i.record) || m.settled.owns(peerId, i.record),
         );
-        this.send(link, { t: 'records', items, upTo });
+        // Split so no frame is over the receiver's size limit (records reach 400 KiB).
+        const chunks = chunkByBytes(items);
+        if (!chunks.length) chunks.push([]);
+        for (const [i, chunk] of chunks.entries()) {
+          const last = i === chunks.length - 1;
+          this.send(link, { t: 'records', items: chunk, upTo: last ? upTo : chunk.at(-1)!.seq });
+        }
         link.sentUpTo = upTo;
         while (link.ws.readyState === link.ws.OPEN && link.ws.bufferedAmount > 4 * 1024 * 1024) {
           await new Promise((r) => setTimeout(r, 20));
@@ -885,9 +891,9 @@ export class Mesh {
 
   /** Send records to a server that has just become an owner (no cursor involved). */
   async handOver(serverId: string, records: SignedRecord[]) {
-    for (let i = 0; i < records.length; i += 200) {
-      const items = records.slice(i, i + 200).map((record) => ({ seq: 0, record }));
-      this.sendTo(serverId, { t: 'records', items, upTo: 0 });
+    const items = records.map((record) => ({ seq: 0, record }));
+    for (const chunk of chunkByBytes(items, undefined, 200)) {
+      this.sendTo(serverId, { t: 'records', items: chunk, upTo: 0 });
       const link = this.links.get(serverId);
       while (
         link &&
