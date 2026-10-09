@@ -282,6 +282,10 @@ const MAIL_AFTER_MS = 5000;
 const FRIEND_NOTE_RETRY_MS = 5000;
 /** And how often while connected, whoever it is owed to. */
 const FRIEND_NOTE_SWEEP_MS = 10 * 60_000;
+/** A caller rings again every 2.5 s at most: this long without a ring, it has gone. */
+const RING_SILENCE_MS = 8000;
+/** Time for a hang-up to go out before the call's connection closes. */
+const HANG_UP_FLUSH_MS = 200;
 
 /**
  * The whole client behind one object. UIs render `store` and call methods;
@@ -2354,6 +2358,7 @@ export class CrocodileClient extends Emitter<ClientEvents> {
   }
 
   private ringTimer?: ReturnType<typeof setInterval>;
+  private ringingTimer?: ReturnType<typeof setTimeout>;
 
   private ringLoop(sessionId: string) {
     clearInterval(this.ringTimer);
@@ -2379,7 +2384,7 @@ export class CrocodileClient extends Emitter<ClientEvents> {
   }
 
   private sendCallSignal(sessionId: string, action: 'ring' | 'accept' | 'decline' | 'end') {
-    this.sessions.get(sessionId)?.sendGroup({ type: 'call', action });
+    return this.sessions.get(sessionId)?.sendGroup({ type: 'call', action }) ?? false;
   }
 
   declineCall() {
@@ -2400,8 +2405,16 @@ export class CrocodileClient extends Emitter<ClientEvents> {
         this.sendCallSignal(sessionId, 'accept');
         return;
       }
-      if (!this.state.incomingCall)
-        this.store.set({ incomingCall: { sessionId, from, at: Date.now() } });
+      const ringing = this.state.incomingCall;
+      if (ringing && ringing.sessionId !== sessionId) return;
+      if (!ringing) this.store.set({ incomingCall: { sessionId, from, at: Date.now() } });
+      // A hang-up can be lost (the caller's app quit, say): stop when the rings do.
+      clearTimeout(this.ringingTimer);
+      this.ringingTimer = setTimeout(() => {
+        if (this.state.incomingCall?.sessionId === sessionId)
+          this.store.set({ incomingCall: null });
+      }, RING_SILENCE_MS);
+      this.ringingTimer.unref?.();
     } else if (action === 'accept') {
       if (this.state.outgoingCall?.sessionId === sessionId) this.store.set({ outgoingCall: null });
     } else if (action === 'decline') {
@@ -2439,7 +2452,10 @@ export class CrocodileClient extends Emitter<ClientEvents> {
     if (!sessionId) return;
     if (this.state.outgoingCall?.sessionId === sessionId) {
       this.store.set({ outgoingCall: null });
-      this.sendCallSignal(sessionId, 'end');
+      // Let the hang-up go out first: if we host the call, leaving closes the relay.
+      if (this.sendCallSignal(sessionId, 'end'))
+        await new Promise((r) => setTimeout(r, HANG_UP_FLUSH_MS));
+      if (this.state.voiceSession !== sessionId) return;
     }
     this.store.set({ voiceSession: null });
     const session = this.sessions.get(sessionId);
@@ -2485,6 +2501,7 @@ export class CrocodileClient extends Emitter<ClientEvents> {
     clearTimeout(this.mailTimer);
     clearTimeout(this.friendRetryTimer);
     clearInterval(this.friendSweepTimer);
+    clearTimeout(this.ringingTimer);
     await this.leaveVoice().catch(() => {});
     for (const s of this.sessions.values()) await s.leave().catch(() => {});
     this.link?.stop();

@@ -492,6 +492,45 @@ describe('calls', () => {
     expect(alice.state.errors.map((e) => e.message)).toContain('No answer');
     await waitFor(() => !bob.state.incomingCall, 6000, 'stops ringing for bob');
   });
+
+  it('the hang-up reaches the callee when the caller hosts the call', async () => {
+    const coord = await server();
+    const net = new FakeRelayNetwork();
+    const alice = await signUp(makeClient(net, coord, { ringTimeoutMs: 1500 }), 'alice');
+    // Bob can't host, so Alice's device is the relay: hanging up closes it.
+    const bob = await signUp(makeClient(net, coord, { canHost: false }), 'bob');
+    alice.voiceEngine = silentVoice();
+    await alice.addFriend(bob.userId);
+    await waitFor(() => bob.state.friends.incoming.includes(alice.userId), 12000);
+    await bob.addFriend(alice.userId);
+    await waitFor(() => alice.state.friends.friends.includes(bob.userId), 12000, 'friends');
+
+    await alice.callDm(bob.userId);
+    await waitFor(() => bob.state.incomingCall, 12000, 'bob rings');
+    const started = Date.now();
+    await waitFor(() => !alice.state.voiceSession, 6000, 'hung up');
+    await waitFor(() => !bob.state.incomingCall, 6000, 'stops ringing for bob');
+    // By the hang-up itself, not because the rings stopped.
+    expect(Date.now() - started).toBeLessThan(3000);
+  });
+
+  it('stops ringing when the caller goes quiet without hanging up', async () => {
+    const coord = await server();
+    const net = new FakeRelayNetwork();
+    const alice = await signUp(makeClient(net, coord), 'alice');
+    const bob = await signUp(makeClient(net, coord), 'bob');
+    alice.voiceEngine = silentVoice();
+    await alice.addFriend(bob.userId);
+    await waitFor(() => bob.state.friends.incoming.includes(alice.userId), 12000);
+    await bob.addFriend(alice.userId);
+    await waitFor(() => alice.state.friends.friends.includes(bob.userId), 12000, 'friends');
+
+    await alice.callDm(bob.userId);
+    await waitFor(() => bob.state.incomingCall, 12000, 'bob rings');
+    // Alice's app freezes: no more rings, and no hang-up either.
+    clearInterval((alice as unknown as { ringTimer: ReturnType<typeof setInterval> }).ringTimer);
+    await waitFor(() => !bob.state.incomingCall, 12000, 'stops ringing for bob');
+  }, 30_000);
 });
 
 describe('server list', () => {
