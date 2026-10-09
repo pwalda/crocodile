@@ -31,4 +31,23 @@ describe('voice frame keys in the worker', () => {
     expect(counterOf(scopes.get('conn-3')!.sender!.encrypt(frame))).toBe((counters[3]! + 1) >>> 0);
     keyring.dispose();
   });
+
+  it('takes the newer audio position from a key sent again, so a new connection can still decrypt', () => {
+    const alice = new GroupKeyring({ autoRatchet: false });
+    const bob = new GroupKeyring({ autoRatchet: false });
+    bob.addPeerKey('alice.d1', alice.exportMine());
+    // Twenty minutes of voice later: Alice's audio chain moved on, her text didn't.
+    for (let i = 0; i < 20; i++) alice.advanceAudio();
+    // Bob reconnects after a host failover and Alice sends her key again.
+    bob.addPeerKey('alice.d1', alice.exportMine());
+    const scopes = new FrameScopes();
+    scopes.update('alice', alice.frameKeys());
+    scopes.update('bob-after-failover', bob.frameKeys());
+    const frame = new Uint8Array(60);
+    const sent = scopes.get('alice')!.sender!.encrypt(frame);
+    const receiver = scopes.get('bob-after-failover')!.receivers.get(alice.kid)!;
+    expect(receiver.decrypt(sent)).toEqual(frame);
+    alice.dispose();
+    bob.dispose();
+  });
 });

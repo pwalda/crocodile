@@ -88,8 +88,16 @@ export class GroupKeyring extends Emitter<{ changed: FrameKeys; rotated: Exporte
     const kid = chains.kid >>> 0;
     const existing = this.peers.get(kid);
     if (existing && existing.peer !== peer) return false;
-    // Re-sent current state for a key we already track: keep our (newer) receiver.
-    if (existing && existing.text.gen >= chains.text.gen) return true;
+    // Re-sent current state for a key we already track: keep our (newer) text
+    // receiver, but take a newer audio position. Receivers for a new
+    // connection start from it, and can only skip a few generations ahead.
+    if (existing && existing.text.gen >= chains.text.gen) {
+      if (chains.audio.gen > existing.audio.gen) {
+        existing.audio = importChain(chains.audio);
+        this.emitChanged();
+      }
+      return true;
+    }
     const now = Date.now();
     for (const p of this.peers.values()) {
       if (p.peer === peer && p.kid !== kid && p.expiresAt === null) p.expiresAt = now + GRACE_MS;
