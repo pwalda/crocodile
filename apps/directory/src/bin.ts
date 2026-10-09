@@ -7,6 +7,7 @@ const directory = new Directory({
   port: Number(env.CROC_DIR_PORT ?? defaultDirectoryConfig.port),
   allowPrivateUrls: env.CROC_DIR_ALLOW_PRIVATE === '1',
   verifyReachability: env.CROC_DIR_VERIFY !== '0',
+  trustProxy: env.CROC_DIR_TRUST_PROXY === '1',
   statePath: env.CROC_DIR_STATE ?? '.crocodile-data/directory.json',
   log: (m) => console.log(`${new Date().toISOString()} [directory] ${m}`),
 });

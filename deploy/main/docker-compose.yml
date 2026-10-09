@@ -18,6 +18,10 @@ services:
     restart: unless-stopped
     ports:
       - '127.0.0.1:7400:7400'
+    environment:
+      # Behind the proxy (and on 127.0.0.1 only): take client addresses from
+      # X-Forwarded-For, so each server gets its own registration limit.
+      CROC_DIR_TRUST_PROXY: '1'
     volumes:
       - directory-data:/data
 

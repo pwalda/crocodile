@@ -21,6 +21,12 @@ export interface DirectoryConfig {
   allowPrivateUrls: boolean;
   /** Persist entries across restarts. */
   statePath?: string;
+  /** Read client addresses from X-Forwarded-For (only behind a proxy). */
+  trustProxy: boolean;
+  /** Registrations one address may send per minute. */
+  registrationsPerMinute: number;
+  /** Servers listed at most; new ones are refused past this. */
+  maxEntries: number;
   log?: (msg: string) => void;
 }
 
@@ -30,6 +36,10 @@ export const defaultDirectoryConfig: DirectoryConfig = {
   ttlMs: 3 * 60_000,
   verifyReachability: true,
   allowPrivateUrls: false,
+  trustProxy: false,
+  // A server registers once a minute; a few share an address at most.
+  registrationsPerMinute: 20,
+  maxEntries: 5000,
 };
 
 type Stored = DirectoryEntry & { lastSeen: number; verifiedAt: number };
@@ -47,6 +57,8 @@ export class Directory {
   private entries = new Map<string, Stored>();
   private app?: FastifyInstance;
   private saveTimer?: ReturnType<typeof setInterval>;
+  /** Registrations per client address in the current minute. */
+  private recent = new Map<string, { n: number; since: number }>();
 
   constructor(config: Partial<DirectoryConfig> = {}) {
     this.config = { ...defaultDirectoryConfig, ...config };
@@ -87,6 +99,8 @@ export class Directory {
     }
 
     const previous = this.entries.get(entry.server.id);
+    if (!previous && this.liveCount(now) >= this.config.maxEntries)
+      return { ok: false, status: 503, error: 'the directory is full' };
     let verifiedAt = previous && previous.server.url === entry.server.url ? previous.verifiedAt : 0;
     if (this.config.verifyReachability && now - verifiedAt > REVERIFY_MS) {
       const reachable = await probe(entry.server.url, entry.server.id);
@@ -102,8 +116,33 @@ export class Directory {
     return { ok: true };
   }
 
+  private liveCount(now: number) {
+    let n = 0;
+    for (const [id, e] of this.entries) {
+      if (now - e.lastSeen < this.config.ttlMs) n++;
+      else this.entries.delete(id);
+    }
+    return n;
+  }
+
+  /** Whether an address may register again now (each one also costs a probe). */
+  private allow(ip: string, now = Date.now()) {
+    const r = this.recent.get(ip);
+    if (!r || now - r.since >= 60_000) {
+      if (this.recent.size > 100_000) this.recent.clear();
+      this.recent.set(ip, { n: 1, since: now });
+      return true;
+    }
+    return ++r.n <= this.config.registrationsPerMinute;
+  }
+
   async start(): Promise<this> {
-    const app = Fastify({ logger: false, bodyLimit: 64 * 1024 });
+    const app = Fastify({
+      logger: false,
+      bodyLimit: 64 * 1024,
+      // Only the proxy's own hop: what the client put in the header is not trusted.
+      trustProxy: this.config.trustProxy ? (_address: string, hop: number) => hop < 1 : false,
+    });
     this.app = app;
     app.addHook('onSend', async (_req, reply) => {
       reply.header('access-control-allow-origin', '*');
@@ -119,6 +158,8 @@ export class Directory {
       return this.listing();
     });
     app.post(DIRECTORY_PATHS.register, async (req, reply) => {
+      if (!this.allow(req.ip))
+        return reply.code(429).send({ error: 'too many registrations; try again in a minute' });
       const result = await this.register(req.body);
       if (!result.ok) return reply.code(result.status).send({ error: result.error });
       return { ok: true, servers: this.listing().servers.length };
@@ -165,20 +206,63 @@ async function probe(baseUrl: string, expectedId: string): Promise<boolean> {
 }
 
 export function isPrivateHost(hostname: string): boolean {
-  const h = hostname.replace(/^\[|\]$/g, '').toLowerCase();
+  const h = hostname
+    .replace(/^\[|\]$/g, '')
+    .toLowerCase()
+    .replace(/\.$/, '');
   if (h === 'localhost' || h.endsWith('.local') || h.endsWith('.localhost')) return true;
   const v4 = h.match(/^(\d+)\.(\d+)\.(\d+)\.(\d+)$/);
-  if (v4) {
-    const [a, b] = [Number(v4[1]), Number(v4[2])];
-    return (
-      a === 10 ||
-      a === 127 ||
-      a === 0 ||
-      (a === 169 && b === 254) ||
-      (a === 172 && b >= 16 && b <= 31) ||
-      (a === 192 && b === 168) ||
-      (a === 100 && b >= 64 && b <= 127)
-    );
+  if (v4) return isPrivateV4(Number(v4[1]), Number(v4[2]));
+  // A name, not an address (fdroid.example.org is a public name).
+  if (!h.includes(':')) return false;
+  const g = ipv6Groups(h);
+  if (!g) return true;
+  if (g.every((x) => x === 0)) return true; // ::
+  if (g.slice(0, 7).every((x) => x === 0) && g[7] === 1) return true; // ::1
+  const first = g[0]!;
+  if ((first & 0xfe00) === 0xfc00) return true; // unique local fc00::/7
+  if ((first & 0xffc0) === 0xfe80) return true; // link-local fe80::/10
+  if ((first & 0xff00) === 0xff00) return true; // multicast
+  // An IPv4 address inside IPv6: mapped (::ffff:a.b.c.d), compatible
+  // (::a.b.c.d) or NAT64 (64:ff9b::a.b.c.d) reaches that IPv4 address.
+  const embedded =
+    (g.slice(0, 5).every((x) => x === 0) && (g[5] === 0xffff || g[5] === 0)) ||
+    (first === 0x64 && g[1] === 0xff9b && g.slice(2, 6).every((x) => x === 0));
+  if (embedded) return isPrivateV4(g[6]! >> 8, g[6]! & 0xff);
+  return false;
+}
+
+function isPrivateV4(a: number, b: number): boolean {
+  return (
+    a === 10 ||
+    a === 127 ||
+    a === 0 ||
+    a >= 224 || // multicast and reserved
+    (a === 169 && b === 254) ||
+    (a === 172 && b >= 16 && b <= 31) ||
+    (a === 192 && b === 168) ||
+    (a === 100 && b >= 64 && b <= 127) ||
+    (a === 198 && (b === 18 || b === 19))
+  );
+}
+
+/** The eight 16-bit groups of an IPv6 address, or null if it isn't one. */
+function ipv6Groups(h: string): number[] | null {
+  let s = h.replace(/%.*$/, '');
+  const dotted = s.match(/^(.*:)(\d+)\.(\d+)\.(\d+)\.(\d+)$/);
+  if (dotted) {
+    const [a, b, c, d] = dotted.slice(2).map(Number) as [number, number, number, number];
+    if ([a, b, c, d].some((x) => x > 255)) return null;
+    s = `${dotted[1]}${((a << 8) | b).toString(16)}:${((c << 8) | d).toString(16)}`;
   }
-  return h === '::1' || h.startsWith('fc') || h.startsWith('fd') || h.startsWith('fe80');
+  const halves = s.split('::');
+  if (halves.length > 2) return null;
+  const parse = (part: string) => (part ? part.split(':') : []);
+  const head = parse(halves[0]!);
+  const tail = halves.length === 2 ? parse(halves[1]!) : [];
+  const fill = 8 - head.length - tail.length;
+  if (halves.length === 2 ? fill < 1 : fill !== 0) return null;
+  const groups = [...head, ...Array<string>(halves.length === 2 ? fill : 0).fill('0'), ...tail];
+  if (!groups.every((x) => /^[0-9a-f]{1,4}$/.test(x))) return null;
+  return groups.map((x) => parseInt(x, 16));
 }
