@@ -172,7 +172,32 @@ await a.page.getByRole('button', { name: /Requests/ }).click();
 await a.page.getByText('Wants to be friends').waitFor({ timeout: 10_000 });
 await shot(a.page, '10-friend-request');
 
+// A call shows as ringing, not as on, until the friend picks up.
+await a.page.getByRole('button', { name: 'Accept' }).click();
+await a.page.getByRole('button', { name: /^All/ }).click();
+await a.page.getByRole('button', { name: 'Call', exact: true }).click();
+await a.page.getByText('Ringing…').waitFor({ timeout: 15_000 });
+await b.page.getByText('is calling you').waitFor({ timeout: 15_000 });
+await a.page.waitForTimeout(1500);
+if (!(await a.page.getByText('Ringing…').isVisible()))
+  throw new Error('the call looks answered before the friend picked up');
+await shot(a.page, '10b-ringing');
+await b.page.getByRole('button', { name: 'Accept' }).click();
+await a.page.getByText('Ringing…').waitFor({ state: 'detached', timeout: 15_000 });
+await a.page.waitForFunction(() => /\b0:0\d\b/.test(document.body.innerText), undefined, {
+  timeout: 15_000,
+});
+await a.page.getByRole('button', { name: 'Leave call' }).click();
+
 // Command palette + settings.
+// The search button shows a search icon and this system's shortcut, not the Mac ⌘ key.
+const jump = a.page.getByRole('button', { name: /Jump to/ });
+if (
+  (await jump.locator('svg.lucide-search').count()) !== 1 ||
+  (await jump.locator('svg.lucide-command').count()) !== 0 ||
+  !(await jump.innerText()).includes('Ctrl K')
+)
+  throw new Error('the search button should show a search icon and "Ctrl K" off the Mac');
 await a.page.keyboard.press('Control+K');
 await a.page.waitForTimeout(200);
 await shot(a.page, '11-palette');
