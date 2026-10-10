@@ -283,7 +283,10 @@ describe('client', () => {
     bob.store.subscribe(() => {
       if (!bob.state.sessions[sid]?.peers.includes(alice.userId)) dropped = true;
     });
+    const started = net.started;
     net.crashRelayProcessOf(alice.userId);
+    // One relay started in place of the one that died.
+    expect(net.started).toBe(started + 1);
     // Alice runs a new relay for the same session: no new election needed.
     await waitFor(
       () => dropped && bob.state.sessions[sid]?.peers.includes(alice.userId),

@@ -16,10 +16,13 @@ import {
 export class FakeRelayNetwork {
   private relays = new Map<string, FakeRelay>();
   private onFailed = new Map<string, (reason: string) => void>();
+  /** Relays started so far. */
+  started = 0;
 
   adapter(): HostRelayAdapter {
     return {
       start: async (opts) => {
+        this.started++;
         const relay = new FakeRelay(opts.hostPeer, opts.members);
         const key = `${opts.sessionId}|${opts.epoch}|${opts.hostPeer}`;
         this.relays.set(key, relay);
@@ -59,7 +62,8 @@ export class FakeRelayNetwork {
 
   /** The host's relay process dies; the app itself (and its link) carry on. */
   crashRelayProcessOf(userId: string) {
-    for (const [key, relay] of this.relays) {
+    // The relays running now: those started again from onFailed live on.
+    for (const [key, relay] of [...this.relays]) {
       if (key.split('|')[2]!.startsWith(`${userId}.`)) {
         this.relays.delete(key);
         relay.close();
@@ -70,7 +74,7 @@ export class FakeRelayNetwork {
 
   /** Simulate the host vanishing without a goodbye (crash, network loss). */
   killRelaysOf(userId: string) {
-    for (const [key, relay] of this.relays) {
+    for (const [key, relay] of [...this.relays]) {
       if (key.split('|')[2]!.startsWith(`${userId}.`)) {
         this.relays.delete(key);
         relay.close();
