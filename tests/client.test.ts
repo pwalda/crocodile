@@ -444,6 +444,29 @@ describe('calls', () => {
       frameCrypto: () => undefined,
     }) as unknown as VoiceEngine;
 
+  it('signing out during a call ends it and turns the microphone off', async () => {
+    const coord = await server();
+    const net = new FakeRelayNetwork();
+    const alice = await signUp(makeClient(net, coord), 'alice');
+    const bob = await signUp(makeClient(net, coord), 'bob');
+    let micOn = false;
+    alice.voiceEngine = {
+      ...silentVoice(),
+      start: async () => void (micOn = true),
+      stop: () => void (micOn = false),
+    } as unknown as VoiceEngine;
+    await alice.addFriend(bob.userId);
+    await waitFor(() => bob.state.friends.incoming.includes(alice.userId), 12000);
+    await bob.addFriend(alice.userId);
+    await waitFor(() => alice.state.friends.friends.includes(bob.userId), 12000, 'friends');
+    await alice.callDm(bob.userId);
+    expect(micOn).toBe(true);
+    await alice.signOut();
+    expect(micOn).toBe(false);
+    expect(alice.state.voiceSession).toBeNull();
+    expect(alice.state.outgoingCall).toBeNull();
+  });
+
   it('falls back to the relay even while other members keep coming and going', async () => {
     const coord = await server({ relay: { enabled: true, maxUsers: 5 }, stunPort: 0 });
     const net = new FakeRelayNetwork();

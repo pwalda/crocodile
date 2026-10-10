@@ -583,6 +583,12 @@ export class CrocodileClient extends Emitter<ClientEvents> {
 
   /** Clears this device's copy of the account, including stored messages. */
   private async forgetLocalAccount({ deleted }: { deleted: boolean }) {
+    // A call in progress ends with the account: microphone off, nothing ringing.
+    clearInterval(this.ringTimer);
+    clearTimeout(this.ringingTimer);
+    const voice = this.state.voiceSession;
+    if (voice) this.voiceEngine?.stopSession(voice);
+    this.voiceEngine?.stop();
     await Promise.all([...this.sessions.values()].map((s) => s.leave().catch(() => {})));
     this.sessions.clear();
     this.link?.stop();
@@ -618,6 +624,9 @@ export class CrocodileClient extends Emitter<ClientEvents> {
       messages: {},
       dms: [],
       devices: [],
+      voiceSession: null,
+      outgoingCall: null,
+      incomingCall: null,
       accountDeleted: deleted,
     });
   }
