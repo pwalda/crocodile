@@ -129,7 +129,7 @@ describe('server hello', () => {
       ...(impl ? { WebSocketImpl: impl } : {}),
     });
 
-  it('the STUN servers and operator come signed, and a changed list is refused', async () => {
+  it('the STUN servers and operator come signed, and a changed list is not used', async () => {
     const c = await server({
       extraStun: ['stun:stun.example.org:3478'],
       operatorContact: 'ops@example.org',
@@ -141,7 +141,10 @@ describe('server hello', () => {
 
     // Someone on the path points the app at their own STUN server.
     const evil = tampered((h) => ({ ...h, stun: ['stun:watching.example:3478'] }));
-    await expect(connect(c, evil)).rejects.toThrow(/did not sign/);
+    const changed = await connect(c, evil);
+    expect(changed.stun).toEqual([]);
+    expect(changed.operator).toBeUndefined();
+    changed.close();
     // A server from before the full signature: its unsigned list isn't used.
     const old = tampered(({ sigFull: _, ...h }) => ({
       ...h,
