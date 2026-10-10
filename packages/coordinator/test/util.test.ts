@@ -8,6 +8,9 @@ describe('chunkByBytes', () => {
     const chunks = chunkByBytes(items, 350);
     expect(chunks.flat()).toEqual(items);
     for (const c of chunks) expect(Buffer.byteLength(JSON.stringify(c))).toBeLessThanOrEqual(350);
+    // Brackets included: two of these make 9 bytes, one more than allowed.
+    expect(chunkByBytes(['x', 'x'], 8)).toEqual([['x'], ['x']]);
+    expect(chunkByBytes(['x', 'x'], 9)).toEqual([['x', 'x']]);
   });
 
   it('caps the count too, and sends an oversized item alone', () => {

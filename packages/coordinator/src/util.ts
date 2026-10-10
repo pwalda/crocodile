@@ -94,13 +94,14 @@ const jsonBytes = (v: unknown) => Buffer.byteLength(JSON.stringify(v));
 export function chunkByBytes<T>(items: T[], budget = FRAME_BUDGET, max = Infinity): T[][] {
   const out: T[][] = [];
   let run: T[] = [];
-  let size = 0;
+  // A run's JSON: its items, a comma or bracket after each, and "[" first.
+  let size = 1;
   for (const item of items) {
     const n = jsonBytes(item) + 1;
     if (run.length && (size + n > budget || run.length >= max)) {
       out.push(run);
       run = [];
-      size = 0;
+      size = 1;
     }
     run.push(item);
     size += n;
