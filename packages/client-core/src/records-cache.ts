@@ -12,7 +12,13 @@ const KV_KEY = 'records-cache';
  */
 export class RecordCache extends Emitter<{ changed: SignedRecord; wanted: string[] }> {
   private map = new Map<string, SignedRecord>();
-  private pending: SignedRecord[] = [];
+  /** Records waiting for one they depend on, and the keys each waits for. */
+  private waiting = new Map<SignedRecord, string[]>();
+  /** The same records by their own key (one version each). */
+  private waitingByKey = new Map<string, SignedRecord>();
+  /** The same records by the key they wait for. */
+  private waitingFor = new Map<string, Set<SignedRecord>>();
+  private static readonly MAX_WAITING = 2000;
   private saveTimer?: ReturnType<typeof setTimeout>;
 
   constructor(private readonly kv: KeyValueStore) {
@@ -38,7 +44,9 @@ export class RecordCache extends Emitter<{ changed: SignedRecord; wanted: string
   reset() {
     clearTimeout(this.saveTimer);
     this.map.clear();
-    this.pending = [];
+    this.waiting.clear();
+    this.waitingByKey.clear();
+    this.waitingFor.clear();
   }
 
   /**
@@ -69,10 +77,11 @@ export class RecordCache extends Emitter<{ changed: SignedRecord; wanted: string
     });
     if (!res.ok) {
       if (res.retryable) {
-        this.pending.push(record);
-        if (this.pending.length > 2000) this.pending.shift();
         const wanted = dependenciesOf(record).filter((k) => !this.map.has(k));
-        if (wanted.length) this.emit('wanted', wanted);
+        if (wanted.length) {
+          this.wait(record, wanted);
+          this.emit('wanted', wanted);
+        }
       }
       return false;
     }
@@ -81,11 +90,49 @@ export class RecordCache extends Emitter<{ changed: SignedRecord; wanted: string
       this.dropAccount(record.key.slice('profile:'.length));
     if (persist) this.scheduleSave();
     this.emit('changed', record);
-    if (this.pending.length) {
-      const retry = this.pending.splice(0);
+    // Only what waited for this record is tried again, never the whole queue.
+    const ready = this.waitingFor.get(record.key);
+    if (ready) {
+      const retry = [...ready].sort(
+        (a, b) => RECORD_KIND_ORDER[a.kind] - RECORD_KIND_ORDER[b.kind],
+      );
+      for (const r of retry) this.unwait(r);
       for (const r of retry) this.ingest(r, persist);
     }
     return true;
+  }
+
+  /** How many records wait for one they depend on (tests). */
+  get waitingCount() {
+    return this.waiting.size;
+  }
+
+  private wait(record: SignedRecord, keys: string[]) {
+    const other = this.waitingByKey.get(record.key);
+    if (other && other.version >= record.version) return;
+    if (other) this.unwait(other);
+    this.waiting.set(record, keys);
+    this.waitingByKey.set(record.key, record);
+    for (const k of keys) {
+      let set = this.waitingFor.get(k);
+      if (!set) this.waitingFor.set(k, (set = new Set()));
+      set.add(record);
+    }
+    // Oldest first out.
+    while (this.waiting.size > RecordCache.MAX_WAITING)
+      this.unwait(this.waiting.keys().next().value as SignedRecord);
+  }
+
+  private unwait(record: SignedRecord) {
+    const keys = this.waiting.get(record);
+    if (!keys) return;
+    this.waiting.delete(record);
+    if (this.waitingByKey.get(record.key) === record) this.waitingByKey.delete(record.key);
+    for (const k of keys) {
+      const set = this.waitingFor.get(k);
+      set?.delete(record);
+      if (set?.size === 0) this.waitingFor.delete(k);
+    }
   }
 
   /** A deleted account: drop its other records, as servers do. */
