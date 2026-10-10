@@ -279,6 +279,10 @@ const APP_VERSION_FALLBACK = '0.1.0';
 const MAX_AHEAD_MS = 5 * 60_000;
 /** How long direct delivery gets before an opted-in DM goes to a mailbox. */
 const MAIL_AFTER_MS = 5000;
+/** Plaintext bytes of messages in one mailbox box. */
+const MAIL_BOX_BYTES = 48 * 1024;
+/** Bytes of boxes in one mail.put request. */
+const MAIL_REQUEST_BYTES = 512 * 1024;
 /** How soon to retry a note owed to someone who just came online. */
 const FRIEND_NOTE_RETRY_MS = 5000;
 /** And how often while connected, whoever it is owed to. */
@@ -907,8 +911,10 @@ export class CrocodileClient extends Emitter<ClientEvents> {
         const targets = await this.mailTargets([other, me]);
         if (targets.length === 0) continue;
         const items: { to: string; box: SealedBox }[] = [];
-        for (let i = 0; i < pending.length; i += 50) {
-          const chunk = pending.slice(i, i + 50);
+        // A server takes boxes of up to 96 KiB: sealed and encoded, 48 KiB of
+        // messages stays well under that.
+        const size = (m: ChatMessage) => utf8.encode(JSON.stringify(m)).length + 1;
+        for (const chunk of chunksBySize(pending, MAIL_BOX_BYTES, size)) {
           const plaintext = utf8.encode(JSON.stringify({ type: 'mail', messages: chunk }));
           for (const t of targets) {
             items.push({
@@ -917,9 +923,10 @@ export class CrocodileClient extends Emitter<ClientEvents> {
             });
           }
         }
-        for (let i = 0; i < items.length; i += 20) {
-          await link.request('mail.put', { items: items.slice(i, i + 20) });
-        }
+        // At most 20 boxes a request, and well under the 1 MiB frame limit.
+        const boxSize = (it: { box: SealedBox }) => it.box.ct.length + 1024;
+        for (const part of chunksBySize(items, MAIL_REQUEST_BYTES, boxSize, 20))
+          await link.request('mail.put', { items: part });
         const ids = pending.map((m) => m.id);
         this.outbox.markMailed(ids);
         const mailed = new Set(ids);
@@ -2594,5 +2601,24 @@ export function foldEdits(messages: MessageView[]): MessageView[] {
 function chunks<T>(items: T[], size: number): T[][] {
   const out: T[][] = [];
   for (let i = 0; i < items.length; i += size) out.push(items.slice(i, i + size));
+  return out;
+}
+
+/** Runs of items within `max` total size (and `count` items); a larger item goes alone. */
+function chunksBySize<T>(items: T[], max: number, size: (t: T) => number, count = Infinity): T[][] {
+  const out: T[][] = [];
+  let run: T[] = [];
+  let total = 0;
+  for (const item of items) {
+    const n = size(item);
+    if (run.length && (total + n > max || run.length >= count)) {
+      out.push(run);
+      run = [];
+      total = 0;
+    }
+    run.push(item);
+    total += n;
+  }
+  if (run.length) out.push(run);
   return out;
 }
