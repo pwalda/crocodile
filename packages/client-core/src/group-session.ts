@@ -264,7 +264,6 @@ export class GroupSession extends Emitter<GroupSessionEvents> {
     const adapter = this.ctx.platform.relay;
     if (!adapter) return;
     const sessionId = this.sessionId;
-    let hosting: { epoch: number; handle: Promise<RelayHandle | null> } | undefined;
     const handle = adapter
       .start({
         sessionId,
@@ -286,7 +285,7 @@ export class GroupSession extends Emitter<GroupSessionEvents> {
         onFailed: (reason) => {
           // Members reconnect to a fresh relay at the same epoch; a host whose
           // relay keeps dying stops, and they report it to get another host.
-          if (this.left || this.hosting !== hosting || this.state?.host !== this.me) return;
+          if (this.left || this.hosting?.handle !== handle || this.state?.host !== this.me) return;
           const now = Date.now();
           this.relayRestarts = this.relayRestarts.filter((t) => now - t < 60_000);
           this.ctx.log('relay stopped', { sessionId, reason, restarts: this.relayRestarts.length });
@@ -299,8 +298,7 @@ export class GroupSession extends Emitter<GroupSessionEvents> {
         this.ctx.log('failed to start relay', { err: String(err) });
         return null;
       });
-    hosting = { epoch: state.epoch, handle };
-    this.hosting = hosting;
+    this.hosting = { epoch: state.epoch, handle };
     this.ctx.log('hosting relay', { sessionId, epoch: state.epoch });
     const early = this.earlyRelaySignals.filter((s) => s.data.epoch === state.epoch);
     this.earlyRelaySignals = [];
