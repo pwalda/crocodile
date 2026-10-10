@@ -278,10 +278,18 @@ describe('client', () => {
     await waitFor(() => bob.state.sessions[sid]?.peers.includes(alice.userId), 12000, 'connected');
     const epoch = bob.state.sessions[sid]!.epoch;
 
+    // Seen as it happens: the relay can be back before a poll would notice.
+    let dropped = false;
+    bob.store.subscribe(() => {
+      if (!bob.state.sessions[sid]?.peers.includes(alice.userId)) dropped = true;
+    });
     net.crashRelayProcessOf(alice.userId);
-    await waitFor(() => !bob.state.sessions[sid]?.peers.includes(alice.userId), 5000, 'dropped');
     // Alice runs a new relay for the same session: no new election needed.
-    await waitFor(() => bob.state.sessions[sid]?.peers.includes(alice.userId), 5000, 'back');
+    await waitFor(
+      () => dropped && bob.state.sessions[sid]?.peers.includes(alice.userId),
+      5000,
+      'dropped and back',
+    );
     expect(bob.state.sessions[sid]!.epoch).toBe(epoch);
     await alice.sendMessage(ch, 'still here');
     await waitFor(() => bodies(bob, ch).includes('still here'), 5000, 'delivered');
