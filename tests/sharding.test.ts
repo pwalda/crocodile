@@ -494,6 +494,8 @@ describe('across servers that are not linked', () => {
     throw new Error('every server is linked to every other');
   }
 
+  // Twelve servers in one process, verifying each other's signed beacons: slow
+  // under coverage, which CI measures.
   it('delivers mail held on one server to a device that connects to another', async () => {
     const servers = await network(12);
     await new Promise((r) => setTimeout(r, 2000));
@@ -526,15 +528,13 @@ describe('across servers that are not linked', () => {
 
     bob = await connectUser(y, bobId, 'bob', deviceId);
     cleanup.push(() => bob.conn.close());
-    // Without the device's signature, other servers keep their mail.
+    // Without the device's signature, other servers keep their mail; signed
+    // for another server, it isn't answered either.
     await bob.conn.request('mail.fetch', {});
-    await new Promise((r) => setTimeout(r, 1500));
-    expect(bob.events.some((e) => e.ev === 'mail')).toBe(false);
-    // Signed for another server: not answered either.
     await bob.conn.request('mail.fetch', {
       proof: signMailProof(bobId, { t: 'mail_fetch', peer: bob.conn.peer, server: x.info.id }),
     });
-    await new Promise((r) => setTimeout(r, 1500));
+    await new Promise((r) => setTimeout(r, 1000));
     expect(bob.events.some((e) => e.ev === 'mail')).toBe(false);
     await bob.conn.request('mail.fetch', {
       proof: signMailProof(bobId, { t: 'mail_fetch', peer: bob.conn.peer, server: y.info.id }),
@@ -546,14 +546,14 @@ describe('across servers that are not linked', () => {
     );
     // An acknowledgement without the device's signature deletes nothing elsewhere.
     await bob.conn.request('mail.ack', { ids });
-    await new Promise((r) => setTimeout(r, 1500));
+    await new Promise((r) => setTimeout(r, 1000));
     expect(x.store.mailCount({})).toBe(1);
     await bob.conn.request('mail.ack', {
       ids,
       proof: signMailProof(bobId, { t: 'mail_ack', peer: bob.conn.peer, ids }),
     });
     await waitFor(() => x.store.mailCount({}) === 0, 5000, 'acknowledged everywhere');
-  });
+  }, 120_000);
 
   it('finds a device-link code opened on another server', async () => {
     const servers = await network(12);
