@@ -41,16 +41,20 @@ export async function probeNetwork(
   const hostIps = new Set<string>();
   const mapped = new Set<string>();
   const mappedIps = new Set<string>();
-  /** Local sockets whose STUN request failed; `unattributed` if one didn't say. */
-  const failed = new Set<string>();
+  /** The mappings each local socket got, when the candidate says which socket. */
+  const bySocket = new Map<string, Set<string>>();
+  /** STUN requests that failed, per local socket; `unattributed` if one didn't say. */
+  const failed = new Map<string, number>();
   let unattributed = false;
   let complete = false;
   await new Promise<void>((resolve) => {
     const timer = setTimeout(resolve, timeoutMs);
     pc.onicecandidateerror = (ev) => {
       const e = ev as RTCPeerConnectionIceErrorEvent;
-      if (e.address && e.port) failed.add(`${e.address}:${e.port}`);
-      else unattributed = true;
+      if (e.address && e.port) {
+        const socket = `${e.address}:${e.port}`;
+        failed.set(socket, (failed.get(socket) ?? 0) + 1);
+      } else unattributed = true;
     };
     pc.onicecandidate = (ev) => {
       if (!ev.candidate) {
@@ -71,6 +75,21 @@ export async function probeNetwork(
       if (type === 'srflx') {
         mapped.add(`${ip}:${port}`);
         mappedIps.add(ip);
+        // Which local socket it maps (browsers often hide it: 0.0.0.0 0).
+        const raddr = parts[parts.indexOf('raddr') + 1];
+        const rport = parts[parts.indexOf('rport') + 1];
+        if (
+          parts.includes('raddr') &&
+          raddr &&
+          rport &&
+          rport !== '0' &&
+          !/^(0\.0\.0\.0|::)$/.test(raddr)
+        ) {
+          const socket = `${raddr}:${rport}`;
+          let set = bySocket.get(socket);
+          if (!set) bySocket.set(socket, (set = new Set()));
+          set.add(`${ip}:${port}`);
+        }
       }
     };
     void pc.createOffer().then((o) => pc.setLocalDescription(o));
@@ -90,9 +109,21 @@ export async function probeNetwork(
   }
   if ([...mappedIps].some((ip) => hostIps.has(ip))) return { nat: 'open', udp: true };
   if (servers.length < 2) return { nat: 'unknown', udp: true };
-  // More public mappings than local sockets: the NAT maps each destination
-  // separately.
-  return { nat: mapped.size > Math.max(1, hosts.size) ? 'symmetric' : 'cone', udp: true };
+  const failures = (socket: string) => failed.get(socket) ?? 0;
+  // Two mappings of one socket: the NAT maps each destination separately.
+  if (bySocket.size > 0) {
+    if ([...bySocket.values()].some((m) => m.size > 1)) return { nat: 'symmetric', udp: true };
+    // One mapping is a cone only if both servers answered that socket.
+    const compared = [...bySocket.keys()].some((socket) => failures(socket) === 0);
+    return { nat: compared && !unattributed ? 'cone' : 'unknown', udp: true };
+  }
+  // Mappings not tied to sockets: compare their number with the sockets that
+  // got any answer (a socket every request failed on contributes none).
+  const answered = [...hosts].filter((h) => failures(h) < servers.length).length;
+  if (mapped.size > Math.max(1, answered)) return { nat: 'symmetric', udp: true };
+  // A socket only one server answered can't show whether its mapping changes.
+  const partly = [...hosts].some((h) => failures(h) > 0 && failures(h) < servers.length);
+  return { nat: partly || unattributed ? 'unknown' : 'cone', udp: true };
 }
 
 /**

@@ -99,6 +99,53 @@ describe('network check', () => {
     ).toBe('good');
   });
 
+  it('judges each socket by its own answers, not by totals', async () => {
+    const via = (ip: string, port: number, from: string, fromPort: number) =>
+      `candidate:2 1 udp 1686052607 ${ip} ${port} typ srflx raddr ${from} rport ${fromPort}`;
+    const twoSockets = [host('10.0.0.2', 50000), host('192.168.5.3', 50002)];
+    const secondFails = [
+      { address: '192.168.5.3', port: 50002 },
+      { address: '192.168.5.3', port: 50002 },
+    ];
+    // One interface gets nowhere; the other gets a different mapping per
+    // server: a symmetric NAT, though there are as many mappings as sockets.
+    expect(
+      (
+        await check({
+          candidates: [...twoSockets, srflx('203.0.113.9', 40001), srflx('203.0.113.9', 40777)],
+          errors: secondFails,
+        })
+      ).probe.nat,
+    ).toBe('symmetric');
+    // The same, where the browser says which socket each mapping is of.
+    expect(
+      (
+        await check({
+          candidates: [
+            ...twoSockets,
+            via('203.0.113.9', 40001, '10.0.0.2', 50000),
+            via('203.0.113.9', 40777, '10.0.0.2', 50000),
+          ],
+          errors: secondFails,
+        })
+      ).probe.nat,
+    ).toBe('symmetric');
+    // Only one server answered: one mapping proves nothing either way.
+    expect(
+      (
+        await check({
+          candidates: [host('10.0.0.2'), srflx('203.0.113.9', 40001)],
+          errors: [{ address: '10.0.0.2', port: 50000 }],
+        })
+      ).probe.nat,
+    ).toBe('unknown');
+    // Both answered the socket with one mapping: a cone NAT.
+    expect(
+      (await check({ candidates: [...twoSockets, via('203.0.113.9', 40001, '10.0.0.2', 50000)] }))
+        .verdict,
+    ).toBe('good');
+  });
+
   it("doesn't call a network blocked because one of its interfaces can't reach the server", async () => {
     // Public IPv4 (its answer dropped as a duplicate) next to IPv6 that can't
     // reach the IPv4-only server.
