@@ -180,9 +180,9 @@ function randomCounter(): number {
 /**
  * Encrypts outgoing voice frames with the audio chain's current message key.
  * The AES-GCM nonce is the key's salt XOR a per-frame counter, so a counter
- * must never repeat under one key. It starts at a random point, so a sender
- * rebuilt from the same key state (a new connection, a restarted worker)
- * doesn't replay the nonces of the one before it.
+ * must never repeat under one key: callers never build two senders for one
+ * chain state (the app moves its audio chain on for each new connection).
+ * The counter also starts at a random point, as a second line of defence.
  */
 export class AudioSender {
   private mk: MessageKey;
