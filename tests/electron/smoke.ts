@@ -121,6 +121,9 @@ await b.page.getByRole('button', { name: 'Join a space' }).click();
 await b.page.getByPlaceholder('croc://join/abcd2345').fill(inviteText);
 await b.page.getByRole('button', { name: 'Join space' }).click();
 await b.page.getByText('This is the start of general').waitFor({ timeout: 15_000 });
+// Only the owner can make invites: Bob isn't offered any.
+if (await b.page.getByRole('button', { name: 'Invite people' }).count())
+  throw new Error('a member who does not own the space is offered invites');
 
 // Chat both ways.
 await a.page.waitForFunction(
@@ -343,6 +346,24 @@ await d.page.getByText('Your account was deleted').waitFor({ timeout: 15_000 });
 await d.page.getByText("I'm new here").waitFor();
 await shot(d.page, '22-account-deleted');
 await d.app.close();
+
+// Deleting a space: confirmed by typing its name.
+await a.page.getByTitle('Create or join a space').click();
+await a.page.getByText('Create my own').click();
+await a.page.getByRole('dialog').getByRole('textbox').fill('Scratch');
+await a.page.getByRole('button', { name: 'Create' }).click();
+await a.page.getByText('This is the start of general').waitFor({ timeout: 15_000 });
+await a.page.getByLabel('Space menu').click();
+await a.page.getByText('Space settings').click();
+await a.page.getByRole('button', { name: 'Delete space' }).click();
+const deleteSpace = a.page.getByRole('dialog').getByRole('button', { name: 'Delete space' });
+if (await deleteSpace.isEnabled()) throw new Error('deleting a space must wait for its typed name');
+await a.page.getByRole('dialog').getByLabel('Type Scratch to confirm').fill('Scratch');
+await shot(a.page, '22b-delete-space');
+await deleteSpace.click();
+await a.page
+  .getByText('This is the start of general')
+  .waitFor({ state: 'detached', timeout: 15_000 });
 
 // Run server really starts the app's own coordination server (on the default
 // port 7443). Done last: while it runs it joins the test network.

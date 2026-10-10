@@ -61,14 +61,17 @@ export function SpaceSidebar({ spaceId }: { spaceId: string }) {
         >
           {(close) => (
             <>
-              <MenuItem
-                icon={<UserPlus size={16} />}
-                label="Invite people"
-                onClick={() => {
-                  close();
-                  openModal({ kind: 'invite', spaceId });
-                }}
-              />
+              {/* Only the owner can make invites (servers refuse anyone else's). */}
+              {isOwner && (
+                <MenuItem
+                  icon={<UserPlus size={16} />}
+                  label="Invite people"
+                  onClick={() => {
+                    close();
+                    openModal({ kind: 'invite', spaceId });
+                  }}
+                />
+              )}
               {isOwner && (
                 <MenuItem
                   icon={<Plus size={16} />}
@@ -114,12 +117,14 @@ export function SpaceSidebar({ spaceId }: { spaceId: string }) {
           )}
         </Menu>
       </div>
-      <button
-        onClick={() => openModal({ kind: 'invite', spaceId })}
-        className="mx-4 mb-3 flex items-center justify-center gap-2 rounded-xl bg-accent-soft py-2 text-sm font-semibold text-accent transition hover:brightness-125"
-      >
-        <UserPlus size={16} /> Invite people
-      </button>
+      {isOwner && (
+        <button
+          onClick={() => openModal({ kind: 'invite', spaceId })}
+          className="mx-4 mb-3 flex items-center justify-center gap-2 rounded-xl bg-accent-soft py-2 text-sm font-semibold text-accent transition hover:brightness-125"
+        >
+          <UserPlus size={16} /> Invite people
+        </button>
+      )}
 
       <div className="flex-1 overflow-y-auto px-3 pb-4">
         <Section
