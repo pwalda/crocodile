@@ -8,6 +8,7 @@ import {
   encodeStun,
   isForbiddenPeerAddress,
   parseStun,
+  parseXorAddress,
   xorAddress,
 } from '../src/turn';
 
@@ -249,5 +250,109 @@ describe('TURN relay', () => {
     }
     // …while a public IPv6 peer is fine.
     expect(await permit('2606:4700::1111')).toBe(0);
+  });
+
+  /** A TURN client on a UDP socket: authenticated requests, and what comes back. */
+  async function turnClient(turn: TurnServer) {
+    const sock = createSocket('udp4');
+    cleanup.push(() => sock.close());
+    const replies: Buffer[] = [];
+    sock.on('message', (b) => replies.push(b));
+    await new Promise<void>((r) => sock.bind(0, '127.0.0.1', r));
+    const creds = turn.credentials('eeeeeeeeeeeeeeeeeeeeeeeeee', Date.now() + 60_000);
+    const key = createHash('md5')
+      .update(`${creds.username}:crocodile:${creds.credential}`)
+      .digest();
+    const send = (
+      method: number,
+      txId: Buffer,
+      attrs: { type: number; value: Buffer }[],
+      k?: Buffer,
+    ) => sock.send(encodeStun(method, 0, txId, attrs, k), turn.port, '127.0.0.1');
+    const answer = (txId: Buffer) =>
+      waitFor(() =>
+        replies.map(parseStun).find((r): r is NonNullable<typeof r> => !!r?.txId.equals(txId)),
+      );
+    const transport = { type: 0x0019, value: Buffer.from([17, 0, 0, 0]) };
+    const tx0 = randomBytes(12);
+    send(0x003, tx0, [transport]);
+    const nonce = (await answer(tx0)).attrs.find((a) => a.type === 0x0015)!;
+    const auth = [
+      { type: 0x0006, value: Buffer.from(creds.username) },
+      { type: 0x0014, value: Buffer.from('crocodile') },
+      nonce,
+    ];
+    return { sock, replies, key, auth, transport, send, answer };
+  }
+
+  it('a permission matches its peer however the address was written', async () => {
+    const turn = await new TurnServer({
+      port: 0,
+      host: '127.0.0.1',
+      relayIp: '127.0.0.1',
+      secret: randomBytes(32),
+      allowPrivatePeers: true,
+    }).start();
+    cleanup.push(() => turn.stop());
+    const c = await turnClient(turn);
+    const tx = randomBytes(12);
+    c.send(0x003, tx, [c.transport, ...c.auth], c.key);
+    const allocated = await c.answer(tx);
+    const relayed = parseXorAddress(allocated.attrs.find((a) => a.type === 0x0016)!.value, tx)!;
+
+    const peer = createSocket('udp4');
+    cleanup.push(() => peer.close());
+    await new Promise<void>((r) => peer.bind(0, '127.0.0.1', r));
+    // The peer named as an IPv4-mapped IPv6 address; its packets come from 127.0.0.1.
+    const txp = randomBytes(12);
+    c.send(
+      0x008,
+      txp,
+      [
+        { type: 0x0012, value: xorAddress('::ffff:127.0.0.1', peer.address().port, txp) },
+        ...c.auth,
+      ],
+      c.key,
+    );
+    expect((await c.answer(txp)).attrs.find((a) => a.type === 0x0009)).toBeUndefined();
+    peer.send(Buffer.from('hello'), relayed.port, '127.0.0.1');
+    const data = await waitFor(
+      () =>
+        c.replies
+          .map(parseStun)
+          .find((r) => r?.method === 0x007)
+          ?.attrs.find((a) => a.type === 0x0013)?.value,
+    );
+    expect(data.toString()).toBe('hello');
+  });
+
+  it('a retransmitted Allocate makes one allocation, not two', async () => {
+    const turn = await new TurnServer({
+      port: 0,
+      host: '127.0.0.1',
+      relayIp: '127.0.0.1',
+      secret: randomBytes(32),
+    }).start();
+    cleanup.push(() => turn.stop());
+    const internals = turn as unknown as {
+      bindRelaySocket(type: string): Promise<unknown>;
+      allocations: Map<string, unknown>;
+    };
+    let binds = 0;
+    const bind = internals.bindRelaySocket.bind(turn);
+    internals.bindRelaySocket = async (type) => {
+      binds++;
+      await new Promise((r) => setTimeout(r, 50));
+      return bind(type);
+    };
+    const c = await turnClient(turn);
+    const tx = randomBytes(12);
+    // The client didn't hear back in time and sends the same request again.
+    c.send(0x003, tx, [c.transport, ...c.auth], c.key);
+    c.send(0x003, tx, [c.transport, ...c.auth], c.key);
+    expect((await c.answer(tx)).attrs.find((a) => a.type === 0x0009)).toBeUndefined();
+    await new Promise((r) => setTimeout(r, 200));
+    expect(binds).toBe(1);
+    expect(internals.allocations.size).toBe(1);
   });
 });

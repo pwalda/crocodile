@@ -220,7 +220,7 @@ export function parseXorAddress(
   return null;
 }
 
-function ipv6Bytes(address: string): Buffer {
+export function ipv6Bytes(address: string): Buffer {
   const clean = address.split('%')[0]!;
   const mapped = clean.match(/^::ffff:(\d+\.\d+\.\d+\.\d+)$/i);
   if (mapped)
@@ -365,6 +365,14 @@ export function canonicalIp(address: string): string | null {
   return new URL(`http://[${groups.join(':')}]/`).hostname.slice(1, -1);
 }
 
+/**
+ * One spelling per address, for permissions and channels: a peer named in a
+ * request (2001:db8:0:0:0:0:0:1) must match its packets (from 2001:db8::1).
+ */
+function addrKey(address: string): string {
+  return canonicalIp(address) ?? address;
+}
+
 export function isForbiddenPeerAddress(address: string, own: ReadonlySet<string> = new Set()) {
   const addr = canonicalIp(address);
   if (!addr || own.has(addr)) return true;
@@ -376,6 +384,8 @@ export class TurnServer {
   /** One socket per local address, so replies leave from the address the client used. */
   private sockets: Socket[] = [];
   private allocations = new Map<string, Allocation>();
+  /** Allocations whose relay socket is still being bound, by client tuple. */
+  private allocating = new Set<string>();
   private sweep?: ReturnType<typeof setInterval>;
   /** This machine's own addresses (never valid relay peers). */
   private own = new Set<string>();
@@ -430,7 +440,10 @@ export class TurnServer {
     for (const a of [...this.allocations.values()]) if (a.userId === userId) this.remove(a);
   }
 
+  private stopped = false;
+
   stop() {
+    this.stopped = true;
     clearInterval(this.sweep);
     for (const a of [...this.allocations.values()]) this.remove(a);
     for (const s of this.sockets) s.close();
@@ -598,6 +611,9 @@ export class TurnServer {
       this.reply(via, m, rinfo, CLASS.error, [errorAttr(437, 'Allocation Mismatch')], auth.key);
       return;
     }
+    // A retransmission of an Allocate still being served: the first one's
+    // answer is on its way, and a second socket would be lost.
+    if (this.allocating.has(tuple)) return;
     const transport = attrOf(m, ATTR.requestedTransport);
     if (!transport || transport[0] !== 17) {
       this.reply(
@@ -626,7 +642,17 @@ export class TurnServer {
       );
       return;
     }
-    const socket = await this.bindRelaySocket(isIPv4(rinfo.address) ? 'udp4' : 'udp6');
+    this.allocating.add(tuple);
+    let socket: Socket | null;
+    try {
+      socket = await this.bindRelaySocket(isIPv4(rinfo.address) ? 'udp4' : 'udp6');
+    } finally {
+      this.allocating.delete(tuple);
+    }
+    if (socket && this.stopped) {
+      socket.close();
+      return;
+    }
     if (!socket) {
       this.reply(via, m, rinfo, CLASS.error, [errorAttr(508, 'Insufficient Capacity')], auth.key);
       return;
@@ -716,7 +742,7 @@ export class TurnServer {
       this.reply(via, m, rinfo, CLASS.error, [errorAttr(403, 'Forbidden')], auth.key);
       return;
     }
-    for (const p of peers) a.permissions.set(p!.address, Date.now() + 300_000);
+    for (const p of peers) a.permissions.set(addrKey(p!.address), Date.now() + 300_000);
     this.reply(via, m, rinfo, CLASS.success, [], auth.key);
   }
 
@@ -737,10 +763,10 @@ export class TurnServer {
       this.reply(via, m, rinfo, CLASS.error, [errorAttr(403, 'Forbidden')], auth.key);
       return;
     }
-    const key = `${peer.address}|${peer.port}`;
+    const key = `${addrKey(peer.address)}|${peer.port}`;
     const existing = a.channels.get(number);
     if (
-      (existing && `${existing.address}|${existing.port}` !== key) ||
+      (existing && `${addrKey(existing.address)}|${existing.port}` !== key) ||
       (a.channelByPeer.has(key) && a.channelByPeer.get(key) !== number)
     ) {
       this.reply(via, m, rinfo, CLASS.error, [errorAttr(400, 'Bad Request')], auth.key);
@@ -748,13 +774,13 @@ export class TurnServer {
     }
     a.channels.set(number, peer);
     a.channelByPeer.set(key, number);
-    a.permissions.set(peer.address, Date.now() + 300_000);
+    a.permissions.set(addrKey(peer.address), Date.now() + 300_000);
     this.reply(via, m, rinfo, CLASS.success, [], auth.key);
   }
 
   private onPeerPacket(a: Allocation, data: Buffer, from: RemoteInfo) {
     if (!this.hasPermission(a, from.address) || !this.spend(a, data.length)) return;
-    const channel = a.channelByPeer.get(`${from.address}|${from.port}`);
+    const channel = a.channelByPeer.get(`${addrKey(from.address)}|${from.port}`);
     if (channel !== undefined) {
       const out = Buffer.alloc(4 + data.length + ((4 - (data.length % 4)) % 4));
       out.writeUInt16BE(channel, 0);
@@ -777,7 +803,7 @@ export class TurnServer {
   }
 
   private hasPermission(a: Allocation, address: string) {
-    return (a.permissions.get(address) ?? 0) > Date.now();
+    return (a.permissions.get(addrKey(address)) ?? 0) > Date.now();
   }
 
   /** Token bucket shared by both directions of an allocation. */
