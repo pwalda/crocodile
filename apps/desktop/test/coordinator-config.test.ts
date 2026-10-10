@@ -33,6 +33,10 @@ describe("the app's own server", () => {
       min: 9002,
       max: 9013,
     });
-    expect(relayPorts({ ...settings, port: 65530, relayMaxUsers: 100 }).max).toBe(65535);
+    // Too close to the top for the relay's ports: refused, rather than fewer ports.
+    const high = { ...settings, contact: 'ops@example.org', relay: true, relayMaxUsers: 100 };
+    expect(coordinatorStartError({ ...high, port: 65530 })).toMatch(/65134 or lower/);
+    expect(coordinatorStartError({ ...high, port: 65134 })).toBeUndefined();
+    expect(coordinatorStartError({ ...high, port: 65534, relay: false })).toBeUndefined();
   });
 });

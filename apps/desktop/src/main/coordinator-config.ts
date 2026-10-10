@@ -10,6 +10,11 @@ export function coordinatorStartError(s: CoordinatorSettings): string | undefine
   if (!s.contact) return 'Add an operator contact below to run your server.';
   if (!isOperatorContact(s.contact))
     return 'The operator contact must be an email address or a page starting with https://.';
+  // The relay's ports sit just above the server's own two.
+  if (s.relay && relayPorts(s).max > 65535) {
+    const highest = 65535 - 1 - relayCapacity(s) * 4;
+    return `With the relay on, the port must be ${highest} or lower (its ports come right after it).`;
+  }
   return undefined;
 }
 
@@ -25,6 +30,7 @@ export function relayCapacity(s: CoordinatorSettings): number {
  */
 export function relayPorts(s: CoordinatorSettings): { min: number; max: number } {
   const min = s.port + 2;
-  // Four per person, as each may hold up to four relayed connections.
-  return { min, max: Math.min(65535, min + relayCapacity(s) * 4 - 1) };
+  // Four per person, as each may hold up to four relayed connections. Past
+  // port 65535 the settings are refused (coordinatorStartError).
+  return { min, max: min + relayCapacity(s) * 4 - 1 };
 }
