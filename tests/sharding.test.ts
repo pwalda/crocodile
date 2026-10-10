@@ -163,10 +163,11 @@ describe('sharded records', () => {
 
   it('keeps the overlay sparse, and still reaches every server', async () => {
     const servers = await network(12);
-    // Direct links that were only needed for a moment close again.
-    await new Promise((r) => setTimeout(r, 2500));
-    const links = servers.map((c) => c.mesh.peerIds().length);
-    expect(Math.max(...links)).toBeLessThan(11);
+    // Direct links that were only needed for a moment close again, once
+    // they have been idle a while (later when a busy machine runs it slowly).
+    const mostLinks = () => Math.max(...servers.map((c) => c.mesh.peerIds().length));
+    await waitFor(() => mostLinks() < 11, 10_000, 'idle links closed');
+    expect(mostLinks()).toBeLessThan(11);
     // Presence still travels between servers that aren't linked.
     const far = servers.find((c) => !c.mesh.peerIds().includes(servers[0]!.info.id))!;
     const watcher = await user(servers[0]!);
