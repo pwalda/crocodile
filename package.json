@@ -27,7 +27,7 @@
     "qa:smoke": "tsx tests/electron/smoke.ts"
   },
   "devDependencies": {
-    "@eslint/js": "^9.39.5",
+    "@eslint/js": "^10.0.1",
     "@types/node": "^22.19.0",
     "@vitest/coverage-v8": "4.1.11",
     "eslint": "^10.11.0",
