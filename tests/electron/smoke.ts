@@ -37,7 +37,7 @@ await new Promise((r) => setTimeout(r, 1000));
 
 async function launch(
   name: string,
-  opts: { noDirectory?: boolean } = {},
+  opts: { noDirectory?: boolean; env?: Record<string, string> } = {},
 ): Promise<{ app: ElectronApplication; page: Page }> {
   // CROC_APP_EXEC points at a packaged build (e.g. release/linux-unpacked/crocodile).
   const packaged = process.env.CROC_APP_EXEC;
@@ -53,6 +53,7 @@ async function launch(
       ...process.env,
       CROC_USER_DATA: mkdtempSync(join(tmpdir(), `croc-${name}-`)),
       CROC_DIRECTORIES_OVERRIDE: opts.noDirectory ? '' : directory.url,
+      ...opts.env,
     },
   });
   const page = await app.firstWindow();
@@ -346,6 +347,35 @@ await d.page.getByText('Your account was deleted').waitFor({ timeout: 15_000 });
 await d.page.getByText("I'm new here").waitFor();
 await shot(d.page, '22-account-deleted');
 await d.app.close();
+
+// In-app update (a pretend release): offered, downloaded on request, then restart.
+const u = await launch('updater', {
+  noDirectory: true,
+  env: {
+    CROC_FAKE_UPDATE: '9.9.0',
+    CROC_UPDATE_FIRST_CHECK_MS: '500',
+    CROC_FAKE_UPDATE_STEP_MS: '250',
+  },
+});
+let updaterLog = '';
+u.app.process().stdout?.on('data', (d: Buffer) => (updaterLog += d.toString()));
+await onboard(u.page, 'Ulla');
+await finishOnboarding(u.page);
+await u.page.getByRole('button', { name: 'Update', exact: true }).waitFor({ timeout: 15_000 });
+await shot(u.page, '22c-update-available');
+await u.page.getByRole('button', { name: 'Update', exact: true }).click();
+await u.page.getByRole('button', { name: /Updating \d+%/ }).waitFor();
+await shot(u.page, '22d-update-downloading');
+await u.page.getByRole('button', { name: /Updating/ }).click();
+await u.page.getByRole('progressbar', { name: 'Download progress' }).waitFor();
+await u.page.getByText('Version 9.9.0 is downloaded').waitFor({ timeout: 15_000 });
+await shot(u.page, '22e-update-ready');
+await u.page.getByRole('dialog').getByRole('button', { name: 'Restart to update' }).click();
+for (let i = 0; i < 50 && !updaterLog.includes('would restart into 9.9.0'); i++)
+  await new Promise((r) => setTimeout(r, 100));
+if (!updaterLog.includes('would restart into 9.9.0'))
+  throw new Error('Restart to update must install the downloaded version');
+await u.app.close();
 
 // Deleting a space: confirmed by typing its name.
 await a.page.getByTitle('Create or join a space').click();

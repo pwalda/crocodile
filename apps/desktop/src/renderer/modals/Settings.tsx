@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState, type ReactNode } from 'react';
 import {
   AppWindow,
+  ArrowDownCircle,
   Check,
   Code,
   Coffee,
@@ -17,6 +18,7 @@ import {
   Palette,
   Plus,
   RefreshCw,
+  RotateCw,
   Server,
   Shield,
   ShieldCheck,
@@ -32,7 +34,9 @@ import {
   ACCENTS,
   closeModal,
   diagnostics,
+  downloadUpdate,
   getClient,
+  installUpdate,
   openModal,
   saveAppearance,
   saveVoiceSettings,
@@ -1351,6 +1355,95 @@ const ABOUT_FEATURES = [
   },
 ];
 
+/** Look for a new version, download it, restart into it. */
+function UpdatesCard() {
+  const update = useUi((s) => s.update);
+  if (update.state === 'unsupported' || !desktop) return null;
+  const check = () => void desktop?.updates.check();
+  let text: ReactNode;
+  let action: ReactNode = (
+    <Button variant="secondary" onClick={check} disabled={update.state === 'checking'}>
+      <RefreshCw size={15} className={cx(update.state === 'checking' && 'animate-spin')} />
+      Check for updates
+    </Button>
+  );
+  switch (update.state) {
+    case 'idle':
+      text = 'Crocodile looks for new versions now and then and asks before installing one.';
+      break;
+    case 'checking':
+      text = 'Looking for a new version…';
+      break;
+    case 'current':
+      text = `You have the latest version (checked ${stampOf(update.checkedAt).replace(
+        /^(Today|Yesterday)/,
+        (d) => d.toLowerCase(),
+      )}).`;
+      break;
+    case 'available':
+      text =
+        update.how === 'install'
+          ? `Version ${update.version} is out.`
+          : `Version ${update.version} is out. This copy can't update itself; download the new version from the release page.`;
+      action = (
+        <Button onClick={downloadUpdate}>
+          <ArrowDownCircle size={15} />
+          {update.how === 'install' ? 'Download and install' : 'Open download page'}
+        </Button>
+      );
+      break;
+    case 'downloading':
+      text = `Downloading version ${update.version}…`;
+      action = null;
+      break;
+    case 'ready':
+      text =
+        update.after === 'open'
+          ? `Version ${update.version} is downloaded. Crocodile quits and opens it; drag Crocodile into Applications to replace this version.`
+          : `Version ${update.version} is downloaded. Restart Crocodile to start using it.`;
+      action = (
+        <Button onClick={installUpdate}>
+          <RotateCw size={15} />
+          {update.after === 'open' ? 'Quit and install' : 'Restart to update'}
+        </Button>
+      );
+      break;
+    case 'error':
+      text = update.version
+        ? `Version ${update.version} couldn't be installed: ${update.message}`
+        : `Couldn't look for updates: ${update.message}`;
+      break;
+  }
+  return (
+    <section aria-label="Updates">
+      <Card className="mb-3 text-sm leading-relaxed text-text-2">
+        <h3 className="flex items-center gap-2 text-base font-bold text-text">
+          <ArrowDownCircle size={16} className="text-accent" /> Updates
+        </h3>
+        <p className="mt-1" role="status">
+          {text}
+        </p>
+        {update.state === 'downloading' && (
+          <div
+            role="progressbar"
+            aria-label="Download progress"
+            aria-valuenow={update.percent}
+            aria-valuemin={0}
+            aria-valuemax={100}
+            className="mt-3 h-2 overflow-hidden rounded-full bg-raised"
+          >
+            <div
+              className="h-full rounded-full bg-accent transition-[width]"
+              style={{ width: `${update.percent}%` }}
+            />
+          </div>
+        )}
+        {action && <div className="flex flex-wrap gap-2 pt-3">{action}</div>}
+      </Card>
+    </section>
+  );
+}
+
 function AboutTab() {
   const version = useUi((s) => s.appVersion);
   return (
@@ -1365,6 +1458,7 @@ function AboutTab() {
           Version {version} · beta
         </span>
       </div>
+      <UpdatesCard />
       <div className="grid grid-cols-3 gap-3">
         {ABOUT_FEATURES.map(({ icon: Icon, title, text }) => (
           <Card key={title} className="p-4">

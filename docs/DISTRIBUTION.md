@@ -64,10 +64,10 @@ provider's action) in the release workflow; nothing else changes.
   try to open the app once, then _System Settings → Privacy & Security →
   Open Anyway_. After that it opens normally.
 - **`install.sh`:** no prompt at all (see above).
-- **Auto-update:** Squirrel.Mac refuses updates that are not signed with a
-  Developer ID, so ad-hoc builds show a notification with a download link
-  instead of updating silently (`checkForUpdates` in `src/main/main.ts`). The
-  build records whether it was properly signed (`crocSigned` in the packaged
+- **Updates:** Squirrel.Mac refuses updates that are not signed with a
+  Developer ID, so ad-hoc builds update themselves another way (see
+  [Updates from within the app](#updates-from-within-the-app)). The build
+  records whether it was properly signed (`crocSigned` in the packaged
   `package.json`).
 - **Homebrew:** a tap (`pwalda/homebrew-crocodile`) with a cask is easy to
   maintain, but Homebrew is phasing out casks that fail Gatekeeper, so treat
@@ -90,6 +90,39 @@ provider's action) in the release workflow; nothing else changes.
   Discover. It needs a Flatpak manifest (`org.electronjs.Electron2.BaseApp`)
   and the portals for global shortcuts (Wayland) — worth doing together with
   Wayland push-to-talk support.
+
+## Updates from within the app
+
+The app looks for a new release 15 seconds after it starts and every 6 hours
+after that, and says so with a notification and an **Update** button in the
+top bar (also in Settings → About). Nothing is downloaded until the user
+clicks it; then the button shows the progress and turns into **Restart to
+update**. If a call is going on, the app asks first. Code:
+`apps/desktop/src/main/updates.ts` and `update-engines.ts`.
+
+How the update is applied depends on the install:
+
+| Install                         | How                                                                                                                                                                                           |
+| ------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Windows installer               | electron-updater runs the new installer silently and restarts the app.                                                                                                                        |
+| macOS, Developer ID signed      | electron-updater (Squirrel.Mac).                                                                                                                                                              |
+| macOS, ad-hoc signed (today)    | The app downloads the release `.zip`, checks its SHA-512 against `latest-mac.yml` and the bundle's version, and after it quits a small script swaps the new `Crocodile.app` in and starts it. |
+| macOS, app can't replace itself | Run from the disk image, translocated, or a folder the user can't write: the `.dmg` is downloaded (checked the same way) and opened, and the user drags Crocodile into Applications.          |
+| Linux AppImage                  | electron-updater replaces the AppImage file.                                                                                                                                                  |
+| Linux `.deb` / `.rpm`           | electron-updater installs the new package with `dpkg`/`rpm`, which asks for the administrator password (pkexec or sudo).                                                                      |
+| Linux `.tar.gz`                 | Can't update itself: the button opens the release page.                                                                                                                                       |
+
+Updates come only from this repository's latest GitHub release over HTTPS,
+and every file is checked against the SHA-512 in that release's `latest*.yml`.
+That protects against a broken download, not against someone who can publish
+releases here; code signing is what would add that (see above). Because the
+updater reads the latest release, publish releases as normal releases, not
+pre-releases (docs/QA.md, release checklist).
+
+To try the UI without a release, start a development build with
+`CROC_FAKE_UPDATE=9.9.0` (optionally `CROC_UPDATE_FIRST_CHECK_MS=500`): it
+offers a pretend version 9.9.0 whose "restart" only logs. The Electron smoke
+test does this.
 
 ## Global push-to-talk permissions
 

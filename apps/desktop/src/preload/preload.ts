@@ -4,6 +4,7 @@ import type {
   CoordinatorStatus,
   RelayProcessIn,
   RelayProcessOut,
+  UpdateStatus,
 } from '../main/ipc-types';
 
 /** The only bridge between the sandboxed UI and the rest of the app. */
@@ -51,6 +52,21 @@ const api = {
       ipcRenderer.on('ptt:state', listener);
       return () => {
         ipcRenderer.off('ptt:state', listener);
+      };
+    },
+  },
+  updates: {
+    status: () => ipcRenderer.invoke('updates:status') as Promise<UpdateStatus>,
+    /** Looks for a new release (never downloads it). */
+    check: () => ipcRenderer.invoke('updates:check') as Promise<UpdateStatus>,
+    download: () => ipcRenderer.invoke('updates:download') as Promise<UpdateStatus>,
+    /** Quits and restarts into the downloaded version (or opens its installer). */
+    install: () => ipcRenderer.invoke('updates:install') as Promise<void>,
+    onStatus: (fn: (s: UpdateStatus) => void) => {
+      const listener = (_e: unknown, s: UpdateStatus) => fn(s);
+      ipcRenderer.on('updates:status', listener);
+      return () => {
+        ipcRenderer.off('updates:status', listener);
       };
     },
   },

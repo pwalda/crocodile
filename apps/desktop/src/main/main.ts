@@ -17,12 +17,15 @@ import { join } from 'node:path';
 import { cpus } from 'node:os';
 import { configureGlobalPtt, stopGlobalPtt } from './global-ptt';
 import { SecureStore } from './secure-store';
+import { createUpdateEngine } from './update-engines';
+import { UpdateController } from './updates';
 import type {
   CoordinatorProcessOut,
   CoordinatorSettings,
   CoordinatorStatus,
   RelayProcessIn,
   RelayProcessOut,
+  UpdateStatus,
 } from './ipc-types';
 
 const isDev = !!process.env.CROC_RENDERER_URL;
@@ -311,46 +314,52 @@ app.whenReady().then(() => {
   createTray();
   applyCoordinator();
 
-  if (app.isPackaged) void checkForUpdates();
+  void startUpdates();
 });
 
-/**
- * Updates install themselves, except on macOS builds without a Developer ID
- * signature: Squirrel.Mac refuses to apply those, so we point the user to the
- * download instead (see docs/DISTRIBUTION.md).
- */
-async function checkForUpdates() {
+// ---------------------------------------------------------------------------
+// Updates: checked now and then; downloaded and installed when the user says.
+// ---------------------------------------------------------------------------
+
+let updates = new UpdateController(null, () => {});
+/** Versions the user was already told about in a notification. */
+const announced = new Set<string>();
+
+function publishUpdate(s: UpdateStatus) {
+  win?.webContents.send('updates:status', s);
+  if (s.state !== 'available' || announced.has(s.version)) return;
+  announced.add(s.version);
+  if (win?.isFocused() || !Notification.isSupported()) return;
+  const n = new Notification({
+    title: 'A new version of Crocodile is available',
+    body: `Version ${s.version} is out. Open Crocodile to update.`,
+  });
+  n.on('click', showWindow);
+  n.show();
+}
+
+async function startUpdates() {
   try {
-    const { autoUpdater } = await import('electron-updater');
-    if (process.platform === 'darwin' && !developerSigned()) {
-      autoUpdater.autoDownload = false;
-      autoUpdater.on('update-available', (info) => {
-        const n = new Notification({
-          title: 'A new version of Crocodile is available',
-          body: `Version ${info.version} is ready. Click to download it.`,
-        });
-        n.on('click', () => void shell.openExternal(RELEASES_URL));
-        n.show();
-      });
-      await autoUpdater.checkForUpdates();
-    } else {
-      await autoUpdater.checkForUpdatesAndNotify();
-    }
+    const engine = await createUpdateEngine(() => {
+      quitting = true;
+    });
+    updates = new UpdateController(engine, publishUpdate);
+    publishUpdate(updates.status);
+    if (!engine) return;
+    setTimeout(() => void updates.check(), UPDATE_FIRST_CHECK_MS);
+    setInterval(() => void updates.check(), UPDATE_CHECK_EVERY_MS).unref();
   } catch (err) {
-    console.warn('auto-update unavailable', err);
+    console.warn('updates unavailable', err);
   }
 }
 
-const RELEASES_URL = 'https://github.com/pwalda/crocodile/releases/latest';
+const UPDATE_FIRST_CHECK_MS = Number(process.env.CROC_UPDATE_FIRST_CHECK_MS ?? 15_000);
+const UPDATE_CHECK_EVERY_MS = 6 * 60 * 60_000;
 
-function developerSigned(): boolean {
-  try {
-    const pkg = JSON.parse(readFileSync(join(app.getAppPath(), 'package.json'), 'utf8'));
-    return pkg.crocSigned === true;
-  } catch {
-    return false;
-  }
-}
+ipcMain.handle('updates:status', () => updates.status);
+ipcMain.handle('updates:check', () => updates.check());
+ipcMain.handle('updates:download', () => updates.download());
+ipcMain.handle('updates:install', () => updates.install());
 
 app.on('activate', showWindow);
 app.on('before-quit', () => {
