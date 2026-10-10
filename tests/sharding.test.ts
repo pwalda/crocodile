@@ -487,6 +487,15 @@ describe('staying consistent', () => {
 
 describe('across servers that are not linked', () => {
   /** Two servers of a sparse network with no link between them. */
+  /**
+   * Twelve servers in one process spend most of their time on each other's
+   * signed beacons; under coverage (as CI runs) that starves requests. These
+   * tests don't depend on how fast a dead server is noticed.
+   */
+  const quieter: Partial<CoordinatorConfig> = {
+    membership: { beaconMs: 2000, liveMs: 8000, settleMs: 300 },
+  };
+
   function apart(servers: Coordinator[]) {
     for (const x of servers)
       for (const y of servers)
@@ -494,10 +503,8 @@ describe('across servers that are not linked', () => {
     throw new Error('every server is linked to every other');
   }
 
-  // Twelve servers in one process, verifying each other's signed beacons: slow
-  // under coverage, which CI measures.
   it('delivers mail held on one server to a device that connects to another', async () => {
-    const servers = await network(12);
+    const servers = await network(12, quieter);
     await new Promise((r) => setTimeout(r, 2000));
     const [x, y] = apart(servers);
     const bobId = createIdentity();
@@ -553,10 +560,10 @@ describe('across servers that are not linked', () => {
       proof: signMailProof(bobId, { t: 'mail_ack', peer: bob.conn.peer, ids }),
     });
     await waitFor(() => x.store.mailCount({}) === 0, 5000, 'acknowledged everywhere');
-  }, 120_000);
+  });
 
   it('finds a device-link code opened on another server', async () => {
-    const servers = await network(12);
+    const servers = await network(12, quieter);
     await new Promise((r) => setTimeout(r, 2000));
     const [x, y] = apart(servers);
     const fresh = await user(x);
