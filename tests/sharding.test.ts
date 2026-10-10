@@ -751,7 +751,10 @@ describe('frames from other servers', () => {
   it('passes on only the events servers route, and session states only from their owner', async () => {
     const [x, y] = await network(2);
     const victim = await user(x!, 'victim');
-    const sid = sessionIds.dm(victim.identity.userId, createIdentity().userId);
+    // A session y doesn't own, so y's session state for it is forged.
+    let sid = sessionIds.dm(victim.identity.userId, createIdentity().userId);
+    while (x!.sessions.ownerOf(sid) !== x!.info.id)
+      sid = sessionIds.dm(victim.identity.userId, createIdentity().userId);
     // "replaced" would stop the victim's app from reconnecting.
     y!.mesh.sendTo(x!.info.id, {
       t: 'route',
@@ -760,14 +763,12 @@ describe('frames from other servers', () => {
       d: { reason: 'evil' },
     } as never);
     // A session state from a server that doesn't own the session.
-    const forger = x!.sessions.ownerOf(sid) === y!.info.id ? x! : y!;
-    if (forger === y)
-      y!.mesh.sendTo(x!.info.id, {
-        t: 'route',
-        to: victim.conn.peer,
-        ev: 'session',
-        d: { state: { id: sid, epoch: 99, host: 'mallory.dev', backup: null, members: [] } },
-      } as never);
+    y!.mesh.sendTo(x!.info.id, {
+      t: 'route',
+      to: victim.conn.peer,
+      ev: 'session',
+      d: { state: { id: sid, epoch: 99, host: 'mallory.dev', backup: null, members: [] } },
+    } as never);
     // Malformed: dropped without disturbing the link.
     y!.mesh.sendTo(x!.info.id, { t: 'records', items: 'nonsense', upTo: 'x' } as never);
     await new Promise((r) => setTimeout(r, 800));
