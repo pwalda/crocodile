@@ -5,22 +5,21 @@ import { accessSync, constants, existsSync, readFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { promisify } from 'node:util';
 import {
+  electronUpdaterEngine,
   MacSwapEngine,
   ManualEngine,
   RELEASE_FEED,
   updateMode,
+  type AutoUpdaterLike,
   type UpdateEngine,
 } from './updates';
 
 const run = promisify(execFile);
 
-/**
- * The engine for this install, or null for a development build.
- * `beforeQuit` runs before the app quits to install.
- */
-export async function createUpdateEngine(beforeQuit: () => void): Promise<UpdateEngine | null> {
+/** The engine for this install, or null for a development build. */
+export async function createUpdateEngine(): Promise<UpdateEngine | null> {
   const fake = process.env.CROC_FAKE_UPDATE;
-  if (fake) return fakeEngine(fake);
+  if (fake) return electronUpdaterEngine(fakeUpdater(fake));
   const mode = updateMode({
     packaged: app.isPackaged,
     platform: process.platform,
@@ -28,7 +27,10 @@ export async function createUpdateEngine(beforeQuit: () => void): Promise<Update
     appImage: !!process.env.APPIMAGE,
     packageType: packageType(),
   });
-  if (mode === 'auto') return electronUpdater(beforeQuit);
+  if (mode === 'auto') {
+    const { autoUpdater } = await import('electron-updater');
+    return electronUpdaterEngine(autoUpdater);
+  }
   const fetchImpl = (url: string | URL | Request, init?: RequestInit) =>
     net.fetch(url instanceof URL ? url.href : url, init);
   if (mode === 'mac-swap') {
@@ -57,10 +59,7 @@ export async function createUpdateEngine(beforeQuit: () => void): Promise<Update
       runDetached: (script, args) =>
         spawn('/bin/sh', [script, ...args], { detached: true, stdio: 'ignore' }).unref(),
       openPath: (p) => void shell.openPath(p),
-      quit: () => {
-        beforeQuit();
-        app.quit();
-      },
+      quit: () => app.quit(),
       pid: process.pid,
     });
   }
@@ -75,56 +74,29 @@ export async function createUpdateEngine(beforeQuit: () => void): Promise<Update
   return null;
 }
 
-/** electron-updater: Windows, Linux AppImage/deb/rpm and Developer ID-signed macOS. */
-async function electronUpdater(beforeQuit: () => void): Promise<UpdateEngine> {
-  const { autoUpdater } = await import('electron-updater');
-  // Ask first: nothing downloads until the user says so.
-  autoUpdater.autoDownload = false;
-  autoUpdater.autoInstallOnAppQuit = true;
-  return {
-    how: 'install',
-    after: 'restart',
-    async check() {
-      const result = await autoUpdater.checkForUpdates();
-      return result?.isUpdateAvailable ? { version: result.updateInfo.version } : null;
-    },
-    async download(onProgress) {
-      const listener = (p: { percent: number }) => onProgress(Math.floor(p.percent));
-      autoUpdater.on('download-progress', listener);
-      try {
-        await autoUpdater.downloadUpdate();
-      } finally {
-        autoUpdater.off('download-progress', listener);
-      }
-    },
-    install() {
-      beforeQuit();
-      autoUpdater.quitAndInstall(true, true);
-    },
-  };
-}
-
 /**
  * CROC_FAKE_UPDATE=<version> pretends that version is out, for the smoke test
  * and for trying the UI: the download takes a few seconds, and installing
- * only logs.
+ * behaves like an installer that didn't start (it logs, the app keeps running).
  */
-function fakeEngine(version: string): UpdateEngine {
+function fakeUpdater(version: string): AutoUpdaterLike {
+  const step = Number(process.env.CROC_FAKE_UPDATE_STEP_MS ?? 300);
+  const listeners = new Set<(p: { percent: number }) => void>();
   return {
-    how: 'install',
-    after: 'restart',
-    check: async () => ({ version }),
-    async download(onProgress) {
-      for (let p = 0; p <= 100; p += 10) {
-        onProgress(p);
-        await new Promise((r) =>
-          setTimeout(r, Number(process.env.CROC_FAKE_UPDATE_STEP_MS ?? 300)),
-        );
+    autoDownload: false,
+    autoInstallOnAppQuit: false,
+    checkForUpdates: async () => ({ isUpdateAvailable: true, updateInfo: { version } }),
+    async downloadUpdate() {
+      for (let percent = 0; percent <= 100; percent += 10) {
+        for (const fn of listeners) fn({ percent });
+        await new Promise((r) => setTimeout(r, step));
       }
     },
-    install() {
+    quitAndInstall() {
       console.log(`[updates] would restart into ${version}`);
     },
+    on: (_e, fn) => listeners.add(fn),
+    off: (_e, fn) => listeners.delete(fn),
   };
 }
 

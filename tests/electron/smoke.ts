@@ -375,6 +375,15 @@ for (let i = 0; i < 50 && !updaterLog.includes('would restart into 9.9.0'); i++)
   await new Promise((r) => setTimeout(r, 100));
 if (!updaterLog.includes('would restart into 9.9.0'))
   throw new Error('Restart to update must install the downloaded version');
+// The pretend installer didn't start (like a cancelled password prompt): the
+// app keeps running as before, so closing the window hides it to the tray.
+await u.app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0]!.close());
+await new Promise((r) => setTimeout(r, 500));
+const hidden = await u.app.evaluate(({ BrowserWindow }) =>
+  BrowserWindow.getAllWindows().map((w) => w.isVisible()),
+);
+if (JSON.stringify(hidden) !== '[false]')
+  throw new Error(`after an install that didn't start, closing must hide the window: ${hidden}`);
 await u.app.close();
 
 // Deleting a space: confirmed by typing its name.

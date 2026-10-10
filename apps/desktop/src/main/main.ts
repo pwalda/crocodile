@@ -340,9 +340,8 @@ function publishUpdate(s: UpdateStatus) {
 
 async function startUpdates() {
   try {
-    const engine = await createUpdateEngine(() => {
-      quitting = true;
-    });
+    // Installing quits through app.quit(), so before-quit marks the app as quitting.
+    const engine = await createUpdateEngine();
     updates = new UpdateController(engine, publishUpdate);
     publishUpdate(updates.status);
     if (!engine) return;

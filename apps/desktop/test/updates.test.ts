@@ -12,9 +12,11 @@ import {
   ManualEngine,
   UpdateController,
   downloadVerified,
+  electronUpdaterEngine,
   isNewer,
   parseLatestYml,
   updateMode,
+  type AutoUpdaterLike,
   type MacSwapDeps,
   type UpdateEngine,
 } from '../src/main/updates';
@@ -42,6 +44,9 @@ files:
   - url: Crocodile-0.3.1-linux-amd64.deb
     sha512: kB7e93lKW/ZSaQW7Id1ZsNVBO+0viRYEwCfgT9sFaDj4BhPFdFWHjVIKAokTj2Fk/suvVJfjhTtEl/2OSoMYpw==
     size: 100327052
+  - url: Crocodile-0.3.1-linux-x86_64.rpm
+    sha512: JmMyvAx2ci4fuG6ZfXoNioKZaqgIczgHPtdb9aPpA07emONt2gExrG4+WG/H0gX/abJhaCFtJuxjWCJ17Uvn+A==
+    size: 89632201
 path: Crocodile-0.3.1-linux-x86_64.AppImage
 sha512: YJstTpFiSZ8dNiS6bjJrgxqq4QthTs6XEDRxmFhtnZMtCEeTJPcgVY7JDJBKt4rquGg3ppTFzp5Y1UrRb7995w==
 releaseDate: '2026-10-09T16:01:08.473Z'
@@ -106,8 +111,17 @@ describe('release metadata', () => {
     expect(release.files.map((f) => f.url)).toEqual([
       'Crocodile-0.3.1-linux-x86_64.AppImage',
       'Crocodile-0.3.1-linux-amd64.deb',
+      'Crocodile-0.3.1-linux-x86_64.rpm',
     ]);
     expect(parseLatestYml('<html>Not Found</html>')).toBeNull();
+  });
+
+  it('lists a file for every Linux package that updates itself', () => {
+    // electron-updater picks the AppImage, .deb or .rpm from this file
+    // (electron-builder writes all three into latest-linux.yml).
+    const urls = parseLatestYml(LATEST_LINUX)!.files.map((f) => f.url);
+    for (const ext of ['.AppImage', '.deb', '.rpm'])
+      expect(urls.some((u) => u.endsWith(ext))).toBe(true);
   });
 
   it('compares versions numerically', () => {
@@ -287,10 +301,74 @@ describe('update controller', () => {
     expect(c.status.state).toBe('available');
   });
 
+  it('a check in the background never hides a download the user started', async () => {
+    let finishCheck = (_v: { version: string } | null) => {};
+    let checks = 0;
+    const { engine } = fakeEngine({
+      check: () => {
+        checks++;
+        return checks === 1
+          ? Promise.resolve({ version: '9.9.9' })
+          : new Promise((r) => (finishCheck = r));
+      },
+    });
+    const c = new UpdateController(engine, () => {});
+    await c.check();
+    // The periodic check starts while the release is on offer...
+    const looking = c.check();
+    // ...and the user clicks Update meanwhile.
+    const downloading = c.download();
+    finishCheck({ version: '9.9.9' });
+    await looking;
+    expect(await downloading).toEqual({ state: 'ready', version: '9.9.9', after: 'restart' });
+    expect(c.status.state).toBe('ready');
+  });
+
   it('does nothing without an engine (a development build)', async () => {
     const c = new UpdateController(null, () => {});
     expect(await c.check()).toEqual({ state: 'unsupported' });
     expect(await c.download()).toEqual({ state: 'unsupported' });
+  });
+});
+
+describe('electron-updater', () => {
+  function fakeUpdater() {
+    const listeners = new Set<(p: { percent: number }) => void>();
+    const calls: unknown[][] = [];
+    const updater: AutoUpdaterLike = {
+      autoDownload: true,
+      autoInstallOnAppQuit: false,
+      checkForUpdates: async () => ({ isUpdateAvailable: true, updateInfo: { version: '1.2.3' } }),
+      async downloadUpdate() {
+        for (const percent of [12.7, 99.9]) for (const fn of listeners) fn({ percent });
+      },
+      quitAndInstall: (...args) => void calls.push(args),
+      on: (_e, fn) => listeners.add(fn),
+      off: (_e, fn) => listeners.delete(fn),
+    };
+    return { updater, calls, listeners };
+  }
+
+  it('asks before downloading, reports progress, installs silently and restarts', async () => {
+    const { updater, calls, listeners } = fakeUpdater();
+    const engine = electronUpdaterEngine(updater);
+    expect(updater.autoDownload).toBe(false);
+    expect(await engine.check()).toEqual({ version: '1.2.3' });
+    const seen: number[] = [];
+    await engine.download((p) => seen.push(p));
+    expect(seen).toEqual([12, 99]);
+    expect(listeners.size).toBe(0);
+    engine.install();
+    expect(calls).toEqual([[true, true]]);
+  });
+
+  it('finds nothing when no newer version is out', async () => {
+    const { updater } = fakeUpdater();
+    updater.checkForUpdates = async () => ({
+      isUpdateAvailable: false,
+      updateInfo: { version: '0.3.1' },
+    });
+    expect(await electronUpdaterEngine(updater).check()).toBeNull();
   });
 });
 

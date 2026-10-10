@@ -166,9 +166,56 @@ export interface UpdateEngine {
   readonly how: 'install' | 'download';
 }
 
+/** The parts of electron-updater's autoUpdater we use. */
+export interface AutoUpdaterLike {
+  autoDownload: boolean;
+  autoInstallOnAppQuit: boolean;
+  checkForUpdates(): Promise<{
+    isUpdateAvailable: boolean;
+    updateInfo: { version: string };
+  } | null>;
+  downloadUpdate(): Promise<unknown>;
+  /** Quits the app once the installer has started; leaves it running if that fails. */
+  quitAndInstall(isSilent?: boolean, isForceRunAfter?: boolean): void;
+  on(event: 'download-progress', fn: (p: { percent: number }) => void): unknown;
+  off(event: 'download-progress', fn: (p: { percent: number }) => void): unknown;
+}
+
+/**
+ * electron-updater: Windows, Linux AppImage/deb/rpm and Developer ID-signed
+ * macOS. Nothing downloads until asked. Installing doesn't mark the app as
+ * quitting itself: if the installer can't start (the administrator password
+ * prompt was cancelled), the app keeps running as before.
+ */
+export function electronUpdaterEngine(updater: AutoUpdaterLike): UpdateEngine {
+  updater.autoDownload = false;
+  updater.autoInstallOnAppQuit = true;
+  return {
+    how: 'install',
+    after: 'restart',
+    async check() {
+      const result = await updater.checkForUpdates();
+      return result?.isUpdateAvailable ? { version: result.updateInfo.version } : null;
+    },
+    async download(onProgress) {
+      const listener = (p: { percent: number }) => onProgress(Math.floor(p.percent));
+      updater.on('download-progress', listener);
+      try {
+        await updater.downloadUpdate();
+      } finally {
+        updater.off('download-progress', listener);
+      }
+    },
+    install() {
+      updater.quitAndInstall(true, true);
+    },
+  };
+}
+
 /** Drives an UpdateEngine and reports its state (shown in the app). */
 export class UpdateController {
   private current: UpdateStatus;
+  private checking: Promise<void> | null = null;
 
   constructor(
     private readonly engine: UpdateEngine | null,
@@ -190,18 +237,26 @@ export class UpdateController {
   async check(): Promise<UpdateStatus> {
     const { engine } = this;
     const busy = ['checking', 'downloading', 'ready'].includes(this.current.state);
-    if (!engine || busy) return this.current;
+    if (!engine || busy || this.checking) return this.current;
     // A release already offered stays on screen while we look again.
     if (this.current.state !== 'available') this.set({ state: 'checking' });
-    try {
-      const found = await engine.check();
-      this.set(
-        found
+    const started = this.current;
+    this.checking = (async () => {
+      let next: UpdateStatus;
+      try {
+        const found = await engine.check();
+        next = found
           ? { state: 'available', version: found.version, how: engine.how }
-          : { state: 'current', checkedAt: Date.now() },
-      );
-    } catch (err) {
-      this.set({ state: 'error', message: messageOf(err) });
+          : { state: 'current', checkedAt: Date.now() };
+      } catch (err) {
+        next = { state: 'error', message: messageOf(err) };
+      }
+      if (this.current === started) this.set(next);
+    })();
+    try {
+      await this.checking;
+    } finally {
+      this.checking = null;
     }
     return this.current;
   }
@@ -209,6 +264,8 @@ export class UpdateController {
   /** Downloads the release found, then waits for the user to restart. */
   async download(): Promise<UpdateStatus> {
     const { engine } = this;
+    // One thing at a time: a check started in the background finishes first.
+    if (this.checking) await this.checking;
     const s = this.current;
     if (!engine || s.state !== 'available') return this.current;
     if (engine.how === 'download') {
