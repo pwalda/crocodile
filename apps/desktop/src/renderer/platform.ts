@@ -159,13 +159,15 @@ export const messages: MessageStore = {
     await tx.done;
     return true;
   },
-  async page(channel, { before, limit }) {
+  async page(channel, { before, beforeId, limit }) {
     const d = await db();
+    // Index entries are ordered by (ch, ts), then by id: the same order as
+    // the timeline, so a position is a time and an id.
     const range = IDBKeyRange.bound(
       [channel, 0],
       [channel, before === undefined ? Number.MAX_SAFE_INTEGER : before],
       false,
-      true,
+      before !== undefined && beforeId === undefined,
     );
     const rows: StoredMessage[] = [];
     let cursor = await d
@@ -173,7 +175,8 @@ export const messages: MessageStore = {
       .store.index('byChannelTs')
       .openCursor(range, 'prev');
     while (cursor && rows.length < limit) {
-      rows.push(cursor.value);
+      const row = cursor.value;
+      if (!(beforeId !== undefined && row.ts === before && row.id >= beforeId)) rows.push(row);
       cursor = await cursor.continue();
     }
     return decode(rows.reverse());
@@ -183,7 +186,7 @@ export const messages: MessageStore = {
     const range = IDBKeyRange.bound(
       [channel, after],
       [channel, Number.MAX_SAFE_INTEGER],
-      true,
+      false,
       false,
     );
     return decode(await d.getAllFromIndex('messages', 'byChannelTs', range, limit));

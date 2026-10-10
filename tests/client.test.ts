@@ -10,7 +10,7 @@ import {
 } from '@crocodile/client-core';
 import type { Coordinator } from '@crocodile/coordinator';
 import { Directory } from '@crocodile/directory';
-import { createIdentity, signRecord } from '@crocodile/crypto';
+import { createChatMessage, createIdentity, signRecord } from '@crocodile/crypto';
 import {
   DELETED_PROFILE_NAME,
   recordKey,
@@ -213,6 +213,28 @@ describe('client', () => {
     await carol.openChannel(ch);
     await waitFor(() => bodies(carol, ch).length === 5, 12000, 'history');
     expect(bodies(carol, ch)).toEqual(['msg 0', 'msg 1', 'msg 2', 'msg 3', 'msg 4']);
+  });
+
+  it('scrolling back shows every older message once, however many share a time', async () => {
+    const coord = await server();
+    const alice = await signUp(makeClient(new FakeRelayNetwork(), coord), 'alice');
+    const spaceId = await alice.createSpace('Busy');
+    const ch = channelOf(alice, spaceId);
+    // 150 messages; 40 of them at one moment, around where a page ends.
+    const base = Date.now() - 3_600_000;
+    for (let i = 0; i < 150; i++) {
+      const ts = i >= 30 && i < 70 ? base + 30 : base + i;
+      await alice.platform.messages.put(
+        createChatMessage(alice.identity!, { ch, body: `m${i}` }, ts),
+      );
+    }
+    await alice.openChannel(ch);
+    expect(alice.state.messages[ch]).toHaveLength(100);
+    // Fast scrolling asks several times before the first answer.
+    await Promise.all([alice.loadOlder(ch), alice.loadOlder(ch), alice.loadOlder(ch)]);
+    const shown = bodies(alice, ch);
+    expect(shown).toHaveLength(150);
+    expect(new Set(shown).size).toBe(150);
   });
 
   it('counts and announces new messages, not edits or deletions', async () => {

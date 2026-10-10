@@ -2277,17 +2277,32 @@ export class CrocodileClient extends Emitter<ClientEvents> {
     }
   }
 
-  async loadOlder(channel: string): Promise<boolean> {
-    const current = this.state.messages[channel] ?? [];
-    const before = current[0]?.ts;
-    const page = await this.platform.messages.page(channel, { before, limit: 100 });
+  private loadingOlder = new Map<string, Promise<boolean>>();
+
+  /** The page before the oldest message shown. Calls while one loads share it. */
+  loadOlder(channel: string): Promise<boolean> {
+    let loading = this.loadingOlder.get(channel);
+    if (!loading) {
+      loading = this.loadOlderPage(channel).finally(() => this.loadingOlder.delete(channel));
+      this.loadingOlder.set(channel, loading);
+    }
+    return loading;
+  }
+
+  private async loadOlderPage(channel: string): Promise<boolean> {
+    const oldest = (this.state.messages[channel] ?? [])[0];
+    const page = await this.platform.messages.page(channel, {
+      before: oldest?.ts,
+      beforeId: oldest?.id,
+      limit: 100,
+    });
     if (page.length === 0) return false;
-    this.store.set((s) => ({
-      messages: {
-        ...s.messages,
-        [channel]: foldEdits([...this.withDelivery(page), ...(s.messages[channel] ?? [])]),
-      },
-    }));
+    this.store.set((s) => {
+      const shown = s.messages[channel] ?? [];
+      const have = new Set(shown.map((m) => m.id));
+      const older = this.withDelivery(page.filter((m) => !have.has(m.id)));
+      return { messages: { ...s.messages, [channel]: foldEdits([...older, ...shown]) } };
+    });
     return true;
   }
 

@@ -13,9 +13,19 @@ export interface KeyValueStore {
 export interface MessageStore {
   /** Returns false if the message id was already stored. */
   put(message: ChatMessage): Promise<boolean>;
-  /** Newest-last page of messages older than `before` (exclusive). */
-  page(channel: string, opts: { before?: number; limit: number }): Promise<ChatMessage[]>;
-  /** Messages newer than `after`, oldest first. */
+  /**
+   * Newest-last page of messages before a position: older than `before`, or
+   * at `before` with an id below `beforeId`. Messages are ordered by
+   * (ts, id), so messages sharing a time aren't skipped between pages.
+   */
+  page(
+    channel: string,
+    opts: { before?: number; beforeId?: string; limit: number },
+  ): Promise<ChatMessage[]>;
+  /**
+   * Messages at or after `after`, oldest first. The boundary time is
+   * included (the asker may lack some messages at it); ids weed out repeats.
+   */
   since(channel: string, after: number, limit: number): Promise<ChatMessage[]>;
   latestTs(channel: string): Promise<number>;
   /** Deletes every stored message (account deletion). */
@@ -99,15 +109,19 @@ export class MemoryMessageStore implements MessageStore {
     return true;
   }
 
-  async page(channel: string, opts: { before?: number; limit: number }) {
+  async page(channel: string, opts: { before?: number; beforeId?: string; limit: number }) {
+    const { before, beforeId } = opts;
     const list = (this.byChannel.get(channel) ?? []).filter(
-      (m) => opts.before === undefined || m.ts < opts.before,
+      (m) =>
+        before === undefined ||
+        m.ts < before ||
+        (m.ts === before && beforeId !== undefined && m.id < beforeId),
     );
     return list.slice(-opts.limit);
   }
 
   async since(channel: string, after: number, limit: number) {
-    return (this.byChannel.get(channel) ?? []).filter((m) => m.ts > after).slice(0, limit);
+    return (this.byChannel.get(channel) ?? []).filter((m) => m.ts >= after).slice(0, limit);
   }
 
   async latestTs(channel: string) {
