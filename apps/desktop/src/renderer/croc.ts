@@ -9,6 +9,7 @@ import {
 import { StateStore } from '@crocodile/client-core';
 import { createPlatform, desktop, kv } from './platform';
 import FrameWorker from '@crocodile/client-core/frame-worker?worker';
+import type { UpdateStatus } from '../main/ipc-types';
 
 export type View =
   | { kind: 'friends' }
@@ -56,6 +57,8 @@ export interface UiState {
   pttKey: string;
   micLevel: number;
   appVersion: string;
+  /** In-app updates (the desktop main process does the work). */
+  update: UpdateStatus;
 }
 
 export const ui = new StateStore<UiState>({
@@ -69,6 +72,7 @@ export const ui = new StateStore<UiState>({
   pttKey: 'Backquote',
   micLevel: -100,
   appVersion: '',
+  update: { state: 'unsupported' },
 });
 
 let client: CrocodileClient;
@@ -139,6 +143,10 @@ export async function bootClient(): Promise<CrocodileClient> {
     client.setExtraServers(st.state === 'running' ? [st.url] : []);
   });
   ui.set({ voiceSettings, pttKey, appVersion: info.version });
+  if (desktop) {
+    desktop.updates.onStatus((update) => ui.set({ update }));
+    void desktop.updates.status().then((update) => ui.set({ update }));
+  }
   desktop?.ptt.onState((down) => engine.setPushToTalk(down));
   void syncGlobalPtt();
   await client.init();
@@ -147,6 +155,33 @@ export async function bootClient(): Promise<CrocodileClient> {
 
 export function getClient() {
   return client;
+}
+
+// ---------------------------------------------------------------------------
+// Updates
+// ---------------------------------------------------------------------------
+
+/** Downloads the release on offer, or opens its download page when it can't be installed here. */
+export function downloadUpdate() {
+  void desktop?.updates.download();
+}
+
+/** Restarts into the downloaded update, after asking if that would end a call. */
+export function installUpdate() {
+  const restart = () => void desktop?.updates.install();
+  const s = ui.get().update;
+  if (s.state !== 'ready') return;
+  if (!client?.state.voiceSession) return restart();
+  openModal({
+    kind: 'confirm',
+    title: s.after === 'open' ? 'Quit and install?' : 'Restart to update?',
+    body:
+      s.after === 'open'
+        ? `Crocodile quits so you can install version ${s.version}. This ends your call.`
+        : `Crocodile restarts into version ${s.version}. This ends your call.`,
+    action: s.after === 'open' ? 'Quit and install' : 'Restart',
+    onConfirm: restart,
+  });
 }
 
 // ---------------------------------------------------------------------------

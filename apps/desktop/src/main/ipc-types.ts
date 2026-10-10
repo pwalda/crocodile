@@ -66,3 +66,17 @@ export type CoordinatorProcessIn =
   | { type: 'stop' }
   | { type: 'status' };
 export type CoordinatorProcessOut = { type: 'status'; status: CoordinatorStatus };
+
+/** In-app updates (src/main/updates.ts), as shown in the app. */
+export type UpdateStatus =
+  /** This build can't update itself (a development build). */
+  | { state: 'unsupported' }
+  | { state: 'idle' }
+  | { state: 'checking' }
+  | { state: 'current'; checkedAt: number }
+  /** 'download': it can't be installed from the app; the download page opens. */
+  | { state: 'available'; version: string; how: 'install' | 'download' }
+  | { state: 'downloading'; version: string; percent: number }
+  /** 'open': the installer opens (and the app quits) instead of a restart. */
+  | { state: 'ready'; version: string; after: 'restart' | 'open' }
+  | { state: 'error'; message: string; version?: string };

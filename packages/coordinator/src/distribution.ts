@@ -77,6 +77,8 @@ export class Distribution {
   private repairTimer?: ReturnType<typeof setInterval>;
   private deletionTimer?: ReturnType<typeof setInterval>;
   private repairing = false;
+  /** Store positions over time, for collectGarbage: { when, latest seq then }. */
+  private gcMarks: { at: number; seq: number }[] = [];
 
   constructor(
     private readonly hub: Coordinator,
@@ -847,19 +849,31 @@ export class Distribution {
     if (this.deletionsAgain) return this.sendDeletions();
   }
 
-  /** Delete records we don't own, once the live set has been stable for a while. */
+  /**
+   * Delete records we don't own, once the live set has been stable for a
+   * while. A record that arrived recently stays until we could have seen the
+   * change that made us its owner: a server that held a link to one that went
+   * away notices at once and hands its records on, while we may only notice
+   * when that server's beacons stop (liveMs later).
+   */
   collectGarbage(now = Date.now()) {
     const m = this.hub.membership;
     const settled = m.settled;
+    const store = this.hub.records.store;
+    this.gcMarks.push({ at: now, seq: store.latestSeq() });
+    const hold = m.timing.liveMs + m.timing.settleMs + this.config.gcStableMs;
+    // The newest store position at least `hold` old: records up to it may go.
+    while (this.gcMarks.length > 1 && this.gcMarks[1]!.at <= now - hold) this.gcMarks.shift();
+    const upTo = this.gcMarks[0]!.at <= now - hold ? this.gcMarks[0]!.seq : 0;
     if (!settled.equals(m.view) || now - m.stableSince < this.config.gcStableMs) return 0;
     if (settled.ownsAll || settled.full.includes(this.self)) return 0;
-    const store = this.hub.records.store;
     const drop: string[] = [];
-    for (let cursor = 0; ;) {
+    for (let cursor = 0; cursor < upTo;) {
       const batch = store.since(cursor, 1000);
       if (batch.length === 0) break;
       cursor = batch[batch.length - 1]!.seq;
-      for (const { record } of batch) if (!settled.owns(this.self, record)) drop.push(record.key);
+      for (const { seq, record } of batch)
+        if (seq <= upTo && !settled.owns(this.self, record)) drop.push(record.key);
     }
     for (const key of drop) store.delete(key);
     if (drop.length) this.hub.log.info('dropped records owned elsewhere', { records: drop.length });
