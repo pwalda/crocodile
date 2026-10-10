@@ -74,11 +74,12 @@ law requires it.
 You can ask us for a copy of the data we hold about you, or to correct or
 delete it. Most of it you can see and change yourself in the app.
 
-The records in the first four rows are signed by you and kept by every server
-in the network, so no single server can delete them for you: a copy deleted
+The records in the first four rows are signed by you and kept by several
+servers in the network (a few chosen for each record, and any that keep a copy
+of everything), so no single server can delete them for you: a copy deleted
 here would come back from the others. To delete them everywhere, delete your
-account in the app (Settings → Profile → Delete account). Every server,
-this one included, then erases your devices, friends list, memberships, and
+account in the app (Settings → Profile → Delete account). Every server that
+holds them, this one included, then erases your devices, friends list, memberships, and
 any friend requests and mail waiting for you. What remains is a marker with your account ID and
 public key, named "Deleted user", and a "Deleted space" marker for each space
 you owned, so the account and its spaces can't be brought back. For data only
