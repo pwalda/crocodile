@@ -254,6 +254,33 @@ describe('sharded records', () => {
     expect(got.records).toHaveLength(written.length);
   });
 
+  it('keeps a copy handed over before this server sees that it owns it', async () => {
+    // An owner that held a link to a server that went away notices at once
+    // and hands its records on; a server without a link only notices when the
+    // beacons stop. A copy arriving in between must not be thrown away as
+    // "owned elsewhere".
+    const servers = await network(5);
+    const alice = await user(servers[0]!, 'alice');
+    const { space } = await createSpace(alice, 'Swamp');
+    const others = servers.filter((c) => !owners(servers, space).includes(c.info.id));
+    const late = others[others.length - 1]!;
+    const sender = owners(servers, space)[0]!;
+    // Its view has been stable for long enough to collect garbage.
+    await waitFor(
+      () => Date.now() - late.membership.stableSince > sharded.distribution!.gcStableMs! + 300,
+      5000,
+      'a stable view',
+    );
+    await late.dist.onReplicated([{ seq: 0, record: space }], sender);
+    expect(late.dist.collectGarbage()).toBe(0);
+    expect(late.store.get(space.key)?.sig).toBe(space.sig);
+    // Once it has had time to see the change and didn't, the copy goes.
+    const { liveMs, settleMs } = sharded.membership!;
+    const later = Date.now() + liveMs! + settleMs! + sharded.distribution!.gcStableMs!;
+    expect(late.dist.collectGarbage(later)).toBe(1);
+    expect(late.store.get(space.key)).toBeUndefined();
+  });
+
   it('repairs a copy that went missing on one owner', async () => {
     const servers = await network(5);
     const alice = await user(servers[0]!, 'alice');

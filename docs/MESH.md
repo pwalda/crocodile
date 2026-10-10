@@ -88,7 +88,10 @@ by name goes to `name:<name>`.
   stable for a few seconds, each server goes through what it stores and sends
   every record to owners that have just become responsible for it (only the
   first live old owner does, so each record is sent once). Records a server no
-  longer owns are deleted after the live set has been stable for ten minutes.
+  longer owns are deleted after the live set has been stable for ten minutes,
+  and only once they have been held long enough to have seen the change that
+  made the server an owner: a server linked to one that went away notices at
+  once and hands records on, while the others notice only when its beacons stop.
 - **Catching up.** When a link comes up, each side streams the records the
   other owns that it wrote since the last time (per-server cursors, as before).
 - **Repair.** Every few minutes a server compares what it holds with one other
