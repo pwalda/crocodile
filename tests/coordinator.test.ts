@@ -24,7 +24,7 @@ import {
   type SignedRecord,
 } from '@crocodile/protocol';
 import { CoordinatorConnection } from '@crocodile/client-core';
-import { Coordinator, rendezvousOwner } from '@crocodile/coordinator';
+import { Coordinator, lanAddress, rendezvousOwner } from '@crocodile/coordinator';
 import {
   caps,
   connectUser,
@@ -151,6 +151,39 @@ describe('server hello', () => {
     expect(conn.stun).toEqual([]);
     expect(conn.operator).toBeUndefined();
     conn.close();
+  });
+});
+
+describe('STUN and TURN addresses', () => {
+  it('without a public URL, apps get the address they reached the server on', async () => {
+    const c = await server({ stunPort: 0 });
+    expect(new URL(c.url).hostname).toBe('127.0.0.1');
+    // An app on the LAN reached us at 192.168.1.20: 127.0.0.1 would be its own machine.
+    expect(c.publicHost('192.168.1.20')).toBe('192.168.1.20');
+    expect(c.publicHost('::ffff:192.168.1.20')).toBe('192.168.1.20');
+    expect(c.publicHost('fd00::20')).toBe('[fd00::20]');
+    expect(c.stunUrls('192.168.1.20')[0]).toMatch(/^stun:192\.168\.1\.20:\d+$/);
+    // A local app keeps the loopback address.
+    expect(c.publicHost('127.0.0.1')).toBe('127.0.0.1');
+
+    // With a public URL, that is what everyone gets.
+    const named = await server({ publicUrl: 'https://croc.example.org' });
+    expect(named.publicHost('192.168.1.20')).toBe('croc.example.org');
+  });
+
+  it("a relay with no public address uses the machine's network address", () => {
+    expect(
+      lanAddress({
+        lo: [{ address: '127.0.0.1', family: 'IPv4', internal: true } as never],
+        eth0: [
+          { address: 'fe80::1', family: 'IPv6', internal: false } as never,
+          { address: '192.168.1.20', family: 'IPv4', internal: false } as never,
+        ],
+      }),
+    ).toBe('192.168.1.20');
+    expect(
+      lanAddress({ lo: [{ address: '127.0.0.1', family: 'IPv4', internal: true } as never] }),
+    ).toBeUndefined();
   });
 });
 

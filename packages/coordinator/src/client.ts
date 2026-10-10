@@ -71,6 +71,8 @@ export class ClientConnection implements ClientHandle {
   constructor(
     private readonly hub: Coordinator,
     private readonly ws: WebSocket,
+    /** Our address as this client reached it, for STUN and TURN URLs. */
+    readonly via?: string,
   ) {
     const time = Date.now();
     const info = hub.info;
@@ -79,7 +81,7 @@ export class ClientConnection implements ClientHandle {
       t: 'hello' as const,
       server: info,
       challenge: this.challenge,
-      stun: hub.stunUrls(),
+      stun: hub.stunUrls(via),
       time,
       channel,
       features: {
