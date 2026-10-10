@@ -474,8 +474,21 @@ describe('sealed for self', () => {
 describe('notes', () => {
   const bob = createIdentity();
   const once = () => createIdentity();
+  const boxForBob = () =>
+    sealAnonymous(
+      once(),
+      'somedevice',
+      { peer: `${bob.userId}.somedevice`, prekey: createPrekey().bundle },
+      utf8.encode('x'),
+    );
   const note = (author = once(), version = Date.now()) =>
-    signRecord(author, 'note', recordKey.note(bob.userId, author.userId), { boxes: [] }, version);
+    signRecord(
+      author,
+      'note',
+      recordKey.note(bob.userId, author.userId),
+      { boxes: [boxForBob()] },
+      version,
+    );
 
   it('are signed by a one-time key named in the key, and written once', () => {
     const n = note();
@@ -504,6 +517,14 @@ describe('notes', () => {
       ],
     });
     expect(validateRecord(stray, ctx([]))).toMatchObject({ ok: false });
+    // An empty one would only take a place in Bob's quota.
+    const empty = once();
+    expect(
+      validateRecord(
+        signRecord(empty, 'note', recordKey.note(bob.userId, empty.userId), { boxes: [] }),
+        ctx([]),
+      ),
+    ).toMatchObject({ ok: false, reason: 'a note carries at least one box' });
   });
 
   it('only the recipient deletes them, and nothing brings back an expired one', () => {
