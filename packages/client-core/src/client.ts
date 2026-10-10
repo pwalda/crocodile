@@ -270,7 +270,8 @@ export interface ClientState {
 }
 
 export type ClientEvents = {
-  message: { channel: string; message: ChatMessage; mine: boolean };
+  /** `update`: an edit or deletion of an earlier message, not a new one. */
+  message: { channel: string; message: ChatMessage; mine: boolean; update: boolean };
   error: { message: string };
 };
 
@@ -2326,7 +2327,7 @@ export class CrocodileClient extends Emitter<ClientEvents> {
       session.peers.size > 0 &&
       session.sendGroup({ type: 'message', message });
     this.addToTimeline(channel, { ...message, pending: true });
-    this.emit('message', { channel, message, mine: true });
+    this.emit('message', { channel, message, mine: true, update: !!message.edits });
     if (!delivered && sessionId.startsWith('dm:')) void this.pokeDm(sessionId);
     this.scheduleMail();
   }
@@ -2354,7 +2355,9 @@ export class CrocodileClient extends Emitter<ClientEvents> {
     if (!fresh) return false;
     this.addToTimeline(message.ch, message);
     const mine = message.author === this.userId;
-    if (!mine && this.state.activeChannel !== message.ch) {
+    // Edits and deletions change what's there; they aren't news.
+    const update = !!message.edits;
+    if (!mine && !update && this.state.activeChannel !== message.ch) {
       this.store.set((s) => ({
         unread: { ...s.unread, [message.ch]: (s.unread[message.ch] ?? 0) + 1 },
       }));
@@ -2365,7 +2368,7 @@ export class CrocodileClient extends Emitter<ClientEvents> {
       const { [message.author]: _, ...rest } = typing;
       return { typing: { ...s.typing, [message.ch]: rest } };
     });
-    this.emit('message', { channel: message.ch, message, mine });
+    this.emit('message', { channel: message.ch, message, mine, update });
     return true;
   }
 

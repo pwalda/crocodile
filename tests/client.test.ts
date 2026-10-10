@@ -215,6 +215,32 @@ describe('client', () => {
     expect(bodies(carol, ch)).toEqual(['msg 0', 'msg 1', 'msg 2', 'msg 3', 'msg 4']);
   });
 
+  it('counts and announces new messages, not edits or deletions', async () => {
+    const coord = await server();
+    const net = new FakeRelayNetwork();
+    const alice = await signUp(makeClient(net, coord, { nat: 'open' }), 'alice');
+    const bob = await signUp(makeClient(net, coord), 'bob');
+    const spaceId = await alice.createSpace('Edits');
+    const code = await alice.createInvite(spaceId);
+    await bob.joinWithInvite(code);
+    const ch = channelOf(alice, spaceId);
+    const sid = sessionIds.space(spaceId);
+    await alice.openChannel(ch);
+    await waitFor(() => alice.state.sessions[sid]?.peers.includes(bob.userId), 12000, 'connected');
+    // Bob is elsewhere in the app.
+    bob.closeChannel();
+    const events: boolean[] = [];
+    bob.on('message', ({ update }) => events.push(update));
+    await alice.sendMessage(ch, 'first take');
+    await waitFor(() => bob.state.unread[ch] === 1, 12000, 'unread');
+    const id = alice.state.messages[ch]!.find((m) => m.body === 'first take')!.id;
+    await alice.editMessage(ch, id, 'second take');
+    await alice.deleteMessage(ch, id);
+    await waitFor(() => events.length === 3, 12000, 'edit and deletion arrive');
+    expect(events).toEqual([false, true, true]);
+    expect(bob.state.unread[ch]).toBe(1);
+  });
+
   it('syncs a long history in parts small enough for the data channel', async () => {
     const coord = await server();
     const net = new FakeRelayNetwork();
