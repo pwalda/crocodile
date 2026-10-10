@@ -208,14 +208,26 @@ export const messages: MessageStore = {
 /** Runs host relays in the Electron utility process. */
 function relayAdapter(api: DesktopApi): HostRelayAdapter {
   const outbound = new Map<string, (to: string, data: SignalData) => void>();
+  const failed = new Map<string, (reason: string) => void>();
   api.relay.onEvent((msg) => {
     if (msg.type === 'signal') outbound.get(msg.handle)?.(msg.to, msg.data);
-    else if (msg.type === 'error') console.warn('relay error', msg.message);
+    else if (msg.type === 'error') {
+      console.warn('relay error', msg.message);
+      // '*': the relay process exited, taking every relay with it.
+      const lost = msg.handle === '*' ? [...failed.keys()] : [msg.handle];
+      for (const h of lost) {
+        const fn = failed.get(h);
+        failed.delete(h);
+        outbound.delete(h);
+        fn?.(msg.message);
+      }
+    }
   });
   return {
     async start(opts) {
       const handle = randomId(6);
       outbound.set(handle, opts.sendSignal);
+      if (opts.onFailed) failed.set(handle, opts.onFailed);
       await api.relay.send({
         type: 'start',
         handle,
@@ -238,6 +250,7 @@ function relayAdapter(api: DesktopApi): HostRelayAdapter {
         async close() {
           clearInterval(timer);
           outbound.delete(handle);
+          failed.delete(handle);
           await api.relay.send({ type: 'close', handle });
         },
       } satisfies RelayHandle;

@@ -263,6 +263,30 @@ describe('client', () => {
     expect(bob.state.unread[ch]).toBe(1);
   });
 
+  it('starts the relay again when its process dies, and members come back', async () => {
+    const coord = await server();
+    const net = new FakeRelayNetwork();
+    const alice = await signUp(makeClient(net, coord, { nat: 'open' }), 'alice');
+    const bob = await signUp(makeClient(net, coord, { canHost: false }), 'bob');
+    const spaceId = await alice.createSpace('Crash');
+    const code = await alice.createInvite(spaceId);
+    await bob.joinWithInvite(code);
+    const ch = channelOf(alice, spaceId);
+    const sid = sessionIds.space(spaceId);
+    await alice.openChannel(ch);
+    await bob.openChannel(ch);
+    await waitFor(() => bob.state.sessions[sid]?.peers.includes(alice.userId), 12000, 'connected');
+    const epoch = bob.state.sessions[sid]!.epoch;
+
+    net.crashRelayProcessOf(alice.userId);
+    await waitFor(() => !bob.state.sessions[sid]?.peers.includes(alice.userId), 5000, 'dropped');
+    // Alice runs a new relay for the same session: no new election needed.
+    await waitFor(() => bob.state.sessions[sid]?.peers.includes(alice.userId), 5000, 'back');
+    expect(bob.state.sessions[sid]!.epoch).toBe(epoch);
+    await alice.sendMessage(ch, 'still here');
+    await waitFor(() => bodies(bob, ch).includes('still here'), 5000, 'delivered');
+  });
+
   it('syncs a long history in parts small enough for the data channel', async () => {
     const coord = await server();
     const net = new FakeRelayNetwork();

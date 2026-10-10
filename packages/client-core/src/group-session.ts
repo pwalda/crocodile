@@ -256,11 +256,15 @@ export class GroupSession extends Emitter<GroupSessionEvents> {
     this.emit('update', undefined);
   }
 
+  /** When our relay last had to be started again, to give up on one that keeps dying. */
+  private relayRestarts: number[] = [];
+
   private startHosting(state: SessionState) {
     this.stopHosting();
     const adapter = this.ctx.platform.relay;
     if (!adapter) return;
     const sessionId = this.sessionId;
+    let hosting: { epoch: number; handle: Promise<RelayHandle | null> } | undefined;
     const handle = adapter
       .start({
         sessionId,
@@ -279,12 +283,24 @@ export class GroupSession extends Emitter<GroupSessionEvents> {
             .request('signal.send', { to, sessionId, data })
             .catch(() => {});
         },
+        onFailed: (reason) => {
+          // Members reconnect to a fresh relay at the same epoch; a host whose
+          // relay keeps dying stops, and they report it to get another host.
+          if (this.left || this.hosting !== hosting || this.state?.host !== this.me) return;
+          const now = Date.now();
+          this.relayRestarts = this.relayRestarts.filter((t) => now - t < 60_000);
+          this.ctx.log('relay stopped', { sessionId, reason, restarts: this.relayRestarts.length });
+          if (this.relayRestarts.length >= 3) return this.stopHosting();
+          this.relayRestarts.push(now);
+          this.startHosting(this.state);
+        },
       })
       .catch((err) => {
         this.ctx.log('failed to start relay', { err: String(err) });
         return null;
       });
-    this.hosting = { epoch: state.epoch, handle };
+    hosting = { epoch: state.epoch, handle };
+    this.hosting = hosting;
     this.ctx.log('hosting relay', { sessionId, epoch: state.epoch });
     const early = this.earlyRelaySignals.filter((s) => s.data.epoch === state.epoch);
     this.earlyRelaySignals = [];

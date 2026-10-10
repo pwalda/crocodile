@@ -49,6 +49,8 @@ export interface RelayStartOptions {
   /** Peer ids allowed to connect; checked on every offer. */
   members: () => string[];
   sendSignal: (to: string, data: SignalData) => void;
+  /** The relay stopped by itself (its process died, say): the session starts another. */
+  onFailed?: (reason: string) => void;
 }
 
 /**
