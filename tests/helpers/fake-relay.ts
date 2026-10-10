@@ -109,6 +109,9 @@ class FakeRelay {
   }
 }
 
+/** werift's SCTP max-message-size. */
+const MAX_MESSAGE_SIZE = 65536;
+
 class FakeTransport extends Emitter<RelayLinkEvents> implements RelayTransport {
   private relay?: FakeRelay;
   private closed = false;
@@ -162,6 +165,10 @@ class FakeTransport extends Emitter<RelayLinkEvents> implements RelayTransport {
 
   send(msg: { t: string }) {
     if (!this.isOpen) return false;
+    // Like werift's data channel, which the host relay uses.
+    const size = JSON.stringify(msg).length;
+    if (size > MAX_MESSAGE_SIZE)
+      throw new Error(`max-message-size exceeded: ${size} > ${MAX_MESSAGE_SIZE}`);
     const relay = this.relay!;
     setTimeout(() => relay.route(this.userId, msg as never), 1);
     return true;

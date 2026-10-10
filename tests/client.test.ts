@@ -215,6 +215,23 @@ describe('client', () => {
     expect(bodies(carol, ch)).toEqual(['msg 0', 'msg 1', 'msg 2', 'msg 3', 'msg 4']);
   });
 
+  it('syncs a long history in parts small enough for the data channel', async () => {
+    const coord = await server();
+    const net = new FakeRelayNetwork();
+    const alice = await signUp(makeClient(net, coord, { nat: 'open' }), 'alice');
+    const spaceId = await alice.createSpace('Long');
+    const code = await alice.createInvite(spaceId);
+    const ch = channelOf(alice, spaceId);
+    await alice.openChannel(ch);
+    // 40 long messages: about 300 KiB of history, in several-byte characters.
+    for (let i = 0; i < 40; i++) await alice.sendMessage(ch, `${i} ${'żółw '.repeat(780)}`);
+
+    const carol = await signUp(makeClient(net, coord), 'carol');
+    await carol.joinWithInvite(code);
+    await carol.openChannel(ch);
+    await waitFor(() => bodies(carol, ch).length === 40, 15000, 'history');
+  }, 40_000);
+
   it('delivers DMs, including ones written while the friend was offline', async () => {
     const coord = await server();
     const net = new FakeRelayNetwork();

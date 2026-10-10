@@ -101,7 +101,12 @@ export type GroupSessionEvents = {
   error: { message: string };
 };
 
-const HISTORY_CHUNK_BYTES = 96 * 1024;
+/**
+ * Plaintext bytes of history in one reply. Sealed and base64-encoded it grows
+ * by about half, and must stay under the 64 KiB a data channel message may
+ * be (werift's limit, which host relays use).
+ */
+const HISTORY_CHUNK_BYTES = 32 * 1024;
 const PENDING_TTL_MS = 15_000;
 
 /**
@@ -544,14 +549,27 @@ export class GroupSession extends Emitter<GroupSessionEvents> {
     const pending = this.ctx.outbox.pending(this.sessionId);
     if (pending.length === 0) return;
     this.outboxOffered.add(peer);
-    for (let i = 0; i < pending.length; i += 100) {
-      const chunk = pending.slice(i, i + 100);
-      await this.sendSealed(peer, {
-        type: 'history',
-        messages: chunk,
-        done: i + 100 >= pending.length,
-      });
+    await this.sendMessages(peer, pending);
+  }
+
+  /**
+   * Messages to one peer as 'history' replies, each small enough for one
+   * data channel message; the last one says it's done.
+   */
+  private async sendMessages(to: string, messages: ChatMessage[]) {
+    let chunk: ChatMessage[] = [];
+    let size = 0;
+    for (const m of messages) {
+      const bytes = utf8.encode(JSON.stringify(m)).length + 1;
+      if (size + bytes > HISTORY_CHUNK_BYTES && chunk.length) {
+        await this.sendSealed(to, { type: 'history', messages: chunk, done: false });
+        chunk = [];
+        size = 0;
+      }
+      chunk.push(m);
+      size += bytes;
     }
+    await this.sendSealed(to, { type: 'history', messages: chunk, done: true });
   }
 
   /** Confirm receipt of messages authored by `from`'s user, batched. */
@@ -806,20 +824,7 @@ export class GroupSession extends Emitter<GroupSessionEvents> {
       if (!allowed.has(ch)) continue;
       out.push(...(await this.ctx.messages.since(ch, after, 500)));
     }
-    let chunk: ChatMessage[] = [];
-    let size = 0;
-    const flush = async (done: boolean) => {
-      await this.sendSealed(to, { type: 'history', messages: chunk, done });
-      chunk = [];
-      size = 0;
-    };
-    for (const m of out) {
-      const bytes = m.body.length * 3 + 400;
-      if (size + bytes > HISTORY_CHUNK_BYTES && chunk.length) await flush(false);
-      chunk.push(m);
-      size += bytes;
-    }
-    await flush(true);
+    await this.sendMessages(to, out);
   }
 
   private setStatus(status: RelayStatus) {
