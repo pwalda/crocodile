@@ -7,7 +7,7 @@
 import { networkInterfaces } from 'node:os';
 import { Coordinator } from '@crocodile/coordinator';
 import type { CoordinatorProcessIn, CoordinatorStatus } from './ipc-types';
-import { coordinatorStartError } from './coordinator-config';
+import { coordinatorStartError, relayCapacity, relayPorts } from './coordinator-config';
 
 /** What the host needs of a server (a Coordinator; tests pass a stand-in). */
 export type ServerLike = Pick<Coordinator, 'start' | 'stop' | 'url' | 'info' | 'mesh' | 'presence'>;
@@ -57,10 +57,7 @@ export function createCoordinatorHost(
           stunPort: s.port,
           extraStun: [],
           capacity: 500,
-          relay: {
-            enabled: s.relay,
-            maxUsers: Math.max(1, Math.min(100, s.relayMaxUsers || 10)),
-          },
+          relay: { enabled: s.relay, maxUsers: relayCapacity(s), ports: relayPorts(s) },
           // Small quotas: a home computer is not a mail server.
           mailbox: {
             enabled: !!s.mailbox,

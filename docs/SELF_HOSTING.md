@@ -88,7 +88,9 @@ grant lasts at most one hour, `--relay-max-users` caps how many people use
 it at once, and each allocation is rate-limited (about 100 kbit/s of voice
 per person). Your server only ever sees ciphertext. Turn it off with
 `--relay off` if bandwidth is scarce. The desktop app's built-in server
-leaves it off unless you enable "Offer a relay".
+leaves it off unless you enable "Offer a relay"; it then relays on the UDP
+ports just above its own (four per relay user; the app shows the range), which
+you forward along with its port to serve people outside your network.
 
 ## Hosting safely
 

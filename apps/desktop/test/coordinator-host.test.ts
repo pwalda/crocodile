@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { createCoordinatorHost, type ServerLike } from '../src/main/coordinator-host';
+import type { CoordinatorConfig } from '@crocodile/coordinator';
 import type { CoordinatorSettings, CoordinatorStatus } from '../src/main/ipc-types';
 
 const settings: CoordinatorSettings = {
@@ -23,8 +24,10 @@ const start = {
 /** Servers that take a moment to start and stop, and note which are running. */
 function fakeServers() {
   const running = new Set<number>();
+  const configs: Partial<CoordinatorConfig>[] = [];
   let n = 0;
-  const make = (): ServerLike => {
+  const make = (config: Partial<CoordinatorConfig>): ServerLike => {
+    configs.push(config);
     const id = n++;
     return {
       start: async () => {
@@ -41,7 +44,7 @@ function fakeServers() {
       presence: { localCount: 0 },
     } as unknown as ServerLike;
   };
-  return { running, make };
+  return { running, make, configs };
 }
 
 describe("the app's own server, started and stopped quickly", () => {
@@ -59,6 +62,8 @@ describe("the app's own server, started and stopped quickly", () => {
     void host.send(start);
     await host.send(start);
     expect(servers.running.size).toBe(1);
+    // Its relay uses a fixed range of ports, which a router can forward.
+    expect(servers.configs.at(-1)?.relay?.ports).toEqual({ min: 7445, max: 7484 });
     expect(statuses.at(-1)?.state).toBe('running');
   });
 });

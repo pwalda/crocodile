@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { coordinatorStartError } from '../src/main/coordinator-config';
+import { coordinatorStartError, relayPorts } from '../src/main/coordinator-config';
 import type { CoordinatorSettings } from '../src/main/ipc-types';
 
 const settings: CoordinatorSettings = {
@@ -25,5 +25,14 @@ describe("the app's own server", () => {
     expect(
       coordinatorStartError({ ...settings, contact: 'https://example.org/privacy' }),
     ).toBeUndefined();
+  });
+
+  it('relays on a fixed range of ports, which a router can forward', () => {
+    expect(relayPorts(settings)).toEqual({ min: 7445, max: 7484 });
+    expect(relayPorts({ ...settings, port: 9000, relayMaxUsers: 3 })).toEqual({
+      min: 9002,
+      max: 9013,
+    });
+    expect(relayPorts({ ...settings, port: 65530, relayMaxUsers: 100 }).max).toBe(65535);
   });
 });
