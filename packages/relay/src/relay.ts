@@ -179,10 +179,15 @@ export class HostRelay {
         },
       });
     });
+    // This connection's events only ever end this connection: once a newer
+    // offer from the same member replaced it, they must leave that one alone.
+    const end = (reason: string) => {
+      if (this.peers.get(from) === peer) this.removePeer(from, reason);
+    };
     pc.connectionStateChange.subscribe((state) => {
-      if (state === 'failed' || state === 'closed') this.removePeer(from, state);
+      if (state === 'failed' || state === 'closed') end(state);
       else if (state === 'disconnected') {
-        peer.closeTimer = setTimeout(() => this.removePeer(from, 'disconnected'), 8000);
+        peer.closeTimer = setTimeout(() => end('disconnected'), 8000);
       } else if (state === 'connected' && peer.closeTimer) {
         clearTimeout(peer.closeTimer);
         peer.closeTimer = undefined;
@@ -196,8 +201,7 @@ export class HostRelay {
       dc.stateChanged.subscribe((s) => {
         if (s === 'open') onOpen();
         // A closed control channel means the member hung up.
-        else if (s === 'closed' && this.peers.get(from) === peer)
-          this.removePeer(from, 'channel closed');
+        else if (s === 'closed') end('channel closed');
       });
       dc.onMessage.subscribe((raw) => this.onDataMessage(peer, raw));
     });
@@ -239,7 +243,7 @@ export class HostRelay {
         await pc.addIceCandidate(c as never).catch(() => {});
     } catch (err) {
       this.opts.log?.warn('failed to answer offer', { from, err: String(err) });
-      this.removePeer(from, 'error');
+      end('error');
     }
   }
 
