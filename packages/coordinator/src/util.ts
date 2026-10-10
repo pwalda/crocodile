@@ -77,3 +77,68 @@ export class RpcFailure extends Error {
     super(message);
   }
 }
+
+/**
+ * Bytes of JSON one frame between servers may carry. Sealed (padded, then
+ * base64) it stays under LIMITS.wsMessageMaxBytes, which the receiving side
+ * enforces by closing the link.
+ */
+export const FRAME_BUDGET = 512 * 1024;
+
+const jsonBytes = (v: unknown) => Buffer.byteLength(JSON.stringify(v));
+
+/**
+ * Splits items into runs whose JSON fits in `budget` bytes and `max` items.
+ * A single item larger than the budget goes alone (records are smaller).
+ */
+export function chunkByBytes<T>(items: T[], budget = FRAME_BUDGET, max = Infinity): T[][] {
+  const out: T[][] = [];
+  let run: T[] = [];
+  // A run's JSON: its items, a comma or bracket after each, and "[" first.
+  let size = 1;
+  for (const item of items) {
+    const n = jsonBytes(item) + 1;
+    if (run.length && (size + n > budget || run.length >= max)) {
+      out.push(run);
+      run = [];
+      size = 1;
+    }
+    run.push(item);
+    size += n;
+  }
+  if (run.length) out.push(run);
+  return out;
+}
+
+/** The longest leading run of items that fits in `budget` bytes. */
+export function withinBytes<T>(items: T[], budget = FRAME_BUDGET): T[] {
+  return chunkByBytes(items, budget)[0] ?? [];
+}
+
+/**
+ * A number from a command-line option or environment variable: the fallback
+ * when unset, an error for anything that isn't a number in range (a typo
+ * would otherwise become NaN, and NaN comparisons are always false).
+ */
+export function numberOption(
+  raw: string | undefined,
+  name: string,
+  fallback: number,
+  range: { min?: number; max?: number; integer?: boolean } = {},
+): number {
+  if (raw === undefined || raw.trim() === '') return fallback;
+  const n = Number(raw.trim());
+  const { min = -Infinity, max = Infinity, integer = true } = range;
+  if (!Number.isFinite(n) || (integer && !Number.isInteger(n)) || n < min || n > max) {
+    const bounds = [
+      min > -Infinity ? `at least ${min}` : '',
+      max < Infinity ? `at most ${max}` : '',
+    ]
+      .filter(Boolean)
+      .join(' and ');
+    throw new Error(
+      `${name} must be ${integer ? 'a whole number' : 'a number'}${bounds ? ` ${bounds}` : ''}, not "${raw}"`,
+    );
+  }
+  return n;
+}

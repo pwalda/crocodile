@@ -53,6 +53,7 @@ import { desktop } from '../platform';
 import { Avatar, Button, Input, Label, Toggle, cx } from '../components/ui';
 import { Logo } from '../components/Logo';
 import type { CoordinatorSettings, CoordinatorStatus } from '../../main/ipc-types';
+import { relayPorts } from '../../main/coordinator-config';
 
 const TABS = [
   { id: 'account', label: 'Profile', icon: User },
@@ -1130,7 +1131,10 @@ function HostTab() {
           <p className="mt-1 text-muted">
             People on your network add it under Settings → Network → Preferred servers (or when the
             app says it can't find a server). For people elsewhere, forward TCP+UDP {settings.port}{' '}
-            and UDP {settings.port + 1} on your router and share your public address.
+            and UDP {settings.port + 1}
+            {settings.relay &&
+              ` (and UDP ${relayPorts(settings).min}-${relayPorts(settings).max} for the relay)`}{' '}
+            on your router and share your public address.
           </p>
           <div className="mt-2 space-y-1">
             {(status.publicUrl ? [status.publicUrl, ...status.lanUrls] : status.lanUrls).map(

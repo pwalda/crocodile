@@ -6,24 +6,25 @@ import {
   routeFromStats,
 } from '@crocodile/client-core';
 
-/** A stand-in RTCPeerConnection: per STUN URL, the reflexive candidates it finds, or no answer. */
-function fakePeerConnection(byUrl: Record<string, string[] | 'no answer'>) {
+type Gathered = { candidates: string[]; errors?: { address?: string; port?: number }[] };
+
+/** A stand-in RTCPeerConnection: what gathering finds, given the STUN servers it was handed. */
+function fakePeerConnection(gather: (servers: string[]) => Gathered) {
   return class {
     onicecandidate: ((ev: { candidate: { candidate: string } | null }) => void) | null = null;
-    onicecandidateerror: (() => void) | null = null;
-    private url: string;
+    onicecandidateerror: ((ev: { address?: string; port?: number }) => void) | null = null;
+    private servers: string[];
     constructor(config: { iceServers: { urls: string }[] }) {
-      this.url = config.iceServers[0]!.urls;
+      this.servers = config.iceServers.map((s) => s.urls);
     }
     createDataChannel() {}
     async createOffer() {
       return {};
     }
     async setLocalDescription() {
-      const found = byUrl[this.url] ?? [];
-      this.onicecandidate?.({ candidate: { candidate: host('10.0.0.2') } });
-      if (found === 'no answer') this.onicecandidateerror?.();
-      else for (const c of found) this.onicecandidate?.({ candidate: { candidate: c } });
+      const found = gather(this.servers);
+      for (const c of found.candidates) this.onicecandidate?.({ candidate: { candidate: c } });
+      for (const e of found.errors ?? []) this.onicecandidateerror?.(e);
       this.onicecandidate?.({ candidate: null });
     }
     close() {}
@@ -35,64 +36,150 @@ const srflx = (ip: string, port: number) =>
   `candidate:2 1 udp 1686052607 ${ip} ${port} typ srflx raddr 0.0.0.0 rport 0`;
 const STUN = ['stun:coord.example:7443', 'stun:coord.example:7444'];
 
-async function check(a: string[] | 'no answer', b: string[] | 'no answer') {
-  const probe = await probeNetwork(fakePeerConnection({ [STUN[0]!]: a, [STUN[1]!]: b }), STUN);
+async function check(found: Gathered) {
+  const probe = await probeNetwork(
+    fakePeerConnection(() => found),
+    STUN,
+  );
   return { probe, verdict: networkVerdict(probe) };
 }
 
 describe('network check', () => {
+  it('asks both STUN ports from one connection, so their answers are comparable', async () => {
+    const asked: string[][] = [];
+    await probeNetwork(
+      fakePeerConnection((servers) => {
+        asked.push(servers);
+        return { candidates: [] };
+      }),
+      STUN,
+    );
+    expect(asked).toEqual([STUN]);
+  });
+
   it('tells a good network from a limited or blocked one', async () => {
-    // Both STUN ports see the same public mapping: a cone NAT, fine for direct connections.
-    expect(await check([srflx('203.0.113.9', 40001)], [srflx('203.0.113.9', 40001)])).toEqual({
+    // Both ports see the same mapping of our one socket, reported once: a cone NAT.
+    expect(await check({ candidates: [host('10.0.0.2'), srflx('203.0.113.9', 40001)] })).toEqual({
       probe: { nat: 'cone', udp: true },
       verdict: 'good',
     });
-    // A new mapping per destination: symmetric NAT, direct connections often fail.
-    expect(await check([srflx('203.0.113.9', 40001)], [srflx('203.0.113.9', 40777)])).toEqual({
-      probe: { nat: 'symmetric', udp: true },
-      verdict: 'limited',
+    // Two sockets (two interfaces), one mapping each: still a cone NAT.
+    expect(
+      (
+        await check({
+          candidates: [
+            host('10.0.0.2', 50000),
+            host('192.168.5.3', 50002),
+            srflx('203.0.113.9', 40001),
+            srflx('198.51.100.4', 41000),
+          ],
+        })
+      ).verdict,
+    ).toBe('good');
+    // One socket, a different mapping per port: symmetric NAT, direct connections often fail.
+    expect(
+      await check({
+        candidates: [host('10.0.0.2'), srflx('203.0.113.9', 40001), srflx('203.0.113.9', 40777)],
+      }),
+    ).toEqual({ probe: { nat: 'symmetric', udp: true }, verdict: 'limited' });
+    // No answer on the only socket: UDP is blocked, nothing direct can work.
+    expect(
+      await check({
+        candidates: [host('10.0.0.2')],
+        errors: [{ address: '10.0.0.2', port: 50000 }],
+      }),
+    ).toEqual({ probe: { nat: 'unknown', udp: false }, verdict: 'blocked' });
+    // The answers matched our own address (dropped as duplicates): nothing in between.
+    expect(await check({ candidates: [host('10.0.0.2')] })).toEqual({
+      probe: { nat: 'open', udp: true },
+      verdict: 'good',
     });
-    // No STUN answer at all: UDP is blocked, nothing direct can work.
-    expect(await check('no answer', 'no answer')).toEqual({
-      probe: { nat: 'unknown', udp: false },
-      verdict: 'blocked',
-    });
-    // Both answered with our own address, which WebRTC drops as a duplicate:
-    // nothing in between, as with a server on the same network.
-    expect(await check([], [])).toEqual({ probe: { nat: 'open', udp: true }, verdict: 'good' });
-    // The public address is the machine's own.
-    expect((await check([srflx('10.0.0.2', 50000)], [])).verdict).toBe('good');
-    // Only one port answered: can't tell.
-    expect((await check([srflx('203.0.113.9', 1)], 'no answer')).verdict).toBe('unknown');
+    expect(
+      (await check({ candidates: [host('10.0.0.2'), srflx('10.0.0.2', 50000)] })).verdict,
+    ).toBe('good');
+  });
+
+  it('judges each socket by its own answers, not by totals', async () => {
+    const via = (ip: string, port: number, from: string, fromPort: number) =>
+      `candidate:2 1 udp 1686052607 ${ip} ${port} typ srflx raddr ${from} rport ${fromPort}`;
+    const twoSockets = [host('10.0.0.2', 50000), host('192.168.5.3', 50002)];
+    const secondFails = [
+      { address: '192.168.5.3', port: 50002 },
+      { address: '192.168.5.3', port: 50002 },
+    ];
+    // One interface gets nowhere; the other gets a different mapping per
+    // server: a symmetric NAT, though there are as many mappings as sockets.
+    expect(
+      (
+        await check({
+          candidates: [...twoSockets, srflx('203.0.113.9', 40001), srflx('203.0.113.9', 40777)],
+          errors: secondFails,
+        })
+      ).probe.nat,
+    ).toBe('symmetric');
+    // The same, where the browser says which socket each mapping is of.
+    expect(
+      (
+        await check({
+          candidates: [
+            ...twoSockets,
+            via('203.0.113.9', 40001, '10.0.0.2', 50000),
+            via('203.0.113.9', 40777, '10.0.0.2', 50000),
+          ],
+          errors: secondFails,
+        })
+      ).probe.nat,
+    ).toBe('symmetric');
+    // Only one server answered: one mapping proves nothing either way.
+    expect(
+      (
+        await check({
+          candidates: [host('10.0.0.2'), srflx('203.0.113.9', 40001)],
+          errors: [{ address: '10.0.0.2', port: 50000 }],
+        })
+      ).probe.nat,
+    ).toBe('unknown');
+    // Both answered the socket with one mapping: a cone NAT.
+    expect(
+      (await check({ candidates: [...twoSockets, via('203.0.113.9', 40001, '10.0.0.2', 50000)] }))
+        .verdict,
+    ).toBe('good');
+  });
+
+  it("doesn't call a network blocked because one of its interfaces can't reach the server", async () => {
+    // Public IPv4 (its answer dropped as a duplicate) next to IPv6 that can't
+    // reach the IPv4-only server.
+    expect(
+      await check({
+        candidates: [host('198.51.100.4', 50000), host('2001:db8::5', 50002)],
+        errors: [{ address: '2001:db8::5', port: 50002 }],
+      }),
+    ).toEqual({ probe: { nat: 'unknown', udp: true }, verdict: 'unknown' });
+    // An error that doesn't say which socket: can't tell.
+    expect((await check({ candidates: [host('10.0.0.2')], errors: [{}] })).verdict).toBe('unknown');
   });
 
   it('tests again when the app moves to another server, and reuses a recent result otherwise', async () => {
     let gathered = 0;
-    const PC = fakePeerConnection({
-      'stun:a.example:7443': [srflx('203.0.113.9', 1)],
-      'stun:a.example:7444': [srflx('203.0.113.9', 1)],
-      'stun:b.example:7443': [srflx('203.0.113.9', 1)],
-      'stun:b.example:7444': [srflx('203.0.113.9', 2)],
+    const PC = fakePeerConnection((servers) => {
+      gathered++;
+      return servers[0]!.startsWith('stun:a.')
+        ? { candidates: [host('10.0.0.2'), srflx('203.0.113.9', 1)] }
+        : { candidates: [host('10.0.0.2'), srflx('203.0.113.9', 1), srflx('203.0.113.9', 2)] };
     });
-    const Counting = class extends (PC as unknown as new (c: unknown) => object) {
-      constructor(c: unknown) {
-        super(c);
-        gathered++;
-      }
-    } as unknown as typeof RTCPeerConnection;
     let server = 'a';
-    const probe = createNetworkProber(Counting, () => [
+    const probe = createNetworkProber(PC, () => [
       `stun:${server}.example:7443`,
       `stun:${server}.example:7444`,
     ]);
     expect(networkVerdict(await probe())).toBe('good');
     expect(networkVerdict(await probe())).toBe('good');
-    expect(gathered).toBe(2);
+    expect(gathered).toBe(1);
     server = 'b';
     expect(networkVerdict(await probe())).toBe('limited');
-    expect(gathered).toBe(4);
+    expect(gathered).toBe(2);
     await probe(true);
-    expect(gathered).toBe(6);
+    expect(gathered).toBe(3);
   });
 
   it('reads how a connection travels from WebRTC stats', () => {

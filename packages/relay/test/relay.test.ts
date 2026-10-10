@@ -210,6 +210,77 @@ describe('HostRelay', () => {
     await waitFor(() => a.inbox.some((m) => m.t === 'peer_leave' && m.peer === P(c.identity)));
   });
 
+  it('keeps a member whose new offer replaced one still being answered', async () => {
+    const host = createIdentity();
+    let toBob: (d: SignalData) => void = () => {};
+    const relay = new HostRelay({
+      sessionId: SESSION,
+      epoch: 1,
+      identity: host,
+      hostPeer: P(host),
+      slots: SLOTS,
+      iceServers: stun(),
+      includeLoopback: true,
+      sendSignal: (_to, data) => toBob(data),
+    });
+    closers.push(() => relay.close());
+    const bob = createIdentity();
+    const offer = (sdp: string) =>
+      signSdp(bob, 'offer', { sessionId: SESSION, epoch: 1, from: P(bob), to: P(host) }, sdp);
+    // Two offers from Bob's app, the second sent before the first is answered.
+    const second = new RTCPeerConnection({
+      iceServers: stun(),
+      iceAdditionalHostAddresses: ['127.0.0.1'],
+    });
+    closers.push(() => second.close());
+    second.addTransceiver('audio', { direction: 'sendonly' });
+    for (let i = 0; i < SLOTS; i++) second.addTransceiver('audio', { direction: 'recvonly' });
+    const dc = second.createDataChannel('croc');
+    await second.setLocalDescription(await second.createOffer());
+    let answered = false;
+    const early: unknown[] = [];
+    toBob = (data) => {
+      if (data.type === 'answer') {
+        void second.setRemoteDescription({ type: 'answer', sdp: data.sdp }).then(async () => {
+          answered = true;
+          for (const c of early.splice(0)) await second.addIceCandidate(c as never);
+        });
+      } else if (data.type === 'candidate') {
+        if (answered) void second.addIceCandidate(data.candidate as never).catch(() => {});
+        else early.push(data.candidate);
+      }
+    };
+    second.onIceCandidate.subscribe((c) => {
+      if (c?.candidate)
+        void relay.handleSignal(P(bob), {
+          type: 'candidate',
+          epoch: 1,
+          dir: 'toRelay',
+          candidate: {
+            candidate: c.candidate,
+            sdpMid: c.sdpMid ?? null,
+            sdpMLineIndex: c.sdpMLineIndex ?? null,
+          },
+        });
+    });
+    // The relay fails to take the first offer a moment after the second came.
+    const proto = RTCPeerConnection.prototype;
+    const setRemote = proto.setRemoteDescription;
+    proto.setRemoteDescription = async function (this: RTCPeerConnection, d) {
+      if (d.sdp?.includes('a=x-test-fail')) {
+        await new Promise((r) => setTimeout(r, 100));
+        throw new Error('cannot answer this offer');
+      }
+      return setRemote.call(this, d);
+    };
+    closers.push(async () => void (proto.setRemoteDescription = setRemote));
+    void relay.handleSignal(P(bob), offer(`${second.localDescription!.sdp}a=x-test-fail\r\n`));
+    void relay.handleSignal(P(bob), offer(second.localDescription!.sdp));
+    await waitFor(() => dc.readyState === 'open');
+    await new Promise((r) => setTimeout(r, 1000));
+    expect(relay.connectedPeerIds()).toEqual([P(bob)]);
+  });
+
   it('rejects offers whose signature does not match the sender', async () => {
     const host = createIdentity();
     const mallory = createIdentity();

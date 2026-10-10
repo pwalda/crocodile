@@ -15,17 +15,22 @@ import {
  */
 export class FakeRelayNetwork {
   private relays = new Map<string, FakeRelay>();
+  private onFailed = new Map<string, (reason: string) => void>();
+  /** Relays started so far. */
+  started = 0;
 
   adapter(): HostRelayAdapter {
     return {
       start: async (opts) => {
+        this.started++;
         const relay = new FakeRelay(opts.hostPeer, opts.members);
         const key = `${opts.sessionId}|${opts.epoch}|${opts.hostPeer}`;
         this.relays.set(key, relay);
+        if (opts.onFailed) this.onFailed.set(key, opts.onFailed);
         return {
           handleSignal: () => {},
           close: async () => {
-            this.relays.delete(key);
+            if (this.relays.get(key) === relay) this.relays.delete(key);
             relay.close();
           },
         } satisfies RelayHandle;
@@ -55,9 +60,21 @@ export class FakeRelayNetwork {
     return this.relays.get(key);
   }
 
+  /** The host's relay process dies; the app itself (and its link) carry on. */
+  crashRelayProcessOf(userId: string) {
+    // The relays running now: those started again from onFailed live on.
+    for (const [key, relay] of [...this.relays]) {
+      if (key.split('|')[2]!.startsWith(`${userId}.`)) {
+        this.relays.delete(key);
+        relay.close();
+        this.onFailed.get(key)?.('relay process exited');
+      }
+    }
+  }
+
   /** Simulate the host vanishing without a goodbye (crash, network loss). */
   killRelaysOf(userId: string) {
-    for (const [key, relay] of this.relays) {
+    for (const [key, relay] of [...this.relays]) {
       if (key.split('|')[2]!.startsWith(`${userId}.`)) {
         this.relays.delete(key);
         relay.close();
@@ -108,6 +125,9 @@ class FakeRelay {
     this.peers.clear();
   }
 }
+
+/** werift's SCTP max-message-size. */
+const MAX_MESSAGE_SIZE = 65536;
 
 class FakeTransport extends Emitter<RelayLinkEvents> implements RelayTransport {
   private relay?: FakeRelay;
@@ -162,6 +182,10 @@ class FakeTransport extends Emitter<RelayLinkEvents> implements RelayTransport {
 
   send(msg: { t: string }) {
     if (!this.isOpen) return false;
+    // Like werift's data channel, which the host relay uses.
+    const size = JSON.stringify(msg).length;
+    if (size > MAX_MESSAGE_SIZE)
+      throw new Error(`max-message-size exceeded: ${size} > ${MAX_MESSAGE_SIZE}`);
     const relay = this.relay!;
     setTimeout(() => relay.route(this.userId, msg as never), 1);
     return true;

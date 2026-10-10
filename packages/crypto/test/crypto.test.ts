@@ -293,7 +293,12 @@ describe('hybrid post-quantum sealed boxes', () => {
     expect(openLink(temp, box, account.userId)).toEqual(account.seed);
     expect(openLink(temp, box, createIdentity().userId)).toBeNull();
     expect(openLink(createIdentity(), box, account.userId)).toBeNull();
-    expect(linkSecurityCode(temp.publicKey, account.publicKey)).toMatch(/^\d{3} \d{3}$/);
+    const shown = linkSecurityCode(temp.publicKey, temp.encPublicKey, account.publicKey);
+    expect(shown).toMatch(/^\d{3} \d{3}$/);
+    // A different encryption key gives a different code (a swap shows).
+    expect(
+      linkSecurityCode(temp.publicKey, createIdentity().encPublicKey, account.publicKey),
+    ).not.toBe(shown);
   });
 });
 
@@ -336,6 +341,22 @@ describe('ratcheting sender keys', () => {
     expect(rx.decrypt(bad)).toBeNull();
     const other = createSenderKey();
     expect(new AudioReceiver(other.kid, other.audio).decrypt(f2)).toBeNull();
+  });
+
+  it('audio: a sender rebuilt from the same key does not reuse its nonces', () => {
+    const sk = createSenderKey();
+    const counterOf = (f: Uint8Array) =>
+      new DataView(f.buffer, f.byteOffset + f.length - 11, 11).getUint32(6);
+    // Two senders from one key state, as after a reconnect: their frame
+    // counters (and so their nonces) start apart.
+    const first = Array.from({ length: 5 }, () =>
+      counterOf(new AudioSender(sk.kid, sk.audio).encrypt(new Uint8Array(40))),
+    );
+    expect(new Set(first).size).toBe(5);
+    const rx = new AudioReceiver(sk.kid, importChain(exportChains(sk).audio));
+    expect(rx.decrypt(new AudioSender(sk.kid, sk.audio).encrypt(new Uint8Array(40)))).toEqual(
+      new Uint8Array(40),
+    );
   });
 });
 
@@ -453,8 +474,21 @@ describe('sealed for self', () => {
 describe('notes', () => {
   const bob = createIdentity();
   const once = () => createIdentity();
+  const boxForBob = () =>
+    sealAnonymous(
+      once(),
+      'somedevice',
+      { peer: `${bob.userId}.somedevice`, prekey: createPrekey().bundle },
+      utf8.encode('x'),
+    );
   const note = (author = once(), version = Date.now()) =>
-    signRecord(author, 'note', recordKey.note(bob.userId, author.userId), { boxes: [] }, version);
+    signRecord(
+      author,
+      'note',
+      recordKey.note(bob.userId, author.userId),
+      { boxes: [boxForBob()] },
+      version,
+    );
 
   it('are signed by a one-time key named in the key, and written once', () => {
     const n = note();
@@ -483,6 +517,14 @@ describe('notes', () => {
       ],
     });
     expect(validateRecord(stray, ctx([]))).toMatchObject({ ok: false });
+    // An empty one would only take a place in Bob's quota.
+    const empty = once();
+    expect(
+      validateRecord(
+        signRecord(empty, 'note', recordKey.note(bob.userId, empty.userId), { boxes: [] }),
+        ctx([]),
+      ),
+    ).toMatchObject({ ok: false, reason: 'a note carries at least one box' });
   });
 
   it('only the recipient deletes them, and nothing brings back an expired one', () => {

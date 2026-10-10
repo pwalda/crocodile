@@ -118,15 +118,18 @@ What this does not hide: while you are connected, your server sees whose
 presence you follow, whom you send a friend request or answer to, and whom
 you start a direct message or call with (it doesn't keep or replicate who
 sent a note; hiding even that would need an anonymising relay), and
-every server sees space memberships (it uses them to admit members to a
-space's sessions). See [docs/ROADMAP.md](docs/ROADMAP.md).
+the servers holding a space's records, and any server a member connects
+through, see its memberships (they use them to admit members to the space's
+sessions). See [docs/ROADMAP.md](docs/ROADMAP.md).
 
 ## 4. Coordination servers and the mesh
 
 A coordinator (`packages/coordinator`) offers a WebSocket JSON-RPC API:
 
 1. Server sends a signed `hello` with a challenge and a fresh hybrid
-   key-exchange offer (X25519 + ML-KEM-768). The client checks the signature
+   key-exchange offer (X25519 + ML-KEM-768). A second signature covers the
+   rest of the hello (the STUN servers apps use, the operator's contact),
+   which apps ignore when it is missing. The client checks the signatures
    against the key in the directory listing, answers the key exchange and
    signs the transcript. From then on every frame is AES-256-GCM encrypted
    and padded, so metadata is confidential even over plain `ws://` to a
@@ -339,7 +342,8 @@ See [docs/ROADMAP.md](docs/ROADMAP.md). The main ones:
   membership themselves before sharing keys.
 - **Metadata on servers.** Friend lists are sealed, but the server you're
   connected to sees whose presence you follow and whom you befriend, message
-  or call while you do, and space memberships are visible to every server.
+  or call while you do, and a space's memberships are visible to the servers
+  holding its records and those its members connect through.
 - **Every server hears every beacon and presence change.** Fine for
   thousands of servers; presence would move to the owners of each user's
   shard for much more than that.

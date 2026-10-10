@@ -87,6 +87,67 @@ describe('directory', () => {
     expect(isPrivateHost('[::1]')).toBe(true);
     expect(isPrivateHost('croc.example.org')).toBe(false);
     expect(isPrivateHost('203.0.113.9')).toBe(false);
+    // IPv4 addresses written as IPv6 reach the same machines.
+    for (const h of [
+      '[::ffff:127.0.0.1]',
+      new URL('http://[::ffff:127.0.0.1]/').hostname,
+      new URL('http://[::ffff:10.0.0.1]/').hostname,
+      '[::ffff:c0a8:104]',
+      '[64:ff9b::10.1.2.3]',
+      '[::]',
+      '[fd12:3456::1]',
+      '[fe80::1%25eth0]',
+      new URL('http://0x7f.1/').hostname,
+    ])
+      expect(isPrivateHost(h), h).toBe(true);
+    expect(isPrivateHost('[::ffff:203.0.113.9]')).toBe(false);
+    expect(isPrivateHost('[2001:db8::1]')).toBe(false);
+    // Names that merely start like a private IPv6 prefix are public names.
+    expect(isPrivateHost('fdroid.example.org')).toBe(false);
+    expect(isPrivateHost('fcbarcelona.example')).toBe(false);
+  });
+
+  it('limits how often one address registers, and how many servers it lists', async () => {
+    const d = await new Directory({
+      host: '127.0.0.1',
+      port: 0,
+      allowPrivateUrls: true,
+      verifyReachability: false,
+      registrationsPerMinute: 3,
+      maxEntries: 2,
+    }).start();
+    cleanup.push(() => d.stop());
+    const entry = (n: number) => {
+      const id = createIdentity();
+      const server = {
+        id: id.userId,
+        key: id.publicKey,
+        name: `s${n}`,
+        url: `http://127.0.0.1:${1000 + n}`,
+        version: '0',
+      };
+      const load = { users: 0, capacity: 1 };
+      const signedAt = Date.now();
+      return {
+        server,
+        load,
+        signedAt,
+        sig: sign(id, SIG_DOMAIN.directory, { server, load, signedAt }),
+      };
+    };
+    const post = (body: unknown) =>
+      fetch(`${d.url}/v1/servers`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+    expect((await post(entry(1))).status).toBe(200);
+    expect((await post(entry(2))).status).toBe(200);
+    // Full: a third server isn't listed.
+    expect((await post(entry(3))).status).toBe(503);
+    // And one address can't keep trying.
+    expect((await post(entry(4))).status).toBe(429);
+    expect(d.listing().servers).toHaveLength(2);
   });
 
   it('servers discover and link with each other through the directory', async () => {

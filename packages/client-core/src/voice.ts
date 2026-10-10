@@ -253,6 +253,11 @@ export class VoiceEngine extends Emitter<VoiceEvents> {
     const scope = Math.random().toString(36).slice(2);
     const post = (msg: WorkerMessage, transfer: Transferable[] = []) =>
       worker.postMessage(msg, transfer);
+    // A new connection may get a new frame sender (the previous one dropped,
+    // or a new worker); it must not encrypt under a key an earlier sender
+    // used, or their frame counters could reuse a nonce. Moving our audio
+    // chain on first makes the key fresh; receivers follow a few steps ahead.
+    keyring.advanceAudio();
     post({ type: 'keys', scope, keys: keyring.frameKeys() });
     const off = keyring.on('changed', (keys) => post({ type: 'keys', scope, keys }));
     this.scopes.set(scope, () => {

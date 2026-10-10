@@ -88,7 +88,9 @@ grant lasts at most one hour, `--relay-max-users` caps how many people use
 it at once, and each allocation is rate-limited (about 100 kbit/s of voice
 per person). Your server only ever sees ciphertext. Turn it off with
 `--relay off` if bandwidth is scarce. The desktop app's built-in server
-leaves it off unless you enable "Offer a relay".
+leaves it off unless you enable "Offer a relay"; it then relays on the UDP
+ports just above its own (four per relay user; the app shows the range), which
+you forward along with its port to serve people outside your network.
 
 ## Hosting safely
 
@@ -218,7 +220,10 @@ The directory is tiny: `docker compose --profile directory up -d directory`
 (port 7400). Point coordinators at it with `CROC_DIRECTORY` and build the app
 with `CROC_DIRECTORIES=https://your-directory` to make it the default.
 Directories verify that each registered server is reachable at its advertised
-URL, and drop servers that stop sending heartbeats.
+URL, and drop servers that stop sending heartbeats. One address may register
+20 times a minute, and a directory lists at most 5000 servers. Behind a
+reverse proxy, set `CROC_DIR_TRUST_PROXY=1` (and keep port 7400 off the
+internet) so the limit applies to each server's address, not the proxy's.
 
 ## Private networks
 

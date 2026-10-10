@@ -1,5 +1,11 @@
-import { randomId } from '@crocodile/crypto';
-import { peerIds, recordKey, type MailItem, type SealedBox } from '@crocodile/protocol';
+import { randomId, verifyMailProof } from '@crocodile/crypto';
+import {
+  peerIds,
+  recordKey,
+  type MailItem,
+  type MailProof,
+  type SealedBox,
+} from '@crocodile/protocol';
 import type { ClientConnection } from './client';
 import type { Coordinator } from './coordinator';
 import type { StoredMail } from './store';
@@ -105,23 +111,30 @@ export class MailboxService {
     else this.hub.deliverToPeer(peer, 'mail', d);
   }
 
-  /** A device is ready for its mail: send ours and ask the mesh for theirs. */
-  fetch(client: ClientConnection) {
+  /**
+   * A device is ready for its mail: send ours, and ask the mesh for theirs.
+   * Other servers send theirs only with the device's signature naming this
+   * server (`proof`), so no server can ask for someone else's mail.
+   */
+  fetch(client: ClientConnection, proof?: MailProof) {
     this.deliverTo(client.peer);
-    this.hub.mesh.flood({ t: 'mail_query', peer: client.peer });
+    if (proof) this.hub.mesh.flood({ t: 'mail_query', peer: client.peer, proof });
   }
 
-  onQuery(fromServer: string, peer: string) {
+  onQuery(fromServer: string, peer: string, proof?: MailProof) {
+    if (!verifyMailProof(peer, { t: 'mail_fetch', peer, server: fromServer }, proof)) return;
     this.deliverTo(peer, fromServer);
   }
 
-  ack(client: ClientConnection, ids: string[]) {
+  ack(client: ClientConnection, ids: string[], proof?: MailProof) {
     this.hub.store.mailDelete(client.peer, ids);
-    this.hub.mesh.flood({ t: 'mail_ack', peer: client.peer, ids });
+    // Other servers delete only with the device's signature on these ids.
+    if (proof) this.hub.mesh.flood({ t: 'mail_ack', peer: client.peer, ids, proof });
     this.deliverTo(client.peer);
   }
 
-  onRemoteAck(peer: string, ids: string[]) {
+  onRemoteAck(peer: string, ids: string[], proof?: MailProof) {
+    if (!verifyMailProof(peer, { t: 'mail_ack', peer, ids }, proof)) return;
     if (this.hub.store.mailDelete(peer, ids) > 0) this.deliverTo(peer);
   }
 

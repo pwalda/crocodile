@@ -6,7 +6,14 @@ import {
   type PlatformAdapter,
 } from '@crocodile/client-core';
 import type { Coordinator, CoordinatorConfig } from '@crocodile/coordinator';
-import { createIdentity, createPrekey, sealToDevice, signRecord } from '@crocodile/crypto';
+import {
+  createIdentity,
+  createPrekey,
+  sealToDevice,
+  signMailProof,
+  signRecord,
+  spaceIdFor,
+} from '@crocodile/crypto';
 import {
   DELETED_PROFILE_NAME,
   peerIds,
@@ -156,10 +163,11 @@ describe('sharded records', () => {
 
   it('keeps the overlay sparse, and still reaches every server', async () => {
     const servers = await network(12);
-    // Direct links that were only needed for a moment close again.
-    await new Promise((r) => setTimeout(r, 2500));
-    const links = servers.map((c) => c.mesh.peerIds().length);
-    expect(Math.max(...links)).toBeLessThan(11);
+    // Direct links that were only needed for a moment close again, once
+    // they have been idle a while (later when a busy machine runs it slowly).
+    const mostLinks = () => Math.max(...servers.map((c) => c.mesh.peerIds().length));
+    await waitFor(() => mostLinks() < 11, 10_000, 'idle links closed');
+    expect(mostLinks()).toBeLessThan(11);
     // Presence still travels between servers that aren't linked.
     const far = servers.find((c) => !c.mesh.peerIds().includes(servers[0]!.info.id))!;
     const watcher = await user(servers[0]!);
@@ -361,6 +369,41 @@ describe('staying consistent', () => {
     await waitFor(() => holders(servers, memberKey).length === 0, 8000, 'membership erased');
   });
 
+  it('keeps a deletion added while earlier ones are being sent', async () => {
+    const servers = await network(2);
+    const a = servers[0]!;
+    const marker = () => {
+      const id = createIdentity();
+      return signRecord(id, 'profile', recordKey.profile(id.userId), {
+        username: DELETED_PROFILE_NAME,
+        encKey: id.encPublicKey,
+        deleted: true,
+      });
+    };
+    // B holds every shard; it answers slowly and loses the first marker.
+    const sent: string[] = [];
+    const request = a.mesh.request.bind(a.mesh);
+    a.mesh.request = (async (id: string, m: string, p: { records?: SignedRecord[] }) => {
+      if (m !== 'rec_store') return request(id as never, m as never, p as never);
+      await new Promise((r) => setTimeout(r, 200));
+      const key = p.records![0]!.key;
+      if (!sent.length) {
+        sent.push(key);
+        throw new Error('lost');
+      }
+      sent.push(key);
+      return {};
+    }) as typeof a.mesh.request;
+    const first = marker();
+    const second = marker();
+    a.dist.trackDeletion(first, ['aaaaaaaaaaaaaaaaaaaaaaaaaa']);
+    // Added while the first is still on its way.
+    await new Promise((r) => setTimeout(r, 50));
+    a.dist.trackDeletion(second, ['bbbbbbbbbbbbbbbbbbbbbbbbbb']);
+    await waitFor(() => sent.includes(second.key), 5000, 'second deletion sent');
+    await waitFor(() => sent.filter((k) => k === first.key).length === 2, 5000, 'first sent again');
+  });
+
   it('answers a request sent while the link to that server is closing', async () => {
     const [a, b] = await network(2);
     const link = (
@@ -445,6 +488,15 @@ describe('staying consistent', () => {
 
 describe('across servers that are not linked', () => {
   /** Two servers of a sparse network with no link between them. */
+  /**
+   * Twelve servers in one process spend most of their time on each other's
+   * signed beacons; under coverage (as CI runs) that starves requests. These
+   * tests don't depend on how fast a dead server is noticed.
+   */
+  const quieter: Partial<CoordinatorConfig> = {
+    membership: { beaconMs: 2000, liveMs: 8000, settleMs: 300 },
+  };
+
   function apart(servers: Coordinator[]) {
     for (const x of servers)
       for (const y of servers)
@@ -453,7 +505,7 @@ describe('across servers that are not linked', () => {
   }
 
   it('delivers mail held on one server to a device that connects to another', async () => {
-    const servers = await network(12);
+    const servers = await network(12, quieter);
     await new Promise((r) => setTimeout(r, 2000));
     const [x, y] = apart(servers);
     const bobId = createIdentity();
@@ -484,18 +536,35 @@ describe('across servers that are not linked', () => {
 
     bob = await connectUser(y, bobId, 'bob', deviceId);
     cleanup.push(() => bob.conn.close());
+    // Without the device's signature, other servers keep their mail; signed
+    // for another server, it isn't answered either.
     await bob.conn.request('mail.fetch', {});
+    await bob.conn.request('mail.fetch', {
+      proof: signMailProof(bobId, { t: 'mail_fetch', peer: bob.conn.peer, server: x.info.id }),
+    });
+    await new Promise((r) => setTimeout(r, 1000));
+    expect(bob.events.some((e) => e.ev === 'mail')).toBe(false);
+    await bob.conn.request('mail.fetch', {
+      proof: signMailProof(bobId, { t: 'mail_fetch', peer: bob.conn.peer, server: y.info.id }),
+    });
     await waitFor(
       () => bob.events.some((e) => e.ev === 'mail'),
       5000,
       'mail from the other server',
     );
+    // An acknowledgement without the device's signature deletes nothing elsewhere.
     await bob.conn.request('mail.ack', { ids });
+    await new Promise((r) => setTimeout(r, 1000));
+    expect(x.store.mailCount({})).toBe(1);
+    await bob.conn.request('mail.ack', {
+      ids,
+      proof: signMailProof(bobId, { t: 'mail_ack', peer: bob.conn.peer, ids }),
+    });
     await waitFor(() => x.store.mailCount({}) === 0, 5000, 'acknowledged everywhere');
   });
 
   it('finds a device-link code opened on another server', async () => {
-    const servers = await network(12);
+    const servers = await network(12, quieter);
     await new Promise((r) => setTimeout(r, 2000));
     const [x, y] = apart(servers);
     const fresh = await user(x);
@@ -569,5 +638,151 @@ describe('the app across a sharded network', () => {
     }
     // Presence across servers.
     await waitFor(() => alice.state.presence[bob.userId] === 'online', 8000, 'presence');
+  });
+});
+
+describe('large records between servers', () => {
+  it('a server joining catches up on records too large for one frame together', async () => {
+    const a = await server('A');
+    // Profiles with the largest avatars: about 350 KiB each, 10 MB in all.
+    const avatar = `data:image/png;base64,${'A'.repeat(Math.ceil(256 * 1024 * 1.37))}`;
+    const keys: string[] = [];
+    for (let i = 0; i < 30; i++) {
+      const id = createIdentity();
+      const r = signRecord(id, 'profile', recordKey.profile(id.userId), {
+        username: `big${i}`,
+        encKey: id.encPublicKey,
+        avatar,
+      });
+      expect(a.records.put(r, { fresh: true, origin: null }).accepted).toBe(true);
+      keys.push(r.key);
+    }
+    const b = await server('B', { meshPeers: [a.url] });
+    await converged([a, b]);
+    await waitFor(() => keys.every((k) => b.store.get(k)), 20_000, 'B holds every large record');
+  }, 60_000);
+
+  it('a replicated batch looks up what it needs in one round, not one record at a time', async () => {
+    const a = await server('A');
+    // Memberships of 40 spaces nobody here holds; every lookup takes 150 ms.
+    const items = Array.from({ length: 40 }, () => {
+      const id = createIdentity();
+      const spaceId = spaceIdFor(id.publicKey, 'nonce-of-a-space');
+      const record = signRecord(id, 'member', recordKey.member(spaceId, id.userId), {
+        spaceId,
+        userId: id.userId,
+      });
+      return { seq: 0, record };
+    });
+    let calls = 0;
+    a.mesh.gather = (async () => {
+      calls++;
+      await new Promise((r) => setTimeout(r, 150));
+      return [];
+    }) as typeof a.mesh.gather;
+    const started = Date.now();
+    await a.dist.onReplicated(items, 'elsewhere');
+    expect(calls).toBeGreaterThan(0);
+    // One record after another would take 40 × 150 ms at least.
+    expect(Date.now() - started).toBeLessThan(2000);
+  });
+});
+
+describe('records from other servers', () => {
+  it('ignores a forged account deletion pushed by another server', async () => {
+    const [x] = await network(2);
+    const victim = await user(x!, 'victim');
+    const victimId = victim.identity.userId;
+    // A malicious server pushes "deleted" for someone else's account, signed
+    // with its own key (it can't sign as the victim).
+    const mallory = createIdentity();
+    const forged = signRecord(mallory, 'profile', recordKey.profile(victimId), {
+      username: DELETED_PROFILE_NAME,
+      encKey: mallory.encPublicKey,
+      deleted: true,
+    });
+    await x!.dist.onPush(forged);
+    await new Promise((r) => setTimeout(r, 500));
+    expect(x!.presence.localOf(victimId).length).toBe(1);
+    expect(
+      (x!.dist.lookup(recordKey.profile(victimId))?.body as { deleted?: boolean })?.deleted,
+    ).not.toBe(true);
+  });
+
+  it("doesn't let an owner's forged invite admit someone to a space", async () => {
+    const servers = await network(4);
+    const alice = await user(servers[0]!, 'alice');
+    const { spaceId } = await createSpace(alice);
+    const mallory = createIdentity();
+    const code = 'malloryinvite';
+    // A malicious owner of the invite's shard answers with an invite to
+    // Alice's space that Mallory signed herself.
+    const forgedInvite = signRecord(mallory, 'invite', recordKey.invite(code), {
+      spaceId,
+      code,
+      expiresAt: null,
+    });
+    const via = servers.find((c) => !c.dist.ownsShard(`invite:${code}`))!;
+    for (const c of servers) {
+      const gather = c.mesh.gather.bind(c.mesh);
+      c.mesh.gather = (async (ids: string[], m: string, p: { keys?: string[] }) =>
+        m === 'rec_get' && p?.keys?.includes(recordKey.invite(code))
+          ? [{ records: [forgedInvite] }]
+          : gather(ids as never, m as never, p as never)) as typeof c.mesh.gather;
+      const requestAny = c.mesh.requestAny.bind(c.mesh);
+      c.mesh.requestAny = (async (ids: string[], m: string, p: { keys?: string[] }) =>
+        m === 'rec_get' && p?.keys?.includes(recordKey.invite(code))
+          ? { records: [forgedInvite] }
+          : requestAny(ids as never, m as never, p as never)) as typeof c.mesh.requestAny;
+    }
+    const m = await user(via, 'mallory');
+    const res = await m.conn.request('records.put', {
+      record: signRecord(m.identity, 'member', recordKey.member(spaceId, m.identity.userId), {
+        spaceId,
+        userId: m.identity.userId,
+        inviteCode: code,
+      }),
+    });
+    expect(res.accepted).toBe(false);
+    expect(via.dist.lookup(recordKey.invite(code))).toBeUndefined();
+  });
+});
+
+describe('frames from other servers', () => {
+  it('passes on only the events servers route, and session states only from their owner', async () => {
+    const [x, y] = await network(2);
+    const victim = await user(x!, 'victim');
+    // A session y doesn't own, so y's session state for it is forged.
+    let sid = sessionIds.dm(victim.identity.userId, createIdentity().userId);
+    while (x!.sessions.ownerOf(sid) !== x!.info.id)
+      sid = sessionIds.dm(victim.identity.userId, createIdentity().userId);
+    // "replaced" would stop the victim's app from reconnecting.
+    y!.mesh.sendTo(x!.info.id, {
+      t: 'route',
+      to: victim.conn.peer,
+      ev: 'replaced',
+      d: { reason: 'evil' },
+    } as never);
+    // A session state from a server that doesn't own the session.
+    y!.mesh.sendTo(x!.info.id, {
+      t: 'route',
+      to: victim.conn.peer,
+      ev: 'session',
+      d: { state: { id: sid, epoch: 99, host: 'mallory.dev', backup: null, members: [] } },
+    } as never);
+    // Malformed: dropped without disturbing the link.
+    y!.mesh.sendTo(x!.info.id, { t: 'records', items: 'nonsense', upTo: 'x' } as never);
+    await new Promise((r) => setTimeout(r, 800));
+    expect(victim.events.map((e) => e.ev)).not.toContain('replaced');
+    expect(victim.events.map((e) => e.ev)).not.toContain('session');
+    expect(x!.mesh.peerIds()).toContain(y!.info.id);
+    // Events servers do route still arrive.
+    y!.mesh.sendTo(x!.info.id, {
+      t: 'route',
+      to: victim.conn.peer,
+      ev: 'relay_expired',
+      d: { reason: 'grant ended' },
+    } as never);
+    await waitFor(() => victim.events.some((e) => e.ev === 'relay_expired'), 3000, 'routed');
   });
 });

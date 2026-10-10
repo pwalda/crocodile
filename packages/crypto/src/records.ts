@@ -195,6 +195,8 @@ export function validateRecord(input: unknown, ctx: ValidationContext): Validati
       if (existing) return reject('note already exists');
       const recipient = ctx.get(`profile:${to}`) as SignedRecord<'profile'> | undefined;
       if (recipient?.body.deleted) return reject('account was deleted');
+      // An empty one would only take a place in the recipient's quota.
+      if (!body.boxes.length) return reject('a note carries at least one box');
       if (body.boxes.some((b) => peerIds.user(b.to) !== to))
         return reject('note boxes are for someone else');
       return { ok: true, authorId };

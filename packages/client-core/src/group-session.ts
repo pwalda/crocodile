@@ -31,7 +31,8 @@ export interface SessionContext {
   identity: Identity;
   /** This device's peer id. */
   peer: string;
-  link: CoordinatorLink;
+  /** The client's current link: it is replaced when the client changes server. */
+  link(): CoordinatorLink;
   platform: PlatformAdapter;
   messages: MessageStore;
   iceServers(): { urls: string }[];
@@ -100,7 +101,12 @@ export type GroupSessionEvents = {
   error: { message: string };
 };
 
-const HISTORY_CHUNK_BYTES = 96 * 1024;
+/**
+ * Plaintext bytes of history in one reply. Sealed and base64-encoded it grows
+ * by about half, and must stay under the 64 KiB a data channel message may
+ * be (werift's limit, which host relays use).
+ */
+const HISTORY_CHUNK_BYTES = 32 * 1024;
 const PENDING_TTL_MS = 15_000;
 
 /**
@@ -189,7 +195,7 @@ export class GroupSession extends Emitter<GroupSessionEvents> {
     this.left = false;
     if (this.status === 'idle' || this.status === 'left') this.setStatus('joining');
     const caps = await this.ctx.caps();
-    const { state } = await this.ctx.link.request('session.join', {
+    const { state } = await this.ctx.link().request('session.join', {
       sessionId: this.sessionId,
       caps,
     });
@@ -199,7 +205,8 @@ export class GroupSession extends Emitter<GroupSessionEvents> {
   async updateCaps() {
     if (this.left) return;
     const caps = await this.ctx.caps();
-    await this.ctx.link
+    await this.ctx
+      .link()
       .request('session.update', { sessionId: this.sessionId, caps })
       .catch(() => {});
   }
@@ -212,7 +219,10 @@ export class GroupSession extends Emitter<GroupSessionEvents> {
     this.stopHosting();
     this.keyring.dispose();
     this.setStatus('left');
-    await this.ctx.link.request('session.leave', { sessionId: this.sessionId }).catch(() => {});
+    await this.ctx
+      .link()
+      .request('session.leave', { sessionId: this.sessionId })
+      .catch(() => {});
   }
 
   // -------------------------------------------------------------------------
@@ -236,11 +246,18 @@ export class GroupSession extends Emitter<GroupSessionEvents> {
       this.transport.epoch !== state.epoch ||
       this.transport.host !== state.host
     ) {
-      this.failures = 0;
+      // Failures count against one host at one epoch: other changes (members
+      // coming and going) mustn't reset them, or the host is never reported
+      // and the relay never tried.
+      const target = this.attempted;
+      if (!target || target.epoch !== state.epoch || target.host !== state.host) this.failures = 0;
       this.connectTransport();
     }
     this.emit('update', undefined);
   }
+
+  /** When our relay last had to be started again, to give up on one that keeps dying. */
+  private relayRestarts: number[] = [];
 
   private startHosting(state: SessionState) {
     this.stopHosting();
@@ -260,7 +277,21 @@ export class GroupSession extends Emitter<GroupSessionEvents> {
             .map((m) => m.peer)
             .filter((p) => this.ctx.isAllowedPeer(sessionId, p)),
         sendSignal: (to, data) => {
-          void this.ctx.link.request('signal.send', { to, sessionId, data }).catch(() => {});
+          void this.ctx
+            .link()
+            .request('signal.send', { to, sessionId, data })
+            .catch(() => {});
+        },
+        onFailed: (reason) => {
+          // Members reconnect to a fresh relay at the same epoch; a host whose
+          // relay keeps dying stops, and they report it to get another host.
+          if (this.left || this.hosting?.handle !== handle || this.state?.host !== this.me) return;
+          const now = Date.now();
+          this.relayRestarts = this.relayRestarts.filter((t) => now - t < 60_000);
+          this.ctx.log('relay stopped', { sessionId, reason, restarts: this.relayRestarts.length });
+          if (this.relayRestarts.length >= 3) return this.stopHosting();
+          this.relayRestarts.push(now);
+          this.startHosting(this.state);
         },
       })
       .catch((err) => {
@@ -307,10 +338,16 @@ export class GroupSession extends Emitter<GroupSessionEvents> {
   // Connection to the host relay
   // -------------------------------------------------------------------------
 
+  /** The host and epoch of the latest connection attempt. */
+  private attempted?: { epoch: number; host: string };
+
   private connectTransport() {
+    // A retry scheduled for an earlier attempt must not tear this one down.
+    clearTimeout(this.retryTimer);
     this.closeTransport();
     const state = this.state;
     if (!state?.host || this.left) return;
+    this.attempted = { epoch: state.epoch, host: state.host };
     const slots = this.voice && this.isVoice ? state.relaySlots : 0;
     const grant =
       this.relayGrant && this.relayGrant.expiresAt > Date.now() ? this.relayGrant : null;
@@ -331,7 +368,9 @@ export class GroupSession extends Emitter<GroupSessionEvents> {
       micTrack: this.voice?.micTrack() ?? null,
       crypto: slots > 0 ? this.voice?.frameCrypto(this.keyring) : undefined,
       sendSignal: (data) =>
-        this.ctx.link.request('signal.send', { to: state.host!, sessionId: this.sessionId, data }),
+        this.ctx
+          .link()
+          .request('signal.send', { to: state.host!, sessionId: this.sessionId, data }),
     });
     const entry = { epoch: state.epoch, host: state.host, t };
     this.transport = entry;
@@ -376,7 +415,8 @@ export class GroupSession extends Emitter<GroupSessionEvents> {
       this.emit('update', undefined);
       if (this.failures >= 2 && this.reportedEpoch !== entry.epoch && entry.host !== this.me) {
         this.reportedEpoch = entry.epoch;
-        void this.ctx.link
+        void this.ctx
+          .link()
           .request('session.report', {
             sessionId: this.sessionId,
             epoch: entry.epoch,
@@ -395,7 +435,8 @@ export class GroupSession extends Emitter<GroupSessionEvents> {
       clearTimeout(this.retryTimer);
       this.retryTimer = setTimeout(
         () => {
-          if (!this.left && this.state?.epoch === entry.epoch) this.connectTransport();
+          if (!this.left && !this.transport && this.state?.epoch === entry.epoch)
+            this.connectTransport();
         },
         Math.min(10_000, 500 * 2 ** this.failures),
       );
@@ -522,14 +563,27 @@ export class GroupSession extends Emitter<GroupSessionEvents> {
     const pending = this.ctx.outbox.pending(this.sessionId);
     if (pending.length === 0) return;
     this.outboxOffered.add(peer);
-    for (let i = 0; i < pending.length; i += 100) {
-      const chunk = pending.slice(i, i + 100);
-      await this.sendSealed(peer, {
-        type: 'history',
-        messages: chunk,
-        done: i + 100 >= pending.length,
-      });
+    await this.sendMessages(peer, pending);
+  }
+
+  /**
+   * Messages to one peer as 'history' replies, each small enough for one
+   * data channel message; the last one says it's done.
+   */
+  private async sendMessages(to: string, messages: ChatMessage[]) {
+    let chunk: ChatMessage[] = [];
+    let size = 0;
+    for (const m of messages) {
+      const bytes = utf8.encode(JSON.stringify(m)).length + 1;
+      if (size + bytes > HISTORY_CHUNK_BYTES && chunk.length) {
+        await this.sendSealed(to, { type: 'history', messages: chunk, done: false });
+        chunk = [];
+        size = 0;
+      }
+      chunk.push(m);
+      size += bytes;
     }
+    await this.sendSealed(to, { type: 'history', messages: chunk, done: true });
   }
 
   /** Confirm receipt of messages authored by `from`'s user, batched. */
@@ -784,20 +838,7 @@ export class GroupSession extends Emitter<GroupSessionEvents> {
       if (!allowed.has(ch)) continue;
       out.push(...(await this.ctx.messages.since(ch, after, 500)));
     }
-    let chunk: ChatMessage[] = [];
-    let size = 0;
-    const flush = async (done: boolean) => {
-      await this.sendSealed(to, { type: 'history', messages: chunk, done });
-      chunk = [];
-      size = 0;
-    };
-    for (const m of out) {
-      const bytes = m.body.length * 3 + 400;
-      if (size + bytes > HISTORY_CHUNK_BYTES && chunk.length) await flush(false);
-      chunk.push(m);
-      size += bytes;
-    }
-    await flush(true);
+    await this.sendMessages(to, out);
   }
 
   private setStatus(status: RelayStatus) {

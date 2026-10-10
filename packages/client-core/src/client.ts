@@ -19,6 +19,7 @@ import {
   sealLink,
   sealToDevice,
   userIdFromKey,
+  signMailProof,
   signRecord,
   spaceIdFor,
   userTag,
@@ -54,6 +55,7 @@ import {
   type OperatorInfo,
   type ServerInfo,
   type SessionState,
+  type PresenceEntry,
   type SignedRecord,
   type SpaceBody,
   type VoiceOccupancy,
@@ -268,7 +270,8 @@ export interface ClientState {
 }
 
 export type ClientEvents = {
-  message: { channel: string; message: ChatMessage; mine: boolean };
+  /** `update`: an edit or deletion of an earlier message, not a new one. */
+  message: { channel: string; message: ChatMessage; mine: boolean; update: boolean };
   error: { message: string };
 };
 
@@ -277,10 +280,18 @@ const APP_VERSION_FALLBACK = '0.1.0';
 const MAX_AHEAD_MS = 5 * 60_000;
 /** How long direct delivery gets before an opted-in DM goes to a mailbox. */
 const MAIL_AFTER_MS = 5000;
+/** Plaintext bytes of messages in one mailbox box. */
+const MAIL_BOX_BYTES = 48 * 1024;
+/** Bytes of boxes in one mail.put request. */
+const MAIL_REQUEST_BYTES = 512 * 1024;
 /** How soon to retry a note owed to someone who just came online. */
 const FRIEND_NOTE_RETRY_MS = 5000;
 /** And how often while connected, whoever it is owed to. */
 const FRIEND_NOTE_SWEEP_MS = 10 * 60_000;
+/** A caller rings again every 2.5 s at most: this long without a ring, it has gone. */
+const RING_SILENCE_MS = 8000;
+/** Time for a hang-up to go out before the call's connection closes. */
+const HANG_UP_FLUSH_MS = 200;
 
 /**
  * The whole client behind one object. UIs render `store` and call methods;
@@ -573,6 +584,12 @@ export class CrocodileClient extends Emitter<ClientEvents> {
 
   /** Clears this device's copy of the account, including stored messages. */
   private async forgetLocalAccount({ deleted }: { deleted: boolean }) {
+    // A call in progress ends with the account: microphone off, nothing ringing.
+    clearInterval(this.ringTimer);
+    clearTimeout(this.ringingTimer);
+    const voice = this.state.voiceSession;
+    if (voice) this.voiceEngine?.stopSession(voice);
+    this.voiceEngine?.stop();
     await Promise.all([...this.sessions.values()].map((s) => s.leave().catch(() => {})));
     this.sessions.clear();
     this.link?.stop();
@@ -608,6 +625,9 @@ export class CrocodileClient extends Emitter<ClientEvents> {
       messages: {},
       dms: [],
       devices: [],
+      voiceSession: null,
+      outgoingCall: null,
+      incomingCall: null,
       accountDeleted: deleted,
     });
   }
@@ -788,14 +808,12 @@ export class CrocodileClient extends Emitter<ClientEvents> {
       const members = await link.request('records.list', { prefix: recordKey.memberPrefix(id) });
       this.records.ingestAll(members.records);
     }
-    await link.request('records.subscribe', {
-      prefixes: [
-        recordKey.profile(me),
-        recordKey.friends(me),
-        recordKey.devicePrefix(me),
-        ...spaceIds.flatMap((id) => [recordKey.space(id), recordKey.memberPrefix(id)]),
-      ],
-    });
+    await this.subscribe([
+      recordKey.profile(me),
+      recordKey.friends(me),
+      recordKey.devicePrefix(me),
+      ...spaceIds.flatMap((id) => [recordKey.space(id), recordKey.memberPrefix(id)]),
+    ]);
     await this.syncProfiles();
     if (this.state.settings.status !== 'online')
       await link.request('presence.set', { status: this.state.settings.status });
@@ -814,7 +832,16 @@ export class CrocodileClient extends Emitter<ClientEvents> {
     for (const s of this.sessions.values())
       void s.join().catch((err) => this.log('join failed', { id: s.sessionId, err: String(err) }));
     // Mail held for this device while it was offline, anywhere in the mesh.
-    void link.request('mail.fetch', {}).catch(() => {});
+    // Signed for this server, so the others send their mail for us here too.
+    const server = this.state.server?.info.id;
+    void link
+      .request(
+        'mail.fetch',
+        server
+          ? { proof: signMailProof(this.identity!, { t: 'mail_fetch', peer: this.peer, server }) }
+          : {},
+      )
+      .catch(() => {});
     this.scheduleMail();
   }
 
@@ -894,8 +921,10 @@ export class CrocodileClient extends Emitter<ClientEvents> {
         const targets = await this.mailTargets([other, me]);
         if (targets.length === 0) continue;
         const items: { to: string; box: SealedBox }[] = [];
-        for (let i = 0; i < pending.length; i += 50) {
-          const chunk = pending.slice(i, i + 50);
+        // A server takes boxes of up to 96 KiB: sealed and encoded, 48 KiB of
+        // messages stays well under that.
+        const size = (m: ChatMessage) => utf8.encode(JSON.stringify(m)).length + 1;
+        for (const chunk of chunksBySize(pending, MAIL_BOX_BYTES, size)) {
           const plaintext = utf8.encode(JSON.stringify({ type: 'mail', messages: chunk }));
           for (const t of targets) {
             items.push({
@@ -904,9 +933,10 @@ export class CrocodileClient extends Emitter<ClientEvents> {
             });
           }
         }
-        for (let i = 0; i < items.length; i += 20) {
-          await link.request('mail.put', { items: items.slice(i, i + 20) });
-        }
+        // At most 20 boxes a request, and well under the 1 MiB frame limit.
+        const boxSize = (it: { box: SealedBox }) => it.box.ct.length + 1024;
+        for (const part of chunksBySize(items, MAIL_REQUEST_BYTES, boxSize, 20))
+          await link.request('mail.put', { items: part });
         const ids = pending.map((m) => m.id);
         this.outbox.markMailed(ids);
         const mailed = new Set(ids);
@@ -973,7 +1003,13 @@ export class CrocodileClient extends Emitter<ClientEvents> {
         if (await this.acceptMessage(m.ch, m)) this.addDm(other);
       }
     }
-    if (done.length) await this.link?.request('mail.ack', { ids: done }).catch(() => {});
+    if (done.length)
+      await this.link
+        ?.request('mail.ack', {
+          ids: done,
+          proof: signMailProof(this.identity!, { t: 'mail_ack', peer: this.peer, ids: done }),
+        })
+        .catch(() => {});
   }
 
   private async ensureProfilePublished() {
@@ -990,16 +1026,22 @@ export class CrocodileClient extends Emitter<ClientEvents> {
   private async syncProfiles() {
     const ids = this.relevantUsers();
     const missing = ids.filter((id) => id !== this.userId);
-    for (let i = 0; i < missing.length; i += 400) {
-      const keys = missing.slice(i, i + 400).map((id) => recordKey.profile(id));
+    for (const part of chunks(missing, 400)) {
+      const keys = part.map((id) => recordKey.profile(id));
       const res = await this.link!.request('records.get', { keys });
       this.records.ingestAll(res.records);
     }
-    await this.link!.request('records.subscribe', {
-      prefixes: missing.map((id) => recordKey.profile(id)),
-    });
-    const { presence } = await this.link!.request('presence.subscribe', { userIds: missing });
+    await this.subscribe(missing.map((id) => recordKey.profile(id)));
+    const presence: PresenceEntry[] = [];
+    for (const userIds of chunks(missing, 5000))
+      presence.push(...(await this.link!.request('presence.subscribe', { userIds })).presence);
     this.store.set({ presence: Object.fromEntries(presence.map((p) => [p.userId, p.status])) });
+  }
+
+  /** Subscribe to record prefixes, at most as many per request as the server takes. */
+  private async subscribe(prefixes: string[]) {
+    for (const part of chunks(prefixes, 2000))
+      await this.link!.request('records.subscribe', { prefixes: part });
   }
 
   private relevantUsers(): string[] {
@@ -1014,24 +1056,50 @@ export class CrocodileClient extends Emitter<ClientEvents> {
     return [...set];
   }
 
-  private async fetchProfiles(userIds: string[]) {
+  private profileQueue = new Set<string>();
+  private profileBatch?: Promise<void>;
+
+  /**
+   * Profiles we don't have yet. Calls close together (one per record of a
+   * long member list, say) share one batch of requests.
+   */
+  private fetchProfiles(userIds: string[]): Promise<void> {
+    for (const id of userIds)
+      if (!this.records.get(recordKey.profile(id))) this.profileQueue.add(id);
+    if (!this.profileQueue.size) return Promise.resolve();
+    this.profileBatch ??= new Promise((r) => setTimeout(r, 20)).then(() => {
+      this.profileBatch = undefined;
+      const ids = [...this.profileQueue];
+      this.profileQueue.clear();
+      return this.loadProfiles(ids);
+    });
+    return this.profileBatch;
+  }
+
+  private async loadProfiles(userIds: string[]) {
+    const link = this.link;
     const missing = userIds.filter((id) => !this.records.get(recordKey.profile(id)));
-    if (!missing.length || !this.link) return;
-    const res = await this.link
-      .request('records.get', { keys: missing.map((id) => recordKey.profile(id)) })
-      .catch(() => null);
-    if (res) this.records.ingestAll(res.records);
-    await this.link
-      .request('records.subscribe', { prefixes: missing.map((id) => recordKey.profile(id)) })
-      .catch(() => {});
-    const p = await this.link.request('presence.subscribe', { userIds: missing }).catch(() => null);
-    if (p)
-      this.store.set((s) => ({
-        presence: {
-          ...s.presence,
-          ...Object.fromEntries(p.presence.map((e) => [e.userId, e.status])),
-        },
-      }));
+    if (!missing.length || !link) return;
+    for (const part of chunks(missing, 400)) {
+      const res = await link
+        .request('records.get', { keys: part.map((id) => recordKey.profile(id)) })
+        .catch(() => null);
+      if (res) this.records.ingestAll(res.records);
+    }
+    for (const part of chunks(missing, 2000))
+      await link
+        .request('records.subscribe', { prefixes: part.map((id) => recordKey.profile(id)) })
+        .catch(() => {});
+    for (const userIds of chunks(missing, 5000)) {
+      const p = await link.request('presence.subscribe', { userIds }).catch(() => null);
+      if (p)
+        this.store.set((s) => ({
+          presence: {
+            ...s.presence,
+            ...Object.fromEntries(p.presence.map((e) => [e.userId, e.status])),
+          },
+        }));
+    }
   }
 
   // ===========================================================================
@@ -1764,7 +1832,7 @@ export class CrocodileClient extends Emitter<ClientEvents> {
       {
         identity: this.identity!,
         peer: this.peer,
-        link: this.link!,
+        link: () => this.link!,
         platform: this.platform,
         messages: this.platform.messages,
         iceServers: () => this.stun.map((urls) => ({ urls })),
@@ -2019,7 +2087,7 @@ export class CrocodileClient extends Emitter<ClientEvents> {
           role: 'new',
           step: 'claimed',
           code: code.toUpperCase(),
-          securityCode: linkSecurityCode(temp.publicKey, key),
+          securityCode: linkSecurityCode(temp.publicKey, temp.encPublicKey, key),
           account: userId,
         },
       });
@@ -2054,7 +2122,9 @@ export class CrocodileClient extends Emitter<ClientEvents> {
   /** Existing device: enter the code the new device shows. */
   async claimDeviceLink(code: string): Promise<string> {
     const res = await this.link!.request('link.claim', { code });
-    const securityCode = linkSecurityCode(res.key, this.identity!.publicKey);
+    // The code covers the key the account will be sealed to: a server that
+    // swapped it would make the two devices show different codes.
+    const securityCode = linkSecurityCode(res.key, res.encKey, this.identity!.publicKey);
     this.pendingLinkTarget = { code, encKey: res.encKey };
     this.store.set({ linking: { role: 'existing', step: 'confirm', code, securityCode } });
     return securityCode;
@@ -2207,17 +2277,32 @@ export class CrocodileClient extends Emitter<ClientEvents> {
     }
   }
 
-  async loadOlder(channel: string): Promise<boolean> {
-    const current = this.state.messages[channel] ?? [];
-    const before = current[0]?.ts;
-    const page = await this.platform.messages.page(channel, { before, limit: 100 });
+  private loadingOlder = new Map<string, Promise<boolean>>();
+
+  /** The page before the oldest message shown. Calls while one loads share it. */
+  loadOlder(channel: string): Promise<boolean> {
+    let loading = this.loadingOlder.get(channel);
+    if (!loading) {
+      loading = this.loadOlderPage(channel).finally(() => this.loadingOlder.delete(channel));
+      this.loadingOlder.set(channel, loading);
+    }
+    return loading;
+  }
+
+  private async loadOlderPage(channel: string): Promise<boolean> {
+    const oldest = (this.state.messages[channel] ?? [])[0];
+    const page = await this.platform.messages.page(channel, {
+      before: oldest?.ts,
+      beforeId: oldest?.id,
+      limit: 100,
+    });
     if (page.length === 0) return false;
-    this.store.set((s) => ({
-      messages: {
-        ...s.messages,
-        [channel]: foldEdits([...this.withDelivery(page), ...(s.messages[channel] ?? [])]),
-      },
-    }));
+    this.store.set((s) => {
+      const shown = s.messages[channel] ?? [];
+      const have = new Set(shown.map((m) => m.id));
+      const older = this.withDelivery(page.filter((m) => !have.has(m.id)));
+      return { messages: { ...s.messages, [channel]: foldEdits([...older, ...shown]) } };
+    });
     return true;
   }
 
@@ -2257,7 +2342,7 @@ export class CrocodileClient extends Emitter<ClientEvents> {
       session.peers.size > 0 &&
       session.sendGroup({ type: 'message', message });
     this.addToTimeline(channel, { ...message, pending: true });
-    this.emit('message', { channel, message, mine: true });
+    this.emit('message', { channel, message, mine: true, update: !!message.edits });
     if (!delivered && sessionId.startsWith('dm:')) void this.pokeDm(sessionId);
     this.scheduleMail();
   }
@@ -2285,7 +2370,9 @@ export class CrocodileClient extends Emitter<ClientEvents> {
     if (!fresh) return false;
     this.addToTimeline(message.ch, message);
     const mine = message.author === this.userId;
-    if (!mine && this.state.activeChannel !== message.ch) {
+    // Edits and deletions change what's there; they aren't news.
+    const update = !!message.edits;
+    if (!mine && !update && this.state.activeChannel !== message.ch) {
       this.store.set((s) => ({
         unread: { ...s.unread, [message.ch]: (s.unread[message.ch] ?? 0) + 1 },
       }));
@@ -2296,7 +2383,7 @@ export class CrocodileClient extends Emitter<ClientEvents> {
       const { [message.author]: _, ...rest } = typing;
       return { typing: { ...s.typing, [message.ch]: rest } };
     });
-    this.emit('message', { channel: message.ch, message, mine });
+    this.emit('message', { channel: message.ch, message, mine, update });
     return true;
   }
 
@@ -2336,6 +2423,7 @@ export class CrocodileClient extends Emitter<ClientEvents> {
   }
 
   private ringTimer?: ReturnType<typeof setInterval>;
+  private ringingTimer?: ReturnType<typeof setTimeout>;
 
   private ringLoop(sessionId: string) {
     clearInterval(this.ringTimer);
@@ -2361,7 +2449,7 @@ export class CrocodileClient extends Emitter<ClientEvents> {
   }
 
   private sendCallSignal(sessionId: string, action: 'ring' | 'accept' | 'decline' | 'end') {
-    this.sessions.get(sessionId)?.sendGroup({ type: 'call', action });
+    return this.sessions.get(sessionId)?.sendGroup({ type: 'call', action }) ?? false;
   }
 
   declineCall() {
@@ -2382,8 +2470,16 @@ export class CrocodileClient extends Emitter<ClientEvents> {
         this.sendCallSignal(sessionId, 'accept');
         return;
       }
-      if (!this.state.incomingCall)
-        this.store.set({ incomingCall: { sessionId, from, at: Date.now() } });
+      const ringing = this.state.incomingCall;
+      if (ringing && ringing.sessionId !== sessionId) return;
+      if (!ringing) this.store.set({ incomingCall: { sessionId, from, at: Date.now() } });
+      // A hang-up can be lost (the caller's app quit, say): stop when the rings do.
+      clearTimeout(this.ringingTimer);
+      this.ringingTimer = setTimeout(() => {
+        if (this.state.incomingCall?.sessionId === sessionId)
+          this.store.set({ incomingCall: null });
+      }, RING_SILENCE_MS);
+      this.ringingTimer.unref?.();
     } else if (action === 'accept') {
       if (this.state.outgoingCall?.sessionId === sessionId) this.store.set({ outgoingCall: null });
     } else if (action === 'decline') {
@@ -2421,7 +2517,10 @@ export class CrocodileClient extends Emitter<ClientEvents> {
     if (!sessionId) return;
     if (this.state.outgoingCall?.sessionId === sessionId) {
       this.store.set({ outgoingCall: null });
-      this.sendCallSignal(sessionId, 'end');
+      // Let the hang-up go out first: if we host the call, leaving closes the relay.
+      if (this.sendCallSignal(sessionId, 'end'))
+        await new Promise((r) => setTimeout(r, HANG_UP_FLUSH_MS));
+      if (this.state.voiceSession !== sessionId) return;
     }
     this.store.set({ voiceSession: null });
     const session = this.sessions.get(sessionId);
@@ -2467,6 +2566,7 @@ export class CrocodileClient extends Emitter<ClientEvents> {
     clearTimeout(this.mailTimer);
     clearTimeout(this.friendRetryTimer);
     clearInterval(this.friendSweepTimer);
+    clearTimeout(this.ringingTimer);
     await this.leaveVoice().catch(() => {});
     for (const s of this.sessions.values()) await s.leave().catch(() => {});
     this.link?.stop();
@@ -2522,5 +2622,30 @@ export function foldEdits(messages: MessageView[]): MessageView[] {
     byId.set(m.id, m);
     out.push(m);
   }
+  return out;
+}
+
+function chunks<T>(items: T[], size: number): T[][] {
+  const out: T[][] = [];
+  for (let i = 0; i < items.length; i += size) out.push(items.slice(i, i + size));
+  return out;
+}
+
+/** Runs of items within `max` total size (and `count` items); a larger item goes alone. */
+function chunksBySize<T>(items: T[], max: number, size: (t: T) => number, count = Infinity): T[][] {
+  const out: T[][] = [];
+  let run: T[] = [];
+  let total = 0;
+  for (const item of items) {
+    const n = size(item);
+    if (run.length && (total + n > max || run.length >= count)) {
+      out.push(run);
+      run = [];
+      total = 0;
+    }
+    run.push(item);
+    total += n;
+  }
+  if (run.length) out.push(run);
   return out;
 }

@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { Check, Copy, Hash, Volume2 } from 'lucide-react';
 import type { ChannelKind } from '@crocodile/protocol';
-import { closeModal, getClient, navigate, useCroc } from '../croc';
+import { closeModal, getClient, navigate, openModal, useCroc } from '../croc';
 import { copyText, imageToDataUrl, initials } from '../lib/format';
 import { Button, Input, Label, Modal, cx } from '../components/ui';
 
@@ -328,11 +328,21 @@ export function SpaceSettingsModal({ spaceId }: { spaceId: string }) {
         <Button
           variant="danger"
           className="mt-3"
-          onClick={async () => {
-            await client.deleteSpace(spaceId);
-            closeModal();
-            navigate({ kind: 'friends' });
-          }}
+          onClick={() =>
+            openModal({
+              kind: 'confirm',
+              title: `Delete ${space.name}?`,
+              body: 'Everyone loses access, for good. This cannot be undone.',
+              action: 'Delete space',
+              danger: true,
+              confirmText: space.name,
+              onConfirm: async () => {
+                await client.deleteSpace(spaceId);
+                closeModal();
+                navigate({ kind: 'friends' });
+              },
+            })
+          }
         >
           Delete space
         </Button>

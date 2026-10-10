@@ -65,3 +65,37 @@ describe('coordinator link latency', () => {
     expect(link.listed.find((s) => s.info.id === server.info.id)!.rttMs).toBe(before);
   });
 });
+
+describe('coordinator link lifecycle', () => {
+  it('a connection that completes after stop() is closed, not kept', async () => {
+    const server = await startCoordinator();
+    cleanup.push(() => server.stop());
+    // The server's hello reaches the app slowly, so stop() comes mid-handshake.
+    class SlowSocket extends WebSocket {
+      override set onmessage(fn: ((ev: MessageEvent) => void) | null) {
+        super.onmessage = (ev: MessageEvent) => void setTimeout(() => fn?.(ev), 300);
+      }
+      override get onmessage() {
+        return super.onmessage;
+      }
+    }
+    const link = new CoordinatorLink({
+      identity: createIdentity(),
+      deviceId: randomDeviceId(),
+      platform: 'bot',
+      version: 'test',
+      kv: new MemoryKeyValueStore(),
+      directories: [],
+      preferredServers: [server.url],
+      WebSocketImpl: SlowSocket,
+    });
+    cleanup.push(() => link.stop());
+    link.start();
+    await waitFor(() => link.status === 'connecting', 5000, 'connecting');
+    link.stop();
+    await new Promise((r) => setTimeout(r, 2000));
+    expect(link.status).toBe('idle');
+    expect(link.connection).toBeUndefined();
+    expect(server.presence.localCount).toBe(0);
+  });
+});

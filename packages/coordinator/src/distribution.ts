@@ -1,6 +1,7 @@
-import { userIdFromKey } from '@crocodile/crypto';
+import { userIdFromKey, validateRecord } from '@crocodile/crypto';
 import {
   FedRequestParams,
+  RECORD_KIND_ORDER,
   SignedRecordEnvelope,
   type FedRequest,
   type ProfileBody,
@@ -18,7 +19,7 @@ import {
   type View,
 } from './placement';
 import type { PutResult } from './records';
-import { RpcFailure } from './util';
+import { RpcFailure, withinBytes } from './util';
 
 export interface DistributionConfig {
   /** Records we no longer own go once the live set has been stable this long. */
@@ -140,9 +141,44 @@ export class Distribution {
     return undefined;
   }
 
-  private remember(records: SignedRecord[]) {
+  /**
+   * Records another server sent us, sorted by how far they can be trusted:
+   * `valid` passed every check that needs nothing else (signature, and the
+   * author may write that key), so they can be passed on to clients, which
+   * check them again. `trusted` also passed the checks that need other
+   * records (an invite signed by its space's owner, a membership with a valid
+   * invite), against what we hold and the batch itself: only those are
+   * cached and used for our own decisions.
+   */
+  private sift(input: unknown[]): { valid: SignedRecord[]; trusted: SignedRecord[] } {
     const now = Date.now();
+    const order = ['profile', 'friends', 'device', 'space', 'note', 'invite', 'member'];
+    const records = input
+      .filter((r): r is SignedRecord => SignedRecordEnvelope.safeParse(r).success)
+      .sort((a, b) => order.indexOf(a.kind) - order.indexOf(b.kind));
+    const accepted = new Map<string, SignedRecord>();
+    const valid: SignedRecord[] = [];
+    const trusted: SignedRecord[] = [];
     for (const r of records) {
+      const own = (k: string) => (k === r.key ? undefined : (accepted.get(k) ?? this.lookup(k)));
+      const full = validateRecord(r, { get: own, now, fresh: false });
+      if (full.ok) {
+        valid.push(r);
+        trusted.push(r);
+        if ((accepted.get(r.key)?.version ?? 0) < r.version) accepted.set(r.key, r);
+        continue;
+      }
+      // Only a missing dependency kept it from full trust: still well signed.
+      const alone = validateRecord(r, { get: () => undefined, now, fresh: false });
+      if (alone.ok || alone.retryable) valid.push(r);
+    }
+    return { valid, trusted };
+  }
+
+  /** Keep checked records from other servers for a few minutes (see sift). */
+  private remember(input: unknown[]) {
+    const now = Date.now();
+    for (const r of this.sift(input).trusted) {
       const have = this.cache.get(r.key);
       if (have && have.record.version > r.version) continue;
       this.cache.set(r.key, { record: r, at: now });
@@ -159,26 +195,45 @@ export class Distribution {
     if (missing.length) await this.get(missing);
   }
 
-  private async ensureDependencies(record: SignedRecord) {
-    let authorId: string;
-    try {
-      authorId = userIdFromKey(record.author);
-    } catch {
-      return;
-    }
-    await this.fetchMissing(dependenciesOf(record, authorId)).catch(() => {});
-    // An invite reaches the owners of its space before those of its code.
-    const body = record.body as { spaceId?: string; inviteCode?: string };
-    if (record.kind === 'member' && body.inviteCode && body.spaceId) {
-      const key = `invite:${body.inviteCode}`;
-      const owners = this.others(`space:${body.spaceId}`);
-      if (!this.lookup(key) && owners.length) {
-        await this.hub.mesh
-          .requestAny<{ records: SignedRecord[] }>(owners, 'rec_get', { keys: [key] })
-          .then(({ records }) => this.remember(records.filter((r) => r.key === key)))
-          .catch(() => {});
+  /**
+   * Fetch what a group of records needs to pass validation, all at once: a
+   * batch of hundreds waits for one round of lookups, not one per record.
+   */
+  private async ensureDependencies(records: SignedRecord[]) {
+    const inBatch = new Set(records.map((r) => r.key));
+    const need = (k: string) => !inBatch.has(k) && !this.lookup(k);
+    const keys = new Set<string>();
+    const invites = new Map<string, Set<string>>();
+    for (const record of records) {
+      let authorId: string;
+      try {
+        authorId = userIdFromKey(record.author);
+      } catch {
+        continue;
+      }
+      for (const k of dependenciesOf(record, authorId)) if (need(k)) keys.add(k);
+      // An invite reaches the owners of its space before those of its code.
+      const body = record.body as { spaceId?: string; inviteCode?: string };
+      if (record.kind === 'member' && body.inviteCode && body.spaceId) {
+        const key = `invite:${body.inviteCode}`;
+        if (!need(key)) continue;
+        const set = invites.get(body.spaceId) ?? new Set();
+        invites.set(body.spaceId, set.add(key));
       }
     }
+    if (keys.size) await this.get([...keys]).catch(() => {});
+    // Invites the code's own owners didn't have: ask the space's.
+    await Promise.all(
+      [...invites].map(async ([spaceId, wanted]) => {
+        const left = [...wanted].filter((k) => !this.lookup(k));
+        const owners = this.others(`space:${spaceId}`);
+        if (!left.length || !owners.length) return;
+        await this.hub.mesh
+          .requestAny<{ records: SignedRecord[] }>(owners, 'rec_get', { keys: left })
+          .then(({ records }) => this.remember((records ?? []).filter((r) => wanted.has(r.key))))
+          .catch(() => {});
+      }),
+    );
   }
 
   // -------------------------------------------------------------------------
@@ -216,7 +271,7 @@ export class Distribution {
     opts: { fresh: boolean; origin: string | null },
   ): Promise<PutResult> {
     if (SignedRecordEnvelope.safeParse(input).success)
-      await this.ensureDependencies(input as SignedRecord);
+      await this.ensureDependencies([input as SignedRecord]);
     const res = this.hub.records.put(input, opts);
     if (res.accepted && opts.fresh) await this.storeOnOtherShards(input as SignedRecord);
     return res;
@@ -242,14 +297,21 @@ export class Distribution {
 
   /** Records another server copied to us, as an owner. */
   async onReplicated(items: { seq: number; record: SignedRecord }[], from: string) {
-    for (const item of items) {
-      if (!SignedRecordEnvelope.safeParse(item.record).success) continue;
-      const have = this.hub.records.store.get(item.record.key);
-      if (have && have.version >= item.record.version) continue;
-      await this.ensureDependencies(item.record);
-      const res = this.hub.records.put(item.record, { fresh: false, origin: from });
+    const records = items
+      .map((i) => i.record)
+      .filter((r) => {
+        if (!SignedRecordEnvelope.safeParse(r).success) return false;
+        const have = this.hub.records.store.get(r.key);
+        return !have || have.version < r.version;
+      });
+    if (!records.length) return;
+    await this.ensureDependencies(records);
+    // What others in the batch depend on goes first (a space before its members).
+    records.sort((a, b) => RECORD_KIND_ORDER[a.kind] - RECORD_KIND_ORDER[b.kind]);
+    for (const record of records) {
+      const res = this.hub.records.put(record, { fresh: false, origin: from });
       if (!res.accepted && /^unknown /.test(res.reason ?? ''))
-        this.retryLater({ record: item.record, from, tries: 0 });
+        this.retryLater({ record, from, tries: 0 });
     }
   }
 
@@ -261,10 +323,13 @@ export class Distribution {
       this.retryTimer = undefined;
       const due = this.retries.splice(0);
       void (async () => {
-        for (const r of due) {
+        const todo = due.filter((r) => {
           const have = this.hub.records.store.get(r.record.key);
-          if (have && have.version >= r.record.version) continue;
-          await this.ensureDependencies(r.record);
+          return !have || have.version < r.record.version;
+        });
+        await this.ensureDependencies(todo.map((r) => r.record));
+        todo.sort((a, b) => RECORD_KIND_ORDER[a.record.kind] - RECORD_KIND_ORDER[b.record.kind]);
+        for (const r of todo) {
           const res = this.hub.records.put(r.record, { fresh: false, origin: r.from });
           if (!res.accepted && /^unknown /.test(res.reason ?? ''))
             this.retryLater({ ...r, tries: r.tries + 1 });
@@ -296,20 +361,19 @@ export class Distribution {
     shard: string,
     m: 'rec_get' | 'rec_list' | 'rec_term',
     p: unknown,
+    more?: { value: boolean },
   ): Promise<SignedRecord[] | null> {
-    const answers = await this.hub.mesh.gather<{ records: SignedRecord[] }>(
+    const answers = await this.hub.mesh.gather<{ records: SignedRecord[]; more?: boolean }>(
       this.others(shard),
       m,
       p,
     );
     if (answers.length === 0) return null;
+    if (more) more.value = answers.some((a) => a.more === true);
+    // Only well-signed records count: an owner can't hand us a forged newer copy.
+    const { valid } = this.sift(answers.flatMap((a) => a.records ?? []));
     const newest = new Map<string, SignedRecord>();
-    for (const a of answers) {
-      for (const r of a.records ?? []) {
-        if (!SignedRecordEnvelope.safeParse(r).success) continue;
-        if ((newest.get(r.key)?.version ?? 0) < r.version) newest.set(r.key, r);
-      }
-    }
+    for (const r of valid) if ((newest.get(r.key)?.version ?? 0) < r.version) newest.set(r.key, r);
     const found = [...newest.values()];
     this.remember(found);
     return found;
@@ -342,10 +406,23 @@ export class Distribution {
     }
     await Promise.all(
       [...ask].map(async ([shard, group]) => {
-        const found = (await this.fromOwners(shard, 'rec_get', { keys: group })) ?? [];
+        // At most 1000 keys a request, and an answer too large for one
+        // frame comes in parts: ask again for what it left out.
+        const found: SignedRecord[] = [];
+        for (let i = 0; i < group.length; i += 1000) {
+          let left = group.slice(i, i + 1000);
+          while (left.length) {
+            const more = { value: false };
+            const part = (await this.fromOwners(shard, 'rec_get', { keys: left }, more)) ?? [];
+            found.push(...part);
+            const got = new Set(part.map((r) => r.key));
+            const rest = left.filter((k) => !got.has(k));
+            left = more.value && rest.length < left.length ? rest : [];
+          }
+        }
+        const asked = new Set(group);
         for (const r of found) {
-          if (group.includes(r.key) && (out.get(r.key)?.version ?? 0) < r.version)
-            out.set(r.key, r);
+          if (asked.has(r.key) && (out.get(r.key)?.version ?? 0) < r.version) out.set(r.key, r);
         }
         // A record we wrote a moment ago may not have reached the owners yet;
         // if they can't be reached, what we still hold is better than nothing.
@@ -405,15 +482,18 @@ export class Distribution {
       }
       case 'rec_get': {
         const { keys } = parsed.data as { keys: string[] };
-        return { records: keys.map((k) => store.get(k)).filter(Boolean) };
+        // As many as fit in one frame; the asker comes back for the rest.
+        const found = keys.map((k) => store.get(k)).filter((r) => r !== undefined);
+        const records = withinBytes(found);
+        return records.length < found.length ? { records, more: true } : { records };
       }
       case 'rec_list': {
         const { prefix, limit } = parsed.data as { prefix: string; limit?: number };
-        return { records: store.listPrefix(prefix, limit ?? 1000) };
+        return { records: withinBytes(store.listPrefix(prefix, limit ?? 1000)) };
       }
       case 'rec_term': {
         const { term, limit } = parsed.data as { term: string; limit?: number };
-        return { records: store.findByTerm(term, limit ?? 1000) };
+        return { records: withinBytes(store.findByTerm(term, limit ?? 1000)) };
       }
       case 'rec_store': {
         const { records } = parsed.data as { records: SignedRecord[] };
@@ -434,10 +514,12 @@ export class Distribution {
         const { buckets } = parsed.data as { buckets: number[] };
         const wanted = new Set(buckets);
         return {
-          keys: this.shared(from)
-            .filter((r) => wanted.has(bucketOf(r.key)))
-            .slice(0, 20_000)
-            .map((r) => ({ key: r.key, version: r.version })),
+          keys: withinBytes(
+            this.shared(from)
+              .filter((r) => wanted.has(bucketOf(r.key)))
+              .slice(0, 20_000)
+              .map((r) => ({ key: r.key, version: r.version })),
+          ),
         };
       }
       case 'watch': {
@@ -489,11 +571,14 @@ export class Distribution {
 
   /** Watcher side: a record our clients may want, from its owner. */
   async onPush(input: SignedRecord) {
-    if (!SignedRecordEnvelope.safeParse(input).success) return;
-    const record = input as SignedRecord;
-    this.remember([record]);
+    // Pushed by another server: act on it only if it checks out (a forged
+    // "deleted" profile would otherwise sign the user out everywhere).
+    const { valid, trusted } = this.sift([input]);
+    const record = valid[0];
+    if (!record) return;
+    this.remember(trusted);
     this.hub.pushRecordToClients(record);
-    if (record.kind === 'profile' && (record.body as ProfileBody).deleted)
+    if (trusted[0] && record.kind === 'profile' && (record.body as ProfileBody).deleted)
       this.hub.signOutDeleted(
         record.key.slice('profile:'.length),
         record as SignedRecord<'profile'>,
@@ -643,12 +728,22 @@ export class Distribution {
         .filter((k) => (store.get(k.key)?.version ?? 0) < k.version)
         .map((k) => k.key);
       if (send.length) await this.hub.mesh.handOver(target, send);
-      for (let i = 0; i < fetch.length; i += 500) {
+      // A large answer comes in parts: ask again for what didn't fit.
+      let left = fetch;
+      while (left.length) {
+        const ask = left.slice(0, 500);
         const { records } = await this.hub.mesh.request<{ records: SignedRecord[] }>(
           target,
           'rec_get',
-          { keys: fetch.slice(i, i + 500) },
+          { keys: ask },
         );
+        const got = new Set(records.map((r) => r.key));
+        const missing = ask.filter((k) => !got.has(k));
+        // What they no longer have isn't coming: stop once an answer adds nothing.
+        left =
+          missing.length < ask.length
+            ? [...missing, ...left.slice(ask.length)]
+            : left.slice(ask.length);
         await this.onReplicated(
           records.map((record) => ({ seq: 0, record })),
           target,
@@ -690,17 +785,26 @@ export class Distribution {
   }
 
   private sendingDeletions = false;
+  private deletionsAgain = false;
 
-  async sendDeletions() {
-    if (this.sendingDeletions) return;
+  async sendDeletions(): Promise<void> {
+    if (this.sendingDeletions) {
+      // Jobs added meanwhile are sent as soon as this round is over.
+      this.deletionsAgain = true;
+      return;
+    }
     this.sendingDeletions = true;
+    this.deletionsAgain = false;
     const store = this.hub.records.store;
+    const finished = new Set<string>();
     try {
       const index = JSON.parse(store.getMeta('deletions') ?? '[]') as string[];
-      const left: string[] = [];
       for (const userId of index) {
         const raw = store.getMeta(`deletion:${userId}`);
-        if (!raw) continue;
+        if (!raw) {
+          finished.add(userId);
+          continue;
+        }
         const job = JSON.parse(raw) as {
           marker: SignedRecord;
           spaces: string[];
@@ -709,6 +813,7 @@ export class Distribution {
         };
         if (Date.now() - job.since > 30 * 24 * 3600_000) {
           store.setMeta(`deletion:${userId}`, '');
+          finished.add(userId);
           continue;
         }
         const targets = new Set<string>();
@@ -723,16 +828,23 @@ export class Distribution {
             // Tried again on the next round.
           }
         }
+        // The job may have been replaced while we were sending (the same
+        // account deleted again): that newer one stays as it is.
+        if (store.getMeta(`deletion:${userId}`) !== raw) continue;
         const pending = [...targets].some((id) => !job.done.includes(id));
-        if (pending) {
-          left.push(userId);
-          store.setMeta(`deletion:${userId}`, JSON.stringify(job));
-        } else store.setMeta(`deletion:${userId}`, '');
+        if (pending) store.setMeta(`deletion:${userId}`, JSON.stringify(job));
+        else {
+          store.setMeta(`deletion:${userId}`, '');
+          finished.add(userId);
+        }
       }
-      store.setMeta('deletions', JSON.stringify(left));
+      // Read again: accounts added while we were sending stay listed.
+      const now = JSON.parse(store.getMeta('deletions') ?? '[]') as string[];
+      store.setMeta('deletions', JSON.stringify(now.filter((id) => !finished.has(id))));
     } finally {
       this.sendingDeletions = false;
     }
+    if (this.deletionsAgain) return this.sendDeletions();
   }
 
   /** Delete records we don't own, once the live set has been stable for a while. */

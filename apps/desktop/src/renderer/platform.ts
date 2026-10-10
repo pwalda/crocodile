@@ -70,6 +70,8 @@ async function secureSet(key: string, value: string) {
 let dataKey: Promise<CryptoKey> | undefined;
 function localKey(): Promise<CryptoKey> {
   dataKey ??= (async () => {
+    // Throws if the key is stored but the keychain is locked: never make a
+    // new one then, or everything sealed with the old one is lost.
     let raw = await secureGet('local-data-key');
     if (!raw) {
       raw = toB64u(crypto.getRandomValues(new Uint8Array(32)));
@@ -79,7 +81,10 @@ function localKey(): Promise<CryptoKey> {
       'encrypt',
       'decrypt',
     ]);
-  })();
+  })().catch((err) => {
+    dataKey = undefined;
+    throw err;
+  });
   return dataKey;
 }
 
@@ -154,13 +159,15 @@ export const messages: MessageStore = {
     await tx.done;
     return true;
   },
-  async page(channel, { before, limit }) {
+  async page(channel, { before, beforeId, limit }) {
     const d = await db();
+    // Index entries are ordered by (ch, ts), then by id: the same order as
+    // the timeline, so a position is a time and an id.
     const range = IDBKeyRange.bound(
       [channel, 0],
       [channel, before === undefined ? Number.MAX_SAFE_INTEGER : before],
       false,
-      true,
+      before !== undefined && beforeId === undefined,
     );
     const rows: StoredMessage[] = [];
     let cursor = await d
@@ -168,7 +175,8 @@ export const messages: MessageStore = {
       .store.index('byChannelTs')
       .openCursor(range, 'prev');
     while (cursor && rows.length < limit) {
-      rows.push(cursor.value);
+      const row = cursor.value;
+      if (!(beforeId !== undefined && row.ts === before && row.id >= beforeId)) rows.push(row);
       cursor = await cursor.continue();
     }
     return decode(rows.reverse());
@@ -178,7 +186,7 @@ export const messages: MessageStore = {
     const range = IDBKeyRange.bound(
       [channel, after],
       [channel, Number.MAX_SAFE_INTEGER],
-      true,
+      false,
       false,
     );
     return decode(await d.getAllFromIndex('messages', 'byChannelTs', range, limit));
@@ -200,14 +208,26 @@ export const messages: MessageStore = {
 /** Runs host relays in the Electron utility process. */
 function relayAdapter(api: DesktopApi): HostRelayAdapter {
   const outbound = new Map<string, (to: string, data: SignalData) => void>();
+  const failed = new Map<string, (reason: string) => void>();
   api.relay.onEvent((msg) => {
     if (msg.type === 'signal') outbound.get(msg.handle)?.(msg.to, msg.data);
-    else if (msg.type === 'error') console.warn('relay error', msg.message);
+    else if (msg.type === 'error') {
+      console.warn('relay error', msg.message);
+      // '*': the relay process exited, taking every relay with it.
+      const lost = msg.handle === '*' ? [...failed.keys()] : [msg.handle];
+      for (const h of lost) {
+        const fn = failed.get(h);
+        failed.delete(h);
+        outbound.delete(h);
+        fn?.(msg.message);
+      }
+    }
   });
   return {
     async start(opts) {
       const handle = randomId(6);
       outbound.set(handle, opts.sendSignal);
+      if (opts.onFailed) failed.set(handle, opts.onFailed);
       await api.relay.send({
         type: 'start',
         handle,
@@ -230,6 +250,7 @@ function relayAdapter(api: DesktopApi): HostRelayAdapter {
         async close() {
           clearInterval(timer);
           outbound.delete(handle);
+          failed.delete(handle);
           await api.relay.send({ type: 'close', handle });
         },
       } satisfies RelayHandle;

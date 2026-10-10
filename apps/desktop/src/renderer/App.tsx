@@ -411,9 +411,9 @@ function useGlobalBehaviours() {
 
   useEffect(
     () =>
-      client.on('message', ({ channel, message, mine }) => {
+      client.on('message', ({ channel, message, mine, update }) => {
         const s = client.state;
-        if (mine || !s.settings.notifications || s.settings.status === 'dnd') return;
+        if (mine || update || !s.settings.notifications || s.settings.status === 'dnd') return;
         if (document.hasFocus() && s.activeChannel === channel) return;
         const author = s.profiles[message.author]?.username ?? 'Someone';
         const space = Object.values(s.spaces).find((sp) =>

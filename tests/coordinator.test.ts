@@ -23,7 +23,8 @@ import {
   type ProfileBody,
   type SignedRecord,
 } from '@crocodile/protocol';
-import { Coordinator } from '@crocodile/coordinator';
+import { CoordinatorConnection } from '@crocodile/client-core';
+import { Coordinator, lanAddress, rendezvousOwner } from '@crocodile/coordinator';
 import {
   caps,
   connectUser,
@@ -96,6 +97,130 @@ describe('records', () => {
       prefix: recordKey.memberPrefix(spaceId),
     });
     expect(members.records).toHaveLength(2);
+  });
+});
+
+describe('server hello', () => {
+  /** A WebSocket that lets someone on the path rewrite the server's hello. */
+  function tampered(change: (hello: Record<string, unknown>) => Record<string, unknown>) {
+    return class extends WebSocket {
+      private handler: ((ev: MessageEvent) => void) | null = null;
+      override get onmessage() {
+        return this.handler;
+      }
+      override set onmessage(fn: ((ev: MessageEvent) => void) | null) {
+        this.handler = fn;
+        super.onmessage = (ev: MessageEvent) => {
+          let data = ev.data as string;
+          const frame = JSON.parse(String(data)) as Record<string, unknown>;
+          if (frame.t === 'hello') data = JSON.stringify(change(frame));
+          fn?.({ data } as MessageEvent);
+        };
+      }
+    };
+  }
+  const connect = (c: Coordinator, impl?: typeof WebSocket) =>
+    CoordinatorConnection.connect({
+      url: c.url,
+      identity: createIdentity(),
+      deviceId: randomDeviceId(),
+      platform: 'bot',
+      version: 'test',
+      ...(impl ? { WebSocketImpl: impl } : {}),
+    });
+
+  it('the STUN servers and operator come signed, and a changed list is not used', async () => {
+    const c = await server({
+      extraStun: ['stun:stun.example.org:3478'],
+      operatorContact: 'ops@example.org',
+    });
+    const plain = await connect(c);
+    expect(plain.stun).toContain('stun:stun.example.org:3478');
+    expect(plain.operator).toEqual({ contact: 'ops@example.org' });
+    plain.close();
+
+    // Someone on the path points the app at their own STUN server.
+    const evil = tampered((h) => ({ ...h, stun: ['stun:watching.example:3478'] }));
+    const changed = await connect(c, evil);
+    expect(changed.stun).toEqual([]);
+    expect(changed.operator).toBeUndefined();
+    changed.close();
+    // A server from before the full signature: its unsigned list isn't used.
+    const old = tampered(({ sigFull: _, ...h }) => ({
+      ...h,
+      stun: ['stun:watching.example:3478'],
+    }));
+    const conn = await connect(c, old);
+    expect(conn.stun).toEqual([]);
+    expect(conn.operator).toBeUndefined();
+    conn.close();
+  });
+});
+
+describe('STUN and TURN addresses', () => {
+  it('without a public URL, apps get the address they reached the server on', async () => {
+    const c = await server({ stunPort: 0 });
+    expect(new URL(c.url).hostname).toBe('127.0.0.1');
+    // An app on the LAN reached us at 192.168.1.20: 127.0.0.1 would be its own machine.
+    expect(c.publicHost('192.168.1.20')).toBe('192.168.1.20');
+    expect(c.publicHost('::ffff:192.168.1.20')).toBe('192.168.1.20');
+    expect(c.publicHost('fd00::20')).toBe('[fd00::20]');
+    expect(c.stunUrls('192.168.1.20')[0]).toMatch(/^stun:192\.168\.1\.20:\d+$/);
+    // A local app keeps the loopback address.
+    expect(c.publicHost('127.0.0.1')).toBe('127.0.0.1');
+
+    // With a public URL, that is what everyone gets.
+    const named = await server({ publicUrl: 'https://croc.example.org' });
+    expect(named.publicHost('192.168.1.20')).toBe('croc.example.org');
+  });
+
+  it("a relay with no public address uses the machine's network address", () => {
+    expect(
+      lanAddress({
+        lo: [{ address: '127.0.0.1', family: 'IPv4', internal: true } as never],
+        eth0: [
+          { address: 'fe80::1', family: 'IPv6', internal: false } as never,
+          { address: '192.168.1.20', family: 'IPv4', internal: false } as never,
+        ],
+      }),
+    ).toBe('192.168.1.20');
+    expect(
+      lanAddress({ lo: [{ address: '127.0.0.1', family: 'IPv4', internal: true } as never] }),
+    ).toBeUndefined();
+  });
+});
+
+describe('request limits', () => {
+  it('refuses a list limit below one, which would list everything', async () => {
+    const c = await server();
+    const alice = await user(c);
+    await expect(
+      alice.conn.request('records.list', { prefix: 'profile:', limit: -1 }),
+    ).rejects.toThrow();
+  });
+
+  it('caps the prefixes and users one connection follows', async () => {
+    const c = await server();
+    const alice = await user(c);
+    const b32 = 'abcdefghijklmnopqrstuvwxyz234567';
+    const id = (n: number) =>
+      Array.from({ length: 10 }, (_, i) => b32[Math.floor(n / 32 ** i) % 32]).join('');
+    const prefixes = (i: number) =>
+      Array.from({ length: 2000 }, (_, j) => recordKey.profile(id(i * 2000 + j)));
+    for (let i = 0; i < 10; i++)
+      await alice.conn.request('records.subscribe', { prefixes: prefixes(i) });
+    await expect(
+      alice.conn.request('records.subscribe', { prefixes: prefixes(10) }),
+    ).rejects.toThrow(/at most/);
+    // Following again what it already follows is fine.
+    await alice.conn.request('records.subscribe', { prefixes: prefixes(0) });
+
+    const users = (i: number) => Array.from({ length: 5000 }, (_, j) => id(i * 5000 + j));
+    for (let i = 0; i < 4; i++)
+      await alice.conn.request('presence.subscribe', { userIds: users(i) });
+    await expect(alice.conn.request('presence.subscribe', { userIds: users(4) })).rejects.toThrow(
+      /at most/,
+    );
   });
 });
 
@@ -421,6 +546,58 @@ describe('coordination mesh', () => {
     });
     expect(rejoined.state.host).toBe(host.conn.peer);
     expect(rejoined.state.epoch).toBe(first.state.epoch);
+  });
+
+  it("re-joins again when a session's new owner was briefly unreachable", async () => {
+    const a = await server({ name: 'A' });
+    const b = await server({ name: 'B', meshPeers: [a.url] });
+    const c = await server({ name: 'C', meshPeers: [a.url, b.url] });
+    await waitFor(() => [a, b, c].every((x) => x.mesh.peerIds().length === 2), 5000, 'full mesh');
+
+    const owner = await user(a);
+    const s = await createSpace(owner);
+    // A session owned by C that falls to A once C is gone.
+    let sessionId = `voice:${s.spaceId}:${s.voiceChannel}`;
+    const channels = [...s.space.body.channels];
+    const fits = () =>
+      a.sessions.ownerOf(sessionId) === c.info.id &&
+      rendezvousOwner(sessionId, [a.info.id, b.info.id]) === a.info.id;
+    for (let i = 0; !fits() && i < 100; i++) {
+      const id = randomId();
+      channels.push({ id, name: `v${i}`, kind: 'voice' });
+      sessionId = `voice:${s.spaceId}:${id}`;
+    }
+    expect(fits()).toBe(true);
+    await owner.conn.request('records.put', {
+      record: signRecord(
+        owner.identity,
+        'space',
+        `space:${s.spaceId}`,
+        { ...s.space.body, channels },
+        Date.now() + 1,
+      ),
+    });
+    await waitFor(() => b.records.get(`invite:${s.code}`), 3000, 'replicated');
+    const bob = await user(b);
+    await joinSpace(bob, s.spaceId, s.code);
+    await waitFor(() => isSpaceMember(c.records, s.spaceId, bob.identity.userId), 3000);
+    await bob.conn.request('session.join', { sessionId, caps: caps() });
+
+    // C dies; B's first re-join with A is lost on the way.
+    let dropped = 0;
+    const sendTo = b.mesh.sendTo.bind(b.mesh);
+    b.mesh.sendTo = ((id: string, frame: { t: string }) => {
+      if (frame.t === 'session_op' && id === a.info.id && dropped++ === 0) return false;
+      return sendTo(id as never, frame as never);
+    }) as typeof b.mesh.sendTo;
+    await c.stop();
+    const st = await waitFor(
+      () => a.sessions.ownedState(sessionId),
+      8000,
+      'A rebuilt the session from the re-join',
+    );
+    expect(st.members.map((m) => m.peer)).toEqual([bob.conn.peer]);
+    expect(dropped).toBeGreaterThan(1);
   });
 });
 
@@ -920,6 +1097,20 @@ describe('sealed friends lists and notes', () => {
     expect(await bob.conn.request('records.put', { record: ghost })).toMatchObject({
       accepted: false,
       reason: 'no such note',
+    });
+  });
+
+  it('refuses an empty note, which would only fill the quota', async () => {
+    const c = await server();
+    const alice = await user(c);
+    const bob = await user(c);
+    const author = createIdentity();
+    const empty = signRecord(author, 'note', recordKey.note(bob.identity.userId, author.userId), {
+      boxes: [],
+    });
+    expect(await alice.conn.request('records.put', { record: empty })).toMatchObject({
+      accepted: false,
+      reason: 'a note carries at least one box',
     });
   });
 

@@ -31,58 +31,99 @@ export async function probeNetwork(
 ): Promise<NetworkProbe> {
   const servers = [...new Set(stunUrls)].slice(0, 2);
   if (servers.length === 0) return { nat: 'unknown', udp: true };
-  const gather = async (url: string) => {
-    const pc = new RTCPeerConnectionImpl({ iceServers: [{ urls: url }] });
-    pc.createDataChannel('probe');
-    const found = {
-      host: [] as string[],
-      srflx: [] as { ip: string; port: number }[],
-      /** The STUN server didn't answer (or couldn't be reached). */
-      errored: false,
-      /** Gathering finished before the timeout. */
-      complete: false,
+  // One connection asks both STUN ports from the same local sockets, so their
+  // answers are comparable: behind a cone NAT both see the same mapping
+  // (which WebRTC reports once), behind a symmetric NAT each sees its own.
+  const pc = new RTCPeerConnectionImpl({ iceServers: servers.map((urls) => ({ urls })) });
+  pc.createDataChannel('probe');
+  /** Local sockets ("ip:port") and the public mappings the servers saw. */
+  const hosts = new Set<string>();
+  const hostIps = new Set<string>();
+  const mapped = new Set<string>();
+  const mappedIps = new Set<string>();
+  /** The mappings each local socket got, when the candidate says which socket. */
+  const bySocket = new Map<string, Set<string>>();
+  /** STUN requests that failed, per local socket; `unattributed` if one didn't say. */
+  const failed = new Map<string, number>();
+  let unattributed = false;
+  let complete = false;
+  await new Promise<void>((resolve) => {
+    const timer = setTimeout(resolve, timeoutMs);
+    pc.onicecandidateerror = (ev) => {
+      const e = ev as RTCPeerConnectionIceErrorEvent;
+      if (e.address && e.port) {
+        const socket = `${e.address}:${e.port}`;
+        failed.set(socket, (failed.get(socket) ?? 0) + 1);
+      } else unattributed = true;
     };
-    await new Promise<void>((resolve) => {
-      const timer = setTimeout(resolve, timeoutMs);
-      pc.onicecandidateerror = () => {
-        found.errored = true;
-      };
-      pc.onicecandidate = (ev) => {
-        if (!ev.candidate) {
-          found.complete = true;
-          clearTimeout(timer);
-          resolve();
-          return;
+    pc.onicecandidate = (ev) => {
+      if (!ev.candidate) {
+        complete = true;
+        clearTimeout(timer);
+        resolve();
+        return;
+      }
+      const parts = ev.candidate.candidate.split(' ');
+      const ip = parts[4];
+      const port = parts[5];
+      const type = parts[7];
+      if (!ip || parts[2]?.toLowerCase() !== 'udp') return;
+      if (type === 'host') {
+        hosts.add(`${ip}:${port}`);
+        hostIps.add(ip);
+      }
+      if (type === 'srflx') {
+        mapped.add(`${ip}:${port}`);
+        mappedIps.add(ip);
+        // Which local socket it maps (browsers often hide it: 0.0.0.0 0).
+        const raddr = parts[parts.indexOf('raddr') + 1];
+        const rport = parts[parts.indexOf('rport') + 1];
+        if (
+          parts.includes('raddr') &&
+          raddr &&
+          rport &&
+          rport !== '0' &&
+          !/^(0\.0\.0\.0|::)$/.test(raddr)
+        ) {
+          const socket = `${raddr}:${rport}`;
+          let set = bySocket.get(socket);
+          if (!set) bySocket.set(socket, (set = new Set()));
+          set.add(`${ip}:${port}`);
         }
-        const parts = ev.candidate.candidate.split(' ');
-        const ip = parts[4];
-        const port = Number(parts[5]);
-        const type = parts[7];
-        if (!ip || parts[2]?.toLowerCase() !== 'udp') return;
-        if (type === 'host') found.host.push(ip);
-        if (type === 'srflx') found.srflx.push({ ip, port });
-      };
-      void pc.createOffer().then((o) => pc.setLocalDescription(o));
-    });
-    pc.close();
-    return found;
-  };
-  const results = await Promise.all(servers.map(gather));
-  const mapped = results.flatMap((r) => r.srflx);
-  if (mapped.length === 0) {
-    // No server saw us from outside. Either nothing answered (UDP blocked) or
-    // every answer matched a local address, which WebRTC drops as a duplicate:
-    // nothing translates our address on the way to the server.
-    if (results.every((r) => r.errored)) return { nat: 'unknown', udp: false };
-    if (results.every((r) => r.complete && !r.errored)) return { nat: 'open', udp: true };
-    return { nat: 'unknown', udp: true };
+      }
+    };
+    void pc.createOffer().then((o) => pc.setLocalDescription(o));
+  });
+  pc.close();
+  if (mapped.size === 0) {
+    // Nobody saw us from outside. Either no request got an answer (UDP
+    // blocked), or every answer matched a local address, which WebRTC drops
+    // as a duplicate: nothing translates our address on the way to the server.
+    if (!complete) return { nat: 'unknown', udp: true };
+    if (failed.size === 0 && !unattributed) return { nat: 'open', udp: true };
+    // Blocked only if the requests failed on every local socket: one failing
+    // interface (say IPv6) next to a working one says nothing.
+    const everySocketFailed =
+      !unattributed && hosts.size > 0 && [...hosts].every((h) => failed.has(h));
+    return everySocketFailed ? { nat: 'unknown', udp: false } : { nat: 'unknown', udp: true };
   }
-  if (results.some((r) => r.srflx.some((s) => r.host.includes(s.ip))))
-    return { nat: 'open', udp: true };
-  if (results.length < 2 || results.some((r) => r.srflx.length === 0))
-    return { nat: 'unknown', udp: true };
-  const ports = new Set(mapped.map((m) => `${m.ip}:${m.port}`));
-  return { nat: ports.size === 1 ? 'cone' : 'symmetric', udp: true };
+  if ([...mappedIps].some((ip) => hostIps.has(ip))) return { nat: 'open', udp: true };
+  if (servers.length < 2) return { nat: 'unknown', udp: true };
+  const failures = (socket: string) => failed.get(socket) ?? 0;
+  // Two mappings of one socket: the NAT maps each destination separately.
+  if (bySocket.size > 0) {
+    if ([...bySocket.values()].some((m) => m.size > 1)) return { nat: 'symmetric', udp: true };
+    // One mapping is a cone only if both servers answered that socket.
+    const compared = [...bySocket.keys()].some((socket) => failures(socket) === 0);
+    return { nat: compared && !unattributed ? 'cone' : 'unknown', udp: true };
+  }
+  // Mappings not tied to sockets: compare their number with the sockets that
+  // got any answer (a socket every request failed on contributes none).
+  const answered = [...hosts].filter((h) => failures(h) < servers.length).length;
+  if (mapped.size > Math.max(1, answered)) return { nat: 'symmetric', udp: true };
+  // A socket only one server answered can't show whether its mapping changes.
+  const partly = [...hosts].some((h) => failures(h) > 0 && failures(h) < servers.length);
+  return { nat: partly || unattributed ? 'unknown' : 'cone', udp: true };
 }
 
 /**

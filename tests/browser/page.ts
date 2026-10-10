@@ -9,6 +9,8 @@ import {
   MemoryKeyValueStore,
   MemoryMessageStore,
   VoiceEngine,
+  networkVerdict,
+  probeNetwork,
   routeFromStats,
   type HostRelayAdapter,
   type RelayHandle,
@@ -19,6 +21,7 @@ declare global {
   interface Window {
     croc: CrocodileClient;
     routeFromStats: typeof routeFromStats;
+    checkNetwork(stun: string[]): Promise<string>;
     __relayStart(opts: {
       seed: string;
       hostPeer: string;
@@ -97,6 +100,7 @@ async function toneMicrophone(): Promise<MediaStream> {
 }
 
 window.routeFromStats = routeFromStats;
+window.checkNetwork = async (stun) => networkVerdict(await probeNetwork(RTCPeerConnection, stun));
 
 window.startClient = async ({ server, name, canHost, nat }) => {
   const client = new CrocodileClient(
