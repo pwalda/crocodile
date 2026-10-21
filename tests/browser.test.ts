@@ -2,9 +2,21 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { Browser, Page } from 'playwright-core';
 import type { Server } from 'node:http';
 import type { Coordinator } from '@crocodile/coordinator';
-import { attachRelayBridge, launchBrowser, relayFrames, serveHarness } from './browser/harness';
+import {
+  attachRelayBridge,
+  launchBrowser,
+  relayFrames,
+  relayVideo,
+  serveHarness,
+} from './browser/harness';
 import { existsSync } from 'node:fs';
 import { startCoordinator, waitFor } from './helpers';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { createHash, randomBytes } from 'node:crypto';
+import { CrocodileClient } from '@crocodile/client-core';
+import { createCliPlatform } from '../apps/cli/src/platform';
 
 const chromiumPath = process.env.CHROMIUM_PATH ?? '/opt/pw-browsers/chromium';
 const haveChromium = existsSync(chromiumPath);
@@ -69,6 +81,74 @@ async function until(page: Page, fn: string, timeoutMs = 15_000) {
 }
 
 describe.skipIf(!haveChromium)('browser end-to-end', () => {
+  it('cameras and screens reach those who watch, end-to-end encrypted through the host', async () => {
+    const alice = await openClient('vid-alice', true, 'open');
+    const bob = await openClient('vid-bob', false);
+    const carol = await openClient('vid-carol', false);
+    const spaceId = await alice.page.evaluate(() => window.croc.createSpace('Video Swamp'));
+    const code = await alice.page.evaluate((s) => window.croc.createInvite(s), spaceId);
+    await bob.page.evaluate((c) => window.croc.joinWithInvite(c), code);
+    await carol.page.evaluate((c) => window.croc.joinWithInvite(c), code);
+    const channel = await alice.page.evaluate(
+      (s) => window.croc.state.spaces[s]!.channels.find((c) => c.kind === 'voice')!.id,
+      spaceId,
+    );
+    const sid = `voice:${spaceId}:${channel}`;
+    for (const c of [alice, bob, carol])
+      await c.page.evaluate(([s, ch]) => window.croc.joinVoice(s as string, ch as string), [
+        spaceId,
+        channel,
+      ] as const);
+    // Each connection gets video added once the host says it carries it.
+    for (const c of [alice, bob, carol])
+      await until(
+        c.page,
+        `window.croc.state.sessions['${sid}']?.video.ready && window.croc.state.sessions['${sid}'].peers.length === 2`,
+        30_000,
+      );
+    const before = { ...relayVideo };
+
+    // Bob's camera (Chromium's fake one): Alice and Carol decode it.
+    await bob.page.evaluate(() => window.croc.setCamera(true));
+    // Pictures decoded from what the relay forwarded (so decrypted, too).
+    const decoding = async (page: Page, streams: number) => {
+      const deadline = Date.now() + 30_000;
+      for (;;) {
+        const v = await page.evaluate(() => window.videoStats());
+        if (v.filter((s) => s.framesDecoded > 10 && s.width > 0).length >= streams) return v;
+        if (Date.now() > deadline) throw new Error(`no video decoded: ${JSON.stringify(v)}`);
+        await new Promise((r) => setTimeout(r, 250));
+      }
+    };
+    await decoding(carol.page, 1);
+    await decoding(alice.page, 1);
+    await until(
+      carol.page,
+      `window.croc.state.sessions['${sid}'].video.streams.some(s => s.kind === 'camera' && s.state === 'live')`,
+    );
+
+    // Alice shares a screen. Only Carol chooses to watch it.
+    await alice.page.evaluate(() => window.croc.shareScreen({ quality: 'motion', audio: false }));
+    const screen = await alice.page.evaluate(() => `${window.croc.peer}:screen`);
+    await until(
+      carol.page,
+      `window.croc.state.sessions['${sid}'].video.streams.some(s => s.id === '${screen}' && s.state === 'off')`,
+    );
+    await carol.page.evaluate(
+      ([s, id]) => window.croc.watchScreen(s as string, id as string, true),
+      [sid, screen] as const,
+    );
+    await decoding(carol.page, 2);
+    // Bob didn't ask for it: he gets Alice's nothing (she has no camera on).
+    expect(await bob.page.evaluate(() => window.videoStats().then((v) => v.length))).toBe(0);
+
+    // Everything the relay forwarded was encrypted end to end.
+    const frames = relayVideo.frames - before.frames;
+    expect(frames).toBeGreaterThan(30);
+    expect(relayVideo.encrypted - before.encrypted).toBe(frames);
+    for (const c of [alice, bob, carol]) await c.page.evaluate(() => window.croc.shutdown());
+  }, 150_000);
+
   it('voice and text flow through the elected host relay, end-to-end encrypted', async () => {
     const alice = await openClient('alice', true, 'open');
     const bob = await openClient('bob', true, 'cone');
@@ -101,15 +181,15 @@ describe.skipIf(!haveChromium)('browser end-to-end', () => {
     expect(view!.host).toBe(alice.userId);
     expect(view!.backup).toBe(bob.userId);
     // Read from WebRTC's selected candidate pair: here everyone shares a machine.
-    // Chromium may keep a pair whose address it hides, so the route can stay
-    // unknown, but it must never be reported as across the internet or relayed.
+    // Chromium may keep a pair whose address it hides: then it's direct, or
+    // unknown for a moment, but never across the internet or relayed.
     const deadline = Date.now() + 12_000;
     let route: string | null = null;
     while (!route && Date.now() < deadline) {
       route = await carol.page.evaluate((s) => window.croc.state.sessions[s]!.route, voiceSession);
       if (!route) await new Promise((r) => setTimeout(r, 200));
     }
-    expect([null, 'local', 'lan']).toContain(route);
+    expect([null, 'local', 'lan', 'direct']).toContain(route);
 
     // Everyone's fake microphone emits a tone; listeners must decode real
     // audio, which only happens if frame decryption succeeded.
@@ -172,6 +252,90 @@ async function waitForAudio(page: Page) {
   }
   return best;
 }
+
+describe.skipIf(!haveChromium)('network check in Chromium', () => {
+  it('files cross between Chromium and the command line tool (werift), both ways', async () => {
+    const home = mkdtempSync(join(tmpdir(), 'croc-cli-browser-'));
+    const ref: { c?: CrocodileClient } = {};
+    const { platform, kv } = createCliPlatform({
+      dir: home,
+      version: 'test',
+      stun: () => ref.c?.stunUrls ?? [],
+    });
+    const cli = new CrocodileClient(platform, { directories: [], preferredServers: [coord.url] });
+    ref.c = cli;
+    try {
+      await cli.init();
+      await cli.createAccount('terminal');
+      const { page, userId: browserUser } = await openClient('Dana', true);
+      await waitFor(() => cli.state.link === 'connected', 10_000, 'cli connected');
+
+      // Command line → browser.
+      const data = randomBytes(1_500_000);
+      const sha = createHash('sha256').update(data).digest('hex');
+      const dm = await cli.openDm(browserUser);
+      const id = await cli.sendFile(dm, {
+        name: 'from-terminal.bin',
+        size: data.length,
+        type: 'application/octet-stream',
+        read: async (o, l) => new Uint8Array(data.subarray(o, o + l)),
+      });
+      await until(page, `!!window.croc.state.files[${JSON.stringify(id)}]`, 20_000);
+      await page.evaluate((fid) => window.croc.downloadFile(fid), id);
+      await until(
+        page,
+        `window.croc.state.files[${JSON.stringify(id)}]?.status === 'done'`,
+        30_000,
+      );
+      const got = await page.evaluate(async (fid) => {
+        const parts: Uint8Array[] = [];
+        await window.croc.readFile(fid, (p) => void parts.push(p));
+        const all = new Uint8Array(await new Blob(parts as BlobPart[]).arrayBuffer());
+        const h = new Uint8Array(await crypto.subtle.digest('SHA-256', all));
+        return Array.from(h, (b) => b.toString(16).padStart(2, '0')).join('');
+      }, id);
+      expect(got).toBe(sha);
+
+      // Browser → command line.
+      const back = await page.evaluate(async (cliUser) => {
+        const bytes = new Uint8Array(800_000).map((_, i) => (i * 13) & 0xff);
+        const ch = await window.croc.openDm(cliUser);
+        return window.croc.sendFile(ch, {
+          name: 'from-browser.bin',
+          size: bytes.length,
+          type: 'application/octet-stream',
+          read: async (o, l) => bytes.slice(o, o + l),
+        });
+      }, cli.userId);
+      await waitFor(() => cli.state.files[back], 20_000, 'cli knows');
+      await cli.downloadFile(back);
+      await waitFor(() => cli.state.files[back]?.status === 'done', 30_000, 'cli has it');
+      const parts: Uint8Array[] = [];
+      await cli.readFile(back, (p) => void parts.push(p));
+      const all = Buffer.concat(parts);
+      expect(all.length).toBe(800_000);
+      expect(all.every((b, i) => b === ((i * 13) & 0xff))).toBe(true);
+    } finally {
+      // As the command closes: write the pending state before it goes.
+      await cli.shutdown();
+      kv.flush();
+      rmSync(home, { recursive: true, force: true });
+    }
+  }, 120_000);
+
+  it("finds nothing wrong with a machine that talks to the server's STUN ports directly", async () => {
+    const context = await browser.newContext();
+    const page = await context.newPage();
+    await page.goto(harness.url);
+    const stun = coord.stunUrls();
+    expect(stun).toHaveLength(2);
+    const verdict = await page.evaluate((s) => window.checkNetwork(s), stun);
+    // No NAT in between: the answers match our own address. Never "limited"
+    // (two sockets' mappings compared) or "blocked".
+    expect(['good', 'unknown']).toContain(verdict);
+    await context.close();
+  }, 30_000);
+});
 
 describe.skipIf(!haveChromium)('server relay with Chromium', () => {
   it("Chromium's TURN client relays through a coordinator's TURN server", async () => {

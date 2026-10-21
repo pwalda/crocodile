@@ -13,6 +13,9 @@ import {
   PREKEY_LIFETIME_MS,
   SecureChannel,
   TextReceiver,
+  VIDEO_MAX_CLEAR,
+  VideoReceiver,
+  VideoSender,
   acceptChannel,
   answerChannel,
   createChannelKeys,
@@ -45,6 +48,7 @@ import {
   safetyNumber,
   signRecord,
   signSdp,
+  signSpaceAuthority,
   spaceIdFor,
   validateRecord,
   verifyChatMessage,
@@ -212,6 +216,115 @@ describe('records', () => {
     expect(isSpaceMember(lookup, spaceId, bob.userId)).toBe(true);
     expect(isSpaceMember(lookup, spaceId, mallory.userId)).toBe(false);
   });
+
+  describe('space admins', () => {
+    const carol = createIdentity();
+    const nonce = randomId();
+    const spaceId = spaceIdFor(alice.publicKey, nonce);
+    const key = recordKey.space(spaceId);
+    const now = Date.now();
+    const base = {
+      name: 'Swamp',
+      owner: alice.userId,
+      nonce,
+      bans: [] as string[],
+      channels: [{ id: randomId(), name: 'general', kind: 'text' as const }],
+    };
+    /** Alice makes Bob an admin. */
+    const withBob = signRecord(
+      alice,
+      'space',
+      key,
+      {
+        ...base,
+        admins: [bob.userId],
+        authority: signSpaceAuthority(alice, spaceId, [bob.userId], now - 2000),
+      },
+      now - 2000,
+    );
+
+    it("lets an admin change the space, checked on its own, without the owner's record", () => {
+      const renamed = signRecord(bob, 'space', key, { ...withBob.body, name: 'Pond' }, now - 1000);
+      expect(validateRecord(renamed, ctx([withBob])).ok).toBe(true);
+      // A server or client that never saw the owner's version can check it too.
+      expect(validateRecord(renamed, ctx([])).ok).toBe(true);
+      // Someone not on the owner's list can't, signature or not.
+      const byMallory = signRecord(mallory, 'space', key, { ...withBob.body, name: 'Mine' });
+      expect(validateRecord(byMallory, ctx([withBob]))).toMatchObject({ ok: false });
+    });
+
+    it('keeps the admin list, deletion and the owner out of admins’ hands', () => {
+      const v = now - 1000;
+      const promoted = signRecord(
+        bob,
+        'space',
+        key,
+        { ...withBob.body, admins: [bob.userId, mallory.userId] },
+        v,
+      );
+      expect(validateRecord(promoted, ctx([withBob]))).toMatchObject({
+        ok: false,
+        reason: 'bad admin list signature',
+      });
+      const deleted = signRecord(bob, 'space', key, { ...withBob.body, deleted: true }, v);
+      expect(validateRecord(deleted, ctx([withBob]))).toMatchObject({
+        reason: 'only the owner may delete a space',
+      });
+      const banOwner = signRecord(bob, 'space', key, { ...withBob.body, bans: [alice.userId] }, v);
+      expect(validateRecord(banOwner, ctx([withBob]))).toMatchObject({ ok: false });
+      const banCarol = signRecord(bob, 'space', key, { ...withBob.body, bans: [carol.userId] }, v);
+      expect(validateRecord(banCarol, ctx([withBob])).ok).toBe(true);
+    });
+
+    it('refuses an edit under an admin list the owner has replaced', () => {
+      // Alice removes Bob; Bob still holds the old signed list.
+      const without = signRecord(
+        alice,
+        'space',
+        key,
+        { ...base, admins: [], authority: signSpaceAuthority(alice, spaceId, [], now - 500) },
+        now - 500,
+      );
+      const late = signRecord(bob, 'space', key, { ...withBob.body, name: 'Still mine' }, now);
+      expect(validateRecord(late, ctx([without]))).toMatchObject({
+        ok: false,
+        reason: 'the admin list has changed',
+      });
+    });
+
+    it("lets admins make invites, which stop working when they're no longer admins", () => {
+      const code = randomId(5);
+      const invite = signRecord(bob, 'invite', recordKey.invite(code), {
+        spaceId,
+        code,
+        expiresAt: null,
+      });
+      expect(validateRecord(invite, ctx([withBob])).ok).toBe(true);
+      const join = signRecord(carol, 'member', recordKey.member(spaceId, carol.userId), {
+        spaceId,
+        userId: carol.userId,
+        inviteCode: code,
+      });
+      expect(validateRecord(join, { ...ctx([withBob, invite]), fresh: true }).ok).toBe(true);
+      const without = signRecord(
+        alice,
+        'space',
+        key,
+        { ...base, admins: [], authority: signSpaceAuthority(alice, spaceId, [], now - 500) },
+        now - 500,
+      );
+      expect(validateRecord(join, { ...ctx([without, invite]), fresh: true })).toMatchObject({
+        ok: false,
+        reason: 'invite was made by someone who is no longer an admin',
+      });
+      // Revoking it is the owner's (or a current admin's) to do, checked
+      // with nothing but the space: no earlier invite needed.
+      const revoke = (who: typeof bob) =>
+        signRecord(who, 'invite', recordKey.invite(code), { ...invite.body, revoked: true });
+      expect(validateRecord(revoke(bob), ctx([without]))).toMatchObject({ ok: false });
+      expect(validateRecord(revoke(alice), ctx([without])).ok).toBe(true);
+    });
+  });
 });
 
 describe('hybrid post-quantum sealed boxes', () => {
@@ -293,7 +406,12 @@ describe('hybrid post-quantum sealed boxes', () => {
     expect(openLink(temp, box, account.userId)).toEqual(account.seed);
     expect(openLink(temp, box, createIdentity().userId)).toBeNull();
     expect(openLink(createIdentity(), box, account.userId)).toBeNull();
-    expect(linkSecurityCode(temp.publicKey, account.publicKey)).toMatch(/^\d{3} \d{3}$/);
+    const shown = linkSecurityCode(temp.publicKey, temp.encPublicKey, account.publicKey);
+    expect(shown).toMatch(/^\d{3} \d{3}$/);
+    // A different encryption key gives a different code (a swap shows).
+    expect(
+      linkSecurityCode(temp.publicKey, createIdentity().encPublicKey, account.publicKey),
+    ).not.toBe(shown);
   });
 });
 
@@ -336,6 +454,66 @@ describe('ratcheting sender keys', () => {
     expect(rx.decrypt(bad)).toBeNull();
     const other = createSenderKey();
     expect(new AudioReceiver(other.kid, other.audio).decrypt(f2)).toBeNull();
+  });
+
+  it('audio: a sender rebuilt from the same key does not reuse its nonces', () => {
+    const sk = createSenderKey();
+    const counterOf = (f: Uint8Array) =>
+      new DataView(f.buffer, f.byteOffset + f.length - 11, 11).getUint32(6);
+    // Two senders from one key state, as after a reconnect: their frame
+    // counters (and so their nonces) start apart.
+    const first = Array.from({ length: 5 }, () =>
+      counterOf(new AudioSender(sk.kid, sk.audio).encrypt(new Uint8Array(40))),
+    );
+    expect(new Set(first).size).toBe(5);
+    const rx = new AudioReceiver(sk.kid, importChain(exportChains(sk).audio));
+    expect(rx.decrypt(new AudioSender(sk.kid, sk.audio).encrypt(new Uint8Array(40)))).toEqual(
+      new Uint8Array(40),
+    );
+  });
+
+  it('video: the codec header stays readable, everything is authenticated', () => {
+    const sk = createSenderKey();
+    const sender = new VideoSender(sk.kid, sk.audio);
+    const rx = new VideoReceiver(sk.kid, importChain(exportChains(sk).audio));
+    const frame = Uint8Array.from({ length: 3000 }, (_, i) => (i * 7) & 0xff);
+    const key = sender.encrypt(frame, 10);
+    expect(peekFrameKid(key)).toBe(sk.kid);
+    // The first 10 bytes (a VP8 key frame's header) are as they were; the rest isn't.
+    expect(key.subarray(0, 10)).toEqual(frame.subarray(0, 10));
+    expect(key.subarray(10, 40)).not.toEqual(frame.subarray(10, 40));
+    expect(rx.decrypt(key)).toEqual(frame);
+    const delta = sender.encrypt(frame, 3);
+    expect(rx.decrypt(delta)).toEqual(frame);
+    // A changed clear byte, body byte or clear length is refused.
+    for (const at of [0, 20, key.length - 2]) {
+      const bad = key.slice();
+      bad[at] = bad[at]! ^ 1;
+      expect(rx.decrypt(bad)).toBeNull();
+    }
+    // Never more in the clear than allowed, however much is asked for.
+    const capped = sender.encrypt(frame, 5000);
+    expect(capped[capped.length - 2]).toBe(VIDEO_MAX_CLEAR);
+    expect(rx.decrypt(capped)).toEqual(frame);
+    // Across generations, like audio.
+    sender.update(ratchet(sk.audio));
+    expect(rx.decrypt(sender.encrypt(frame, 3))).toEqual(frame);
+  });
+
+  it("video and audio frames can't stand in for each other", () => {
+    const sk = createSenderKey();
+    const frame = new Uint8Array(200).fill(9);
+    const audio = new AudioSender(sk.kid, sk.audio).encrypt(frame);
+    const video = new VideoSender(sk.kid, sk.audio).encrypt(frame, 0);
+    const chain = () => importChain(exportChains(sk).audio);
+    expect(new VideoReceiver(sk.kid, chain()).decrypt(audio)).toBeNull();
+    expect(new AudioReceiver(sk.kid, chain()).decrypt(video)).toBeNull();
+    // Same layout but the audio magic byte: still another key, so refused.
+    const relabelled = video.slice(0, video.length - 2);
+    const asAudio = new Uint8Array(relabelled.length + 1);
+    asAudio.set(relabelled);
+    asAudio[asAudio.length - 1] = 0xc8;
+    expect(new AudioReceiver(sk.kid, chain()).decrypt(asAudio)).toBeNull();
   });
 });
 
@@ -453,8 +631,21 @@ describe('sealed for self', () => {
 describe('notes', () => {
   const bob = createIdentity();
   const once = () => createIdentity();
+  const boxForBob = () =>
+    sealAnonymous(
+      once(),
+      'somedevice',
+      { peer: `${bob.userId}.somedevice`, prekey: createPrekey().bundle },
+      utf8.encode('x'),
+    );
   const note = (author = once(), version = Date.now()) =>
-    signRecord(author, 'note', recordKey.note(bob.userId, author.userId), { boxes: [] }, version);
+    signRecord(
+      author,
+      'note',
+      recordKey.note(bob.userId, author.userId),
+      { boxes: [boxForBob()] },
+      version,
+    );
 
   it('are signed by a one-time key named in the key, and written once', () => {
     const n = note();
@@ -483,6 +674,14 @@ describe('notes', () => {
       ],
     });
     expect(validateRecord(stray, ctx([]))).toMatchObject({ ok: false });
+    // An empty one would only take a place in Bob's quota.
+    const empty = once();
+    expect(
+      validateRecord(
+        signRecord(empty, 'note', recordKey.note(bob.userId, empty.userId), { boxes: [] }),
+        ctx([]),
+      ),
+    ).toMatchObject({ ok: false, reason: 'a note carries at least one box' });
   });
 
   it('only the recipient deletes them, and nothing brings back an expired one', () => {

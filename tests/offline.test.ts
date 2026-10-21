@@ -142,6 +142,23 @@ describe('offline delivery', () => {
     await waitFor(() => a.store.mailCount({ toUser: bob.userId }) === 0, 8000, 'acked');
   });
 
+  it('mails many long messages in boxes and requests the server takes', async () => {
+    const coord = await server();
+    const net = new FakeRelayNetwork();
+    const { alice, bob, dm } = await friends(net, coord, coord);
+    await alice.updateSettings({ useMailbox: true });
+    await bob.shutdown();
+    await waitFor(() => alice.state.sessions[dm]?.peers.length === 0, 12000, 'bob gone');
+    // 60 messages of 4000 several-byte characters: far more than one box holds.
+    for (let i = 0; i < 60; i++) await alice.sendMessage(dm, `${i} ${'żółw '.repeat(780)}`);
+    await waitFor(
+      () => alice.state.messages[dm]!.filter((m) => m.mailed).length === 60,
+      20000,
+      'all mailed',
+    );
+    expect(coord.store.mailCount({ toUser: bob.userId })).toBeGreaterThan(1);
+  }, 40_000);
+
   it('does not use a mailbox unless the user opted in', async () => {
     const coord = await server();
     const net = new FakeRelayNetwork();

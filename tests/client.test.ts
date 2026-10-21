@@ -10,7 +10,7 @@ import {
 } from '@crocodile/client-core';
 import type { Coordinator } from '@crocodile/coordinator';
 import { Directory } from '@crocodile/directory';
-import { createIdentity, signRecord } from '@crocodile/crypto';
+import { createChatMessage, createIdentity, signRecord } from '@crocodile/crypto';
 import {
   DELETED_PROFILE_NAME,
   recordKey,
@@ -19,7 +19,7 @@ import {
   type SpaceBody,
 } from '@crocodile/protocol';
 import { FakeRelayNetwork } from './helpers/fake-relay';
-import { startCoordinator, waitFor } from './helpers';
+import { caps, connectUser, joinSpace, startCoordinator, waitFor } from './helpers';
 
 const cleanup: (() => Promise<unknown> | unknown)[] = [];
 afterEach(async () => {
@@ -37,7 +37,7 @@ function makeClient(
   coordinator: Coordinator,
   opts: {
     canHost?: boolean;
-    nat?: 'open' | 'cone' | 'symmetric';
+    nat?: 'open' | 'cone' | 'symmetric' | 'unknown';
     kv?: MemoryKeyValueStore;
     directories?: string[];
     /** How far this device's clock is off, in ms (a number, or read each time). */
@@ -215,6 +215,106 @@ describe('client', () => {
     expect(bodies(carol, ch)).toEqual(['msg 0', 'msg 1', 'msg 2', 'msg 3', 'msg 4']);
   });
 
+  it('scrolling back shows every older message once, however many share a time', async () => {
+    const coord = await server();
+    const alice = await signUp(makeClient(new FakeRelayNetwork(), coord), 'alice');
+    const spaceId = await alice.createSpace('Busy');
+    const ch = channelOf(alice, spaceId);
+    // 150 messages; 40 of them at one moment, around where a page ends.
+    const base = Date.now() - 3_600_000;
+    for (let i = 0; i < 150; i++) {
+      const ts = i >= 30 && i < 70 ? base + 30 : base + i;
+      await alice.platform.messages.put(
+        createChatMessage(alice.identity!, { ch, body: `m${i}` }, ts),
+      );
+    }
+    await alice.openChannel(ch);
+    expect(alice.state.messages[ch]).toHaveLength(100);
+    // Fast scrolling asks several times before the first answer.
+    await Promise.all([alice.loadOlder(ch), alice.loadOlder(ch), alice.loadOlder(ch)]);
+    const shown = bodies(alice, ch);
+    expect(shown).toHaveLength(150);
+    expect(new Set(shown).size).toBe(150);
+  });
+
+  it('counts and announces new messages, not edits or deletions', async () => {
+    const coord = await server();
+    const net = new FakeRelayNetwork();
+    const alice = await signUp(makeClient(net, coord, { nat: 'open' }), 'alice');
+    const bob = await signUp(makeClient(net, coord), 'bob');
+    const spaceId = await alice.createSpace('Edits');
+    const code = await alice.createInvite(spaceId);
+    await bob.joinWithInvite(code);
+    const ch = channelOf(alice, spaceId);
+    const sid = sessionIds.space(spaceId);
+    await alice.openChannel(ch);
+    await waitFor(() => alice.state.sessions[sid]?.peers.includes(bob.userId), 12000, 'connected');
+    // Bob is elsewhere in the app.
+    bob.closeChannel();
+    const events: boolean[] = [];
+    bob.on('message', ({ update }) => events.push(update));
+    await alice.sendMessage(ch, 'first take');
+    await waitFor(() => bob.state.unread[ch] === 1, 12000, 'unread');
+    const id = alice.state.messages[ch]!.find((m) => m.body === 'first take')!.id;
+    await alice.editMessage(ch, id, 'second take');
+    await alice.deleteMessage(ch, id);
+    await waitFor(() => events.length === 3, 12000, 'edit and deletion arrive');
+    expect(events).toEqual([false, true, true]);
+    expect(bob.state.unread[ch]).toBe(1);
+  });
+
+  it('starts the relay again when its process dies, and members come back', async () => {
+    const coord = await server();
+    const net = new FakeRelayNetwork();
+    const alice = await signUp(makeClient(net, coord, { nat: 'open' }), 'alice');
+    const bob = await signUp(makeClient(net, coord, { canHost: false }), 'bob');
+    const spaceId = await alice.createSpace('Crash');
+    const code = await alice.createInvite(spaceId);
+    await bob.joinWithInvite(code);
+    const ch = channelOf(alice, spaceId);
+    const sid = sessionIds.space(spaceId);
+    await alice.openChannel(ch);
+    await bob.openChannel(ch);
+    await waitFor(() => bob.state.sessions[sid]?.peers.includes(alice.userId), 12000, 'connected');
+    const epoch = bob.state.sessions[sid]!.epoch;
+
+    // Seen as it happens: the relay can be back before a poll would notice.
+    let dropped = false;
+    bob.store.subscribe(() => {
+      if (!bob.state.sessions[sid]?.peers.includes(alice.userId)) dropped = true;
+    });
+    const started = net.started;
+    net.crashRelayProcessOf(alice.userId);
+    // One relay started in place of the one that died.
+    expect(net.started).toBe(started + 1);
+    // Alice runs a new relay for the same session: no new election needed.
+    await waitFor(
+      () => dropped && bob.state.sessions[sid]?.peers.includes(alice.userId),
+      5000,
+      'dropped and back',
+    );
+    expect(bob.state.sessions[sid]!.epoch).toBe(epoch);
+    await alice.sendMessage(ch, 'still here');
+    await waitFor(() => bodies(bob, ch).includes('still here'), 5000, 'delivered');
+  });
+
+  it('syncs a long history in parts small enough for the data channel', async () => {
+    const coord = await server();
+    const net = new FakeRelayNetwork();
+    const alice = await signUp(makeClient(net, coord, { nat: 'open' }), 'alice');
+    const spaceId = await alice.createSpace('Long');
+    const code = await alice.createInvite(spaceId);
+    const ch = channelOf(alice, spaceId);
+    await alice.openChannel(ch);
+    // 40 long messages: about 300 KiB of history, in several-byte characters.
+    for (let i = 0; i < 40; i++) await alice.sendMessage(ch, `${i} ${'żółw '.repeat(780)}`);
+
+    const carol = await signUp(makeClient(net, coord), 'carol');
+    await carol.joinWithInvite(code);
+    await carol.openChannel(ch);
+    await waitFor(() => bodies(carol, ch).length === 40, 15000, 'history');
+  }, 40_000);
+
   it('delivers DMs, including ones written while the friend was offline', async () => {
     const coord = await server();
     const net = new FakeRelayNetwork();
@@ -314,6 +414,47 @@ describe('client', () => {
     expect(bob.state.server!.info.id).toBe(b.info.id);
     expect(alice.state.server!.info.id).toBe(a.info.id);
   });
+
+  it('keeps its conversations after switching to another server', async () => {
+    const a = await server({ name: 'A' });
+    const b = await server({ name: 'B', meshPeers: [a.url] });
+    await waitFor(() => a.mesh.peerIds().length === 1, 12000, 'mesh');
+    const net = new FakeRelayNetwork();
+    const alice = await signUp(makeClient(net, a, { nat: 'open' }), 'alice');
+    const bob = await signUp(makeClient(net, a), 'bob');
+    const spaceId = await alice.createSpace('Swamp');
+    const code = await alice.createInvite(spaceId);
+    await bob.joinWithInvite(code);
+    const ch = channelOf(alice, spaceId);
+    await alice.openChannel(ch);
+    await bob.openChannel(ch);
+    const sid = sessionIds.space(spaceId);
+    await waitFor(() => bob.state.sessions[sid]?.peers.includes(alice.userId), 8000, 'mesh');
+
+    // Bob picks the other server (Settings → Network → Use).
+    await bob.preferServer(b.url);
+    await waitFor(() => bob.state.server?.info.id === b.info.id, 12000, 'on B');
+    // Leaving A ended Bob's membership there; he must have joined again through B.
+    await new Promise((r) => setTimeout(r, 1500));
+    await waitFor(
+      () => alice.state.sessions[sid]?.members.includes(bob.userId),
+      8000,
+      'bob back in the session',
+    );
+    // A new connection to the host is set up through the new server.
+    net.killRelaysOf(alice.userId);
+    await waitFor(
+      () =>
+        bob.state.sessions[sid]?.status === 'connected' &&
+        bob.state.sessions[sid]?.peers.includes(alice.userId),
+      15000,
+      'reconnected through B',
+    );
+    await alice.sendMessage(ch, 'still here?');
+    await waitFor(() => bodies(bob, ch).includes('still here?'), 12000, 'bob receives on B');
+    await bob.sendMessage(ch, 'yes, from B');
+    await waitFor(() => bodies(alice, ch).includes('yes, from B'), 12000, 'alice receives');
+  });
 });
 
 describe('connection help', () => {
@@ -358,6 +499,11 @@ describe('connection help', () => {
     const trouble = await waitFor(() => bob.state.connectionTrouble, 12000, 'trouble noticed');
     expect(trouble).toEqual({ sessionId: dm, with: alice.userId });
     expect(bob.state.sessions[dm]!.trouble).toBe(true);
+    // Where it fails: Alice answers, but no network path works.
+    const failed = bob.state.sessions[dm]!.attempts.filter((a) => a.end).at(-1)!;
+    expect(failed).toMatchObject({ host: alice.userId, viaRelay: false });
+    expect(failed.end).toMatchObject({ ok: false, stage: 'no-path' });
+    expect(failed.steps.map((s) => s.step)).toEqual(['offer', 'answer']);
 
     await bob.useRelay(dm);
     expect(bob.state.settings.allowServerRelay).toBe(true);
@@ -365,10 +511,145 @@ describe('connection help', () => {
     expect(bob.state.sessions[dm]!.route).toBe('relay');
     expect(bob.state.sessions[dm]!.relay).not.toBeNull();
     expect(bob.state.connectionTrouble).toBeNull();
+    const relayed = bob.state.sessions[dm]!.attempts.at(-1)!;
+    expect(relayed).toMatchObject({ viaRelay: true, end: { ok: true } });
+    expect(relayed.steps.map((s) => s.step)).toEqual(['offer', 'answer', 'path', 'open']);
+    expect(bob.state.sessions[dm]!.connectedAt).toBeGreaterThan(0);
     await bob.sendMessage(dm, 'through the relay');
     await waitFor(() => bodies(alice, dm).includes('through the relay'), 12000, 'delivered');
     // Alice reached her own relay directly.
     expect(alice.state.sessions[dm]!.trouble).toBe(false);
+  });
+});
+
+describe('strict networks', () => {
+  it('a message from behind a symmetric NAT gets through: the reachable side hosts', async () => {
+    const coord = await server();
+    const net = new FakeRelayNetwork();
+    const strict = await signUp(makeClient(net, coord, { nat: 'symmetric' }), 'strict');
+    const open = await signUp(makeClient(net, coord, { nat: 'open' }), 'open');
+    // Nobody can reach a relay the strict side hosts; it can reach others.
+    net.unreachable.add(strict.userId);
+    await strict.addFriend(open.userId);
+    await waitFor(() => open.state.friends.incoming.includes(strict.userId), 12000);
+    await open.addFriend(strict.userId);
+    await waitFor(() => strict.state.friends.friends.includes(open.userId), 12000, 'friends');
+    // The strict side starts the conversation (and so is elected first).
+    const dm = await strict.openDm(open.userId);
+    await strict.openChannel(dm);
+    await strict.sendMessage(dm, 'from behind a strict NAT');
+    // The open side gets the invite and opens the conversation.
+    await waitFor(() => open.state.dms.includes(strict.userId), 12000, 'dm invite');
+    await open.openChannel(dm);
+    await waitFor(
+      () => bodies(open, dm).includes('from behind a strict NAT'),
+      15000,
+      'the open side receives it',
+    );
+    expect(strict.state.sessions[dm]?.host).toBe(open.userId);
+  });
+});
+
+describe('host reports', () => {
+  it('reports a host it has no network path to after one try, not two', async () => {
+    const coord = await server();
+    const net = new FakeRelayNetwork();
+    // The strict side's own network check couldn't finish, so the election
+    // can't tell it is a poor host: only members' reports can move it.
+    const strict = await signUp(makeClient(net, coord, { nat: 'unknown' }), 'strict');
+    const open = await signUp(makeClient(net, coord, { nat: 'open' }), 'open');
+    net.unreachable.add(strict.userId);
+    await strict.addFriend(open.userId);
+    await waitFor(() => open.state.friends.incoming.includes(strict.userId), 12000);
+    await open.addFriend(strict.userId);
+    await waitFor(() => strict.state.friends.friends.includes(open.userId), 12000, 'friends');
+    const dm = await strict.openDm(open.userId);
+    await waitFor(() => open.state.dms.includes(strict.userId), 12000, 'dm invite');
+    await open.openChannel(dm);
+    await waitFor(() => open.state.sessions[dm]?.iAmHost, 12000, 'the open side hosts');
+    const toStrict = open.state.sessions[dm]!.attempts.filter((a) => a.host === strict.userId);
+    expect(toStrict).toHaveLength(1);
+    expect(toStrict[0]!.end).toMatchObject({ ok: false, stage: 'no-path' });
+  });
+
+  it('tries twice before reporting when its own network is the limited one', async () => {
+    const coord = await server();
+    const net = new FakeRelayNetwork();
+    const open = await signUp(makeClient(net, coord, { nat: 'open' }), 'open');
+    // UDP blocked: the app reports symmetric, and the fault is likely its own.
+    const strict = await signUp(makeClient(net, coord, { nat: 'symmetric' }), 'strict');
+    net.blocked.add(strict.userId);
+    await open.addFriend(strict.userId);
+    await waitFor(() => strict.state.friends.incoming.includes(open.userId), 12000);
+    await strict.addFriend(open.userId);
+    await waitFor(() => open.state.friends.friends.includes(strict.userId), 12000, 'friends');
+    const dm = await open.openDm(strict.userId);
+    await waitFor(() => strict.state.dms.includes(open.userId), 12000, 'dm invite');
+    await open.openChannel(dm);
+    await strict.openChannel(dm);
+    // One report would have made the strict side host after its first try.
+    const toOpen = () =>
+      strict.state.sessions[dm]?.attempts.filter((a) => a.host === open.userId && a.end) ?? [];
+    await waitFor(() => toOpen().length >= 2, 12000, 'a second try');
+    expect(toOpen()[0]!.end).toMatchObject({ ok: false, stage: 'no-path' });
+  });
+});
+
+describe('relay windows', () => {
+  /** Alice hosts a DM with Bob, who has the relay on and turned it on for the DM. */
+  async function relayedDm(bobBlocked: boolean) {
+    const coord = await server({ relay: { enabled: true, maxUsers: 5 }, stunPort: 0 });
+    // Short windows; the server extends grants asked for in their last minutes.
+    coord.turn!.limits.maxGrantMs = 3000;
+    const net = new FakeRelayNetwork();
+    const alice = await signUp(makeClient(net, coord, { nat: 'open' }), 'alice');
+    const bob = await signUp(makeClient(net, coord, { canHost: false }), 'bob');
+    await alice.addFriend(bob.userId);
+    await waitFor(() => bob.state.friends.incoming.includes(alice.userId), 12000);
+    await bob.addFriend(alice.userId);
+    if (bobBlocked) net.blocked.add(bob.userId);
+    const dm = await alice.openDm(bob.userId);
+    await waitFor(() => bob.state.dms.includes(alice.userId), 12000, 'dm invite');
+    await alice.openChannel(dm);
+    await bob.openChannel(dm);
+    await bob.useRelay(dm);
+    await waitFor(
+      () =>
+        bob.state.sessions[dm]?.status === 'connected' &&
+        bob.state.sessions[dm]?.relay &&
+        bob.state.sessions[dm]?.route,
+      12000,
+      'connected with the relay offered',
+    );
+    return { bob, dm };
+  }
+
+  it('renews the relay while the connection goes through it, without dropping the call', async () => {
+    const { bob, dm } = await relayedDm(true);
+    const view = () => bob.state.sessions[dm]!;
+    expect(view().route).toBe('relay');
+    const first = view().relay!.expiresAt;
+    const attempts = view().attempts.length;
+    // Past the first window's end.
+    await new Promise((r) => setTimeout(r, first - Date.now() + 700));
+    expect(view().relay!.expiresAt).toBeGreaterThan(first);
+    expect(view().status).toBe('connected');
+    expect(view().attempts).toHaveLength(attempts);
+    expect(bob.state.relayEnded).toBeNull();
+  });
+
+  it("lets the relay go when ICE found a direct path, and doesn't reconnect", async () => {
+    const { bob, dm } = await relayedDm(false);
+    const view = () => bob.state.sessions[dm]!;
+    expect(view().route).toBe('lan');
+    const first = view().relay!.expiresAt;
+    const attempts = view().attempts.length;
+    await waitFor(() => view().relay === null, 5000, 'relay let go');
+    // The server's window ends too; the direct connection carries on.
+    await new Promise((r) => setTimeout(r, first - Date.now() + 700));
+    expect(view().status).toBe('connected');
+    expect(view().attempts).toHaveLength(attempts);
+    expect(bob.state.relayEnded).toBeNull();
   });
 });
 
@@ -384,7 +665,80 @@ describe('calls', () => {
       playSlot: () => {},
       micTrack: () => null,
       frameCrypto: () => undefined,
+      outgoing: () => ({ camera: null, screen: null }),
+      stopCamera: () => {},
+      stopScreen: () => {},
+      on: () => () => {},
     }) as unknown as VoiceEngine;
+
+  it('signing out during a call ends it and turns the microphone off', async () => {
+    const coord = await server();
+    const net = new FakeRelayNetwork();
+    const alice = await signUp(makeClient(net, coord), 'alice');
+    const bob = await signUp(makeClient(net, coord), 'bob');
+    let micOn = false;
+    alice.voiceEngine = {
+      ...silentVoice(),
+      start: async () => void (micOn = true),
+      stop: () => void (micOn = false),
+    } as unknown as VoiceEngine;
+    await alice.addFriend(bob.userId);
+    await waitFor(() => bob.state.friends.incoming.includes(alice.userId), 12000);
+    await bob.addFriend(alice.userId);
+    await waitFor(() => alice.state.friends.friends.includes(bob.userId), 12000, 'friends');
+    await alice.callDm(bob.userId);
+    expect(micOn).toBe(true);
+    await alice.signOut();
+    expect(micOn).toBe(false);
+    expect(alice.state.voiceSession).toBeNull();
+    expect(alice.state.outgoingCall).toBeNull();
+  });
+
+  it('falls back to the relay even while other members keep coming and going', async () => {
+    const coord = await server({ relay: { enabled: true, maxUsers: 5 }, stunPort: 0 });
+    const net = new FakeRelayNetwork();
+    const alice = await signUp(makeClient(net, coord, { nat: 'open' }), 'alice');
+    const bob = await signUp(makeClient(net, coord, { canHost: false }), 'bob');
+    await bob.updateSettings({ allowServerRelay: true });
+    // Bob's network lets nothing through directly.
+    net.blocked.add(bob.userId);
+    const spaceId = await alice.createSpace('Busy');
+    const code = await alice.createInvite(spaceId);
+    await bob.joinWithInvite(code);
+    // Carol (another app) joins and leaves the space's session over and over:
+    // every change sends Bob a new session state while he can't connect.
+    const carol = await connectUser(coord);
+    await joinSpace(carol, spaceId, code);
+    const sid = sessionIds.space(spaceId);
+    let churning = true;
+    let churned = 0;
+    const churn = (async () => {
+      while (churning) {
+        churned++;
+        await carol.conn.request('session.join', {
+          sessionId: sid,
+          caps: caps({ canHost: false }),
+        });
+        await new Promise((r) => setTimeout(r, 200));
+        await carol.conn.request('session.leave', { sessionId: sid });
+        await new Promise((r) => setTimeout(r, 200));
+      }
+    })();
+    cleanup.push(async () => {
+      churning = false;
+      await churn.catch(() => {});
+    });
+    await waitFor(() => churned >= 3, 5000, 'churn under way');
+    const ch = channelOf(alice, spaceId);
+    await alice.openChannel(ch);
+    await bob.openChannel(ch);
+    await waitFor(
+      () => bob.state.sessions[sid]?.status === 'connected' && bob.state.sessions[sid]?.relay,
+      20000,
+      'relayed despite the churn',
+    );
+    expect(bob.state.sessions[sid]!.route).toBe('relay');
+  });
 
   it('hangs up a call nobody answers, instead of staying in it alone', async () => {
     const coord = await server();
@@ -404,6 +758,231 @@ describe('calls', () => {
     expect(alice.state.outgoingCall).toBeNull();
     expect(alice.state.errors.map((e) => e.message)).toContain('No answer');
     await waitFor(() => !bob.state.incomingCall, 6000, 'stops ringing for bob');
+  });
+
+  it('the hang-up reaches the callee when the caller hosts the call', async () => {
+    const coord = await server();
+    const net = new FakeRelayNetwork();
+    const alice = await signUp(makeClient(net, coord, { ringTimeoutMs: 1500 }), 'alice');
+    // Bob can't host, so Alice's device is the relay: hanging up closes it.
+    const bob = await signUp(makeClient(net, coord, { canHost: false }), 'bob');
+    alice.voiceEngine = silentVoice();
+    await alice.addFriend(bob.userId);
+    await waitFor(() => bob.state.friends.incoming.includes(alice.userId), 12000);
+    await bob.addFriend(alice.userId);
+    await waitFor(() => alice.state.friends.friends.includes(bob.userId), 12000, 'friends');
+
+    await alice.callDm(bob.userId);
+    await waitFor(() => bob.state.incomingCall, 12000, 'bob rings');
+    const started = Date.now();
+    await waitFor(() => !alice.state.voiceSession, 6000, 'hung up');
+    await waitFor(() => !bob.state.incomingCall, 6000, 'stops ringing for bob');
+    // By the hang-up itself, not because the rings stopped.
+    expect(Date.now() - started).toBeLessThan(3000);
+  });
+
+  /** Alice and Bob, friends, both able to take calls. */
+  async function callers(opts: { bobCanHost?: boolean } = {}) {
+    const coord = await server();
+    const net = new FakeRelayNetwork();
+    const alice = await signUp(makeClient(net, coord), 'alice');
+    const bob = await signUp(makeClient(net, coord, { canHost: opts.bobCanHost ?? true }), 'bob');
+    alice.voiceEngine = silentVoice();
+    bob.voiceEngine = silentVoice();
+    await alice.addFriend(bob.userId);
+    await waitFor(() => bob.state.friends.incoming.includes(alice.userId), 12000);
+    await bob.addFriend(alice.userId);
+    await waitFor(() => alice.state.friends.friends.includes(bob.userId), 12000, 'friends');
+    return { alice, bob };
+  }
+
+  /** Alice calls, Bob answers, and the call is live on both sides. */
+  async function liveCall(opts: { bobCanHost?: boolean } = {}) {
+    const { alice, bob } = await callers(opts);
+    await alice.callDm(bob.userId);
+    await waitFor(() => bob.state.incomingCall, 12000, 'bob rings');
+    // Ringing is not talking: the call is on, but not live.
+    expect(alice.state.callLiveSince).toBeNull();
+    await bob.callDm(alice.userId);
+    await waitFor(
+      () => alice.state.callLiveSince && bob.state.callLiveSince,
+      12000,
+      'live on both sides',
+    );
+    const sid = alice.state.voiceSession!;
+    return { alice, bob, sid };
+  }
+
+  it('ends the call for the other side when one hangs up after answering', async () => {
+    for (const bobCanHost of [true, false]) {
+      const { alice, bob, sid } = await liveCall({ bobCanHost });
+      expect(alice.state.sessions[sid]!.inCall.sort()).toEqual([alice.userId, bob.userId].sort());
+      const started = Date.now();
+      await alice.leaveVoice();
+      await waitFor(() => !bob.state.voiceSession, 6000, 'ended for bob');
+      expect(Date.now() - started).toBeLessThan(3000);
+      expect(bob.state.callLiveSince).toBeNull();
+      expect(bob.state.errors).toContainEqual(
+        expect.objectContaining({ message: 'Call ended', kind: 'info' }),
+      );
+    }
+  });
+
+  it('calls back at once after hanging up, without the hang-up ending the new call', async () => {
+    const { alice, bob, sid } = await liveCall();
+    // Hang up and call straight back, while the hang-up is still going out.
+    const hangingUp = alice.leaveVoice();
+    await alice.callDm(bob.userId);
+    await hangingUp;
+    await waitFor(() => bob.state.incomingCall, 12000, 'bob rings again');
+    await new Promise((r) => setTimeout(r, 1000));
+    expect(alice.state.voiceSession).toBe(sid);
+    expect(alice.state.outgoingCall).toMatchObject({ to: bob.userId });
+  });
+
+  it('ends the call when the other side leaves it, even if the hang-up was lost', async () => {
+    const { alice, bob, sid } = await liveCall();
+    // Bob's app leaves the call without a word (the hang-up got lost).
+    await bob.leaveVoice({ quiet: true });
+    await waitFor(() => !alice.state.voiceSession, 6000, 'ended for alice');
+    // Bob is still in the conversation, just not in the call.
+    await waitFor(() => alice.state.sessions[sid]?.peers.includes(bob.userId), 8000, 'chat');
+    expect(alice.state.sessions[sid]!.inCall).toEqual([]);
+  });
+
+  it("stops the call's clock as soon as the other side is gone, while waiting for them", async () => {
+    const { alice, bob, sid } = await liveCall();
+    // Alice's app goes away without hanging up (its hang-up never leaves).
+    (alice as unknown as { sendCallSignal: () => boolean }).sendCallSignal = () => false;
+    await alice.shutdown();
+    // Bob answered the call, but answering doesn't keep it live with nobody there.
+    await waitFor(() => !bob.state.callLiveSince, 6000, 'not live');
+    // Still in the call for a while, in case Alice comes back.
+    expect(bob.state.voiceSession).toBe(sid);
+  });
+
+  it('measures each call member’s latency to the host for everyone to see', async () => {
+    const { alice, bob, sid } = await liveCall();
+    await waitFor(
+      () => {
+        const l = alice.state.sessions[sid]?.latency ?? {};
+        return l[alice.userId] !== undefined && l[bob.userId] !== undefined;
+      },
+      8000,
+      'both latencies',
+    );
+  });
+
+  it('stops ringing when the caller goes quiet without hanging up', async () => {
+    const coord = await server();
+    const net = new FakeRelayNetwork();
+    const alice = await signUp(makeClient(net, coord), 'alice');
+    const bob = await signUp(makeClient(net, coord), 'bob');
+    alice.voiceEngine = silentVoice();
+    await alice.addFriend(bob.userId);
+    await waitFor(() => bob.state.friends.incoming.includes(alice.userId), 12000);
+    await bob.addFriend(alice.userId);
+    await waitFor(() => alice.state.friends.friends.includes(bob.userId), 12000, 'friends');
+
+    await alice.callDm(bob.userId);
+    await waitFor(() => bob.state.incomingCall, 12000, 'bob rings');
+    // Alice's app freezes: no more rings, and no hang-up either.
+    clearInterval((alice as unknown as { ringTimer: ReturnType<typeof setInterval> }).ringTimer);
+    await waitFor(() => !bob.state.incomingCall, 12000, 'stops ringing for bob');
+  }, 30_000);
+});
+
+describe('space admins', () => {
+  it('lets an admin change the space and invite people, until the owner says otherwise', async () => {
+    const coord = await server();
+    const net = new FakeRelayNetwork();
+    const alice = await signUp(makeClient(net, coord), 'alice');
+    const bob = await signUp(makeClient(net, coord), 'bob');
+    const carol = await signUp(makeClient(net, coord), 'carol');
+    const dave = await signUp(makeClient(net, coord), 'dave');
+    const spaceId = await alice.createSpace('Swamp');
+    await bob.joinWithInvite(await alice.createInvite(spaceId));
+    // A member can't change the space.
+    await expect(bob.addChannel(spaceId, 'mine', 'text')).rejects.toThrow(/owner or an admin/);
+
+    await alice.setAdmin(spaceId, bob.userId, true);
+    await waitFor(() => bob.state.spaces[spaceId]?.admins.includes(bob.userId), 8000, 'admin');
+    await bob.updateSpace(spaceId, (b) => ({ ...b, name: 'Pond' }));
+    await bob.addChannel(spaceId, 'lily pads', 'text');
+    // Two changes, each its own update: Alice gets both, in either order.
+    await waitFor(
+      () =>
+        alice.state.spaces[spaceId]?.name === 'Pond' &&
+        alice.state.spaces[spaceId]?.channels.some((c) => c.name === 'lily-pads'),
+      8000,
+      'renamed, with the new channel',
+    );
+    // Bob's invites work for others.
+    const bobsInvite = await bob.createInvite(spaceId);
+    await carol.joinWithInvite(bobsInvite);
+    expect(carol.state.spaces[spaceId]?.name).toBe('Pond');
+    // Admins ban members, but not the owner.
+    await bob.banMember(spaceId, carol.userId);
+    await waitFor(() => !carol.state.spaces[spaceId], 8000, 'carol banned');
+    await bob.banMember(spaceId, alice.userId);
+    await new Promise((r) => setTimeout(r, 300));
+    expect(alice.state.spaces[spaceId]).toBeDefined();
+    // But choosing admins and deleting the space stay with the owner.
+    await expect(bob.setAdmin(spaceId, carol.userId, true)).rejects.toThrow(/owner/);
+    await expect(bob.deleteSpace(spaceId)).rejects.toThrow(/owner/);
+
+    await alice.setAdmin(spaceId, bob.userId, false);
+    await waitFor(() => bob.state.spaces[spaceId]?.admins.length === 0, 8000, 'no longer admin');
+    await expect(bob.addChannel(spaceId, 'again', 'text')).rejects.toThrow(/owner or an admin/);
+    // His invite stopped working with his rights.
+    await expect(dave.joinWithInvite(bobsInvite)).rejects.toThrow(/no longer an admin/);
+  });
+});
+
+describe('invites in chat', () => {
+  it('previews the space an invite leads to, before and after joining', async () => {
+    const coord = await server();
+    const net = new FakeRelayNetwork();
+    const alice = await signUp(makeClient(net, coord), 'alice');
+    const bob = await signUp(makeClient(net, coord), 'bob');
+    const spaceId = await alice.createSpace('Pond');
+    const code = await alice.createInvite(spaceId);
+    expect(await bob.previewInvite(`croc://join/${code}`)).toEqual({
+      code,
+      spaceId,
+      name: 'Pond',
+      joined: false,
+      expired: false,
+    });
+    // Only seen, not joined: the space stays out of Bob's list.
+    expect(bob.state.spaces[spaceId]).toBeUndefined();
+    await bob.joinWithInvite(code);
+    expect((await bob.previewInvite(code))?.joined).toBe(true);
+    expect(await bob.previewInvite('croc://join/zzzzzzzzzz')).toBeNull();
+  });
+
+  it("doesn't trust a server's invite that the space's owner didn't sign", async () => {
+    const coord = await server();
+    const net = new FakeRelayNetwork();
+    const alice = await signUp(makeClient(net, coord), 'alice');
+    const bob = await signUp(makeClient(net, coord), 'bob');
+    const spaceId = await alice.createSpace('Pond');
+    // A lying server answers for a code with an invite to Alice's space,
+    // signed by someone who may not make one.
+    const mallory = createIdentity();
+    const code = 'mmmmmmmmmm';
+    const forged = signRecord(mallory, 'invite', recordKey.invite(code), {
+      spaceId,
+      code,
+      expiresAt: null,
+    });
+    const link = bob.link!;
+    const request = link.request.bind(link);
+    link.request = (async (method: string, params: { keys?: string[] }) =>
+      method === 'records.get' && params.keys?.[0] === recordKey.invite(code)
+        ? { records: [forged] }
+        : request(method as never, params as never)) as typeof link.request;
+    expect(await bob.previewInvite(code)).toBeNull();
   });
 });
 
@@ -516,6 +1095,16 @@ describe('multiple devices', () => {
       8000,
       'three peers',
     );
+    // Each device keeps its own network type, and knows which one is itself.
+    const networks = alice2.state.sessions[sid]!.networks;
+    expect(
+      networks
+        .filter((n) => n.user === alice1.userId)
+        .map((n) => n.nat)
+        .sort(),
+    ).toEqual(['cone', 'open']);
+    expect(networks.find((n) => n.self)?.nat).toBe('cone');
+    expect(networks.filter((n) => n.host)).toHaveLength(1);
     await bob.sendMessage(ch, 'to all your devices');
     await waitFor(
       () =>
@@ -555,6 +1144,38 @@ describe('multiple devices', () => {
     expect(fresh.identity).toBeNull();
     fresh.cancelDeviceLink();
   });
+
+  it('shows different security codes when the server swaps the key the account is sent to', async () => {
+    const coord = await server();
+    const net = new FakeRelayNetwork();
+    const alice = await signUp(makeClient(net, coord), 'alice');
+    const fresh = makeClient(net, coord);
+    await fresh.init();
+    await fresh.startDeviceLink();
+    const code = await waitFor(
+      () => (fresh.state.linking?.role === 'new' ? fresh.state.linking.code : undefined),
+      5000,
+    );
+    // A dishonest server answers the claim with its own encryption key, so the
+    // account would be sealed to the server instead of the new device.
+    const mallory = createIdentity();
+    const link = alice.link!;
+    const request = link.request.bind(link);
+    link.request = (async (method: string, params: unknown) => {
+      const res = await request(method as never, params as never);
+      return method === 'link.claim' ? { ...(res as object), encKey: mallory.encPublicKey } : res;
+    }) as typeof link.request;
+
+    const shownOnAlice = await alice.claimDeviceLink(code);
+    const shownOnNew = await waitFor(
+      () => (fresh.state.linking?.role === 'new' ? fresh.state.linking.securityCode : undefined),
+      5000,
+      'claimed',
+    );
+    // The person comparing the screens sees a mismatch and doesn't confirm.
+    expect(shownOnAlice).not.toBe(shownOnNew);
+    fresh.cancelDeviceLink();
+  });
 });
 
 describe('client and server quotas', () => {
@@ -576,6 +1197,42 @@ describe('client and server quotas', () => {
     const cached = alice.records.list('space:').map((r) => (r.body as { name: string }).name);
     expect(cached).toEqual(['One']);
   });
+
+  it('joining a big space fetches the members profiles in one go', async () => {
+    const coord = await server();
+    const net = new FakeRelayNetwork();
+    const bob = await signUp(makeClient(net, coord), 'bob');
+    const spaceId = await bob.createSpace('Crowd');
+    const code = await bob.createInvite(spaceId);
+    for (let i = 0; i < 40; i++) {
+      const u = await connectUser(coord);
+      cleanup.push(() => u.conn.close());
+      await joinSpace(u, spaceId, code);
+    }
+    const alice = await signUp(makeClient(net, coord), 'alice');
+    const link = alice.link!;
+    const request = link.request.bind(link);
+    let gets = 0;
+    link.request = ((m: string, p: unknown) => {
+      if (m === 'records.get') gets++;
+      return request(m as never, p as never);
+    }) as typeof link.request;
+    await alice.joinWithInvite(`croc://join/${code}`);
+    await waitFor(() => alice.state.spaces[spaceId]?.members.length === 42, 5000, 'members');
+    await new Promise((r) => setTimeout(r, 300));
+    // Not one request per member record (which the server would rate-limit).
+    expect(gets).toBeLessThan(10);
+  });
+
+  it('follows more users than one request may name', async () => {
+    const coord = await server();
+    const alice = await signUp(makeClient(new FakeRelayNetwork(), coord), 'alice');
+    // 2500 people in our DMs: past the 2000 prefixes one subscribe request takes.
+    const dms = Array.from({ length: 2500 }, () => createIdentity().userId);
+    alice.store.set({ dms });
+    await (alice as unknown as { syncProfiles(): Promise<void> }).syncProfiles();
+    expect(Object.keys(alice.state.presence).length).toBeGreaterThanOrEqual(2500);
+  }, 30_000);
 });
 
 describe('leaving', () => {

@@ -19,7 +19,11 @@ import {
   sealLink,
   sealToDevice,
   userIdFromKey,
+  signMailProof,
+  canManageSpace,
   signRecord,
+  signSpaceAuthority,
+  spaceAuthorityValid,
   spaceIdFor,
   userTag,
   verifyChatMessage,
@@ -28,7 +32,12 @@ import {
 } from '@crocodile/crypto';
 import {
   DELETED_PROFILE_NAME,
+  FILE_AUTO_DOWNLOAD_MAX,
+  FILE_MAX_SIZE,
+  FileManifest,
+  FileThumb,
   LIMITS,
+  fileMediaKind,
   NotePayload,
   fromB64u,
   isSealedFriends,
@@ -36,6 +45,7 @@ import {
   peerIds,
   recordKey,
   sessionIds,
+  streamIds,
   toB64u,
   type Channel,
   type ChannelKind,
@@ -47,6 +57,7 @@ import {
   utf8,
   type SealedBox,
   type HostCaps,
+  type NatType,
   type LegacyFriendsBody,
   type NoteBody,
   type PresenceStatus,
@@ -54,6 +65,8 @@ import {
   type OperatorInfo,
   type ServerInfo,
   type SessionState,
+  type MediaKind,
+  type PresenceEntry,
   type SignedRecord,
   type SpaceBody,
   type VoiceOccupancy,
@@ -80,15 +93,24 @@ import {
   defaultTransportFactory,
   type RelayStatus,
   type TransportFactory,
+  type ConnectAttempt,
+  type VideoBlock,
 } from './group-session';
 import type { PlatformAdapter } from './platform';
-import { networkVerdict, type NetworkVerdict } from './caps';
-import type { ConnectionRoute } from './relay-link';
+import { webrtcFileLinks, type FileLinkFactory } from './file-link';
+import { FileTransfers, type FileSource, type FileView } from './files';
+import {
+  networkChecklist,
+  networkVerdict,
+  type NetworkCheckItem,
+  type NetworkVerdict,
+} from './caps';
+import type { ConnectionRoute, LinkStats } from './relay-link';
 import { Outbox } from './outbox';
 import { RecordCache } from './records-cache';
 import type { RankedServer } from './server-selection';
 import { StateStore } from './store';
-import type { VoiceEngine } from './voice';
+import type { OutgoingVideo, ScreenQuality, ScreenRequest, VoiceEngine } from './voice';
 
 export interface ClientConfig {
   /** Directory services used to discover coordination servers. */
@@ -97,6 +119,8 @@ export interface ClientConfig {
   preferredServers?: string[];
   /** Override the WebRTC transport (tests). */
   transportFactory?: TransportFactory;
+  /** Override direct connections for files (tests). */
+  fileLinks?: FileLinkFactory;
   /** This device's clock (tests). */
   now?: () => number;
   /** How long an unanswered call rings before hanging up (45 s; tests). */
@@ -125,6 +149,14 @@ export interface Settings {
   useMailbox: boolean;
   /** Display name of this device. */
   deviceName?: string;
+  /**
+   * Fetch pictures and videos up to 10 MB by themselves: from friends and in
+   * DMs, from anyone, or never. Fetching connects to whoever has the file,
+   * who then sees this device's IP address.
+   */
+  autoDownload: 'friends' | 'everyone' | 'never';
+  /** Give files this device downloaded to members of the same space or DM who ask. */
+  shareDownloads: boolean;
 }
 
 export const defaultSettings: Settings = {
@@ -134,6 +166,8 @@ export const defaultSettings: Settings = {
   notifications: true,
   allowServerRelay: false,
   useMailbox: false,
+  autoDownload: 'friends',
+  shareDownloads: true,
 };
 
 export interface ProfileView {
@@ -155,6 +189,8 @@ export interface SpaceView {
   channels: Channel[];
   members: string[];
   bans: string[];
+  /** Members the owner lets change the space. */
+  admins: string[];
 }
 
 /** A session as the UI sees it: user ids (devices collapsed). */
@@ -179,6 +215,71 @@ export interface SessionView {
   route: ConnectionRoute | null;
   /** Connecting to the host keeps failing. */
   trouble: boolean;
+  /** When the current connection to the host opened (null while not connected). */
+  connectedAt: number | null;
+  /** Recent attempts to connect to the host, newest last (host as a user id). */
+  attempts: ConnectAttempt[];
+  /**
+   * The network type each member device reported when joining: what host
+   * election goes by (a symmetric NAT makes a poor host). One entry per
+   * device, so two devices of one user each keep theirs.
+   */
+  networks: MemberNetwork[];
+  /**
+   * Users in the call (audio), us included: in a DM, the other side may be
+   * connected for text only. Empty for sessions without a call.
+   */
+  inCall: string[];
+  /** Each call member's round trip to the host, in ms, as they last measured it. */
+  latency: Record<string, number>;
+  /** Cameras and shared screens in the call. */
+  video: {
+    /** Why video can't be used in this call right now, if it can't. */
+    blocked: VideoBlock | null;
+    /** Video is on our connection: we can show and watch. */
+    ready: boolean;
+    streams: VideoStreamView[];
+  };
+}
+
+/** A camera or shared screen in a call. */
+export interface VideoStreamView {
+  /** Stream id (`<peer>:camera` or `<peer>:screen`). */
+  id: string;
+  userId: string;
+  kind: MediaKind;
+  /** A screen shared with its sound. */
+  audio: boolean;
+  /** Ours: shown from the local preview. */
+  mine: boolean;
+  /**
+   * What we get of it: `live` (it plays), `loading` (asked for, its first
+   * picture is on its way), `paused` (the host's connection or ours is full),
+   * `off` (a screen we haven't chosen to watch).
+   */
+  state: 'live' | 'loading' | 'paused' | 'off';
+}
+
+/** A space an invite leads to, as shown before joining. */
+export interface InvitePreview {
+  code: string;
+  spaceId: string;
+  name: string;
+  icon?: string;
+  /** We are a member already. */
+  joined: boolean;
+  /** Revoked or past its time: joining with it would fail. */
+  expired: boolean;
+}
+
+/** One member device's network type, as the coordinator's election sees it. */
+export interface MemberNetwork {
+  user: string;
+  nat: NatType;
+  /** This device is the session's host. */
+  host: boolean;
+  /** This is our own device. */
+  self: boolean;
 }
 
 /** What the network allows for direct connections (see checkNetwork). */
@@ -186,6 +287,9 @@ export interface NetworkStatus {
   verdict: NetworkVerdict;
   checking: boolean;
   checkedAt: number;
+  /** What each check found, and why the verdict is what it is. */
+  checks?: NetworkCheckItem[];
+  reason?: string;
 }
 
 export interface DeviceView {
@@ -243,13 +347,24 @@ export interface ClientState {
   activeChannel: string | null;
   voiceSession: string | null;
   /** Someone is ringing us in a DM. */
-  incomingCall: { sessionId: string; from: string; at: number } | null;
+  /** `video`: the caller turned their camera on to call. */
+  incomingCall: { sessionId: string; from: string; at: number; video?: boolean } | null;
   /** We are ringing someone and they have not answered yet. */
-  outgoingCall: { sessionId: string; to: string; at: number } | null;
+  outgoingCall: { sessionId: string; to: string; at: number; video?: boolean } | null;
+  /**
+   * Since when the call we are in is live: connected, and in a DM with the
+   * other side in it too. Null while ringing, connecting or alone.
+   */
+  callLiveSince: number | null;
   muted: boolean;
   deafened: boolean;
+  /** Our camera is on (in the call we are in). */
+  camera: boolean;
+  /** We share a screen, and how. */
+  screenShare: { quality: ScreenQuality; audio: boolean } | null;
   settings: Settings;
-  errors: { id: number; message: string }[];
+  /** Toasts: problems, and `info` notices such as a call ending. */
+  errors: { id: number; message: string; kind?: 'info' }[];
   /** This account's devices. */
   devices: DeviceView[];
   deviceId: string | null;
@@ -265,11 +380,18 @@ export interface ClientState {
    * it (useRelay). `with` is the person we were trying to reach.
    */
   connectionTrouble: { sessionId: string; with: string | null } | null;
+  /** Files in messages this device knows of: what is here and what is on its way. */
+  files: Record<string, FileView>;
 }
 
 export type ClientEvents = {
-  message: { channel: string; message: ChatMessage; mine: boolean };
+  /** `update`: an edit or deletion of an earlier message, not a new one. */
+  message: { channel: string; message: ChatMessage; mine: boolean; update: boolean };
   error: { message: string };
+  /** A call we are in: went live, someone joined or left it, or it ended. */
+  call: { sessionId: string; event: 'live' | 'joined' | 'left' | 'ended' };
+  /** Someone fetched all of a file from this device. `to` is a user id. */
+  fileServed: { fileId: string; to: string };
 };
 
 const APP_VERSION_FALLBACK = '0.1.0';
@@ -277,10 +399,20 @@ const APP_VERSION_FALLBACK = '0.1.0';
 const MAX_AHEAD_MS = 5 * 60_000;
 /** How long direct delivery gets before an opted-in DM goes to a mailbox. */
 const MAIL_AFTER_MS = 5000;
+/** Plaintext bytes of messages in one mailbox box. */
+const MAIL_BOX_BYTES = 48 * 1024;
+/** Bytes of boxes in one mail.put request. */
+const MAIL_REQUEST_BYTES = 512 * 1024;
 /** How soon to retry a note owed to someone who just came online. */
 const FRIEND_NOTE_RETRY_MS = 5000;
 /** And how often while connected, whoever it is owed to. */
 const FRIEND_NOTE_SWEEP_MS = 10 * 60_000;
+/** A caller rings again every 2.5 s at most: this long without a ring, it has gone. */
+const RING_SILENCE_MS = 8000;
+/** Time for a hang-up to go out before the call's connection closes. */
+const HANG_UP_FLUSH_MS = 200;
+/** How long a DM call waits for the other side to come back before it ends. */
+const CALL_LOST_GRACE_MS = 20_000;
 
 /**
  * The whole client behind one object. UIs render `store` and call methods;
@@ -300,7 +432,17 @@ export class CrocodileClient extends Emitter<ClientEvents> {
   private transportFactory?: TransportFactory;
   private stun: string[] = [];
   private errorId = 0;
-  voiceEngine?: VoiceEngine;
+  private engine?: VoiceEngine;
+  private offVideo?: () => void;
+  /** Voice and video on this device (set by the app; absent where there is none). */
+  get voiceEngine(): VoiceEngine | undefined {
+    return this.engine;
+  }
+  set voiceEngine(engine: VoiceEngine | undefined) {
+    this.offVideo?.();
+    this.engine = engine;
+    this.offVideo = engine?.on('video', (out) => this.onOutgoingVideo(out));
+  }
   /** Our relationships, decrypted (see friend-list.ts). */
   private friendList: FriendList = new Map();
   /** The list as our stored record has it, encoded; anything else still needs saving. */
@@ -313,6 +455,8 @@ export class CrocodileClient extends Emitter<ClientEvents> {
   /** Grows while notes keep failing, so an unreachable person isn't asked about constantly. */
   private friendRetryDelay = FRIEND_NOTE_RETRY_MS;
   private friendSweepTimer?: ReturnType<typeof setInterval>;
+  /** Absent when the platform can't store files or connect directly. */
+  files?: FileTransfers;
 
   constructor(
     readonly platform: PlatformAdapter,
@@ -322,6 +466,10 @@ export class CrocodileClient extends Emitter<ClientEvents> {
     this.records = new RecordCache(platform.kv);
     this.outbox = new Outbox(platform.kv);
     this.transportFactory = config.transportFactory ?? defaultTransportFactory(platform);
+    const links =
+      config.fileLinks ??
+      (platform.rtc ? webrtcFileLinks(platform.rtc.RTCPeerConnection) : undefined);
+    if (platform.files && links) this.files = this.makeFiles(platform.files, links);
     this.store = new StateStore<ClientState>({
       phase: 'loading',
       link: 'idle',
@@ -342,8 +490,11 @@ export class CrocodileClient extends Emitter<ClientEvents> {
       voiceSession: null,
       incomingCall: null,
       outgoingCall: null,
+      callLiveSince: null,
       muted: false,
       deafened: false,
+      camera: false,
+      screenShare: null,
       settings: defaultSettings,
       errors: [],
       devices: [],
@@ -353,6 +504,7 @@ export class CrocodileClient extends Emitter<ClientEvents> {
       accountDeleted: false,
       network: null,
       connectionTrouble: null,
+      files: {},
     });
     this.records.on('changed', (r) => this.onRecordChanged(r));
     this.records.on('wanted', (keys) => this.fetchWanted(keys));
@@ -382,9 +534,20 @@ export class CrocodileClient extends Emitter<ClientEvents> {
   }
 
   reportError(message: string) {
-    const id = ++this.errorId;
-    this.store.set((s) => ({ errors: [...s.errors.slice(-4), { id, message }] }));
+    this.toast(message);
     this.emit('error', { message });
+  }
+
+  /** A notice that isn't a problem ("Call ended"). */
+  reportInfo(message: string) {
+    this.toast(message, 'info');
+  }
+
+  private toast(message: string, kind?: 'info') {
+    const id = ++this.errorId;
+    this.store.set((s) => ({
+      errors: [...s.errors.slice(-4), { id, message, ...(kind ? { kind } : {}) }],
+    }));
     setTimeout(
       () => this.store.set((s) => ({ errors: s.errors.filter((e) => e.id !== id) })),
       8000,
@@ -404,6 +567,7 @@ export class CrocodileClient extends Emitter<ClientEvents> {
     const dms = (await this.platform.kv.get<string[]>('dms')) ?? [];
     await this.loadDevice();
     await this.outbox.load();
+    await this.files?.load();
     this.store.set({ settings, dms, deviceId: this.deviceId });
     await this.records.load();
     const seed = await this.platform.kv.get<string>('identity-seed');
@@ -573,6 +737,12 @@ export class CrocodileClient extends Emitter<ClientEvents> {
 
   /** Clears this device's copy of the account, including stored messages. */
   private async forgetLocalAccount({ deleted }: { deleted: boolean }) {
+    // A call in progress ends with the account: microphone off, nothing ringing.
+    clearInterval(this.ringTimer);
+    clearTimeout(this.ringingTimer);
+    const voice = this.state.voiceSession;
+    if (voice) this.voiceEngine?.stopSession(voice);
+    this.voiceEngine?.stop();
     await Promise.all([...this.sessions.values()].map((s) => s.leave().catch(() => {})));
     this.sessions.clear();
     this.link?.stop();
@@ -581,6 +751,10 @@ export class CrocodileClient extends Emitter<ClientEvents> {
     this.records.reset();
     this.outbox.dispose();
     await this.platform.messages.clear();
+    if (this.files) {
+      await this.files.close();
+      for (const f of this.files.list()) await this.files.forget(f.id);
+    }
     await this.platform.kv.delete('identity-seed');
     await this.platform.kv.delete('records-cache');
     await this.platform.kv.delete('prekeys');
@@ -608,6 +782,9 @@ export class CrocodileClient extends Emitter<ClientEvents> {
       messages: {},
       dms: [],
       devices: [],
+      voiceSession: null,
+      outgoingCall: null,
+      incomingCall: null,
       accountDeleted: deleted,
     });
   }
@@ -738,10 +915,9 @@ export class CrocodileClient extends Emitter<ClientEvents> {
     );
     link.on('relay_expired', ({ reason }) => {
       for (const s of this.sessions.values()) {
-        if (s.relayGrant) {
-          s.dropServerRelay();
-          this.store.set({ relayEnded: { sessionId: s.sessionId, reason } });
-        }
+        // Only connections that went through the relay are interrupted (and
+        // worth asking about); those that found a direct path carry on.
+        if (s.dropServerRelay()) this.store.set({ relayEnded: { sessionId: s.sessionId, reason } });
       }
     });
     link.start();
@@ -788,14 +964,12 @@ export class CrocodileClient extends Emitter<ClientEvents> {
       const members = await link.request('records.list', { prefix: recordKey.memberPrefix(id) });
       this.records.ingestAll(members.records);
     }
-    await link.request('records.subscribe', {
-      prefixes: [
-        recordKey.profile(me),
-        recordKey.friends(me),
-        recordKey.devicePrefix(me),
-        ...spaceIds.flatMap((id) => [recordKey.space(id), recordKey.memberPrefix(id)]),
-      ],
-    });
+    await this.subscribe([
+      recordKey.profile(me),
+      recordKey.friends(me),
+      recordKey.devicePrefix(me),
+      ...spaceIds.flatMap((id) => [recordKey.space(id), recordKey.memberPrefix(id)]),
+    ]);
     await this.syncProfiles();
     if (this.state.settings.status !== 'online')
       await link.request('presence.set', { status: this.state.settings.status });
@@ -814,7 +988,16 @@ export class CrocodileClient extends Emitter<ClientEvents> {
     for (const s of this.sessions.values())
       void s.join().catch((err) => this.log('join failed', { id: s.sessionId, err: String(err) }));
     // Mail held for this device while it was offline, anywhere in the mesh.
-    void link.request('mail.fetch', {}).catch(() => {});
+    // Signed for this server, so the others send their mail for us here too.
+    const server = this.state.server?.info.id;
+    void link
+      .request(
+        'mail.fetch',
+        server
+          ? { proof: signMailProof(this.identity!, { t: 'mail_fetch', peer: this.peer, server }) }
+          : {},
+      )
+      .catch(() => {});
     this.scheduleMail();
   }
 
@@ -894,8 +1077,10 @@ export class CrocodileClient extends Emitter<ClientEvents> {
         const targets = await this.mailTargets([other, me]);
         if (targets.length === 0) continue;
         const items: { to: string; box: SealedBox }[] = [];
-        for (let i = 0; i < pending.length; i += 50) {
-          const chunk = pending.slice(i, i + 50);
+        // A server takes boxes of up to 96 KiB: sealed and encoded, 48 KiB of
+        // messages stays well under that.
+        const size = (m: ChatMessage) => utf8.encode(JSON.stringify(m)).length + 1;
+        for (const chunk of chunksBySize(pending, MAIL_BOX_BYTES, size)) {
           const plaintext = utf8.encode(JSON.stringify({ type: 'mail', messages: chunk }));
           for (const t of targets) {
             items.push({
@@ -904,9 +1089,10 @@ export class CrocodileClient extends Emitter<ClientEvents> {
             });
           }
         }
-        for (let i = 0; i < items.length; i += 20) {
-          await link.request('mail.put', { items: items.slice(i, i + 20) });
-        }
+        // At most 20 boxes a request, and well under the 1 MiB frame limit.
+        const boxSize = (it: { box: SealedBox }) => it.box.ct.length + 1024;
+        for (const part of chunksBySize(items, MAIL_REQUEST_BYTES, boxSize, 20))
+          await link.request('mail.put', { items: part });
         const ids = pending.map((m) => m.id);
         this.outbox.markMailed(ids);
         const mailed = new Set(ids);
@@ -973,7 +1159,13 @@ export class CrocodileClient extends Emitter<ClientEvents> {
         if (await this.acceptMessage(m.ch, m)) this.addDm(other);
       }
     }
-    if (done.length) await this.link?.request('mail.ack', { ids: done }).catch(() => {});
+    if (done.length)
+      await this.link
+        ?.request('mail.ack', {
+          ids: done,
+          proof: signMailProof(this.identity!, { t: 'mail_ack', peer: this.peer, ids: done }),
+        })
+        .catch(() => {});
   }
 
   private async ensureProfilePublished() {
@@ -990,16 +1182,22 @@ export class CrocodileClient extends Emitter<ClientEvents> {
   private async syncProfiles() {
     const ids = this.relevantUsers();
     const missing = ids.filter((id) => id !== this.userId);
-    for (let i = 0; i < missing.length; i += 400) {
-      const keys = missing.slice(i, i + 400).map((id) => recordKey.profile(id));
+    for (const part of chunks(missing, 400)) {
+      const keys = part.map((id) => recordKey.profile(id));
       const res = await this.link!.request('records.get', { keys });
       this.records.ingestAll(res.records);
     }
-    await this.link!.request('records.subscribe', {
-      prefixes: missing.map((id) => recordKey.profile(id)),
-    });
-    const { presence } = await this.link!.request('presence.subscribe', { userIds: missing });
+    await this.subscribe(missing.map((id) => recordKey.profile(id)));
+    const presence: PresenceEntry[] = [];
+    for (const userIds of chunks(missing, 5000))
+      presence.push(...(await this.link!.request('presence.subscribe', { userIds })).presence);
     this.store.set({ presence: Object.fromEntries(presence.map((p) => [p.userId, p.status])) });
+  }
+
+  /** Subscribe to record prefixes, at most as many per request as the server takes. */
+  private async subscribe(prefixes: string[]) {
+    for (const part of chunks(prefixes, 2000))
+      await this.link!.request('records.subscribe', { prefixes: part });
   }
 
   private relevantUsers(): string[] {
@@ -1014,24 +1212,50 @@ export class CrocodileClient extends Emitter<ClientEvents> {
     return [...set];
   }
 
-  private async fetchProfiles(userIds: string[]) {
+  private profileQueue = new Set<string>();
+  private profileBatch?: Promise<void>;
+
+  /**
+   * Profiles we don't have yet. Calls close together (one per record of a
+   * long member list, say) share one batch of requests.
+   */
+  private fetchProfiles(userIds: string[]): Promise<void> {
+    for (const id of userIds)
+      if (!this.records.get(recordKey.profile(id))) this.profileQueue.add(id);
+    if (!this.profileQueue.size) return Promise.resolve();
+    this.profileBatch ??= new Promise((r) => setTimeout(r, 20)).then(() => {
+      this.profileBatch = undefined;
+      const ids = [...this.profileQueue];
+      this.profileQueue.clear();
+      return this.loadProfiles(ids);
+    });
+    return this.profileBatch;
+  }
+
+  private async loadProfiles(userIds: string[]) {
+    const link = this.link;
     const missing = userIds.filter((id) => !this.records.get(recordKey.profile(id)));
-    if (!missing.length || !this.link) return;
-    const res = await this.link
-      .request('records.get', { keys: missing.map((id) => recordKey.profile(id)) })
-      .catch(() => null);
-    if (res) this.records.ingestAll(res.records);
-    await this.link
-      .request('records.subscribe', { prefixes: missing.map((id) => recordKey.profile(id)) })
-      .catch(() => {});
-    const p = await this.link.request('presence.subscribe', { userIds: missing }).catch(() => null);
-    if (p)
-      this.store.set((s) => ({
-        presence: {
-          ...s.presence,
-          ...Object.fromEntries(p.presence.map((e) => [e.userId, e.status])),
-        },
-      }));
+    if (!missing.length || !link) return;
+    for (const part of chunks(missing, 400)) {
+      const res = await link
+        .request('records.get', { keys: part.map((id) => recordKey.profile(id)) })
+        .catch(() => null);
+      if (res) this.records.ingestAll(res.records);
+    }
+    for (const part of chunks(missing, 2000))
+      await link
+        .request('records.subscribe', { prefixes: part.map((id) => recordKey.profile(id)) })
+        .catch(() => {});
+    for (const userIds of chunks(missing, 5000)) {
+      const p = await link.request('presence.subscribe', { userIds }).catch(() => null);
+      if (p)
+        this.store.set((s) => ({
+          presence: {
+            ...s.presence,
+            ...Object.fromEntries(p.presence.map((e) => [e.userId, e.status])),
+          },
+        }));
+    }
   }
 
   // ===========================================================================
@@ -1139,6 +1363,7 @@ export class CrocodileClient extends Emitter<ClientEvents> {
           channels: body.channels,
           members: [...members],
           bans: body.bans,
+          admins: spaceAuthorityValid(id, body) ? body.admins : [],
         };
       }
       patch.spaces = spaces;
@@ -1626,17 +1851,63 @@ export class CrocodileClient extends Emitter<ClientEvents> {
       .catch((err) => this.log('space session join failed', { err: String(err) }));
   }
 
-  private spaceBody(spaceId: string): SpaceBody {
-    const r = this.records.get(recordKey.space(spaceId)) as SignedRecord<'space'> | undefined;
+  /**
+   * Change a space, as its owner or one of its admins. The owner's version
+   * carries a fresh signature on the admin list whenever it changes; an
+   * admin's keeps the owner's list and signature as they are.
+   */
+  async updateSpace(spaceId: string, mutate: (b: SpaceBody) => SpaceBody) {
+    const key = recordKey.space(spaceId);
+    const r = this.records.get(key) as SignedRecord<'space'> | undefined;
     if (!r) throw new Error('unknown space');
-    if (r.body.owner !== this.userId) throw new Error('only the owner can change this space');
-    return structuredClone(r.body);
+    const me = this.userId;
+    if (
+      !canManageSpace(r.body, me) ||
+      (r.body.owner !== me && !spaceAuthorityValid(spaceId, r.body))
+    )
+      throw new Error('only the owner or an admin can change this space');
+    let body = mutate(structuredClone(r.body));
+    if (r.body.owner === me) {
+      const admins = [...new Set(body.admins)].filter((u) => u !== me);
+      const unchanged =
+        !!r.body.authority &&
+        admins.length === r.body.admins.length &&
+        admins.every((u, i) => u === r.body.admins[i]);
+      body = {
+        ...body,
+        admins,
+        authority: unchanged
+          ? r.body.authority
+          : signSpaceAuthority(
+              this.identity!,
+              spaceId,
+              admins,
+              Math.max(Date.now(), (r.body.authority?.at ?? 0) + 1),
+            ),
+      };
+    } else {
+      // What only the owner decides stays as the owner left it.
+      const { owner, nonce, admins, authority } = r.body;
+      body = { ...body, owner, nonce, admins, authority, deleted: r.body.deleted };
+      if (body.deleted === undefined) delete body.deleted;
+      body.bans = body.bans.filter((u) => u !== owner && !admins.includes(u));
+    }
+    await this.putRecord(signRecord(this.identity!, 'space', key, body, this.nextVersion(key)));
   }
 
-  async updateSpace(spaceId: string, mutate: (b: SpaceBody) => SpaceBody) {
-    const body = mutate(this.spaceBody(spaceId));
-    const key = recordKey.space(spaceId);
-    await this.putRecord(signRecord(this.identity!, 'space', key, body, this.nextVersion(key)));
+  private spaceOwner(spaceId: string): string | undefined {
+    return (this.records.get(recordKey.space(spaceId)) as SignedRecord<'space'> | undefined)?.body
+      .owner;
+  }
+
+  /** Let a member change the space, or stop them (owner only). */
+  async setAdmin(spaceId: string, userId: string, admin: boolean) {
+    if (this.spaceOwner(spaceId) !== this.userId)
+      throw new Error('only the owner can choose admins');
+    return this.updateSpace(spaceId, (b) => ({
+      ...b,
+      admins: admin ? [...b.admins, userId] : b.admins.filter((u) => u !== userId),
+    }));
   }
 
   addChannel(spaceId: string, name: string, kind: ChannelKind) {
@@ -1665,7 +1936,9 @@ export class CrocodileClient extends Emitter<ClientEvents> {
     return this.updateSpace(spaceId, (b) => ({ ...b, bans: [...new Set([...b.bans, userId])] }));
   }
 
-  deleteSpace(spaceId: string) {
+  async deleteSpace(spaceId: string) {
+    if (this.spaceOwner(spaceId) !== this.userId)
+      throw new Error('only the owner can delete a space');
     return this.updateSpace(spaceId, (b) => ({ ...b, deleted: true }));
   }
 
@@ -1705,14 +1978,47 @@ export class CrocodileClient extends Emitter<ClientEvents> {
     return code;
   }
 
+  /**
+   * What an invite leads to, for showing it in a chat before anyone joins:
+   * the space's name and icon, whether we are in it already, and whether it
+   * still works. Null if the server doesn't know the invite.
+   */
+  async previewInvite(input: string): Promise<InvitePreview | null> {
+    const code = inviteCodeOf(input);
+    const key = recordKey.invite(code);
+    const res = await this.link!.request('records.get', { keys: [key] });
+    const claimed = res.records[0] as SignedRecord<'invite'> | undefined;
+    if (!claimed || claimed.kind !== 'invite' || claimed.key !== key) return null;
+    // Only what the cache accepts counts: the invite must be signed by its
+    // space's owner (or an admin), so a server can't point it elsewhere.
+    // Checked like any record, but kept only in memory: we haven't joined.
+    const spaceKey = recordKey.space(claimed.body.spaceId);
+    if (!this.records.get(spaceKey)) {
+      const got = await this.link!.request('records.get', { keys: [spaceKey] });
+      this.records.ingestAll(got.records, false);
+    }
+    this.records.ingest(claimed, false);
+    const invite = this.records.get(key) as SignedRecord<'invite'> | undefined;
+    if (!invite || invite.body.code !== code) return null;
+    const { spaceId } = invite.body;
+    const space = this.records.get(recordKey.space(spaceId)) as SignedRecord<'space'> | undefined;
+    if (!space || space.body.deleted) return null;
+    const expired =
+      !!invite.body.revoked ||
+      (invite.body.expiresAt !== null && invite.body.expiresAt < Date.now());
+    return {
+      code,
+      spaceId,
+      name: space.body.name,
+      ...(space.body.icon ? { icon: space.body.icon } : {}),
+      joined: !!this.state.spaces[spaceId],
+      expired,
+    };
+  }
+
   /** Accepts "abcd1234", "croc://join/abcd1234" or "https://…/join/abcd1234". */
   async joinWithInvite(input: string): Promise<string> {
-    const code = input
-      .trim()
-      .toLowerCase()
-      .split('/')
-      .pop()!
-      .replace(/[^a-z2-7]/g, '');
+    const code = inviteCodeOf(input);
     const res = await this.link!.request('records.get', { keys: [recordKey.invite(code)] });
     const invite = res.records[0] as SignedRecord<'invite'> | undefined;
     if (!invite) throw new Error('That invite does not exist (yet). Check the code and try again.');
@@ -1764,7 +2070,7 @@ export class CrocodileClient extends Emitter<ClientEvents> {
       {
         identity: this.identity!,
         peer: this.peer,
-        link: this.link!,
+        link: () => this.link!,
         platform: this.platform,
         messages: this.platform.messages,
         iceServers: () => this.stun.map((urls) => ({ urls })),
@@ -1789,17 +2095,35 @@ export class CrocodileClient extends Emitter<ClientEvents> {
       },
       this.transportFactory,
       withVoice
-        ? { micTrack: () => withVoice.micTrack(), frameCrypto: (k) => withVoice.frameCrypto(k) }
+        ? {
+            micTrack: () => withVoice.micTrack(),
+            frameCrypto: (k) => withVoice.frameCrypto(k),
+            // Only the call we are in shows our camera or screen.
+            outgoing: () =>
+              this.state.voiceSession === sessionId
+                ? withVoice.outgoing()
+                : { camera: null, screen: null },
+          }
         : undefined,
     );
     session.on('update', () => this.publishSession(session!));
+    session.on('screenAudio', ({ slot, track }) =>
+      this.voiceEngine?.playSlot(sessionId, `screen${slot}`, track, () => {
+        const stream = session!.screenAudioSlots[slot];
+        return stream ? peerIds.user(streamIds.peer(stream)) : null;
+      }),
+    );
     session.on('track', (ev) =>
       this.voiceEngine?.playSlot(sessionId, ev.slot, ev.track, () => {
         const peer = session!.slots[ev.slot];
         return peer ? peerIds.user(peer) : null;
       }),
     );
-    session.on('call', ({ userId, action }) => this.onCallSignal(sessionId, userId, action));
+    session.on('call', ({ userId, action, video }) =>
+      this.onCallSignal(sessionId, userId, action, video),
+    );
+    session.on('file', ({ from, payload }) => this.files?.onMessage(sessionId, from, payload));
+    session.on('update', () => this.files?.sessionChanged(sessionId));
     session.on('typing', ({ userId, ch }) => {
       const until = Date.now() + 6000;
       this.store.set((s) => ({
@@ -1812,6 +2136,8 @@ export class CrocodileClient extends Emitter<ClientEvents> {
   }
 
   private publishSession(session: GroupSession) {
+    // A session we replaced (a DM call back to text) must not overwrite its successor.
+    if (this.sessions.get(session.sessionId) !== session) return;
     const st: SessionState | null = session.state;
     const peers = [...session.peers.values()];
     const users = (ids: string[]) => [...new Set(ids.map((p) => peerIds.user(p)))];
@@ -1841,9 +2167,219 @@ export class CrocodileClient extends Emitter<ClientEvents> {
       relay: grant ? { server: grant.server, expiresAt: grant.expiresAt } : null,
       route: session.status === 'connected' ? session.route : null,
       trouble: session.trouble,
+      connectedAt: session.connectedAt,
+      networks: (st?.members ?? []).map((m) => ({
+        user: peerIds.user(m.peer),
+        nat: m.caps.nat,
+        host: m.peer === st?.host,
+        self: m.peer === this.peer,
+      })),
+      attempts: session.attempts.map((a) => ({
+        ...a,
+        host: peerIds.user(a.host),
+        steps: [...a.steps],
+        ...(a.end ? { end: { ...a.end } } : {}),
+      })),
+      // Apps (and hosts) from before calls said who is in them leave it unknown.
+      inCall: [
+        ...(session.isVoice ? [me] : []),
+        ...users(peers.filter((p) => p.voice).map((p) => p.id)).filter((u) => u !== me),
+      ],
+      latency: Object.fromEntries([
+        ...peers
+          .filter((p) => p.rtt !== undefined && peerIds.user(p.id) !== me)
+          .map((p) => [peerIds.user(p.id), p.rtt!] as const),
+        ...(session.isVoice && session.rttMs !== null ? [[me, session.rttMs] as const] : []),
+      ]),
+      video: this.videoView(session),
     };
     this.store.set((s) => ({ sessions: { ...s.sessions, [session.sessionId]: view } }));
     this.noteTrouble(view);
+    if (this.state.voiceSession === session.sessionId) this.followCall(view, session.welcomed);
+  }
+
+  private videoView(session: GroupSession): SessionView['video'] {
+    const streams: VideoStreamView[] = [];
+    const inThisCall = this.state.voiceSession === session.sessionId;
+    const out = inThisCall ? this.voiceEngine?.outgoing() : undefined;
+    const blocked = session.videoBlocked;
+    if (out && session.videoUsable) {
+      if (out.camera)
+        streams.push({
+          id: streamIds.make(this.peer, 'camera'),
+          userId: this.userId,
+          kind: 'camera',
+          audio: false,
+          mine: true,
+          state: 'live',
+        });
+      if (out.screen)
+        streams.push({
+          id: streamIds.make(this.peer, 'screen'),
+          userId: this.userId,
+          kind: 'screen',
+          audio: !!out.screen.audio,
+          mine: true,
+          state: 'live',
+        });
+    }
+    for (const p of session.peers.values()) {
+      if (p.id === this.peer) continue;
+      for (const kind of ['screen', 'camera'] as const) {
+        if (kind === 'camera' ? !p.camera : !p.screen) continue;
+        const id = streamIds.make(p.id, kind);
+        const watched = kind === 'camera' || session.watchedScreens.includes(id);
+        const slot = session.videoSlots.indexOf(id);
+        streams.push({
+          id,
+          userId: peerIds.user(p.id),
+          kind,
+          audio: kind === 'screen' && !!p.screen?.audio,
+          mine: false,
+          state: !watched
+            ? 'off'
+            : session.pausedStreams.includes(id)
+              ? 'paused'
+              : slot >= 0 && session.videoStream(id) && session.videoShowingNow(id)
+                ? 'live'
+                : 'loading',
+        });
+      }
+    }
+    return {
+      blocked: inThisCall ? blocked : null,
+      ready: session.mediaReady && session.route !== null,
+      streams,
+    };
+  }
+
+  // ===========================================================================
+  // Camera and screen
+  // ===========================================================================
+
+  private onOutgoingVideo(out: OutgoingVideo) {
+    this.store.set({
+      camera: !!out.camera,
+      screenShare: out.screen ? { quality: out.screen.quality, audio: !!out.screen.audio } : null,
+    });
+    const id = this.state.voiceSession;
+    const session = id ? this.sessions.get(id) : undefined;
+    if (session) {
+      session.refreshVideo();
+      this.publishSession(session);
+    }
+  }
+
+  /** Show our camera in the call we are in, or stop. */
+  async setCamera(on: boolean, deviceId?: string) {
+    const engine = this.voiceEngine;
+    if (!on) return engine?.stopCamera();
+    if (!engine) throw new Error('Video is not available on this device');
+    if (!this.state.voiceSession) throw new Error('Join a call to show your camera');
+    await engine.startCamera(deviceId);
+  }
+
+  /** Share a screen or window in the call we are in. */
+  async shareScreen(request: ScreenRequest) {
+    const engine = this.voiceEngine;
+    if (!engine?.canShareScreen) throw new Error('This device cannot share its screen');
+    if (!this.state.voiceSession) throw new Error('Join a call to share your screen');
+    await engine.startScreen(request);
+  }
+
+  stopScreenShare() {
+    this.voiceEngine?.stopScreen();
+  }
+
+  /** What we show, for our own preview. */
+  localVideo(kind: MediaKind): MediaStream | null {
+    const out = this.voiceEngine?.outgoing();
+    const track = kind === 'camera' ? out?.camera : out?.screen?.video;
+    return track && typeof MediaStream !== 'undefined' ? new MediaStream([track]) : null;
+  }
+
+  /** Start or stop watching someone's shared screen. */
+  watchScreen(sessionId: string, stream: string, on: boolean) {
+    this.sessions.get(sessionId)?.watchScreen(stream, on);
+  }
+
+  /** The picture of someone's camera or screen in a call, while we get it. */
+  videoStream(sessionId: string, stream: string): MediaStream | null {
+    return this.sessions.get(sessionId)?.videoStream(stream) ?? null;
+  }
+
+  /** Who was in the call we are in, at the last update (users, us excluded). */
+  private callOthers = new Set<string>();
+  /** The DM call we answered, or whose callee answered. */
+  private callAnswered: string | null = null;
+  /** Users who were in the DM call and dropped out of the conversation altogether. */
+  private callMissing = new Set<string>();
+  /** Someone in this call has said they are in it (apps from 0.6 on do). */
+  private callPresenceSeen = false;
+  private callLostTimer?: ReturnType<typeof setTimeout>;
+
+  /**
+   * Keep the call's live state honest: it is live once connected and, in a
+   * DM, once the other side is in it; it ends when they hang up, or when
+   * they stay gone. Others joining and leaving are events (sounds).
+   */
+  private followCall(view: SessionView, welcomed: boolean) {
+    const me = this.userId;
+    const isDm = view.id.startsWith('dm:');
+    // Who is there is known once the host has said hello on this connection.
+    const connected = view.status === 'connected' && welcomed;
+    if (!connected) return;
+    const others = new Set(view.inCall.filter((u) => u !== me));
+    const before = this.callOthers;
+    const joined = [...others].filter((u) => !before.has(u));
+    const left = [...before].filter((u) => !others.has(u));
+    if (joined.length) this.emit('call', { sessionId: view.id, event: 'joined' });
+    if (left.length) this.emit('call', { sessionId: view.id, event: 'left' });
+    this.callOthers = others;
+    for (const u of others) this.callMissing.delete(u);
+
+    // Once the other side has said it is in the call, its presence decides;
+    // only an older app that never says counts as live on being answered.
+    if (others.size > 0) this.callPresenceSeen = true;
+    const live =
+      !isDm || others.size > 0 || (this.callAnswered === view.id && !this.callPresenceSeen);
+    if (live && !this.state.callLiveSince) {
+      this.store.set({ callLiveSince: Date.now() });
+      this.emit('call', { sessionId: view.id, event: 'live' });
+    } else if (!live && this.state.callLiveSince) {
+      this.store.set({ callLiveSince: null });
+    }
+
+    if (!isDm) return;
+    for (const u of left) this.callMissing.add(u);
+    if (others.size > 0) {
+      this.callMissing.clear();
+      clearTimeout(this.callLostTimer);
+      this.callLostTimer = undefined;
+      return;
+    }
+    if ([...this.callMissing].some((u) => view.peers.includes(u))) {
+      // Connected, but out of the call: they hung up.
+      void this.endCall(view.id, 'Call ended');
+      return;
+    }
+    if (this.callMissing.size === 0 || this.callLostTimer) return;
+    // Gone altogether: their app or network may be back in a moment.
+    this.callLostTimer = setTimeout(() => {
+      this.callLostTimer = undefined;
+      const v = this.state.sessions[view.id];
+      if (this.state.voiceSession === view.id && v && !v.inCall.some((u) => u !== me))
+        void this.endCall(view.id, 'Call ended: the connection was lost');
+    }, CALL_LOST_GRACE_MS);
+    this.callLostTimer.unref?.();
+  }
+
+  /** The call ended from the other side: leave it too. */
+  private async endCall(sessionId: string, notice: string) {
+    if (this.state.voiceSession !== sessionId) return;
+    this.reportInfo(notice);
+    this.emit('call', { sessionId, event: 'ended' });
+    await this.leaveVoice({ quiet: true });
   }
 
   /** Offer the relay when a session can't connect directly and it's off. */
@@ -2019,7 +2555,7 @@ export class CrocodileClient extends Emitter<ClientEvents> {
           role: 'new',
           step: 'claimed',
           code: code.toUpperCase(),
-          securityCode: linkSecurityCode(temp.publicKey, key),
+          securityCode: linkSecurityCode(temp.publicKey, temp.encPublicKey, key),
           account: userId,
         },
       });
@@ -2054,7 +2590,9 @@ export class CrocodileClient extends Emitter<ClientEvents> {
   /** Existing device: enter the code the new device shows. */
   async claimDeviceLink(code: string): Promise<string> {
     const res = await this.link!.request('link.claim', { code });
-    const securityCode = linkSecurityCode(res.key, this.identity!.publicKey);
+    // The code covers the key the account will be sealed to: a server that
+    // swapped it would make the two devices show different codes.
+    const securityCode = linkSecurityCode(res.key, res.encKey, this.identity!.publicKey);
     this.pendingLinkTarget = { code, encKey: res.encKey };
     this.store.set({ linking: { role: 'existing', step: 'confirm', code, securityCode } });
     return securityCode;
@@ -2093,22 +2631,34 @@ export class CrocodileClient extends Emitter<ClientEvents> {
     if (!probe) return Promise.resolve();
     if (this.networkCheck) return this.networkCheck;
     this.store.set((s) => ({
-      network: {
-        verdict: s.network?.verdict ?? 'unknown',
-        checkedAt: s.network?.checkedAt ?? 0,
-        checking: true,
-      },
+      network: s.network
+        ? { ...s.network, checking: true }
+        : { verdict: 'unknown', checkedAt: 0, checking: true },
     }));
     this.networkCheck = probe(fresh)
       .then((result) => {
         const verdict = networkVerdict(result);
-        this.log('network check', { ...result, verdict });
-        this.store.set({ network: { verdict, checking: false, checkedAt: Date.now() } });
+        const { items, reason } = networkChecklist(result);
+        // Addresses stay out of the log (it goes into bug reports).
+        this.log('network check', {
+          nat: result.nat,
+          udp: result.udp,
+          verdict,
+          checks: Object.fromEntries(items.map((i) => [i.id, i.status])),
+        });
+        this.store.set({
+          network: { verdict, checking: false, checkedAt: Date.now(), checks: items, reason },
+        });
       })
       .catch((err) => {
         this.log('network check failed', { err: String(err) });
         this.store.set((s) => ({
-          network: { verdict: 'unknown', checking: false, checkedAt: s.network?.checkedAt ?? 0 },
+          network: {
+            verdict: 'unknown',
+            checking: false,
+            checkedAt: s.network?.checkedAt ?? 0,
+            reason: `The check itself failed (${String(err)}).`,
+          },
         }));
       })
       .finally(() => {
@@ -2132,6 +2682,11 @@ export class CrocodileClient extends Emitter<ClientEvents> {
   }
 
   private troubleDismissed = new Set<string>();
+
+  /** Live WebRTC numbers for a session's connection to its host (debug panel). */
+  async sessionStats(sessionId: string): Promise<LinkStats | null> {
+    return (await this.sessions.get(sessionId)?.stats()) ?? null;
+  }
 
   private historyChannels(sessionId: string): string[] {
     const scope = parseSessionId(sessionId);
@@ -2207,17 +2762,32 @@ export class CrocodileClient extends Emitter<ClientEvents> {
     }
   }
 
-  async loadOlder(channel: string): Promise<boolean> {
-    const current = this.state.messages[channel] ?? [];
-    const before = current[0]?.ts;
-    const page = await this.platform.messages.page(channel, { before, limit: 100 });
+  private loadingOlder = new Map<string, Promise<boolean>>();
+
+  /** The page before the oldest message shown. Calls while one loads share it. */
+  loadOlder(channel: string): Promise<boolean> {
+    let loading = this.loadingOlder.get(channel);
+    if (!loading) {
+      loading = this.loadOlderPage(channel).finally(() => this.loadingOlder.delete(channel));
+      this.loadingOlder.set(channel, loading);
+    }
+    return loading;
+  }
+
+  private async loadOlderPage(channel: string): Promise<boolean> {
+    const oldest = (this.state.messages[channel] ?? [])[0];
+    const page = await this.platform.messages.page(channel, {
+      before: oldest?.ts,
+      beforeId: oldest?.id,
+      limit: 100,
+    });
     if (page.length === 0) return false;
-    this.store.set((s) => ({
-      messages: {
-        ...s.messages,
-        [channel]: foldEdits([...this.withDelivery(page), ...(s.messages[channel] ?? [])]),
-      },
-    }));
+    this.store.set((s) => {
+      const shown = s.messages[channel] ?? [];
+      const have = new Set(shown.map((m) => m.id));
+      const older = this.withDelivery(page.filter((m) => !have.has(m.id)));
+      return { messages: { ...s.messages, [channel]: foldEdits([...older, ...shown]) } };
+    });
     return true;
   }
 
@@ -2228,10 +2798,12 @@ export class CrocodileClient extends Emitter<ClientEvents> {
   async sendMessage(
     channel: string,
     body: string,
-    opts: { replyTo?: string; edits?: string; deleted?: boolean } = {},
+    opts: { replyTo?: string; edits?: string; deleted?: boolean; file?: FileManifest } = {},
+    /** Runs once the message exists and before anyone can see it. */
+    created?: (message: ChatMessage, sessionId: string) => Promise<void>,
   ) {
     const text = body.trim();
-    if (!text && !opts.deleted) return;
+    if (!text && !opts.deleted && !opts.file) return;
     if (text.length > LIMITS.messageMaxChars)
       throw new Error(`Messages are limited to ${LIMITS.messageMaxChars} characters`);
     const sessionId = this.sessionOfChannel(channel);
@@ -2249,7 +2821,9 @@ export class CrocodileClient extends Emitter<ClientEvents> {
     );
     const ts = latest + 1 > now && latest + 1 <= now + MAX_AHEAD_MS - 60_000 ? latest + 1 : now;
     const message = createChatMessage(this.identity!, { ch: channel, body: text, ...opts }, ts);
+    await created?.(message, sessionId);
     await this.platform.messages.put(message);
+    if (opts.deleted && opts.edits) await this.files?.forgetMessage(opts.edits, this.userId);
     this.outbox.add(message, sessionId);
     const session = this.sessions.get(sessionId);
     const delivered =
@@ -2257,9 +2831,128 @@ export class CrocodileClient extends Emitter<ClientEvents> {
       session.peers.size > 0 &&
       session.sendGroup({ type: 'message', message });
     this.addToTimeline(channel, { ...message, pending: true });
-    this.emit('message', { channel, message, mine: true });
+    this.emit('message', { channel, message, mine: true, update: !!message.edits });
     if (!delivered && sessionId.startsWith('dm:')) void this.pokeDm(sessionId);
     this.scheduleMail();
+  }
+
+  /**
+   * Posts a file: encrypts it into this device's storage, then sends the
+   * message that carries its manifest. Members fetch it from this device (or
+   * anyone who already has it) over a direct connection.
+   */
+  async sendFile(
+    channel: string,
+    source: FileSource,
+    opts: {
+      caption?: string;
+      replyTo?: string;
+      /** Made by the UI for pictures and videos. */
+      preview?: { thumb?: string; w?: number; h?: number; dur?: number };
+      onProgress?: (done: number) => void;
+      /**
+       * False: keep no encrypted copy; the platform's block store makes
+       * blocks from the original. `prepared` runs before the message goes
+       * out, so the store can learn where that is.
+       */
+      store?: boolean;
+      prepared?: (file: FileManifest) => void | Promise<void>;
+    } = {},
+  ) {
+    const files = this.files;
+    if (!files) throw new Error('This device cannot send files');
+    if (!this.sessionOfChannel(channel)) throw new Error('unknown channel');
+    if (source.size > FILE_MAX_SIZE) throw new Error('Files are limited to 1 TB');
+    const caption = opts.caption?.trim() ?? '';
+    if (caption.length > LIMITS.messageMaxChars)
+      throw new Error(`Messages are limited to ${LIMITS.messageMaxChars} characters`);
+    const { manifest, hashes } = await files.prepare(source, opts.onProgress, opts.store ?? true);
+    try {
+      const p = opts.preview ?? {};
+      const file = FileManifest.parse({
+        ...manifest,
+        name: cleanFileName(manifest.name),
+        type: manifest.type.slice(0, 127),
+        ...(p.thumb && FileThumb.safeParse(p.thumb).success ? { thumb: p.thumb } : {}),
+        ...(p.w && p.h ? { w: Math.round(p.w), h: Math.round(p.h) } : {}),
+        ...(p.dur !== undefined && Number.isFinite(p.dur) ? { dur: p.dur } : {}),
+      });
+      await opts.prepared?.(file);
+      await this.sendMessage(
+        channel,
+        caption,
+        { file, ...(opts.replyTo ? { replyTo: opts.replyTo } : {}) },
+        (message, sessionId) => files.posted(sessionId, { ...message, file }, hashes),
+      );
+      return file.id;
+    } catch (err) {
+      // Not posted: the encrypted copy has nothing left to serve.
+      await files.forget(manifest.id);
+      throw err;
+    }
+  }
+
+  /** Start fetching a file in a message. */
+  async downloadFile(fileId: string) {
+    if (!this.files) throw new Error('This device cannot receive files');
+    await this.files.download(fileId);
+  }
+
+  /**
+   * Fetch a file by itself if the auto-download setting allows it. With
+   * "from friends", only from the author or a friend: whoever sends it sees
+   * this device's IP address, and nobody chose to connect to anyone else.
+   */
+  async autoDownloadFile(message: ChatMessage) {
+    if (!this.shouldAutoDownload(message)) return;
+    const author = message.author;
+    const anyone = this.state.settings.autoDownload === 'everyone';
+    await this.files!.download(
+      message.file!.id,
+      anyone
+        ? {}
+        : {
+            from: (peer) => {
+              const user = peerIds.user(peer);
+              return user === author || this.state.friends.friends.includes(user);
+            },
+          },
+    );
+  }
+
+  /** A downloaded (or sent) file's contents, block by block. */
+  async readFile(fileId: string, sink: (plain: Uint8Array) => Promise<void> | void) {
+    if (!this.files) throw new Error('This device cannot read files');
+    await this.files.read(fileId, sink);
+  }
+
+  /** Deletes the copies of files this device downloaded (not the ones it sent). */
+  async clearDownloadedFiles() {
+    if (!this.files) return;
+    for (const f of this.files.list())
+      if (!f.mine) await this.files.forget(f.id, { keepRecord: true });
+  }
+
+  /** Bytes of files on this device. */
+  async fileStorageUsed() {
+    return (await this.platform.files?.usage?.()) ?? 0;
+  }
+
+  /**
+   * Whether a file should be fetched without asking: pictures and videos up
+   * to 10 MB, from the people the auto-download setting allows.
+   */
+  shouldAutoDownload(message: ChatMessage): boolean {
+    const f = message.file;
+    if (!f || !this.files || message.deleted) return false;
+    if (message.author === this.identity?.userId) return false;
+    if (!fileMediaKind(f.type) || f.size > FILE_AUTO_DOWNLOAD_MAX) return false;
+    const view = this.state.files[f.id];
+    if (view && view.status !== 'none') return false;
+    const mode = this.state.settings.autoDownload;
+    if (mode === 'never') return false;
+    if (mode === 'everyone') return true;
+    return message.ch.startsWith('dm:') || this.state.friends.friends.includes(message.author);
   }
 
   editMessage(channel: string, id: string, body: string) {
@@ -2285,7 +2978,10 @@ export class CrocodileClient extends Emitter<ClientEvents> {
     if (!fresh) return false;
     this.addToTimeline(message.ch, message);
     const mine = message.author === this.userId;
-    if (!mine && this.state.activeChannel !== message.ch) {
+    await this.noteFile(sessionId, message, mine);
+    // Edits and deletions change what's there; they aren't news.
+    const update = !!message.edits;
+    if (!mine && !update && this.state.activeChannel !== message.ch) {
       this.store.set((s) => ({
         unread: { ...s.unread, [message.ch]: (s.unread[message.ch] ?? 0) + 1 },
       }));
@@ -2296,8 +2992,22 @@ export class CrocodileClient extends Emitter<ClientEvents> {
       const { [message.author]: _, ...rest } = typing;
       return { typing: { ...s.typing, [message.ch]: rest } };
     });
-    this.emit('message', { channel: message.ch, message, mine });
+    this.emit('message', { channel: message.ch, message, mine, update });
     return true;
+  }
+
+  /** Keeps track of files posted in messages, and of their deletion. */
+  private async noteFile(sessionId: string, message: ChatMessage, mine: boolean) {
+    const files = this.files;
+    if (!files) return;
+    if (message.file && !message.edits) {
+      await files.noted(sessionId, { ...message, file: message.file }, mine);
+      // Live messages (not old history) may be fetched right away.
+      const now = this.config.now?.() ?? Date.now();
+      if (now - message.ts < 2 * 60_000) void this.autoDownloadFile(message).catch(() => {});
+    } else if (message.edits && message.deleted) {
+      await files.forgetMessage(message.edits, message.author);
+    }
   }
 
   private addToTimeline(channel: string, message: MessageView) {
@@ -2321,21 +3031,43 @@ export class CrocodileClient extends Emitter<ClientEvents> {
     return this.joinVoiceSession(sessionIds.voice(spaceId, channelId));
   }
 
-  /** Voice call inside a DM: joins the call and rings the other side. */
-  async callDm(userId: string) {
+  /**
+   * Call inside a DM: joins the call and rings the other side, or answers
+   * their ring. With `video`, our camera is on from the start: we see
+   * ourselves while it rings, they see us once they answer.
+   */
+  async callDm(userId: string, opts: { video?: boolean } = {}) {
     const sessionId = await this.openDm(userId);
     const answering = this.state.incomingCall?.sessionId === sessionId;
     await this.joinVoiceSession(sessionId);
+    const attempt = this.callAttempt;
+    // A missing or busy camera doesn't stop the call itself.
+    if (opts.video)
+      await this.setCamera(true).catch((err: unknown) =>
+        this.reportError(err instanceof Error ? err.message : String(err)),
+      );
+    // Hung up (or another call placed) while the camera was opening, say at
+    // its permission prompt: don't ring or answer for a call that's over.
+    if (attempt !== this.callAttempt) return;
     if (answering) {
+      this.callAnswered = sessionId;
       this.store.set({ incomingCall: null });
       this.sendCallSignal(sessionId, 'accept');
       return;
     }
-    this.store.set({ outgoingCall: { sessionId, to: userId, at: Date.now() } });
+    this.store.set({
+      outgoingCall: {
+        sessionId,
+        to: userId,
+        at: Date.now(),
+        ...(opts.video ? { video: true } : {}),
+      },
+    });
     this.ringLoop(sessionId);
   }
 
   private ringTimer?: ReturnType<typeof setInterval>;
+  private ringingTimer?: ReturnType<typeof setTimeout>;
 
   private ringLoop(sessionId: string) {
     clearInterval(this.ringTimer);
@@ -2354,14 +3086,22 @@ export class CrocodileClient extends Emitter<ClientEvents> {
         void this.leaveVoice();
         return;
       }
-      this.sendCallSignal(sessionId, 'ring');
+      this.sendCallSignal(sessionId, 'ring', out.video);
     };
     ring();
     this.ringTimer = setInterval(ring, Math.min(2500, timeout / 2));
   }
 
-  private sendCallSignal(sessionId: string, action: 'ring' | 'accept' | 'decline' | 'end') {
-    this.sessions.get(sessionId)?.sendGroup({ type: 'call', action });
+  private sendCallSignal(
+    sessionId: string,
+    action: 'ring' | 'accept' | 'decline' | 'end',
+    video?: boolean,
+  ) {
+    return (
+      this.sessions
+        .get(sessionId)
+        ?.sendGroup({ type: 'call', action, ...(video ? { video: true } : {}) }) ?? false
+    );
   }
 
   declineCall() {
@@ -2375,6 +3115,7 @@ export class CrocodileClient extends Emitter<ClientEvents> {
     sessionId: string,
     from: string,
     action: 'ring' | 'accept' | 'decline' | 'end',
+    video?: boolean,
   ) {
     if (from === this.userId) return;
     if (action === 'ring') {
@@ -2382,10 +3123,27 @@ export class CrocodileClient extends Emitter<ClientEvents> {
         this.sendCallSignal(sessionId, 'accept');
         return;
       }
-      if (!this.state.incomingCall)
-        this.store.set({ incomingCall: { sessionId, from, at: Date.now() } });
+      const ringing = this.state.incomingCall;
+      if (ringing && ringing.sessionId !== sessionId) return;
+      if (!ringing)
+        this.store.set({
+          incomingCall: { sessionId, from, at: Date.now(), ...(video ? { video: true } : {}) },
+        });
+      // A hang-up can be lost (the caller's app quit, say): stop when the rings do.
+      clearTimeout(this.ringingTimer);
+      this.ringingTimer = setTimeout(() => {
+        if (this.state.incomingCall?.sessionId === sessionId)
+          this.store.set({ incomingCall: null });
+      }, RING_SILENCE_MS);
+      this.ringingTimer.unref?.();
     } else if (action === 'accept') {
-      if (this.state.outgoingCall?.sessionId === sessionId) this.store.set({ outgoingCall: null });
+      if (this.state.outgoingCall?.sessionId === sessionId) {
+        this.callAnswered = sessionId;
+        this.store.set({ outgoingCall: null });
+        const view = this.state.sessions[sessionId];
+        const session = this.sessions.get(sessionId);
+        if (view && session) this.followCall(view, session.welcomed);
+      }
     } else if (action === 'decline') {
       if (this.state.outgoingCall?.sessionId === sessionId) {
         this.store.set({ outgoingCall: null });
@@ -2394,20 +3152,25 @@ export class CrocodileClient extends Emitter<ClientEvents> {
       }
     } else if (action === 'end') {
       if (this.state.incomingCall?.sessionId === sessionId) this.store.set({ incomingCall: null });
+      if (this.state.voiceSession === sessionId) void this.endCall(sessionId, 'Call ended');
     }
   }
 
   private async joinVoiceSession(sessionId: string) {
     const engine = this.voiceEngine;
     if (!engine) throw new Error('Voice is not available on this device');
+    // Calling back right after hanging up: let the hang-up finish first, or
+    // its last steps would end the new call (it's the same DM session).
+    await this.leaving;
     if (this.state.voiceSession && this.state.voiceSession !== sessionId) await this.leaveVoice();
+    this.callAttempt++;
     await engine.start();
     this.store.set({ voiceSession: sessionId });
     let session = this.sessions.get(sessionId);
     if (session && sessionId.startsWith('dm:') && !session.isVoice) {
       // Upgrade the DM's text-only session to one with audio.
-      await session.leave();
       this.sessions.delete(sessionId);
+      await session.leave();
       session = undefined;
     }
     session = session ?? this.ensureSession(sessionId);
@@ -2416,20 +3179,63 @@ export class CrocodileClient extends Emitter<ClientEvents> {
     await session.join();
   }
 
-  async leaveVoice() {
+  /** Hang up. `quiet`: the other side already ended it, no need to tell them. */
+  /** A hang-up still going out; a new call waits for it. */
+  private leaving: Promise<void> | null = null;
+  /** Moves on with every call joined or left, so a step that waited knows. */
+  private callAttempt = 0;
+
+  async leaveVoice(opts: { quiet?: boolean } = {}) {
+    if (this.leaving) return this.leaving;
+    const done = this.leaveVoiceNow(opts).finally(() => {
+      if (this.leaving === done) this.leaving = null;
+    });
+    this.leaving = done;
+    return done;
+  }
+
+  private async leaveVoiceNow(opts: { quiet?: boolean }) {
     const sessionId = this.state.voiceSession;
     if (!sessionId) return;
-    if (this.state.outgoingCall?.sessionId === sessionId) {
-      this.store.set({ outgoingCall: null });
-      this.sendCallSignal(sessionId, 'end');
+    this.callAttempt++;
+    if (this.state.outgoingCall?.sessionId === sessionId) this.store.set({ outgoingCall: null });
+    if (sessionId.startsWith('dm:') && !opts.quiet) {
+      // Tell the other side, ringing or talking. Let the hang-up go out
+      // first: if we host the call, leaving closes the relay.
+      if (this.sendCallSignal(sessionId, 'end'))
+        await new Promise((r) => setTimeout(r, HANG_UP_FLUSH_MS));
+      if (this.state.voiceSession !== sessionId) return;
     }
-    this.store.set({ voiceSession: null });
+    clearTimeout(this.callLostTimer);
+    this.callLostTimer = undefined;
+    this.callOthers.clear();
+    this.callMissing.clear();
+    this.callPresenceSeen = false;
+    this.callAnswered = null;
+    this.store.set({ voiceSession: null, callLiveSince: null });
     const session = this.sessions.get(sessionId);
+    // Camera and screen belong to the call.
+    this.voiceEngine?.stopCamera();
+    this.voiceEngine?.stopScreen();
     this.voiceEngine?.stopSession(sessionId);
     if (sessionId.startsWith('dm:')) {
-      // Keep the DM open for text.
-      await session?.leave();
+      // Keep the DM open for text. The call's session goes first, so its
+      // last updates while it closes don't show us still in the call.
       this.sessions.delete(sessionId);
+      // Until the text session is up: out of the call, reconnecting.
+      this.store.set((st) => {
+        const v = st.sessions[sessionId];
+        if (!v) return {};
+        const view: SessionView = {
+          ...v,
+          status: 'connecting',
+          peers: [],
+          inCall: [],
+          latency: {},
+        };
+        return { sessions: { ...st.sessions, [sessionId]: view } };
+      });
+      await session?.leave();
       const s = this.ensureSession(sessionId);
       await s.join().catch(() => {});
     } else {
@@ -2467,11 +3273,93 @@ export class CrocodileClient extends Emitter<ClientEvents> {
     clearTimeout(this.mailTimer);
     clearTimeout(this.friendRetryTimer);
     clearInterval(this.friendSweepTimer);
+    clearTimeout(this.ringingTimer);
     await this.leaveVoice().catch(() => {});
     for (const s of this.sessions.values()) await s.leave().catch(() => {});
+    await this.files?.close();
     this.link?.stop();
     await this.outbox.flush().catch(() => {});
+    // Nothing is written after this returns: the platform may close its storage.
+    await this.records.flush().catch(() => {});
   }
+
+  private makeFiles(blocks: NonNullable<PlatformAdapter['files']>, links: FileLinkFactory) {
+    return new FileTransfers({
+      kv: this.platform.kv,
+      blocks,
+      links,
+      peer: () => this.peer,
+      iceServers: () => this.stun.map((urls) => ({ urls })),
+      session: (sid) => this.sessions.get(sid),
+      openSession: async (sid) => {
+        const scope = parseSessionId(sid);
+        if (scope?.kind === 'dm') {
+          const other = scope.users.find((u) => u !== this.userId) ?? this.userId;
+          await this.openDm(other);
+          return;
+        }
+        const session = this.ensureSession(sid);
+        if (!session.state) await session.join();
+      },
+      isAllowedPeer: (sid, peer) => this.isAllowedPeer(sid, peer),
+      shareDownloads: () => this.state.settings.shareDownloads,
+      changed: (id, view) =>
+        this.store.set((st) => {
+          if (view) return { files: { ...st.files, [id]: view } };
+          const { [id]: _, ...rest } = st.files;
+          return { files: rest };
+        }),
+      served: (fileId, to) => this.emit('fileServed', { fileId, to: peerIds.user(to) }),
+      log: (m, e) => this.log(m, e),
+    });
+  }
+}
+
+/**
+ * A file name safe to show and to offer when saving: no folders, control
+ * characters or characters Windows refuses, not hidden, not empty.
+ */
+export function cleanFileName(name: string): string {
+  const base = (name.split(/[\\/]/).pop() ?? '')
+    // eslint-disable-next-line no-control-regex
+    .replace(/[\u0000-\u001f\u007f<>:"|?*\u202a-\u202e\u2066-\u2069]/g, '_');
+  // Dots and spaces off both ends, in one pass each (a regex anchored at the
+  // end would retry from every space of a long run).
+  const trimmed = (ch: string) => ch === '.' || /\s/.test(ch);
+  let start = 0;
+  let end = base.length;
+  while (start < end && trimmed(base[start]!)) start++;
+  while (end > start && trimmed(base[end - 1]!)) end--;
+  return fitName(base.slice(start, end)) || 'file';
+}
+
+/** Bytes a file name may take: what most file systems allow. */
+const NAME_MAX_BYTES = 255;
+
+/** A name cut to fit in UTF-8 bytes, whole characters only, keeping a short extension. */
+function fitName(name: string) {
+  const bytes = (s: string) => utf8.encode(s).length;
+  if (name.length <= NAME_MAX_BYTES / 3 || bytes(name) <= NAME_MAX_BYTES) return name;
+  const dot = name.lastIndexOf('.');
+  const ext = dot > 0 && name.length - dot <= 16 ? name.slice(dot) : '';
+  let room = NAME_MAX_BYTES - bytes(ext);
+  let out = '';
+  for (const ch of name.slice(0, name.length - ext.length)) {
+    room -= bytes(ch);
+    if (room < 0) break;
+    out += ch;
+  }
+  return out + ext;
+}
+
+/** The code in an invite link or code as pasted ("croc://join/abc…", "ABC…"). */
+export function inviteCodeOf(input: string): string {
+  return input
+    .trim()
+    .toLowerCase()
+    .split('/')
+    .pop()!
+    .replace(/[^a-z2-7]/g, '');
 }
 
 export function defaultDeviceName(platform: string): string {
@@ -2514,6 +3402,7 @@ export function foldEdits(messages: MessageView[]): MessageView[] {
           edited: !m.deleted,
           deleted: m.deleted,
         };
+        if (m.deleted) delete updated.file;
         byId.set(original.id, updated);
         out[out.indexOf(original)] = updated;
       }
@@ -2522,5 +3411,30 @@ export function foldEdits(messages: MessageView[]): MessageView[] {
     byId.set(m.id, m);
     out.push(m);
   }
+  return out;
+}
+
+function chunks<T>(items: T[], size: number): T[][] {
+  const out: T[][] = [];
+  for (let i = 0; i < items.length; i += size) out.push(items.slice(i, i + size));
+  return out;
+}
+
+/** Runs of items within `max` total size (and `count` items); a larger item goes alone. */
+function chunksBySize<T>(items: T[], max: number, size: (t: T) => number, count = Infinity): T[][] {
+  const out: T[][] = [];
+  let run: T[] = [];
+  let total = 0;
+  for (const item of items) {
+    const n = size(item);
+    if (run.length && (total + n > max || run.length >= count)) {
+      out.push(run);
+      run = [];
+      total = 0;
+    }
+    run.push(item);
+    total += n;
+  }
+  if (run.length) out.push(run);
   return out;
 }

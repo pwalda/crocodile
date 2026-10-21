@@ -43,6 +43,7 @@ import type { Socket } from 'node:dgram';
 import { MailboxService, defaultMailboxConfig, type MailboxConfig } from './mailbox';
 import { consoleLogger, RpcFailure, type Logger } from './util';
 import { isIP } from 'node:net';
+import { networkInterfaces } from 'node:os';
 import { lookup } from 'node:dns/promises';
 
 /** The release this server was built from: CROC_VERSION, set by the release images. */
@@ -160,6 +161,9 @@ export const defaultConfig: CoordinatorConfig = {
  * session hosts and relays signalling. Voice and text never pass through it.
  * Embeddable: the desktop app runs one of these when the user opts in.
  */
+/** A relay grant asked for again in its last minutes is extended (see requestRelay). */
+export const RELAY_RENEW_WINDOW_MS = 10 * 60_000;
+
 export class Coordinator {
   readonly config: CoordinatorConfig;
   readonly log: Logger;
@@ -351,7 +355,7 @@ export class Coordinator {
       scope.get('/v1/client', { websocket: true }, (socket, req) => {
         if (!this.admit(socket, req.ip)) return;
         // Capacity is enforced when the device authenticates (see hasRoomFor).
-        new ClientConnection(this, socket);
+        new ClientConnection(this, socket, req.socket.localAddress);
       });
       scope.get('/v1/federation', { websocket: true }, (socket, req) => {
         if (!this.admit(socket, req.ip)) return;
@@ -379,11 +383,12 @@ export class Coordinator {
         this.turn = await new TurnServer({
           port: this.config.stunPort,
           host: this.config.host.includes(':') ? '::' : '0.0.0.0',
-          relayIp: await this.relayIp(publicUrl),
+          relayIp: await this.relayIp(publicUrl, !this.config.publicUrl),
           ...(this.config.relay.ports ? { relayPorts: this.config.relay.ports } : {}),
           secret: Buffer.from(randomBytes(32)),
           limits: { maxUsers: this.config.relay.maxUsers },
           allowPrivatePeers: this.config.relay.allowPrivatePeers,
+          grantEnd: (userId) => this.relayGrants.get(userId)?.expiresAt,
           log: (m, e) => this.log.debug(m, e),
         }).start();
         this.stunPortBound = this.turn.port;
@@ -431,9 +436,12 @@ export class Coordinator {
   private stunAlt?: Socket;
   private stunAltPortBound?: number;
 
-  private async relayIp(publicUrl: string): Promise<string> {
+  private async relayIp(publicUrl: string, guessed: boolean): Promise<string> {
     if (this.config.relay.publicIp) return this.config.relay.publicIp;
     const host = new URL(publicUrl).hostname.replace(/^\[|\]$/g, '');
+    // No public URL and listening everywhere: a loopback relay address would
+    // reach no one else, so use this machine's address on the network.
+    if (guessed && isLoopback(host) && isUnspecified(this.config.host)) return lanAddress() ?? host;
     if (isIP(host)) return host;
     try {
       return (await lookup(host)).address;
@@ -442,8 +450,20 @@ export class Coordinator {
     }
   }
 
-  stunUrls(): string[] {
-    const host = new URL(this.info.url).hostname;
+  /**
+   * The host apps should use for STUN and TURN: the public URL's, or, when
+   * that is only a loopback address (no --public-url), the address the app
+   * reached us on (`via`), so apps on the LAN get one that works for them.
+   */
+  publicHost(via?: string): string {
+    const host = new URL(this.info.url).hostname.replace(/^\[|\]$/g, '');
+    const local = via?.replace(/^::ffff:/, '');
+    const pick = isLoopback(host) && local && isIP(local) && !isLoopback(local) ? local : host;
+    return pick.includes(':') ? `[${pick}]` : pick;
+  }
+
+  stunUrls(via?: string): string[] {
+    const host = this.publicHost(via);
     const own = [this.stunPortBound, this.stunAltPortBound].flatMap((p) =>
       p ? [`stun:${host}:${p}`] : [],
     );
@@ -568,24 +588,31 @@ export class Coordinator {
     const now = Date.now();
     for (const [u, g] of this.relayGrants) if (g.expiresAt <= now) this.endRelay(u, 'expired');
     let grant = this.relayGrants.get(client.userId);
-    if (!grant) {
-      if (this.relayGrants.size >= this.config.relay.maxUsers) {
-        throw new RpcFailure('unavailable', 'the relay on this server is at capacity right now');
-      }
+    if (!grant && this.relayGrants.size >= this.config.relay.maxUsers) {
+      throw new RpcFailure('unavailable', 'the relay on this server is at capacity right now');
+    }
+    // A new grant, or one about to end extended by another window: a client
+    // renews while its connection still goes through the relay, and the TURN
+    // server keeps the existing allocations (grantEnd), so nothing drops.
+    if (!grant || grant.expiresAt - now < RELAY_RENEW_WINDOW_MS) {
+      const userId = client.userId;
       const expiresAt = now + this.turn.limits.maxGrantMs;
+      if (grant) clearTimeout(grant.timer);
       const timer = setTimeout(
-        () => this.endRelay(client.userId, 'The one-hour relay window ended'),
+        () => this.endRelay(userId, 'its time window ended'),
         expiresAt - now,
       );
       timer.unref?.();
+      this.log.info(grant ? 'relay renewed' : 'relay granted', {
+        user: userId,
+        active: this.relayGrants.size + (grant ? 0 : 1),
+      });
       grant = { expiresAt, timer };
-      this.relayGrants.set(client.userId, grant);
-      this.log.info('relay granted', { user: client.userId, active: this.relayGrants.size });
+      this.relayGrants.set(userId, grant);
     }
     const creds = this.turn.credentials(client.userId, grant.expiresAt);
-    const host = new URL(this.info.url).hostname;
     return {
-      urls: [`turn:${host.includes(':') ? `[${host}]` : host}:${this.turn.port}?transport=udp`],
+      urls: [`turn:${this.publicHost(client.via)}:${this.turn.port}?transport=udp`],
       username: creds.username,
       credential: creds.credential,
       expiresAt: grant.expiresAt,
@@ -767,4 +794,22 @@ export class Coordinator {
 function hostForUrl(host: string): string {
   if (host === '0.0.0.0' || host === '::') return '127.0.0.1';
   return host.includes(':') ? `[${host}]` : host;
+}
+
+function isLoopback(host: string): boolean {
+  const h = host.replace(/^\[|\]$/g, '').replace(/^::ffff:/, '');
+  return h === 'localhost' || h === '::1' || h.startsWith('127.');
+}
+
+function isUnspecified(host: string): boolean {
+  return host === '0.0.0.0' || host === '::';
+}
+
+/** This machine's first non-internal IPv4 address, if it has one. */
+export function lanAddress(
+  interfaces: ReturnType<typeof networkInterfaces> = networkInterfaces(),
+): string | undefined {
+  for (const list of Object.values(interfaces))
+    for (const a of list ?? []) if (a.family === 'IPv4' && !a.internal) return a.address;
+  return undefined;
 }

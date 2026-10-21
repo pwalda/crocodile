@@ -1,6 +1,8 @@
 import {
   app,
   BrowserWindow,
+  clipboard,
+  dialog,
   ipcMain,
   Menu,
   nativeImage,
@@ -12,17 +14,24 @@ import {
   utilityProcess,
   type UtilityProcess,
 } from 'electron';
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { extname, join } from 'node:path';
 import { cpus } from 'node:os';
+import { contextMenuTemplate } from './context-menu';
 import { configureGlobalPtt, stopGlobalPtt } from './global-ptt';
+import { FileExports, FileStore, RISKY_EXTENSIONS } from './file-store';
+import { SecureStore } from './secure-store';
+import { createUpdateEngine } from './update-engines';
+import { UpdateController } from './updates';
 import type {
   CoordinatorProcessOut,
   CoordinatorSettings,
   CoordinatorStatus,
   RelayProcessIn,
   RelayProcessOut,
+  UpdateStatus,
 } from './ipc-types';
+import { setupScreenShare } from './screen-share';
 
 const isDev = !!process.env.CROC_RENDERER_URL;
 const APP_PROTOCOL = 'croc';
@@ -53,54 +62,11 @@ const resource = (...p: string[]) =>
 // Secure storage (identity seed): encrypted with the OS keychain via safeStorage.
 // ---------------------------------------------------------------------------
 
-const securePath = () => join(userData(), 'secure.json');
+const secure = new SecureStore(join(userData(), 'secure.json'), safeStorage);
 
-function readSecure(): Record<string, string> {
-  if (!existsSync(securePath())) return {};
-  try {
-    return JSON.parse(readFileSync(securePath(), 'utf8')) as Record<string, string>;
-  } catch {
-    return {};
-  }
-}
-
-function writeSecure(data: Record<string, string>) {
-  mkdirSync(userData(), { recursive: true });
-  writeFileSync(`${securePath()}.tmp`, JSON.stringify(data), { mode: 0o600 });
-  renameSync(`${securePath()}.tmp`, securePath());
-}
-
-function encrypt(value: string): string {
-  if (safeStorage.isEncryptionAvailable())
-    return `enc:${safeStorage.encryptString(value).toString('base64')}`;
-  return `raw:${value}`;
-}
-
-function decrypt(stored: string): string | undefined {
-  if (stored.startsWith('enc:')) {
-    try {
-      return safeStorage.decryptString(Buffer.from(stored.slice(4), 'base64'));
-    } catch {
-      return undefined;
-    }
-  }
-  return stored.startsWith('raw:') ? stored.slice(4) : undefined;
-}
-
-ipcMain.handle('secure:get', (_e, key: string) => {
-  const v = readSecure()[key];
-  return v === undefined ? undefined : decrypt(v);
-});
-ipcMain.handle('secure:set', (_e, key: string, value: string) => {
-  const data = readSecure();
-  data[key] = encrypt(value);
-  writeSecure(data);
-});
-ipcMain.handle('secure:delete', (_e, key: string) => {
-  const data = readSecure();
-  delete data[key];
-  writeSecure(data);
-});
+ipcMain.handle('secure:get', (_e, key: string) => secure.get(key));
+ipcMain.handle('secure:set', (_e, key: string, value: string) => secure.set(key, value));
+ipcMain.handle('secure:delete', (_e, key: string) => secure.delete(key));
 
 // ---------------------------------------------------------------------------
 // Host relay utility process
@@ -205,6 +171,72 @@ ipcMain.handle('coordinator:set', (_e, patch: Partial<CoordinatorSettings>) => {
 });
 
 // ---------------------------------------------------------------------------
+// Files: encrypted blocks, and saving or opening what the UI decrypts.
+// ---------------------------------------------------------------------------
+
+const fileStore = new FileStore(join(userData(), 'files'));
+const exportsInProgress = new FileExports();
+
+ipcMain.handle('files:write', (_e, id: string, index: number, block: Uint8Array) =>
+  fileStore.write(id, index, block),
+);
+ipcMain.handle('files:read', (_e, id: string, index: number, length: number) =>
+  fileStore.read(id, index, length),
+);
+ipcMain.handle('files:delete', (_e, id: string) => fileStore.delete(id));
+ipcMain.handle('files:usage', () => fileStore.usage());
+
+/** A name to offer when saving: the UI's suggestion without folders. */
+function safeName(name: unknown) {
+  const n = typeof name === 'string' ? name.split(/[\\/]/).pop()! : '';
+  return n.replace(/^[.\s]+/, '').slice(0, 255) || 'file';
+}
+
+ipcMain.handle('files:save-begin', async (_e, name: unknown) => {
+  const options = {
+    defaultPath: join(app.getPath('downloads'), safeName(name)),
+  };
+  const res = win
+    ? await dialog.showSaveDialog(win, options)
+    : await dialog.showSaveDialog(options);
+  if (res.canceled || !res.filePath) return null;
+  return exportsInProgress.begin(res.filePath, false);
+});
+ipcMain.handle('files:open-begin', async (_e, name: unknown) =>
+  exportsInProgress.begin(await exportsInProgress.tempPath(safeName(name)), true),
+);
+ipcMain.handle('files:chunk', (_e, token: string, data: Uint8Array) =>
+  exportsInProgress.chunk(token, data),
+);
+ipcMain.handle('files:abort', (_e, token: string) => exportsInProgress.abort(token));
+/** Finish a save or open: `open` opens it, `reveal` shows it in its folder. */
+ipcMain.handle('files:end', async (_e, token: string, then: 'open' | 'reveal' | 'none') => {
+  const path = await exportsInProgress.end(token);
+  if (then === 'reveal') shell.showItemInFolder(path);
+  if (then === 'open') {
+    // Asked here rather than in the UI, so nothing the UI does can skip it.
+    if (RISKY_EXTENSIONS.has(extname(path).slice(1).toLowerCase())) {
+      const options = {
+        type: 'warning' as const,
+        buttons: ['Cancel', 'Open anyway'],
+        defaultId: 0,
+        cancelId: 0,
+        message: `Open ${safeName(path)}?`,
+        detail:
+          'This kind of file can run code on your computer. Only open it if you trust ' +
+          'the person who sent it and expected it.',
+      };
+      const res = win
+        ? await dialog.showMessageBox(win, options)
+        : await dialog.showMessageBox(options);
+      if (res.response !== 1) return;
+    }
+    const err = await shell.openPath(path);
+    if (err) throw new Error(err);
+  }
+});
+
+// ---------------------------------------------------------------------------
 // Misc app services
 // ---------------------------------------------------------------------------
 
@@ -217,6 +249,10 @@ ipcMain.handle('app:info', () => ({
 
 ipcMain.handle('app:open-external', (_e, url: string) => {
   if (/^https?:\/\//i.test(url)) void shell.openExternal(url);
+});
+
+ipcMain.handle('app:copy-text', (_e, text: unknown) => {
+  if (typeof text === 'string' && text.length <= 100_000) clipboard.writeText(text);
 });
 
 ipcMain.handle('app:badge', (_e, count: number) => {
@@ -289,6 +325,17 @@ function createWindow() {
     if (/^https?:\/\//i.test(url)) void shell.openExternal(url);
     return { action: 'deny' };
   });
+  win.webContents.on('context-menu', (_e, params) => {
+    const contents = win?.webContents;
+    if (!contents) return;
+    const template = contextMenuTemplate(params, {
+      replaceMisspelling: (word) => contents.replaceMisspelling(word),
+      addToDictionary: (word) => contents.session.addWordToSpellCheckerDictionary(word),
+      openLink: (url) => void shell.openExternal(url),
+      copy: (text) => clipboard.writeText(text),
+    });
+    if (template.length) Menu.buildFromTemplate(template).popup({ window: win! });
+  });
   win.webContents.on('will-navigate', (e, url) => {
     if (!url.startsWith('file://') && !(isDev && url.startsWith(process.env.CROC_RENDERER_URL!)))
       e.preventDefault();
@@ -336,68 +383,79 @@ app.whenReady().then(() => {
   }
   handleDeepLink(process.argv.find((a) => a.startsWith(`${APP_PROTOCOL}://`)));
 
+  // Microphone and camera ('media'); screens go through the picker (screen-share.ts);
+  // full screen for a screen someone shares.
+  const allowed = [
+    'media',
+    'display-capture',
+    'fullscreen',
+    'notifications',
+    'clipboard-sanitized-write',
+    'speaker-selection',
+  ];
   session.defaultSession.setPermissionRequestHandler((_wc, permission, callback) => {
-    callback(
-      ['media', 'notifications', 'clipboard-sanitized-write', 'speaker-selection'].includes(
-        permission,
-      ),
-    );
+    callback(allowed.includes(permission));
   });
   session.defaultSession.setPermissionCheckHandler((_wc, permission) =>
-    ['media', 'notifications', 'clipboard-sanitized-write', 'speaker-selection'].includes(
-      permission,
-    ),
+    allowed.includes(permission),
   );
+  setupScreenShare();
 
   createWindow();
   createTray();
   applyCoordinator();
 
-  if (app.isPackaged) void checkForUpdates();
+  void startUpdates();
 });
 
-/**
- * Updates install themselves, except on macOS builds without a Developer ID
- * signature: Squirrel.Mac refuses to apply those, so we point the user to the
- * download instead (see docs/DISTRIBUTION.md).
- */
-async function checkForUpdates() {
+// ---------------------------------------------------------------------------
+// Updates: checked now and then; downloaded and installed when the user says.
+// ---------------------------------------------------------------------------
+
+let updates = new UpdateController(null, () => {});
+/** Versions the user was already told about in a notification. */
+const announced = new Set<string>();
+
+function publishUpdate(s: UpdateStatus) {
+  win?.webContents.send('updates:status', s);
+  if (s.state !== 'available' || announced.has(s.version)) return;
+  announced.add(s.version);
+  if (win?.isFocused() || !Notification.isSupported()) return;
+  const n = new Notification({
+    title: 'A new version of Crocodile is available',
+    body: `Version ${s.version} is out. Open Crocodile to update.`,
+  });
+  n.on('click', showWindow);
+  n.show();
+}
+
+async function startUpdates() {
   try {
-    const { autoUpdater } = await import('electron-updater');
-    if (process.platform === 'darwin' && !developerSigned()) {
-      autoUpdater.autoDownload = false;
-      autoUpdater.on('update-available', (info) => {
-        const n = new Notification({
-          title: 'A new version of Crocodile is available',
-          body: `Version ${info.version} is ready. Click to download it.`,
-        });
-        n.on('click', () => void shell.openExternal(RELEASES_URL));
-        n.show();
-      });
-      await autoUpdater.checkForUpdates();
-    } else {
-      await autoUpdater.checkForUpdatesAndNotify();
-    }
+    // Installing quits through app.quit(), so before-quit marks the app as quitting.
+    const engine = await createUpdateEngine();
+    updates = new UpdateController(engine, publishUpdate);
+    publishUpdate(updates.status);
+    if (!engine) return;
+    setTimeout(() => void updates.check(), UPDATE_FIRST_CHECK_MS);
+    setInterval(() => void updates.check(), UPDATE_CHECK_EVERY_MS).unref();
   } catch (err) {
-    console.warn('auto-update unavailable', err);
+    console.warn('updates unavailable', err);
   }
 }
 
-const RELEASES_URL = 'https://github.com/pwalda/crocodile/releases/latest';
+const UPDATE_FIRST_CHECK_MS = Number(process.env.CROC_UPDATE_FIRST_CHECK_MS ?? 15_000);
+const UPDATE_CHECK_EVERY_MS = 6 * 60 * 60_000;
 
-function developerSigned(): boolean {
-  try {
-    const pkg = JSON.parse(readFileSync(join(app.getAppPath(), 'package.json'), 'utf8'));
-    return pkg.crocSigned === true;
-  } catch {
-    return false;
-  }
-}
+ipcMain.handle('updates:status', () => updates.status);
+ipcMain.handle('updates:check', () => updates.check());
+ipcMain.handle('updates:download', () => updates.download());
+ipcMain.handle('updates:install', () => updates.install());
 
 app.on('activate', showWindow);
 app.on('before-quit', () => {
   quitting = true;
   stopGlobalPtt();
+  exportsInProgress.cleanup();
   relayProc?.kill();
   coordProc?.postMessage({ type: 'stop' });
   setTimeout(() => coordProc?.kill(), 1500);

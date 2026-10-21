@@ -13,13 +13,36 @@ export interface KeyValueStore {
 export interface MessageStore {
   /** Returns false if the message id was already stored. */
   put(message: ChatMessage): Promise<boolean>;
-  /** Newest-last page of messages older than `before` (exclusive). */
-  page(channel: string, opts: { before?: number; limit: number }): Promise<ChatMessage[]>;
-  /** Messages newer than `after`, oldest first. */
+  /**
+   * Newest-last page of messages before a position: older than `before`, or
+   * at `before` with an id below `beforeId`. Messages are ordered by
+   * (ts, id), so messages sharing a time aren't skipped between pages.
+   */
+  page(
+    channel: string,
+    opts: { before?: number; beforeId?: string; limit: number },
+  ): Promise<ChatMessage[]>;
+  /**
+   * Messages at or after `after`, oldest first. The boundary time is
+   * included (the asker may lack some messages at it); ids weed out repeats.
+   */
   since(channel: string, after: number, limit: number): Promise<ChatMessage[]>;
   latestTs(channel: string): Promise<number>;
   /** Deletes every stored message (account deletion). */
   clear(): Promise<void>;
+}
+
+/**
+ * Encrypted file blocks (files.ts): kept as they travel, so they need no
+ * other protection at rest. Block `index` of a file is `length` bytes.
+ */
+export interface FileBlockStore {
+  write(fileId: string, index: number, block: Uint8Array): Promise<void>;
+  /** Null when the block isn't there. */
+  read(fileId: string, index: number, length: number): Promise<Uint8Array | null>;
+  delete(fileId: string): Promise<void>;
+  /** Bytes of files stored on this device. */
+  usage?(): Promise<number>;
 }
 
 /** A running relay for a session this device hosts. */
@@ -39,6 +62,8 @@ export interface RelayStartOptions {
   /** Peer ids allowed to connect; checked on every offer. */
   members: () => string[];
   sendSignal: (to: string, data: SignalData) => void;
+  /** The relay stopped by itself (its process died, say): the session starts another. */
+  onFailed?: (reason: string) => void;
 }
 
 /**
@@ -55,6 +80,8 @@ export interface PlatformAdapter {
   appVersion: string;
   kv: KeyValueStore;
   messages: MessageStore;
+  /** Absent means this device can't send or receive files. */
+  files?: FileBlockStore;
   relay?: HostRelayAdapter;
   /** Browser WebRTC; absent means text/voice sessions are unavailable (e.g. unit tests). */
   rtc?: {
@@ -85,6 +112,25 @@ export class MemoryKeyValueStore implements KeyValueStore {
   }
 }
 
+export class MemoryFileBlockStore implements FileBlockStore {
+  private blocks = new Map<string, Uint8Array>();
+  async write(fileId: string, index: number, block: Uint8Array) {
+    this.blocks.set(`${fileId}/${index}`, block.slice());
+  }
+  async read(fileId: string, index: number, length: number) {
+    const b = this.blocks.get(`${fileId}/${index}`);
+    return b && b.length === length ? b.slice() : null;
+  }
+  async delete(fileId: string) {
+    for (const k of [...this.blocks.keys()]) if (k.startsWith(`${fileId}/`)) this.blocks.delete(k);
+  }
+  async usage() {
+    let n = 0;
+    for (const b of this.blocks.values()) n += b.length;
+    return n;
+  }
+}
+
 export class MemoryMessageStore implements MessageStore {
   private byChannel = new Map<string, ChatMessage[]>();
   private ids = new Set<string>();
@@ -99,15 +145,19 @@ export class MemoryMessageStore implements MessageStore {
     return true;
   }
 
-  async page(channel: string, opts: { before?: number; limit: number }) {
+  async page(channel: string, opts: { before?: number; beforeId?: string; limit: number }) {
+    const { before, beforeId } = opts;
     const list = (this.byChannel.get(channel) ?? []).filter(
-      (m) => opts.before === undefined || m.ts < opts.before,
+      (m) =>
+        before === undefined ||
+        m.ts < before ||
+        (m.ts === before && beforeId !== undefined && m.id < beforeId),
     );
     return list.slice(-opts.limit);
   }
 
   async since(channel: string, after: number, limit: number) {
-    return (this.byChannel.get(channel) ?? []).filter((m) => m.ts > after).slice(0, limit);
+    return (this.byChannel.get(channel) ?? []).filter((m) => m.ts >= after).slice(0, limit);
   }
 
   async latestTs(channel: string) {

@@ -82,13 +82,19 @@ on "Relay through a coordination server", your server can relay their
 already end-to-end encrypted media (TURN). Apps reach the relay on the STUN
 UDP port; the other end of each relayed connection gets its own UDP port,
 from `--relay-ports` if you set it. Behind a firewall or Docker, set a range
-and open it (four ports per relay user is plenty: 49160-49259 covers the
-default 25 users), or relayed connections never get through. Each
-grant lasts at most one hour, `--relay-max-users` caps how many people use
+and open it, or relayed connections never get through. About four ports per
+relay user covers typical use (a chat, a DM and a call), so 49160-49259 suits
+the default 25 users. A user may hold up to eight relayed connections; when
+the range is full, a user's newest connection takes the port of their own
+oldest, so stale ones never lock anyone out. Each
+grant lasts at most one hour (apps renew it while their connection still
+goes through the relay), `--relay-max-users` caps how many people use
 it at once, and each allocation is rate-limited (about 100 kbit/s of voice
 per person). Your server only ever sees ciphertext. Turn it off with
 `--relay off` if bandwidth is scarce. The desktop app's built-in server
-leaves it off unless you enable "Offer a relay".
+leaves it off unless you enable "Offer a relay"; it then relays on the UDP
+ports just above its own (four per relay user; the app shows the range), which
+you forward along with its port to serve people outside your network.
 
 ## Hosting safely
 
@@ -218,7 +224,10 @@ The directory is tiny: `docker compose --profile directory up -d directory`
 (port 7400). Point coordinators at it with `CROC_DIRECTORY` and build the app
 with `CROC_DIRECTORIES=https://your-directory` to make it the default.
 Directories verify that each registered server is reachable at its advertised
-URL, and drop servers that stop sending heartbeats.
+URL, and drop servers that stop sending heartbeats. One address may register
+20 times a minute, and a directory lists at most 5000 servers. Behind a
+reverse proxy, set `CROC_DIR_TRUST_PROXY=1` (and keep port 7400 off the
+internet) so the limit applies to each server's address, not the proxy's.
 
 ## Private networks
 

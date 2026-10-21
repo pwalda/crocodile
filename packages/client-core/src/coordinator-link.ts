@@ -76,6 +76,8 @@ export class CoordinatorLink extends Emitter<LinkEvents> {
   private conn?: CoordinatorConnection;
   private current?: RankedServer;
   private stopped = false;
+  /** Bumped by start() and stop(): a connect loop from an earlier run gives up. */
+  private run = 0;
   private waiters: { resolve: (c: CoordinatorConnection) => void; reject: (e: Error) => void }[] =
     [];
   private retryTimer?: ReturnType<typeof setTimeout>;
@@ -97,12 +99,16 @@ export class CoordinatorLink extends Emitter<LinkEvents> {
 
   start() {
     this.stopped = false;
+    this.run++;
+    clearTimeout(this.retryTimer);
+    clearInterval(this.rerankTimer);
     void this.connectLoop();
     this.rerankTimer = setInterval(() => void this.refreshServers().catch(() => {}), 10 * 60_000);
   }
 
   stop() {
     this.stopped = true;
+    this.run++;
     clearTimeout(this.retryTimer);
     clearInterval(this.rerankTimer);
     this.conn?.close();
@@ -209,13 +215,17 @@ export class CoordinatorLink extends Emitter<LinkEvents> {
 
   private async connectLoop() {
     if (this.stopped) return;
+    const run = this.run;
+    // Stopped, or started again (which runs its own loop), while we waited.
+    const stale = () => this.stopped || this.run !== run;
     // Fast path: fail over straight to the standby we already measured.
     let list = this.ranked.filter((r) => r.info.url !== this.current?.info.url);
     if (this.current && this.attempt === 0) list = [this.current, ...list];
     if (list.length === 0 || this.attempt > 0) list = await this.candidates().catch(() => []);
+    if (stale()) return;
     this.setStatus('connecting');
     for (const candidate of list) {
-      if (this.stopped) return;
+      if (stale()) return;
       try {
         const conn = await CoordinatorConnection.connect({
           url: candidate.info.url,
@@ -226,16 +236,22 @@ export class CoordinatorLink extends Emitter<LinkEvents> {
           expectedServerKey: candidate.info.key || undefined,
           WebSocketImpl: this.opts.WebSocketImpl,
         });
+        if (stale()) {
+          // A connection nobody will use or close otherwise.
+          conn.close();
+          return;
+        }
         this.attach(conn, { ...candidate, info: conn.server });
         return;
       } catch (err) {
         if (err instanceof RpcCallError && err.code === 'account_deleted') {
           this.emit('account_deleted', { record: err.record });
-          if (this.stopped) return;
+          if (stale()) return;
         }
         /* next candidate */
       }
     }
+    if (stale()) return;
     this.setStatus('offline');
     this.attempt += 1;
     const delay = Math.min(30_000, 1000 * 2 ** Math.min(this.attempt, 5));

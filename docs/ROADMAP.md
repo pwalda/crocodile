@@ -22,7 +22,8 @@ report what matters most; issues and discussions are welcome.
 - Multiple devices per account: linking with a code and security check,
   per-device keys for message delivery, renaming and removal.
 - Opt-in relay through coordination servers for networks that block direct
-  connections (one hour at a time, capped users per server).
+  connections (hour-long windows renewed while still needed, capped users
+  per server).
 - Offline delivery: a per-device outbox exchanged peer-to-peer with
   acknowledgements, and an opt-in server mailbox for DMs (sealed per device,
   up to 7 days, works across the server mesh).
@@ -65,8 +66,11 @@ report what matters most; issues and discussions are welcome.
 11. **Store and signing path** (see [DISTRIBUTION.md](DISTRIBUTION.md)):
     Microsoft Store listing (MSIX, signed by the Store, with the built-in
     updater disabled) plus winget; Apple Developer Program for Developer ID
-    signing, notarization and working macOS auto-update; SignPath for the
-    direct Windows download. Until then: the one-line installers.
+    signing, notarization and updates that keep macOS permissions (unsigned
+    builds update in place but lose the Accessibility permission); Azure
+    Artifact Signing for the direct Windows download. The release workflow is
+    ready for both; they start once the accounts exist. Until then: the
+    one-line installers.
 
 ## Paused
 

@@ -4,7 +4,7 @@
  * screenshots along the way. Run: xvfb-run -a npx tsx tests/electron/smoke.ts <outdir>
  */
 import { _electron as electron, type ElectronApplication, type Page } from 'playwright-core';
-import { mkdtempSync, mkdirSync } from 'node:fs';
+import { existsSync, mkdtempSync, mkdirSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createRequire } from 'node:module';
@@ -37,7 +37,7 @@ await new Promise((r) => setTimeout(r, 1000));
 
 async function launch(
   name: string,
-  opts: { noDirectory?: boolean } = {},
+  opts: { noDirectory?: boolean; env?: Record<string, string> } = {},
 ): Promise<{ app: ElectronApplication; page: Page }> {
   // CROC_APP_EXEC points at a packaged build (e.g. release/linux-unpacked/crocodile).
   const packaged = process.env.CROC_APP_EXEC;
@@ -53,6 +53,7 @@ async function launch(
       ...process.env,
       CROC_USER_DATA: mkdtempSync(join(tmpdir(), `croc-${name}-`)),
       CROC_DIRECTORIES_OVERRIDE: opts.noDirectory ? '' : directory.url,
+      ...opts.env,
     },
   });
   const page = await app.firstWindow();
@@ -121,6 +122,9 @@ await b.page.getByRole('button', { name: 'Join a space' }).click();
 await b.page.getByPlaceholder('croc://join/abcd2345').fill(inviteText);
 await b.page.getByRole('button', { name: 'Join space' }).click();
 await b.page.getByText('This is the start of general').waitFor({ timeout: 15_000 });
+// Only the owner can make invites: Bob isn't offered any.
+if (await b.page.getByRole('button', { name: 'Invite people' }).count())
+  throw new Error('a member who does not own the space is offered invites');
 
 // Chat both ways.
 await a.page.waitForFunction(
@@ -143,6 +147,121 @@ await b.page.waitForFunction(
   { timeout: 15_000 },
 );
 await shot(a.page, '06-chat');
+
+// Files: a picture and a document, straight from Alice's device to Bob's.
+const picture = readFileSync(join(appDir, 'resources/icon.png'));
+const notes = Buffer.from('Meet at the swamp at 8.\n'.repeat(5000));
+await a.page.getByLabel('Choose files to send').setInputFiles([
+  { name: 'swamp.png', mimeType: 'image/png', buffer: picture },
+  { name: 'notes.txt', mimeType: 'text/plain', buffer: notes },
+]);
+await a.page.getByRole('list', { name: 'Files to send' }).getByText('notes.txt').waitFor();
+await a.page.getByPlaceholder('Message general').fill('the map and the plan');
+await shot(a.page, '06h-attachments');
+await a.page.keyboard.press('Enter');
+// Bob isn't Alice's friend (yet): her picture waits for his click.
+const tile = b.page.getByRole('button', { name: /^Download: swamp\.png/ });
+await tile.waitFor({ timeout: 20_000 });
+await shot(b.page, '06i-file-offered');
+await tile.click();
+await b.page.getByRole('button', { name: 'Picture: swamp.png' }).waitFor({ timeout: 30_000 });
+const notesCard = b.page.getByRole('group', { name: 'File: notes.txt' });
+await notesCard.getByRole('button', { name: 'Download', exact: true }).click();
+await notesCard.getByRole('button', { name: 'Save as…' }).waitFor({ timeout: 30_000 });
+await shot(b.page, '06j-file-received');
+const savedPath = join(mkdtempSync(join(tmpdir(), 'croc-saved-')), 'notes.txt');
+await b.app.evaluate(({ dialog, shell }, path) => {
+  dialog.showSaveDialog = (async () => ({ canceled: false, filePath: path })) as never;
+  shell.showItemInFolder = () => {};
+}, savedPath);
+await notesCard.getByRole('button', { name: 'Save as…' }).click();
+for (let i = 0; i < 50 && !(existsSync(savedPath) && readFileSync(savedPath).equals(notes)); i++)
+  await b.page.waitForTimeout(100);
+if (!readFileSync(savedPath).equals(notes))
+  throw new Error('the saved file differs from the one sent');
+await b.page.getByRole('button', { name: 'Picture: swamp.png' }).click();
+await b.page.getByRole('dialog', { name: 'swamp.png' }).waitFor();
+await shot(b.page, '06k-picture-zoom');
+await b.page.keyboard.press('Escape');
+// Deleting downloaded files takes the picture out of the chat, ready to
+// download again, not left showing a copy that's gone.
+await b.page.getByLabel('Account').click();
+await b.page.getByText('Settings', { exact: true }).click();
+await b.page.getByRole('button', { name: 'Files', exact: true }).click();
+await b.page.getByRole('button', { name: 'Delete downloaded files' }).click();
+await b.page
+  .getByRole('button', { name: 'Delete downloaded files' })
+  .and(b.page.locator(':disabled'))
+  .waitFor();
+await b.page.getByRole('button', { name: 'Close settings' }).click();
+await b.page.getByRole('button', { name: /^Download: swamp\.png/ }).waitFor({ timeout: 5000 });
+if (await b.page.getByRole('button', { name: 'Picture: swamp.png' }).count())
+  throw new Error('a deleted picture is still shown');
+// Links open in the browser; an invite link becomes a card to join the space.
+await a.page
+  .getByPlaceholder('Message general')
+  .fill(`Docs at crocodilechat.com/docs and bring friends: ${inviteText}`);
+await a.page.keyboard.press('Enter');
+await b.app.evaluate(({ shell }) => {
+  const opened: string[] = [];
+  (globalThis as { opened?: string[] }).opened = opened;
+  shell.openExternal = async (url: string) => void opened.push(url);
+});
+await b.page.getByRole('link', { name: 'crocodilechat.com/docs' }).click();
+await b.page.waitForTimeout(300);
+const bobOpened = await b.app.evaluate(() => (globalThis as { opened?: string[] }).opened);
+if (JSON.stringify(bobOpened) !== JSON.stringify(['https://crocodilechat.com/docs']))
+  throw new Error(`a chat link opened ${JSON.stringify(bobOpened)}`);
+const card = b.page.getByLabel('Invite to The Swamp');
+await card.getByRole('button', { name: 'Open' }).waitFor({ timeout: 10_000 });
+await shot(b.page, '06b-links');
+// @mentions and emoji, from the keyboard; a mention of you stands out.
+const bobBox = b.page.getByPlaceholder('Message general');
+await bobBox.click();
+await bobBox.pressSequentially('@Al');
+await b.page.getByRole('option', { name: /Alice/ }).waitFor();
+await b.page.keyboard.press('Enter');
+await bobBox.pressSequentially('ship it :rock');
+await b.page.getByRole('listbox', { name: 'Emoji' }).waitFor();
+await shot(b.page, '06c-emoji-suggest');
+await b.page.keyboard.press('Enter');
+if ((await bobBox.inputValue()) !== '@Alice ship it 🚀 ')
+  throw new Error(`the composer holds ${JSON.stringify(await bobBox.inputValue())}`);
+await b.page.keyboard.press('Enter');
+await a.page.getByRole('button', { name: '@Alice' }).waitFor({ timeout: 10_000 });
+await a.page.getByText('ship it 🚀').waitFor();
+await b.page.getByRole('button', { name: 'Emoji', exact: true }).click();
+await b.page.getByRole('dialog', { name: 'Emoji picker' }).waitFor();
+await shot(b.page, '06d-emoji-picker');
+await b.page.getByRole('button', { name: 'crocodile' }).click();
+if ((await bobBox.inputValue()) !== '🐊') throw new Error('the picker did not insert the emoji');
+await b.page.keyboard.press('Escape');
+await bobBox.fill('');
+await shot(a.page, '06e-mentioned');
+// Right-click a message: its actions, including copying it (mentions as names).
+await a.page.getByText('ship it 🚀').click({ button: 'right' });
+const messageMenu = a.page.getByRole('menu');
+await messageMenu.getByRole('menuitem', { name: 'Reply' }).waitFor();
+await shot(a.page, '06f-message-menu');
+// Bob's window has the focus: copying from Alice's must work all the same.
+await b.page.bringToFront();
+await messageMenu.getByRole('menuitem', { name: 'Copy text' }).click();
+let copied = '';
+for (let i = 0; i < 20 && copied !== '@Alice ship it 🚀'; i++) {
+  await a.page.waitForTimeout(100);
+  copied = await a.app.evaluate(({ clipboard }) => clipboard.readText());
+}
+if (copied !== '@Alice ship it 🚀') throw new Error(`copied ${JSON.stringify(copied)}`);
+// The owner makes Bob an admin: he can then invite people and change the space.
+await a.page.getByRole('button', { name: 'Space menu' }).click();
+await a.page.getByText('Space settings').click();
+const admins = a.page.getByRole('region', { name: 'People' });
+await admins.getByRole('button', { name: 'Ban' }).waitFor();
+await admins.getByRole('switch', { name: 'Bob is an admin' }).click();
+await admins.getByRole('switch', { name: 'Bob is an admin', checked: true }).waitFor();
+await shot(a.page, '06g-admins');
+await a.page.keyboard.press('Escape');
+await b.page.getByRole('button', { name: 'Invite people' }).waitFor({ timeout: 10_000 });
 // Panel shadows stay as faint as designed (12% opaque) whatever the accent.
 const shadow = await a.page.evaluate(() => {
   const probe = document.body.appendChild(document.createElement('div'));
@@ -165,6 +284,19 @@ await inCall(b.page);
 await a.page.waitForTimeout(2000);
 await shot(a.page, '07-voice');
 await shot(b.page, '08-voice-bob');
+// A camera in a voice room: the room becomes tiles.
+await b.page.getByRole('button', { name: 'Turn camera on' }).first().click();
+await b.page.getByRole('dialog').getByRole('button', { name: 'Turn camera on' }).click();
+await a.page
+  .getByRole('group', { name: /camera$/ })
+  .getByLabel(/^Camera: /)
+  .waitFor({ timeout: 20_000 });
+await a.page.waitForTimeout(1500);
+await shot(a.page, '08b-voice-camera');
+await b.page.getByRole('button', { name: 'Turn camera off' }).first().click();
+await a.page
+  .getByRole('group', { name: /camera$/ })
+  .waitFor({ state: 'detached', timeout: 10_000 });
 
 // People.
 await b.page.getByRole('button', { name: 'Home' }).click();
@@ -181,19 +313,125 @@ await shot(a.page, '10-friend-request');
 // A call shows as ringing, not as on, until the friend picks up.
 await a.page.getByRole('button', { name: 'Accept' }).click();
 await a.page.getByRole('button', { name: /^All/ }).click();
+// Bob has their conversation open when Alice calls.
+await b.page.getByRole('button', { name: 'Home' }).click();
+await b.page.getByRole('button', { name: /^All/ }).click();
+await b.page.getByRole('button', { name: 'Message' }).click();
+await b.page.getByPlaceholder('Message Alice').waitFor();
 await a.page.getByRole('button', { name: 'Call', exact: true }).click();
-await a.page.getByText('Ringing…').waitFor({ timeout: 15_000 });
+// The call bar and the DM's call stage both say so.
+await a.page.getByText('Ringing…').first().waitFor({ timeout: 15_000 });
 await b.page.getByText('is calling you').waitFor({ timeout: 15_000 });
 await a.page.waitForTimeout(1500);
-if (!(await a.page.getByText('Ringing…').isVisible()))
+if (!(await a.page.getByText('Ringing…').first().isVisible()))
   throw new Error('the call looks answered before the friend picked up');
 await shot(a.page, '10b-ringing');
-await b.page.getByRole('button', { name: 'Accept' }).click();
-await a.page.getByText('Ringing…').waitFor({ state: 'detached', timeout: 15_000 });
+// One place to answer: the prompt. The conversation doesn't look like a call yet.
+if (
+  (await b.page.getByRole('button', { name: 'Accept', exact: true }).count()) !== 1 ||
+  (await b.page.getByRole('button', { name: 'Start a call' }).count()) !== 0
+)
+  throw new Error('the call can be answered in more than one place');
+if (await b.page.getByRole('region', { name: 'Call' }).count())
+  throw new Error("the conversation shows a call that hasn't started");
+// Alice is on the conversation: its stage shows the ringing, without a second prompt.
+if (await a.page.getByText(/^Calling /).count())
+  throw new Error('the caller sees the ringing twice');
+await shot(b.page, '10b2-incoming');
+await b.page.getByRole('button', { name: 'Accept', exact: true }).click();
+await a.page.waitForFunction(() => !document.body.innerText.includes('Ringing…'), undefined, {
+  timeout: 15_000,
+});
 await a.page.waitForFunction(() => /\b0:0\d\b/.test(document.body.innerText), undefined, {
   timeout: 15_000,
 });
+// Bob answered from the DM: the call is on a stage above the chat, like a room.
+const stage = b.page.getByRole('region', { name: 'Call' });
+await stage.getByRole('button', { name: 'Hang up' }).waitFor({ timeout: 10_000 });
+await b.page.waitForTimeout(3500);
+await shot(b.page, '10c-dm-call');
+// Video: a camera shows after a preview, to the other side as a tile.
+await a.page.getByRole('button', { name: 'Turn camera on' }).first().click();
+const cameraModal = a.page.getByRole('dialog');
+await cameraModal.getByLabel('Camera preview').waitFor();
+await a.page.waitForTimeout(800);
+await shot(a.page, '10d-camera-preview');
+await cameraModal.getByRole('button', { name: 'Turn camera on' }).click();
+await a.page.getByRole('group', { name: 'Your camera' }).waitFor({ timeout: 15_000 });
+const aliceCamera = b.page.getByRole('group', { name: /camera$/ });
+await aliceCamera.getByLabel(/^Camera: /).waitFor({ timeout: 20_000 });
+const playing = (page: Page, label: RegExp) =>
+  page.waitForFunction(
+    (src) =>
+      [...document.querySelectorAll('video')].some(
+        (v) => new RegExp(src).test(v.getAttribute('aria-label') ?? '') && v.videoWidth > 0,
+      ),
+    label.source,
+    { timeout: 20_000 },
+  );
+await playing(b.page, /^Camera: /);
+await shot(b.page, '10e-camera-bob');
+// A screen share is offered; only who clicks Watch gets it.
+await b.page.getByRole('button', { name: 'Share your screen' }).first().click();
+const shareModal = b.page.getByRole('dialog');
+await shareModal.getByRole('region', { name: 'Screens' }).waitFor({ timeout: 15_000 });
+await shot(b.page, '10f-share-picker');
+await shareModal.getByText('Motion', { exact: true }).click();
+await shareModal.getByRole('button', { name: 'Share', exact: true }).click();
+await b.page.getByRole('group', { name: 'Your screen' }).waitFor({ timeout: 15_000 });
+const watch = a.page.getByRole('button', { name: /^Watch .*'s screen$/ });
+await watch.waitFor({ timeout: 15_000 });
+await shot(a.page, '10g-screen-offer');
+await watch.click();
+await playing(a.page, /^Screen: /);
+await shot(a.page, '10h-watching');
+// Full screen and the pop-out window both open, and close again.
+const screenStage = a.page.getByRole('group', { name: /^Watching .*'s screen$/ });
+await screenStage.hover();
+await screenStage.getByRole('button', { name: 'Full screen' }).click();
+await a.page.waitForFunction(
+  () => document.fullscreenElement?.getAttribute('role') === 'group',
+  undefined,
+  {
+    timeout: 5000,
+  },
+);
+await a.page.waitForTimeout(800);
+await shot(a.page, '10i-full-screen');
+await screenStage.hover();
+await screenStage.getByRole('button', { name: 'Exit full screen' }).click();
+await a.page.waitForFunction(() => !document.fullscreenElement, undefined, { timeout: 5000 });
+await screenStage.hover();
+await screenStage.getByRole('button', { name: 'Pop out' }).click();
+await a.page.waitForFunction(() => !!document.pictureInPictureElement, undefined, {
+  timeout: 5000,
+});
+await a.page.evaluate(() => document.exitPictureInPicture());
+await a.page.getByRole('button', { name: 'Stop watching' }).click();
+await watch.waitFor({ timeout: 10_000 });
+await b.page.getByRole('button', { name: 'Stop sharing your screen' }).first().click();
+await watch.waitFor({ state: 'detached', timeout: 10_000 });
+await a.page.getByRole('button', { name: 'Turn camera off' }).first().click();
+await aliceCamera.waitFor({ state: 'detached', timeout: 10_000 });
+// Hanging up ends the call for the other side too, instead of leaving it "on".
 await a.page.getByRole('button', { name: 'Leave call' }).click();
+await b.page.getByText('Call ended').waitFor({ timeout: 10_000 });
+await b.page.getByRole('button', { name: 'Leave call' }).waitFor({ state: 'detached' });
+
+// A video call: Alice's camera is on from the start; Bob answers with his.
+await a.page.getByRole('button', { name: 'Start a video call' }).click();
+await b.page.getByText('is video calling you').waitFor({ timeout: 15_000 });
+await a.page.getByRole('group', { name: 'Your camera' }).waitFor({ timeout: 15_000 });
+await shot(b.page, '10j-video-incoming');
+await b.page.getByRole('button', { name: 'Accept with video' }).click();
+await playing(a.page, /^Camera: /);
+await playing(b.page, /^Camera: /);
+await a.page.waitForTimeout(1000);
+await shot(a.page, '10k-video-call');
+await a.page.getByRole('button', { name: 'Leave call' }).click();
+await b.page
+  .getByRole('button', { name: 'Leave call' })
+  .waitFor({ state: 'detached', timeout: 10_000 });
 
 // Command palette + settings.
 // The search button shows a search icon and this system's shortcut, not the Mac ⌘ key.
@@ -212,6 +450,14 @@ await a.page.getByLabel('Account').click();
 await a.page.getByText('Settings', { exact: true }).click();
 await a.page.getByRole('button', { name: 'Voice' }).click();
 await shot(a.page, '12-settings-voice');
+await a.page.getByRole('button', { name: 'Privacy & alerts' }).click();
+await a.page.getByRole('switch', { name: 'Sounds' }).waitFor();
+await a.page.getByLabel('Sound volume').waitFor();
+await shot(a.page, '12b-settings-sounds');
+await a.page.getByRole('button', { name: 'Files', exact: true }).click();
+await a.page.getByRole('switch', { name: "Share files I've downloaded" }).waitFor();
+await a.page.getByText(/Files on this computer/).waitFor();
+await shot(a.page, '12c-settings-files');
 await a.page.getByRole('button', { name: 'Network' }).click();
 // The network check ran on connecting, and can run again.
 const test = a.page.getByRole('region', { name: 'Connection test' });
@@ -220,6 +466,10 @@ await test.getByText(verdicts).waitFor({ timeout: 15_000 });
 await test.getByRole('button', { name: 'Test again' }).click();
 await test.getByRole('button', { name: 'Test again' }).waitFor({ timeout: 15_000 });
 await test.getByText(verdicts).waitFor({ timeout: 15_000 });
+// What the check looked at, one line each, and why it decided what it did.
+const checked = test.getByRole('list', { name: 'What was checked' });
+await checked.getByText('UDP reaches the coordination server').waitFor();
+await test.getByText(/^Result:/).waitFor();
 // Who runs the connected server, as it says.
 await a.page.getByRole('button', { name: 'https://example.org/privacy/' }).waitFor();
 // The public server list from the directory, with the connected server marked.
@@ -282,9 +532,28 @@ if (JSON.stringify(report.connection.directories) !== JSON.stringify([directory.
   throw new Error(`expected the test directory, got ${report.connection.directories}`);
 if (JSON.stringify(report).includes('This never touches a server'))
   throw new Error('diagnostics must not contain message content');
+if (!report.sessions.some((x: { attempts?: unknown[] }) => x.attempts?.length))
+  throw new Error('diagnostics must say how connections went');
+// Debug: every connection, live.
+await a.page.getByRole('button', { name: 'Debug' }).click();
+const debugSessions = a.page.getByRole('region', { name: 'Sessions' });
+await debugSessions.getByText('The Swamp (chat)').waitFor({ timeout: 10_000 });
+await a.page.getByRole('region', { name: 'Client log' }).getByLabel('Log lines').waitFor();
+await debugSessions.getByText('The Swamp (chat)').click();
+await debugSessions.getByRole('region', { name: 'Connection attempts' }).first().waitFor();
+await shot(a.page, '14e-debug');
 await a.page.getByRole('button', { name: 'Close settings' }).click();
 await a.page.getByRole('button', { name: 'The Swamp' }).click();
 await shot(a.page, '15-dark-chat');
+// Where a connection stands, step by step.
+await a.page.getByTitle('Connection details').first().click();
+const details = a.page.getByRole('dialog');
+await details.getByRole('region', { name: 'Connection attempts' }).waitFor();
+// The network types host election went by.
+await details.getByLabel("Members' networks").waitFor();
+await shot(a.page, '15b-connection');
+await a.page.keyboard.press('Escape');
+await details.waitFor({ state: 'detached' });
 
 // Link a second device to Alice's account.
 const c = await launch('alice-laptop');
@@ -343,6 +612,62 @@ await d.page.getByText('Your account was deleted').waitFor({ timeout: 15_000 });
 await d.page.getByText("I'm new here").waitFor();
 await shot(d.page, '22-account-deleted');
 await d.app.close();
+
+// In-app update (a pretend release): offered, downloaded on request, then restart.
+const u = await launch('updater', {
+  noDirectory: true,
+  env: {
+    CROC_FAKE_UPDATE: '9.9.0',
+    CROC_UPDATE_FIRST_CHECK_MS: '500',
+    CROC_FAKE_UPDATE_STEP_MS: '250',
+  },
+});
+let updaterLog = '';
+u.app.process().stdout?.on('data', (d: Buffer) => (updaterLog += d.toString()));
+await onboard(u.page, 'Ulla');
+await finishOnboarding(u.page);
+await u.page.getByRole('button', { name: 'Update', exact: true }).waitFor({ timeout: 15_000 });
+await shot(u.page, '22c-update-available');
+await u.page.getByRole('button', { name: 'Update', exact: true }).click();
+await u.page.getByRole('button', { name: /Updating \d+%/ }).waitFor();
+await shot(u.page, '22d-update-downloading');
+await u.page.getByRole('button', { name: /Updating/ }).click();
+await u.page.getByRole('progressbar', { name: 'Download progress' }).waitFor();
+await u.page.getByText('Version 9.9.0 is downloaded').waitFor({ timeout: 15_000 });
+await shot(u.page, '22e-update-ready');
+await u.page.getByRole('dialog').getByRole('button', { name: 'Restart to update' }).click();
+for (let i = 0; i < 50 && !updaterLog.includes('would restart into 9.9.0'); i++)
+  await new Promise((r) => setTimeout(r, 100));
+if (!updaterLog.includes('would restart into 9.9.0'))
+  throw new Error('Restart to update must install the downloaded version');
+// The pretend installer didn't start (like a cancelled password prompt): the
+// app keeps running as before, so closing the window hides it to the tray.
+await u.app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0]!.close());
+await new Promise((r) => setTimeout(r, 500));
+const hidden = await u.app.evaluate(({ BrowserWindow }) =>
+  BrowserWindow.getAllWindows().map((w) => w.isVisible()),
+);
+if (JSON.stringify(hidden) !== '[false]')
+  throw new Error(`after an install that didn't start, closing must hide the window: ${hidden}`);
+await u.app.close();
+
+// Deleting a space: confirmed by typing its name.
+await a.page.getByTitle('Create or join a space').click();
+await a.page.getByText('Create my own').click();
+await a.page.getByRole('dialog').getByRole('textbox').fill('Scratch');
+await a.page.getByRole('button', { name: 'Create' }).click();
+await a.page.getByText('This is the start of general').waitFor({ timeout: 15_000 });
+await a.page.getByLabel('Space menu').click();
+await a.page.getByText('Space settings').click();
+await a.page.getByRole('button', { name: 'Delete space' }).click();
+const deleteSpace = a.page.getByRole('dialog').getByRole('button', { name: 'Delete space' });
+if (await deleteSpace.isEnabled()) throw new Error('deleting a space must wait for its typed name');
+await a.page.getByRole('dialog').getByLabel('Type Scratch to confirm').fill('Scratch');
+await shot(a.page, '22b-delete-space');
+await deleteSpace.click();
+await a.page
+  .getByText('This is the start of general')
+  .waitFor({ state: 'detached', timeout: 15_000 });
 
 // Run server really starts the app's own coordination server (on the default
 // port 7443). Done last: while it runs it joins the test network.

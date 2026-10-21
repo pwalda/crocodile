@@ -1,15 +1,27 @@
 import {
+  ArrowDownCircle,
   Bell,
   Home,
+  Loader2,
   LogOut,
   Plus,
   Search,
   Settings,
   ShieldCheck,
+  RotateCw,
   Smartphone,
   WifiOff,
 } from 'lucide-react';
-import { getClient, navigate, openModal, ui, useCroc, useUi } from '../croc';
+import {
+  downloadUpdate,
+  getClient,
+  installUpdate,
+  navigate,
+  openModal,
+  ui,
+  useCroc,
+  useUi,
+} from '../croc';
 import { colorFor, initials, shortcutLabel } from '../lib/format';
 import { Logo } from './Logo';
 import { Avatar, Menu, MenuItem, StatusDot, cx } from './ui';
@@ -81,6 +93,7 @@ export function TopBar() {
           {shortcutLabel('K')}
         </kbd>
       </button>
+      <UpdatePill />
       <ConnectionPill />
       <AccountMenu />
     </header>
@@ -112,6 +125,63 @@ function Tab({
       )}
     </button>
   );
+}
+
+/** Shown once a new version is out: download it, watch it come in, restart into it. */
+function UpdatePill() {
+  const update = useUi((s) => s.update);
+  const pill =
+    'flex h-9 shrink-0 items-center gap-2 rounded-full px-3 text-xs font-semibold transition';
+  if (update.state === 'available') {
+    const install = update.how === 'install';
+    return (
+      <button
+        onClick={downloadUpdate}
+        title={
+          install
+            ? `Version ${update.version} is out. Download and install it.`
+            : `Version ${update.version} is out. Open the download page.`
+        }
+        className={cx(pill, 'bg-accent text-on-accent hover:brightness-110')}
+      >
+        <ArrowDownCircle size={15} /> {install ? 'Update' : 'Download update'}
+      </button>
+    );
+  }
+  if (update.state === 'downloading') {
+    return (
+      <button
+        onClick={() => openModal({ kind: 'settings', tab: 'about' })}
+        title={`Downloading version ${update.version}`}
+        className={cx(pill, 'bg-accent-soft text-accent')}
+      >
+        <Loader2 size={15} className="animate-spin" /> Updating {update.percent}%
+      </button>
+    );
+  }
+  if (update.state === 'ready') {
+    return (
+      <button
+        onClick={installUpdate}
+        title={`Version ${update.version} is ready`}
+        className={cx(pill, 'bg-accent text-on-accent hover:brightness-110')}
+      >
+        <RotateCw size={15} /> {update.after === 'open' ? 'Install update' : 'Restart to update'}
+      </button>
+    );
+  }
+  if (update.state === 'error' && update.version) {
+    return (
+      <button
+        onClick={() => openModal({ kind: 'settings', tab: 'about' })}
+        title={`The update failed: ${update.message}`}
+        className={cx(pill, 'bg-warn/15 text-warn')}
+      >
+        <ArrowDownCircle size={15} /> Update failed
+      </button>
+    );
+  }
+  return null;
 }
 
 function ConnectionPill() {

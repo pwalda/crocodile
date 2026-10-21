@@ -1,13 +1,19 @@
 import { useCallback, useEffect, useState, type ReactNode } from 'react';
 import {
+  AlertTriangle,
   AppWindow,
+  ArrowDownCircle,
+  Bug,
   Check,
+  CheckCircle2,
   Code,
   Coffee,
   Copy,
   Eye,
+  Files,
   Globe,
   Heart,
+  HelpCircle,
   Info,
   Laptop,
   LogOut,
@@ -17,6 +23,7 @@ import {
   Palette,
   Plus,
   RefreshCw,
+  RotateCw,
   Server,
   Shield,
   ShieldCheck,
@@ -27,14 +34,19 @@ import {
   Users,
   Wifi,
   X,
+  XCircle,
 } from 'lucide-react';
 import {
   ACCENTS,
   closeModal,
   diagnostics,
+  downloadUpdate,
   getClient,
+  installUpdate,
   openModal,
+  playSound,
   saveAppearance,
+  saveSounds,
   saveVoiceSettings,
   setPttKey,
   useCroc,
@@ -42,6 +54,7 @@ import {
 } from '../croc';
 import { copyText, imageToDataUrl, keyLabel, openLink, stampOf } from '../lib/format';
 import { NETWORK_TEXT } from '../lib/network';
+import { formatBytes } from '../lib/files';
 
 const SOURCE_URL = 'https://github.com/pwalda/crocodile';
 const WEBSITE_URL = 'https://crocodilechat.com';
@@ -49,20 +62,25 @@ const SPONSORS_URL = 'https://github.com/sponsors/pwalda';
 const KOFI_URL = 'https://ko-fi.com/pwalda';
 const HOSTING_GUIDE_URL = `${SOURCE_URL}/blob/main/docs/SELF_HOSTING.md#if-other-people-use-your-server`;
 import { isOperatorContact } from '@crocodile/protocol';
+import type { NetworkCheckItem } from '@crocodile/client-core';
 import { desktop } from '../platform';
-import { Avatar, Button, Input, Label, Toggle, cx } from '../components/ui';
+import { Avatar, Button, Input, Label, Select, Toggle, cx } from '../components/ui';
 import { Logo } from '../components/Logo';
+import { DebugTab } from './ConnectionModals';
 import type { CoordinatorSettings, CoordinatorStatus } from '../../main/ipc-types';
+import { relayPorts } from '../../main/coordinator-config';
 
 const TABS = [
   { id: 'account', label: 'Profile', icon: User },
   { id: 'devices', label: 'Devices', icon: Laptop },
   { id: 'voice', label: 'Voice', icon: Mic },
   { id: 'appearance', label: 'Appearance', icon: Palette },
-  { id: 'privacy', label: 'Privacy', icon: Shield },
+  { id: 'privacy', label: 'Privacy & alerts', icon: Shield },
+  { id: 'files', label: 'Files', icon: Files },
   { id: 'connection', label: 'Network', icon: Wifi },
   { id: 'host', label: 'Host a server', icon: Server },
   { id: 'about', label: 'About', icon: Info },
+  { id: 'debug', label: 'Debug', icon: Bug },
 ] as const;
 type Tab = (typeof TABS)[number]['id'];
 
@@ -118,9 +136,18 @@ export function SettingsModal({ tab: initial }: { tab?: string }) {
             {tab === 'voice' && <VoiceTab />}
             {tab === 'appearance' && <AppearanceTab />}
             {tab === 'privacy' && <PrivacyTab />}
+            {tab === 'files' && <FilesTab />}
             {tab === 'connection' && <ConnectionTab />}
             {tab === 'host' && <HostTab />}
             {tab === 'about' && <AboutTab />}
+            {tab === 'debug' && (
+              <>
+                <H sub="Live state of every connection, to see what goes wrong and where. Copy diagnostics into a bug report: it has no messages, keys or addresses.">
+                  Debug
+                </H>
+                <DebugTab />
+              </>
+            )}
           </div>
         </div>
       </div>
@@ -162,26 +189,6 @@ function Row({
       </div>
       <div className="shrink-0">{children}</div>
     </div>
-  );
-}
-
-function Select({
-  value,
-  onChange,
-  children,
-}: {
-  value: string;
-  onChange: (v: string) => void;
-  children: ReactNode;
-}) {
-  return (
-    <select
-      value={value}
-      onChange={(e) => onChange(e.target.value)}
-      className="h-11 w-full rounded-xl border border-line bg-field px-3 text-sm text-text outline-none focus:border-accent"
-    >
-      {children}
-    </select>
   );
 }
 
@@ -729,12 +736,13 @@ function AppearanceTab() {
 
 function PrivacyTab() {
   const settings = useCroc((s) => s.settings);
+  const soundPrefs = useUi((s) => s.sounds);
   const blocked = useCroc((s) => s.friends.blocked);
   const client = getClient();
   return (
     <>
-      <H sub="Messages and voice are end-to-end encrypted with keys that change constantly. These choices control what you share with others.">
-        Privacy
+      <H sub="Messages and voice are end-to-end encrypted with keys that change constantly. These choices control what you share with others, and how Crocodile gets your attention.">
+        Privacy & alerts
       </H>
       <Row label="Status">
         <Segmented
@@ -755,6 +763,34 @@ function PrivacyTab() {
           label="Desktop notifications"
         />
       </Row>
+      <Row
+        label="Sounds"
+        hint="Ringing, people joining and leaving calls, new messages and mentions. Quiet while you're busy."
+      >
+        <Toggle
+          checked={soundPrefs.enabled}
+          onChange={(v) => void saveSounds({ enabled: v })}
+          label="Sounds"
+        />
+      </Row>
+      {soundPrefs.enabled && (
+        <div className="flex items-center gap-3 border-b border-line py-4">
+          <Label>Volume · {Math.round(soundPrefs.volume * 100)}%</Label>
+          <input
+            type="range"
+            min={5}
+            max={100}
+            aria-label="Sound volume"
+            value={Math.round(soundPrefs.volume * 100)}
+            onChange={(e) => void saveSounds({ volume: Number(e.target.value) / 100 })}
+            onPointerUp={() => playSound('message')}
+            className="flex-1 accent-[var(--accent)]"
+          />
+          <Button variant="secondary" className="h-8 text-xs" onClick={() => playSound('ring')}>
+            Play
+          </Button>
+        </div>
+      )}
       <h3 className="mb-2 mt-8 text-lg font-bold">Blocked</h3>
       <Card className="py-2">
         {blocked.length === 0 && (
@@ -774,6 +810,70 @@ function PrivacyTab() {
           </div>
         ))}
       </Card>
+    </>
+  );
+}
+
+function FilesTab() {
+  const settings = useCroc((s) => s.settings);
+  // Counts, not the files themselves: those change with every block received,
+  // and measuring the storage looks at every file on disk.
+  const stored = useCroc((s) => Object.values(s.files).filter((f) => f.status === 'done').length);
+  const downloaded = useCroc(
+    (s) => Object.values(s.files).filter((f) => !f.mine && f.status === 'done').length,
+  );
+  const client = getClient();
+  const [used, setUsed] = useState<number | null>(null);
+  const refresh = useCallback(() => void client.fileStorageUsed().then(setUsed), [client]);
+  useEffect(refresh, [refresh, stored]);
+  return (
+    <>
+      <H sub="Files travel straight from one member's device to another's, end-to-end encrypted, and never through a server. Whoever you fetch a file from sees your IP address while they send it.">
+        Files
+      </H>
+      <Row
+        label="Download pictures and videos by themselves"
+        hint="Up to 10 MB each. Anything bigger, and other files, wait for you to click."
+      >
+        <Select
+          value={settings.autoDownload}
+          onChange={(v) =>
+            void client.updateSettings({ autoDownload: v as typeof settings.autoDownload })
+          }
+        >
+          <option value="friends">From friends and in DMs</option>
+          <option value="everyone">From everyone</option>
+          <option value="never">Never</option>
+        </Select>
+      </Row>
+      <Row
+        label="Share files I've downloaded"
+        hint="Members of the same space or DM can fetch them from you while the app is open, even after the sender has gone offline. Files you sent are always shared."
+      >
+        <Toggle
+          checked={settings.shareDownloads}
+          onChange={(v) => void client.updateSettings({ shareDownloads: v })}
+          label="Share files I've downloaded"
+        />
+      </Row>
+      <Row
+        label="Files on this computer"
+        hint={
+          <>
+            {used === null ? 'Counting…' : formatBytes(used)}, stored encrypted. Deleting the ones
+            you downloaded frees the space; you can download them again while someone who has them
+            is online.
+          </>
+        }
+      >
+        <Button
+          variant="secondary"
+          disabled={downloaded === 0}
+          onClick={() => void client.clearDownloadedFiles().then(refresh)}
+        >
+          <Trash2 size={15} /> Delete downloaded files
+        </Button>
+      </Row>
     </>
   );
 }
@@ -805,6 +905,7 @@ function NetworkTest() {
             {network?.checkedAt ? text.detail : 'Crocodile tests your network when it connects.'}
             {!ok && network?.checkedAt && relayOn ? ' The relay is on.' : ''}
           </p>
+          {network?.checks && <NetworkChecklist checks={network.checks} reason={network.reason} />}
           {!ok &&
             network?.checkedAt &&
             !relayOn &&
@@ -827,6 +928,42 @@ function NetworkTest() {
         </Button>
       </Card>
     </section>
+  );
+}
+
+const CHECK_ICON = {
+  ok: { Icon: CheckCircle2, className: 'text-accent', label: 'Passed' },
+  warn: { Icon: AlertTriangle, className: 'text-warn', label: 'Warning' },
+  fail: { Icon: XCircle, className: 'text-danger', label: 'Failed' },
+  unknown: { Icon: HelpCircle, className: 'text-faint', label: 'Unknown' },
+  info: { Icon: Info, className: 'text-faint', label: 'Information' },
+} as const;
+
+/** What the network check looked at, one line per check, and why it decided what it did. */
+function NetworkChecklist({ checks, reason }: { checks: NetworkCheckItem[]; reason?: string }) {
+  return (
+    <div className="mt-3 rounded-2xl border border-line p-3">
+      <ul aria-label="What was checked" className="space-y-2">
+        {checks.map((c) => {
+          const { Icon, className, label } = CHECK_ICON[c.status];
+          return (
+            <li key={c.id} className="flex gap-2.5 text-xs">
+              <Icon size={15} className={cx('mt-px shrink-0', className)} aria-label={label} />
+              <div>
+                <div className="font-semibold text-text">{c.label}</div>
+                <div className="leading-relaxed text-muted">{c.detail}</div>
+              </div>
+            </li>
+          );
+        })}
+      </ul>
+      {reason && (
+        <p className="mt-3 border-t border-line pt-2 text-xs leading-relaxed text-text-2">
+          <span className="font-semibold">Result: </span>
+          {reason}
+        </p>
+      )}
+    </div>
   );
 }
 
@@ -1130,7 +1267,10 @@ function HostTab() {
           <p className="mt-1 text-muted">
             People on your network add it under Settings → Network → Preferred servers (or when the
             app says it can't find a server). For people elsewhere, forward TCP+UDP {settings.port}{' '}
-            and UDP {settings.port + 1} on your router and share your public address.
+            and UDP {settings.port + 1}
+            {settings.relay &&
+              ` (and UDP ${relayPorts(settings).min}-${relayPorts(settings).max} for the relay)`}{' '}
+            on your router and share your public address.
           </p>
           <div className="mt-2 space-y-1">
             {(status.publicUrl ? [status.publicUrl, ...status.lanUrls] : status.lanUrls).map(
@@ -1347,6 +1487,95 @@ const ABOUT_FEATURES = [
   },
 ];
 
+/** Look for a new version, download it, restart into it. */
+function UpdatesCard() {
+  const update = useUi((s) => s.update);
+  if (update.state === 'unsupported' || !desktop) return null;
+  const check = () => void desktop?.updates.check();
+  let text: ReactNode;
+  let action: ReactNode = (
+    <Button variant="secondary" onClick={check} disabled={update.state === 'checking'}>
+      <RefreshCw size={15} className={cx(update.state === 'checking' && 'animate-spin')} />
+      Check for updates
+    </Button>
+  );
+  switch (update.state) {
+    case 'idle':
+      text = 'Crocodile looks for new versions now and then and asks before installing one.';
+      break;
+    case 'checking':
+      text = 'Looking for a new version…';
+      break;
+    case 'current':
+      text = `You have the latest version (checked ${stampOf(update.checkedAt).replace(
+        /^(Today|Yesterday)/,
+        (d) => d.toLowerCase(),
+      )}).`;
+      break;
+    case 'available':
+      text =
+        update.how === 'install'
+          ? `Version ${update.version} is out.`
+          : `Version ${update.version} is out. This copy can't update itself; download the new version from the release page.`;
+      action = (
+        <Button onClick={downloadUpdate}>
+          <ArrowDownCircle size={15} />
+          {update.how === 'install' ? 'Download and install' : 'Open download page'}
+        </Button>
+      );
+      break;
+    case 'downloading':
+      text = `Downloading version ${update.version}…`;
+      action = null;
+      break;
+    case 'ready':
+      text =
+        update.after === 'open'
+          ? `Version ${update.version} is downloaded. Crocodile quits and opens it; drag Crocodile into Applications to replace this version.`
+          : `Version ${update.version} is downloaded. Restart Crocodile to start using it.`;
+      action = (
+        <Button onClick={installUpdate}>
+          <RotateCw size={15} />
+          {update.after === 'open' ? 'Quit and install' : 'Restart to update'}
+        </Button>
+      );
+      break;
+    case 'error':
+      text = update.version
+        ? `Version ${update.version} couldn't be installed: ${update.message}`
+        : `Couldn't look for updates: ${update.message}`;
+      break;
+  }
+  return (
+    <section aria-label="Updates">
+      <Card className="mb-3 text-sm leading-relaxed text-text-2">
+        <h3 className="flex items-center gap-2 text-base font-bold text-text">
+          <ArrowDownCircle size={16} className="text-accent" /> Updates
+        </h3>
+        <p className="mt-1" role="status">
+          {text}
+        </p>
+        {update.state === 'downloading' && (
+          <div
+            role="progressbar"
+            aria-label="Download progress"
+            aria-valuenow={update.percent}
+            aria-valuemin={0}
+            aria-valuemax={100}
+            className="mt-3 h-2 overflow-hidden rounded-full bg-raised"
+          >
+            <div
+              className="h-full rounded-full bg-accent transition-[width]"
+              style={{ width: `${update.percent}%` }}
+            />
+          </div>
+        )}
+        {action && <div className="flex flex-wrap gap-2 pt-3">{action}</div>}
+      </Card>
+    </section>
+  );
+}
+
 function AboutTab() {
   const version = useUi((s) => s.appVersion);
   return (
@@ -1361,6 +1590,7 @@ function AboutTab() {
           Version {version} · beta
         </span>
       </div>
+      <UpdatesCard />
       <div className="grid grid-cols-3 gap-3">
         {ABOUT_FEATURES.map(({ icon: Icon, title, text }) => (
           <Card key={title} className="p-4">

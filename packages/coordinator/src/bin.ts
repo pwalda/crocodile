@@ -2,6 +2,7 @@
 import { parseArgs } from 'node:util';
 import { Coordinator, defaultConfig } from './coordinator';
 import { parsePortRange } from './turn';
+import { numberOption } from './util';
 
 const list = (v: string | undefined) =>
   (v ?? '')
@@ -97,7 +98,22 @@ const pick = (flag: string | undefined, envName: string) => flag ?? env[envName]
 const stunPort = pick(values['stun-port'], 'CROC_STUN_PORT');
 const relayPorts = pick(values['relay-ports'], 'CROC_RELAY_PORTS');
 const stunAltPort = pick(values['stun-alt-port'], 'CROC_STUN_ALT_PORT');
-const port = Number(pick(values.port, 'CROC_PORT') ?? defaultConfig.port);
+const num = (
+  flag: string | undefined,
+  envName: string,
+  name: string,
+  fallback: number,
+  range?: Parameters<typeof numberOption>[3],
+) => {
+  try {
+    return numberOption(pick(flag, envName), name, fallback, range);
+  } catch (err) {
+    console.error((err as Error).message);
+    process.exit(1);
+  }
+};
+const udpPort = (raw: string, name: string) => num(raw, '', name, 0, { min: 1, max: 65535 });
+const port = num(values.port, 'CROC_PORT', '--port', defaultConfig.port, { min: 0, max: 65535 });
 
 const coordinator = new Coordinator({
   name: pick(values.name, 'CROC_NAME') ?? defaultConfig.name,
@@ -109,17 +125,25 @@ const coordinator = new Coordinator({
   storage: (pick(values.storage, 'CROC_STORAGE') as 'sqlite' | 'memory' | undefined) ?? 'sqlite',
   directoryUrls: list(pick(values.directory, 'CROC_DIRECTORY')),
   meshPeers: list(pick(values.peers, 'CROC_PEERS')),
-  replicas: Number(pick(values.replicas, 'CROC_REPLICAS') ?? defaultConfig.replicas),
+  replicas: num(values.replicas, 'CROC_REPLICAS', '--replicas', defaultConfig.replicas, {
+    min: 1,
+  }),
   storeAll: values['store-all'] === true || env.CROC_STORE_ALL === '1',
-  stunPort: stunPort === 'off' ? null : stunPort ? Number(stunPort) : port,
-  ...(stunAltPort ? { stunAltPort: stunAltPort === 'off' ? null : Number(stunAltPort) } : {}),
+  stunPort: stunPort === 'off' ? null : stunPort ? udpPort(stunPort, '--stun-port') : port,
+  ...(stunAltPort
+    ? { stunAltPort: stunAltPort === 'off' ? null : udpPort(stunAltPort, '--stun-alt-port') }
+    : {}),
   extraStun: list(pick(values.stun, 'CROC_STUN')),
-  capacity: Number(pick(values.capacity, 'CROC_CAPACITY') ?? defaultConfig.capacity),
+  capacity: num(values.capacity, 'CROC_CAPACITY', '--capacity', defaultConfig.capacity, { min: 1 }),
   announce: !(values.private || env.CROC_PRIVATE === '1'),
   relay: {
     enabled: (pick(values.relay, 'CROC_RELAY') ?? 'on') !== 'off',
-    maxUsers: Number(
-      pick(values['relay-max-users'], 'CROC_RELAY_MAX_USERS') ?? defaultConfig.relay.maxUsers,
+    maxUsers: num(
+      values['relay-max-users'],
+      'CROC_RELAY_MAX_USERS',
+      '--relay-max-users',
+      defaultConfig.relay.maxUsers,
+      { min: 0 },
     ),
     publicIp: pick(values['relay-ip'], 'CROC_RELAY_IP'),
     ...(relayPorts ? { ports: parsePortRange(relayPorts) } : {}),
@@ -129,15 +153,27 @@ const coordinator = new Coordinator({
   sourceUrl: pick(values.source, 'CROC_SOURCE_URL'),
   operatorContact: pick(values.contact, 'CROC_CONTACT') || undefined,
   trustProxy: values['trust-proxy'] === true || env.CROC_TRUST_PROXY === '1',
-  maxConnectionsPerIp: Number(
-    pick(values['max-connections-per-ip'], 'CROC_MAX_CONN_PER_IP') ??
-      defaultConfig.maxConnectionsPerIp,
+  maxConnectionsPerIp: num(
+    values['max-connections-per-ip'],
+    'CROC_MAX_CONN_PER_IP',
+    '--max-connections-per-ip',
+    defaultConfig.maxConnectionsPerIp,
+    { min: 1 },
   ),
   mailbox: {
     ...defaultConfig.mailbox,
     enabled: (pick(values.mailbox, 'CROC_MAILBOX') ?? 'on') !== 'off',
+    // Longer than a week is cut to a week, as documented.
     ttlMs:
-      Math.min(7, Number(pick(values['mailbox-days'], 'CROC_MAILBOX_DAYS') ?? 3)) * 24 * 3600_000,
+      Math.min(
+        7,
+        num(values['mailbox-days'], 'CROC_MAILBOX_DAYS', '--mailbox-days', 3, {
+          min: 0.01,
+          integer: false,
+        }),
+      ) *
+      24 *
+      3600_000,
   },
   logLevel: (pick(values['log-level'], 'CROC_LOG_LEVEL') as never) ?? 'info',
 });

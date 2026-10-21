@@ -1,50 +1,23 @@
 /// <reference lib="webworker" />
 /**
- * Voice frame encryption worker. Runs inside Chromium's encoded-transform
- * pipeline: every Opus frame leaving the microphone is encrypted with our
- * ratcheting sender key before packetisation, and every frame arriving on a
- * speaker slot is decrypted with the sending member's key. The host relay
+ * Voice and video frame encryption worker. Runs inside Chromium's encoded-
+ * transform pipeline: every Opus frame leaving the microphone (or a shared
+ * screen's sound) and every VP8 frame leaving the camera or screen is
+ * encrypted with our ratcheting sender key before packetisation, and every
+ * frame arriving on a slot is decrypted with the sending member's key. The host relay
  * only ever sees ciphertext. Frames we cannot encrypt or authenticate are
  * dropped, never passed through in the clear.
  */
-import { AudioReceiver, AudioSender, importChain, peekFrameKid } from '@crocodile/crypto';
+import { peekFrameKid } from '@crocodile/crypto';
+import { FrameScopes, vp8ClearBytes } from './frame-scopes';
 import type { FrameKeys } from './keyring';
 
-interface Scope {
-  sender: AudioSender | null;
-  receivers: Map<number, AudioReceiver>;
-}
-
-const scopes = new Map<string, Scope>();
-
-function scope(id: string): Scope {
-  let s = scopes.get(id);
-  if (!s) scopes.set(id, (s = { sender: null, receivers: new Map() }));
-  return s;
-}
-
-function updateKeys(id: string, keys: FrameKeys) {
-  const s = scope(id);
-  if (keys.mine) {
-    const chain = importChain({ gen: keys.mine.gen, key: keys.mine.key });
-    if (!s.sender || s.sender.kid !== keys.mine.kid)
-      s.sender = new AudioSender(keys.mine.kid, chain);
-    else s.sender.update(chain);
-  }
-  const next = new Map<number, AudioReceiver>();
-  for (const p of keys.peers) {
-    const kid = p.kid >>> 0;
-    // Keep receivers we already have: they may have ratcheted past the given state.
-    next.set(
-      kid,
-      s.receivers.get(kid) ?? new AudioReceiver(kid, importChain({ gen: p.gen, key: p.key })),
-    );
-  }
-  s.receivers = next;
-}
+const scopes = new FrameScopes();
 
 interface EncodedFrame {
   data: ArrayBuffer;
+  /** Video frames: 'key' or 'delta'. */
+  type?: string;
 }
 
 function pipe(
@@ -63,8 +36,20 @@ function pipe(
         controller.enqueue(frame);
         return;
       }
+      if (role === 'encrypt-video') {
+        if (!s?.video) return;
+        const clear = vp8ClearBytes(frame.type === 'key');
+        frame.data = s.video.encrypt(data, clear).slice().buffer;
+        controller.enqueue(frame);
+        return;
+      }
       const kid = peekFrameKid(data);
-      const receiver = kid === null ? undefined : s?.receivers.get(kid);
+      const receiver =
+        kid === null
+          ? undefined
+          : role === 'decrypt-video'
+            ? s?.videoReceivers.get(kid)
+            : s?.receivers.get(kid);
       const plain = receiver?.decrypt(data);
       if (!plain) return;
       frame.data = plain.slice().buffer;
@@ -98,9 +83,9 @@ ctx.onmessage = (ev: MessageEvent) => {
         writable: WritableStream;
       }
     | { type: 'drop'; scope: string };
-  if (m.type === 'keys') updateKeys(m.scope, m.keys);
+  if (m.type === 'keys') scopes.update(m.scope, m.keys);
   else if (m.type === 'stream') pipe(m.readable, m.writable, m.role, m.scope);
-  else if (m.type === 'drop') scopes.delete(m.scope);
+  else if (m.type === 'drop') scopes.drop(m.scope);
 };
 
 ctx.onrtctransform = (ev) => {

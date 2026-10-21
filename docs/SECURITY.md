@@ -6,6 +6,7 @@
 | -------------------------------- | --------------------------------------------------------------------------------------------- |
 | Voice                            | Only the members of the call.                                                                 |
 | Text messages (channels and DMs) | Only the members of the space or DM, now and later (via peer-to-peer history sync).           |
+| Files                            | Only the members of the space or DM it was posted in, fetched straight from another member.   |
 | Your identity key                | Only your linked devices (encrypted with the OS keychain) and whoever holds the recovery key. |
 
 ## What servers see
@@ -25,7 +26,8 @@ enforced by your own apps. They pass on signalling (SDP and
 ICE candidates), which includes IP addresses. They never receive message or
 voice content, except that a user who turned on the **opt-in relay** sends
 their already end-to-end encrypted media through one; that server then also
-sees packet sizes and timing, for at most an hour at a time. Users who turn
+sees packet sizes and timing, in windows of up to an hour that the app
+renews only while the connection still needs the relay. Users who turn
 on the **mailbox** let their server hold direct messages for offline friends
 as boxes sealed to the friend's devices; the server sees sender, recipient,
 size and time, keeps them at most 7 days, and cannot read them.
@@ -48,10 +50,28 @@ The directory only sees coordination servers. Its public listing shows each
 server's address obfuscated rather than in plain text (decodable by the app,
 so not secret) and apps verify each entry's signature before using it.
 
+**Files** never reach a server at all, not even through the opt-in relay:
+they travel over direct connections between members (STUN only). The member
+a file is fetched from, and the one fetching it, see each other's IP address
+and the transfer's size and timing. Pictures and videos are fetched by
+themselves only from friends and in DMs unless the user widens or turns off
+that setting, and then only from the friend who posted it (or another
+friend), so a stranger in a big space can't learn your IP address by posting
+a picture or by fetching a friend's picture first and offering it.
+
 The **host peer** of a session sees the IP addresses of its members and the
 size and timing of their encrypted frames, plus who is speaking (from the
 RFC 6464 audio-level header). It holds the same keys as every other member
 (it is one), but its relay component only forwards ciphertext.
+
+**Video** (cameras and screens) takes the same path as voice, end-to-end
+encrypted between members, and never goes through a server, not even the
+opt-in relay: calls that need it are voice only. For video the host peer
+also sees who has a camera on or shares a screen, which streams each member
+watches, frame sizes and timing (video has no constant bitrate, so these
+reveal roughly how much moves), and the first bytes of each VP8 frame, left
+readable so it can find key frames: the frame type and, on key frames, the
+picture size.
 
 ## Adversaries
 
@@ -62,8 +82,9 @@ RFC 6464 audio-level header). It holds the same keys as every other member
 | Malicious coordination server      | Lie about presence, drop or delay signalling, refuse service, log metadata.            | Forge profiles, spaces, invites, memberships or devices (all signed); substitute a user's key (user ids are key hashes); MITM WebRTC (SDP is identity-signed); read content. |
 | Malicious mesh peer server         | Same as above.                                                                         | Same as above; clients re-verify every record.                                                                                                                               |
 | Mailbox operator (opt-in mailbox)  | See who left how many messages for whom, and when; drop them.                          | Read, alter or forge them (sealed to the recipient's device, signed by the sender).                                                                                          |
-| Relay operator (opt-in relay)      | See relayed packet sizes and timing for up to an hour.                                 | Read or alter content.                                                                                                                                                       |
+| Relay operator (opt-in relay)      | See relayed packet sizes and timing while the relay is in use.                         | Read or alter content.                                                                                                                                                       |
 | Non-member who learns a session id | Nothing: members only share keys with devices whose membership they verify themselves. |                                                                                                                                                                              |
+| Member sharing a file with you     | See your IP address while you fetch it; send you a harmful file.                       | Pass off altered blocks (each is checked against hashes its author signed); get a file posted in a space or DM they aren't in, even by learning its id.                      |
 | Former member                      | Keep what they already saw.                                                            | Decrypt anything after they left: sender keys are replaced on leave.                                                                                                         |
 | Someone who steals a key later     | Decrypt at most the current 30-minute key period of a session.                         | Decrypt earlier messages (hash ratchets, deleted prekeys) or later ones (periodic fresh keys).                                                                               |
 | Removed device                     | Keep what it already had.                                                              | Receive new keys or messages. (It still knows the account seed; see below.)                                                                                                  |
@@ -81,14 +102,28 @@ RFC 6464 audio-level header). It holds the same keys as every other member
   replaced every 30 minutes and on leave.
 - Voice: per-frame AES-GCM with an authenticated SFrame-style trailer
   `(kid, generation, counter)`; constant-bitrate Opus.
+- Video: per-frame AES-GCM with keys from the audio chain under a separate
+  label; the VP8 payload header (3 bytes, 10 on key frames) stays readable
+  and is authenticated with the trailer.
 - Text: author-signed, Padmé-padded, encrypted with the text chain.
+- Files: a random key per file; 1 MiB blocks encrypted with AES-256-GCM
+  (index as nonce; file id, index and a last-block flag as associated data);
+  the hash of the encrypted blocks' SHA-256 list is in the author-signed
+  manifest. Stored encrypted as received.
 - Device linking: short one-time code plus a 6-digit security code compared
-  on both screens, then a hybrid-encrypted, signed transfer.
+  on both screens, then a hybrid-encrypted, signed transfer. The code covers
+  the new device's signing key and the encryption key the account is sent
+  to, so a server that swaps either makes the codes differ.
 - Every signature is domain-separated (`SIG_DOMAIN` in `protocol/constants.ts`).
 - Local data (identity, prekeys, history) is encrypted at rest with a key
   kept in the OS keychain (Electron `safeStorage`).
 
 ## Known gaps
+
+- Space admins: a removed admin's change made just before the removal
+  reaches a server can stay on that server until the owner's next change
+  (versions are last-writer-wins, and a record may be dated up to 5 minutes
+  ahead). Servers that already hold the removal refuse it.
 
 - Linked devices share the account seed; per-device signing keys certified by
   the identity (so a removed device can no longer sign) are planned.
@@ -96,7 +131,15 @@ RFC 6464 audio-level header). It holds the same keys as every other member
   but rekeying cost grows with group size.
 - Safety-number verification is manual.
 - The host peer and relay operators see traffic metadata (sizes, timing,
-  speaking activity).
+  speaking activity); for video the host also sees frame sizes, key frames and
+  picture sizes.
+- The command line tool keeps the account's keys in a file only its user can
+  read (mode 600), not in an OS keychain; anyone with that user's access, or
+  root, can use the account. Remove the device in the app if a machine is
+  lost.
+- Files are checked for integrity, not for safety: the app never opens one by
+  itself, and warns before opening programs and scripts, but a file a member
+  sends can still be harmful.
 
 Please report vulnerabilities privately through
 [GitHub's private reporting](https://github.com/pwalda/crocodile/security/advisories/new)

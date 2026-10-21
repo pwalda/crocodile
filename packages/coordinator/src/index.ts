@@ -1,5 +1,6 @@
 export {
   Coordinator,
+  lanAddress,
   defaultConfig,
   COORDINATOR_VERSION,
   type CoordinatorConfig,

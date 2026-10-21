@@ -1,3 +1,4 @@
+import { dropObjectUrl } from './lib/files';
 import { useRef, useSyncExternalStore } from 'react';
 import {
   CrocodileClient,
@@ -9,6 +10,8 @@ import {
 import { StateStore } from '@crocodile/client-core';
 import { createPlatform, desktop, kv } from './platform';
 import FrameWorker from '@crocodile/client-core/frame-worker?worker';
+import type { UpdateStatus } from '../main/ipc-types';
+import { SoundPlayer, type SoundName } from './lib/sounds';
 
 export type View =
   | { kind: 'friends' }
@@ -24,6 +27,12 @@ export type ModalState =
   | { kind: 'profile'; userId: string }
   | { kind: 'new-dm' }
   | { kind: 'link-device' }
+  /** How a session's connection stands, step by step. */
+  | { kind: 'connection'; sessionId: string }
+  /** Turning the camera on: a preview first. */
+  | { kind: 'camera' }
+  /** Picking a screen or window to share. */
+  | { kind: 'share-screen' }
   | {
       kind: 'confirm';
       title: string;
@@ -56,6 +65,10 @@ export interface UiState {
   pttKey: string;
   micLevel: number;
   appVersion: string;
+  /** In-app updates (the desktop main process does the work). */
+  update: UpdateStatus;
+  /** Ringing, call and message sounds: on or off, and how loud (0–1). */
+  sounds: { enabled: boolean; volume: number };
 }
 
 export const ui = new StateStore<UiState>({
@@ -69,7 +82,26 @@ export const ui = new StateStore<UiState>({
   pttKey: 'Backquote',
   micLevel: -100,
   appVersion: '',
+  update: { state: 'unsupported' },
+  sounds: { enabled: true, volume: 0.6 },
 });
+
+/** The app's sounds; see lib/sounds.ts. */
+export const sounds = new SoundPlayer();
+
+/** Play a sound, if sounds are on. */
+export function playSound(name: SoundName) {
+  const s = ui.get().sounds;
+  if (!s.enabled) return;
+  sounds.volume = s.volume;
+  sounds.play(name);
+}
+
+export async function saveSounds(patch: Partial<UiState['sounds']>) {
+  const next = { ...ui.get().sounds, ...patch };
+  ui.set({ sounds: next });
+  await kv.set('sounds', next);
+}
 
 let client: CrocodileClient;
 /** Server directories this app instance uses (shown in diagnostics). */
@@ -115,6 +147,9 @@ export async function bootClient(): Promise<CrocodileClient> {
   };
   ui.set({ appearance });
   applyAppearance(appearance);
+  ui.set({
+    sounds: { ...ui.get().sounds, ...((await kv.get<UiState['sounds']>('sounds')) ?? {}) },
+  });
   window
     .matchMedia('(prefers-color-scheme: dark)')
     .addEventListener('change', () => applyAppearance(ui.get().appearance));
@@ -124,6 +159,24 @@ export async function bootClient(): Promise<CrocodileClient> {
       getUserMedia: (c) => navigator.mediaDevices.getUserMedia(c),
       enumerateDevices: () => navigator.mediaDevices.enumerateDevices(),
       createFrameWorker: () => new FrameWorker(),
+      // The source was picked in our own picker; the main process hands it over.
+      getDisplayMedia: async (request) => {
+        if (desktop && request.sourceId)
+          await desktop.screen.choose(request.sourceId, request.audio);
+        return navigator.mediaDevices.getDisplayMedia({
+          video: true,
+          // The computer's sound, without the call's own (which would echo
+          // back to the people in it), and unprocessed: music, not a voice.
+          audio: request.audio
+            ? ({
+                restrictOwnAudio: true,
+                echoCancellation: false,
+                noiseSuppression: false,
+                autoGainControl: false,
+              } as MediaTrackConstraints)
+            : false,
+        });
+      },
     },
     voiceSettings,
   );
@@ -139,8 +192,22 @@ export async function bootClient(): Promise<CrocodileClient> {
     client.setExtraServers(st.state === 'running' ? [st.url] : []);
   });
   ui.set({ voiceSettings, pttKey, appVersion: info.version });
+  if (desktop) {
+    desktop.updates.onStatus((update) => ui.set({ update }));
+    void desktop.updates.status().then((update) => ui.set({ update }));
+  }
   desktop?.ptt.onState((down) => engine.setPushToTalk(down));
   void syncGlobalPtt();
+  // A file's message was deleted: let go of its decrypted copy too.
+  let files = client.state.files;
+  client.store.subscribe(() => {
+    const s = client.state;
+    if (s.files === files) return;
+    for (const id of Object.keys(files))
+      if (!s.files[id] || (files[id]!.status === 'done' && s.files[id]!.status !== 'done'))
+        dropObjectUrl(id);
+    files = s.files;
+  });
   await client.init();
   return client;
 }
@@ -150,10 +217,42 @@ export function getClient() {
 }
 
 // ---------------------------------------------------------------------------
+// Updates
+// ---------------------------------------------------------------------------
+
+/** Downloads the release on offer, or opens its download page when it can't be installed here. */
+export function downloadUpdate() {
+  void desktop?.updates.download();
+}
+
+/** Restarts into the downloaded update, after asking if that would end a call. */
+export function installUpdate() {
+  const restart = () => void desktop?.updates.install();
+  const s = ui.get().update;
+  if (s.state !== 'ready') return;
+  if (!client?.state.voiceSession) return restart();
+  openModal({
+    kind: 'confirm',
+    title: s.after === 'open' ? 'Quit and install?' : 'Restart to update?',
+    body:
+      s.after === 'open'
+        ? `Crocodile quits so you can install version ${s.version}. This ends your call.`
+        : `Crocodile restarts into version ${s.version}. This ends your call.`,
+    action: s.after === 'open' ? 'Quit and install' : 'Restart',
+    onConfirm: restart,
+  });
+}
+
+// ---------------------------------------------------------------------------
 // Diagnostics for bug reports
 // ---------------------------------------------------------------------------
 
 const recentLog: string[] = [];
+
+/** The client's recent log lines, oldest first (debug panel). */
+export function recentLogLines(): string[] {
+  return [...recentLog];
+}
 function remember(msg: string, extra?: Record<string, unknown>) {
   recentLog.push(`${new Date().toISOString()} ${msg}${extra ? ` ${JSON.stringify(extra)}` : ''}`);
   if (recentLog.length > 300) recentLog.shift();
@@ -198,7 +297,24 @@ export async function diagnostics(): Promise<string> {
       peers: v.peers.length,
       iAmHost: v.iAmHost,
       relayed: !!v.relay,
+      route: v.route,
+      // The network types election went by, for the host and this device.
+      hostNetwork: v.networks.find((n) => n.host)?.nat ?? null,
+      myNetwork: v.networks.find((n) => n.self)?.nat ?? null,
+      // Steps and failure stages only: no addresses.
+      attempts: v.attempts.map((a) => ({
+        at: new Date(a.startedAt).toISOString(),
+        viaRelay: a.viaRelay,
+        steps: a.steps.map((st) => `${st.step}+${st.at - a.startedAt}ms`),
+        end: a.end ? (a.end.ok ? 'ok' : `${a.end.stage}: ${a.end.reason}`) : 'pending',
+      })),
     })),
+    network: s.network
+      ? {
+          verdict: s.network.verdict,
+          checks: Object.fromEntries((s.network.checks ?? []).map((c) => [c.id, c.status])),
+        }
+      : null,
     voice: s.voiceSession ? { muted: s.muted, deafened: s.deafened } : null,
     hostingServer: hosting
       ? { enabled: hosting.settings.enabled, status: hosting.status.state }

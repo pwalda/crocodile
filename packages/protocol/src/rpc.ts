@@ -12,6 +12,7 @@ import {
 import { DeviceId } from './records';
 import type { PublicServerInfo } from './directory';
 import { SealedBox } from './relay';
+import { MailProof } from './federation';
 
 /** Public identity of a coordination server. */
 export const ServerInfo = z.object({
@@ -86,10 +87,29 @@ export interface ServerHello {
   channel: ChannelOffer;
   /** Server signature over (challenge, server.id, time, channel). */
   sig: string;
-  /** Optional services this server offers (not signed; informational). */
+  /**
+   * Server signature over the whole hello (helloFullPayload). Clients use
+   * the STUN servers and operator details only when it checks out; servers
+   * from before it existed send none.
+   */
+  sigFull?: string;
+  /** Optional services this server offers. */
   features?: { relay?: boolean; mailbox?: { ttlMs: number } };
-  /** Who runs the server, if they say (not signed; informational). */
+  /** Who runs the server, if they say. */
   operator?: OperatorInfo;
+}
+
+/** What `sigFull` covers: everything in the hello but the signatures. */
+export function helloFullPayload(h: Omit<ServerHello, 'sig' | 'sigFull'>) {
+  return {
+    challenge: h.challenge,
+    server: h.server,
+    time: h.time,
+    channel: h.channel,
+    stun: h.stun,
+    features: h.features ?? null,
+    operator: h.operator ?? null,
+  };
 }
 
 export const ClientAuth = z.object({
@@ -232,7 +252,7 @@ export const RpcParams = {
   'records.get': z.object({ keys: z.array(z.string().max(200)).max(500) }),
   'records.list': z.object({
     prefix: z.string().min(3).max(200),
-    limit: z.number().int().max(5000).optional(),
+    limit: z.number().int().min(1).max(5000).optional(),
   }),
   'records.subscribe': z.object({ prefixes: z.array(z.string().min(3).max(200)).max(2000) }),
   'users.search': z.object({ query: z.string().min(1).max(64) }),
@@ -274,9 +294,13 @@ export const RpcParams = {
       .max(20),
   }),
   /** Recipient: deliver mail held for this device anywhere in the mesh. */
-  'mail.fetch': z.object({}),
-  /** Recipient: these mailbox items arrived; delete them everywhere. */
-  'mail.ack': z.object({ ids: z.array(z.string().max(40)).min(1).max(500) }),
+  /** `proof` lets other servers send their mail for this device here (MailProof). */
+  'mail.fetch': z.object({ proof: MailProof.optional() }),
+  /** Recipient: these mailbox items arrived; delete them everywhere (with `proof`). */
+  'mail.ack': z.object({
+    ids: z.array(z.string().max(40)).min(1).max(500),
+    proof: MailProof.optional(),
+  }),
 } as const;
 
 export interface RpcMethods {

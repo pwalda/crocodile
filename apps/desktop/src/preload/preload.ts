@@ -4,10 +4,19 @@ import type {
   CoordinatorStatus,
   RelayProcessIn,
   RelayProcessOut,
+  ScreenSources,
+  UpdateStatus,
 } from '../main/ipc-types';
 
 /** The only bridge between the sandboxed UI and the rest of the app. */
 const api = {
+  screen: {
+    /** Screens and windows to pick from. */
+    sources: () => ipcRenderer.invoke('screen:sources') as Promise<ScreenSources>,
+    /** The one to share at the next getDisplayMedia call. */
+    choose: (id: string, audio: boolean) =>
+      ipcRenderer.invoke('screen:choose', id, audio) as Promise<void>,
+  },
   secure: {
     get: (key: string) => ipcRenderer.invoke('secure:get', key) as Promise<string | undefined>,
     set: (key: string, value: string) =>
@@ -54,6 +63,39 @@ const api = {
       };
     },
   },
+  updates: {
+    status: () => ipcRenderer.invoke('updates:status') as Promise<UpdateStatus>,
+    /** Looks for a new release (never downloads it). */
+    check: () => ipcRenderer.invoke('updates:check') as Promise<UpdateStatus>,
+    download: () => ipcRenderer.invoke('updates:download') as Promise<UpdateStatus>,
+    /** Quits and restarts into the downloaded version (or opens its installer). */
+    install: () => ipcRenderer.invoke('updates:install') as Promise<void>,
+    onStatus: (fn: (s: UpdateStatus) => void) => {
+      const listener = (_e: unknown, s: UpdateStatus) => fn(s);
+      ipcRenderer.on('updates:status', listener);
+      return () => {
+        ipcRenderer.off('updates:status', listener);
+      };
+    },
+  },
+  files: {
+    write: (id: string, index: number, block: Uint8Array) =>
+      ipcRenderer.invoke('files:write', id, index, block) as Promise<void>,
+    read: (id: string, index: number, length: number) =>
+      ipcRenderer.invoke('files:read', id, index, length) as Promise<Uint8Array | null>,
+    delete: (id: string) => ipcRenderer.invoke('files:delete', id) as Promise<void>,
+    usage: () => ipcRenderer.invoke('files:usage') as Promise<number>,
+    /** Asks where to save; null if the user cancelled. Returns a token for chunk/end. */
+    saveBegin: (name: string) =>
+      ipcRenderer.invoke('files:save-begin', name) as Promise<string | null>,
+    /** Writes to a private temporary file, to open with the system's app. */
+    openBegin: (name: string) => ipcRenderer.invoke('files:open-begin', name) as Promise<string>,
+    chunk: (token: string, data: Uint8Array) =>
+      ipcRenderer.invoke('files:chunk', token, data) as Promise<void>,
+    end: (token: string, then: 'open' | 'reveal' | 'none') =>
+      ipcRenderer.invoke('files:end', token, then) as Promise<void>,
+    abort: (token: string) => ipcRenderer.invoke('files:abort', token) as Promise<void>,
+  },
   app: {
     info: () =>
       ipcRenderer.invoke('app:info') as Promise<{
@@ -63,6 +105,8 @@ const api = {
         cpuCores: number;
       }>,
     openExternal: (url: string) => ipcRenderer.invoke('app:open-external', url) as Promise<void>,
+    /** Copy text, focused or not (the web clipboard needs the window focused). */
+    copyText: (text: string) => ipcRenderer.invoke('app:copy-text', text) as Promise<void>,
     setBadge: (count: number) => ipcRenderer.invoke('app:badge', count) as Promise<void>,
     takeDeepLink: () => ipcRenderer.invoke('app:take-deeplink') as Promise<string | null>,
     onDeepLink: (fn: (url: string) => void) => {

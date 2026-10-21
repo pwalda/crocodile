@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { FileId, FileManifest } from './files';
 
 /**
  * Messages on the reliable data channel between a member and the host relay.
@@ -12,12 +13,44 @@ export const RELAY_CHANNEL_ID = 0;
 const userId = z.string().regex(/^[a-z2-7]{8,64}$/);
 const peerId = z.string().regex(/^[a-z2-7]{8,64}\.[a-z2-7]{8,32}$/);
 
+/** What a member can show: their camera, or a screen (with its sound, maybe). */
+export type MediaKind = 'camera' | 'screen';
+/** A member's camera or screen: `<peer id>:camera` or `<peer id>:screen`. */
+export const StreamId = z.string().regex(/^[a-z2-7]{8,64}\.[a-z2-7]{8,32}:(camera|screen)$/);
+export const streamIds = {
+  make: (peer: string, kind: MediaKind) => `${peer}:${kind}`,
+  peer: (stream: string) => stream.slice(0, stream.lastIndexOf(':')),
+  kind: (stream: string) => stream.slice(stream.lastIndexOf(':') + 1) as MediaKind,
+};
+
 export const ClientToRelay = z.discriminatedUnion('t', [
   z.object({ t: z.literal('bcast'), d: z.unknown() }),
   z.object({ t: z.literal('direct'), to: peerId, d: z.unknown() }),
   z.object({ t: z.literal('ping'), ts: z.number() }),
-  /** Client-side mute state so the relay can skip forwarding and show icons. */
-  z.object({ t: z.literal('state'), muted: z.boolean(), deafened: z.boolean() }),
+  /**
+   * Client-side state: mute (so the relay can skip forwarding and show icons),
+   * whether this member is in the call (a DM's text session isn't), and its
+   * round trip to the host, for everyone's latency display.
+   */
+  z.object({
+    t: z.literal('state'),
+    muted: z.boolean(),
+    deafened: z.boolean(),
+    voice: z.boolean().optional(),
+    rtt: z.number().int().min(0).max(60_000).optional(),
+    /** Showing a camera. */
+    camera: z.boolean().optional(),
+    /** Sharing a screen, and whether its sound comes with it. */
+    screen: z.object({ audio: z.boolean() }).optional(),
+  }),
+  /**
+   * Adding video to the connection: a new offer for the same connection,
+   * sent once the host said it can carry video (`hello.media`). It travels
+   * on the encrypted channel, so it needs no signature of its own.
+   */
+  z.object({ t: z.literal('renegotiate'), sdp: z.string().max(100_000) }),
+  /** The cameras and screens this member wants, most wanted first. */
+  z.object({ t: z.literal('watch'), streams: z.array(StreamId).max(32) }),
 ]);
 export type ClientToRelay = z.infer<typeof ClientToRelay>;
 
@@ -26,10 +59,32 @@ export interface PeerState {
   id: string;
   muted: boolean;
   deafened: boolean;
+  /** In the call (audio), not just in the conversation. Absent from older apps. */
+  voice?: boolean;
+  /** This member's last measured round trip to the host, in ms. */
+  rtt?: number;
+  camera?: boolean;
+  screen?: { audio: boolean };
 }
 
 export type RelayToClient =
-  | { t: 'hello'; you: string; host: string; peers: PeerState[]; slots: number }
+  | {
+      t: 'hello';
+      you: string;
+      host: string;
+      peers: PeerState[];
+      slots: number;
+      /** The host can carry video: slots for cameras and screens, and for screens' sound. */
+      media?: { video: number; audio: number };
+    }
+  /** The host's answer to `renegotiate`. */
+  | { t: 'answer'; sdp: string }
+  /**
+   * Which stream each of this member's video slots and screen-sound slots
+   * carries now, and the streams it asked for that the host can't send at
+   * the moment (its connection, or this member's, is full).
+   */
+  | { t: 'media'; video: (string | null)[]; audio: (string | null)[]; paused: string[] }
   | { t: 'peer_join'; peer: PeerState }
   | { t: 'peer_leave'; peer: string }
   | { t: 'peer_state'; peer: PeerState }
@@ -93,6 +148,8 @@ export const ChatMessage = z.object({
   /** Set on edits: id of the message being replaced. */
   edits: z.string().max(40).optional(),
   deleted: z.boolean().optional(),
+  /** A file posted with the message (the body is its caption). */
+  file: FileManifest.optional(),
   sig: z.string(),
 });
 export type ChatMessage = z.infer<typeof ChatMessage>;
@@ -123,6 +180,21 @@ export const SealedPayload = z.discriminatedUnion('type', [
   z.object({ type: z.literal('ack'), ids: z.array(z.string().max(40)).max(500) }),
   /** Messages delivered through a server mailbox while the recipient was offline. */
   z.object({ type: z.literal('mail'), messages: z.array(ChatMessage).max(50) }),
+  /** Answer to `file_want`: this device has the whole file and will serve it. */
+  z.object({ type: z.literal('file_have'), file: FileId }),
+  /**
+   * Setting up a direct connection for one file: the downloader's offer and
+   * the holder's answer. The box is signed by its sender, which binds the
+   * connection's DTLS fingerprint to their identity.
+   */
+  z.object({
+    type: z.literal('file_link'),
+    file: FileId,
+    /** Random id of this connection attempt. */
+    link: z.string().regex(/^[A-Za-z0-9_-]{8,32}$/),
+    kind: z.enum(['offer', 'answer', 'reject']),
+    sdp: z.string().max(64_000).optional(),
+  }),
 ]);
 export type SealedPayload = z.infer<typeof SealedPayload>;
 
@@ -131,6 +203,13 @@ export const GroupPayload = z.discriminatedUnion('type', [
   z.object({ type: z.literal('message'), message: ChatMessage }),
   z.object({ type: z.literal('typing'), ch: z.string().max(200) }),
   /** Direct-call signalling inside a DM session. */
-  z.object({ type: z.literal('call'), action: z.enum(['ring', 'accept', 'decline', 'end']) }),
+  z.object({
+    type: z.literal('call'),
+    action: z.enum(['ring', 'accept', 'decline', 'end']),
+    /** A ring for a video call (older apps drop it and see a call). */
+    video: z.boolean().optional(),
+  }),
+  /** Looking for a member who has this file (posted in this session). */
+  z.object({ type: z.literal('file_want'), file: FileId }),
 ]);
 export type GroupPayload = z.infer<typeof GroupPayload>;

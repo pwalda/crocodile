@@ -14,6 +14,7 @@ import {
   ClientAuth,
   RpcParams,
   SIG_DOMAIN,
+  helloFullPayload,
   peerIds,
   recordKey,
   type LinkBox,
@@ -23,10 +24,14 @@ import {
   type ServerEvents,
   type ServerFrame,
   type SignedRecord,
+  type MailProof,
 } from '@crocodile/protocol';
 import type { Coordinator } from './coordinator';
 import type { ClientHandle, OwnStatus } from './presence';
 import { RateLimiter, RpcFailure, sendJson } from './util';
+
+/** Record prefixes, and users' presence, one connection may follow. */
+const MAX_SUBSCRIPTIONS = 20_000;
 
 let nextConnId = 1;
 
@@ -66,15 +71,17 @@ export class ClientConnection implements ClientHandle {
   constructor(
     private readonly hub: Coordinator,
     private readonly ws: WebSocket,
+    /** Our address as this client reached it, for STUN and TURN URLs. */
+    readonly via?: string,
   ) {
     const time = Date.now();
     const info = hub.info;
     const channel = this.channelKeys.offer;
-    this.frame({
-      t: 'hello',
+    const hello = {
+      t: 'hello' as const,
       server: info,
       challenge: this.challenge,
-      stun: hub.stunUrls(),
+      stun: hub.stunUrls(via),
       time,
       channel,
       features: {
@@ -82,12 +89,16 @@ export class ClientConnection implements ClientHandle {
         ...(hub.config.mailbox.enabled ? { mailbox: { ttlMs: hub.mailbox.ttlMs } } : {}),
       },
       ...hub.operatorInfo(),
+    };
+    this.frame({
+      ...hello,
       sig: sign(hub.identity, SIG_DOMAIN.serverHello, {
         challenge: this.challenge,
         server: info.id,
         time,
         channel,
       }),
+      sigFull: sign(hub.identity, SIG_DOMAIN.serverHelloFull, helloFullPayload(hello)),
     });
     const authTimer = setTimeout(() => {
       if (!this.authed) ws.close(4001, 'authentication timeout');
@@ -267,7 +278,10 @@ export class ClientConnection implements ClientHandle {
       }
       case 'records.subscribe': {
         const { prefixes } = p as unknown as { prefixes: string[] };
-        for (const prefix of prefixes) this.subscriptions.add(prefix);
+        const fresh = prefixes.filter((x) => !this.subscriptions.has(x));
+        if (this.subscriptions.size + fresh.length > MAX_SUBSCRIPTIONS)
+          throw new RpcFailure('bad_request', `at most ${MAX_SUBSCRIPTIONS} subscriptions`);
+        for (const prefix of fresh) this.subscriptions.add(prefix);
         hub.dist.refreshWatchesSoon();
         return {};
       }
@@ -293,6 +307,9 @@ export class ClientConnection implements ClientHandle {
       }
       case 'presence.subscribe': {
         const { userIds } = p as unknown as { userIds: string[] };
+        const fresh = userIds.filter((id) => !this.presenceWatch.has(id));
+        if (this.presenceWatch.size + fresh.length > MAX_SUBSCRIPTIONS)
+          throw new RpcFailure('bad_request', `at most ${MAX_SUBSCRIPTIONS} watched users`);
         return { presence: hub.presence.watch(this, userIds) };
       }
       case 'presence.set': {
@@ -367,12 +384,14 @@ export class ClientConnection implements ClientHandle {
         const { items } = p as unknown as { items: { to: string; box: SealedBox }[] };
         return await hub.mailbox.put(this, items);
       }
-      case 'mail.fetch':
-        hub.mailbox.fetch(this);
+      case 'mail.fetch': {
+        const { proof } = p as unknown as { proof?: MailProof };
+        hub.mailbox.fetch(this, proof);
         return {};
+      }
       case 'mail.ack': {
-        const { ids } = p as unknown as { ids: string[] };
-        hub.mailbox.ack(this, ids);
+        const { ids, proof } = p as unknown as { ids: string[]; proof?: MailProof };
+        hub.mailbox.ack(this, ids, proof);
         return {};
       }
     }

@@ -6,6 +6,12 @@ import type { SessionMember } from '@crocodile/protocol';
  * cone NAT, a desktop on mains power, fast uplink, low latency. A little
  * tenure bonus plus "keep the current host while it is healthy" avoid
  * flapping when a slightly better peer joins.
+ *
+ * One exception to keeping the host: a host behind a symmetric NAT gives way
+ * to the best member whose NAT isn't symmetric (open, cone, or not fully
+ * tested). Whoever starts a call or opens a channel first is elected while
+ * alone, and members on other networks often can't reach a symmetric-NAT
+ * host at all, while it can always reach them.
  */
 const NAT_SCORE = { open: 40, cone: 25, unknown: 10, symmetric: 0 } as const;
 
@@ -47,7 +53,13 @@ export function elect({ members, host, backup, penalties, now }: ElectionInput):
 
   let nextHost: string | null = null;
   const current = host ? byId.get(host) : undefined;
-  if (current && available(current)) nextHost = current.peer;
+  // A network check that couldn't finish ('unknown') is still a better bet
+  // than a known symmetric NAT (a device with UDP blocked reports symmetric).
+  const reachable = (m: SessionMember) => m.caps.nat !== 'symmetric';
+  const betterReachable =
+    current?.caps.nat === 'symmetric' ? ranked.find((m) => reachable(m)) : undefined;
+  if (betterReachable) nextHost = betterReachable.peer;
+  else if (current && available(current)) nextHost = current.peer;
   else {
     const standby = backup ? byId.get(backup) : undefined;
     if (standby && available(standby)) nextHost = standby.peer;

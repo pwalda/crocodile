@@ -1,5 +1,23 @@
-import { bytesEqual, fromB32, fromB64u, toB32, toB64u, utf8 } from '@crocodile/protocol';
-import { ed25519, hkdfSha256, randomBytes, sha256, signPayload, x25519 } from './primitives';
+import {
+  bytesEqual,
+  fromB32,
+  fromB64u,
+  mailProofPayload,
+  SIG_DOMAIN,
+  toB32,
+  toB64u,
+  utf8,
+  type MailProof,
+} from '@crocodile/protocol';
+import {
+  ed25519,
+  hkdfSha256,
+  randomBytes,
+  sha256,
+  signPayload,
+  verifyPayload,
+  x25519,
+} from './primitives';
 
 /**
  * A user's (or a server's) identity. Everything derives from one 32-byte seed,
@@ -131,10 +149,17 @@ export function decodeEncKey(encPublicKey: string): Uint8Array {
 
 /**
  * Six-digit code both devices show while linking. If they match, nobody
- * (including the coordination server) swapped the new device's key.
+ * (including the coordination server) swapped the new device's signing key
+ * or the encryption key the account is sent to.
  */
-export function linkSecurityCode(newDeviceKey: string, accountKey: string): string {
-  const d = sha256(utf8.encode(`croc/v1/link-sas\n${newDeviceKey}\n${accountKey}`));
+export function linkSecurityCode(
+  newDeviceKey: string,
+  newDeviceEncKey: string,
+  accountKey: string,
+): string {
+  const d = sha256(
+    utf8.encode(`croc/v2/link-sas\n${newDeviceKey}\n${newDeviceEncKey}\n${accountKey}`),
+  );
   const n = ((d[0]! << 16) | (d[1]! << 8) | d[2]!) % 1_000_000;
   const s = String(n).padStart(6, '0');
   return `${s.slice(0, 3)} ${s.slice(3)}`;
@@ -142,4 +167,34 @@ export function linkSecurityCode(newDeviceKey: string, accountKey: string): stri
 
 export function randomDeviceId(): string {
   return toB32(randomBytes(10));
+}
+
+// ---------------------------------------------------------------------------
+// Mailbox proofs: a device's signature on a mailbox request, so servers other
+// than its own act on it only for that device (MailProof).
+// ---------------------------------------------------------------------------
+
+export function signMailProof(
+  identity: Pick<Identity, 'signSecret' | 'publicKey'>,
+  req: Parameters<typeof mailProofPayload>[0],
+  at = Date.now(),
+): MailProof {
+  return {
+    key: identity.publicKey,
+    at,
+    sig: sign(identity, SIG_DOMAIN.mail, mailProofPayload(req, at)),
+  };
+}
+
+/** Whether `proof` is a recent signature by `peer`'s account on `req`. */
+export function verifyMailProof(
+  peer: string,
+  req: Parameters<typeof mailProofPayload>[0],
+  proof: MailProof | undefined,
+  now = Date.now(),
+  maxAgeMs = 5 * 60_000,
+): boolean {
+  if (!proof || Math.abs(now - proof.at) > maxAgeMs) return false;
+  if (!keyMatchesUserId(proof.key, peer.split('.')[0]!)) return false;
+  return verifyPayload(proof.key, SIG_DOMAIN.mail, mailProofPayload(req, proof.at), proof.sig);
 }

@@ -1,8 +1,31 @@
 // One-click installers for everyone: no admin rights, no configuration.
-// Code signing is used when certificates are provided (CSC_LINK etc.);
-// otherwise macOS builds are ad-hoc signed so they run on Apple Silicon,
-// and Windows builds are unsigned (see docs/DISTRIBUTION.md).
+// Code signing is used when the release workflow provides it: a Developer ID
+// certificate for macOS (CSC_LINK etc.), Azure Artifact Signing for Windows
+// (AZURE_SIGN_*). Otherwise macOS builds are ad-hoc signed so they run on
+// Apple Silicon, and Windows builds are unsigned (see docs/DISTRIBUTION.md).
 const signed = !!process.env.CSC_LINK;
+
+/** Azure Artifact Signing for Windows; the login comes from AZURE_TENANT_ID etc. */
+function azureSigning() {
+  const env = process.env;
+  const options = {
+    endpoint: env.AZURE_SIGN_ENDPOINT,
+    codeSigningAccountName: env.AZURE_SIGN_ACCOUNT,
+    certificateProfileName: env.AZURE_SIGN_PROFILE,
+    // Exactly the certificate's subject name: the updater checks new
+    // versions are signed by it.
+    publisherName: env.AZURE_SIGN_PUBLISHER,
+  };
+  const missing = Object.entries(options).filter(([, v]) => !v);
+  // All four, or none: a partial set is a mistake, not a choice to go unsigned.
+  if (missing.length === Object.keys(options).length) return undefined;
+  if (missing.length)
+    throw new Error(
+      `Windows signing is half set up; missing ${missing.map(([k]) => k).join(', ')}`,
+    );
+  return options;
+}
+const azureSignOptions = azureSigning();
 
 /** @type {import('electron-builder').Configuration} */
 module.exports = {
@@ -52,12 +75,14 @@ module.exports = {
     notarize: signed && !!process.env.APPLE_ID,
     extendInfo: {
       NSMicrophoneUsageDescription: 'Crocodile uses your microphone for voice chat.',
+      NSCameraUsageDescription: 'Crocodile uses your camera for video calls.',
     },
   },
   dmg: { title: 'Install Crocodile' },
 
   win: {
     target: [{ target: 'nsis', arch: ['x64', 'arm64'] }],
+    ...(azureSignOptions ? { azureSignOptions } : {}),
   },
   nsis: {
     // Per-user install, no UAC prompt, launches when done.
@@ -72,7 +97,7 @@ module.exports = {
   linux: {
     syncDesktopName: true,
     category: 'Network;Chat;InstantMessaging',
-    synopsis: 'Peer-to-peer, end-to-end encrypted voice and text chat',
+    synopsis: 'Peer-to-peer, end-to-end encrypted voice, video and text chat',
     target: [
       { target: 'AppImage', arch: ['x64', 'arm64'] },
       { target: 'deb', arch: ['x64', 'arm64'] },

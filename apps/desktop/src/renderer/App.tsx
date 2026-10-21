@@ -1,7 +1,19 @@
+import { ConnectionModal } from './modals/ConnectionModals';
 import { useEffect, useState } from 'react';
-import { Phone, PhoneOff, Server, Wifi, WifiOff } from 'lucide-react';
+import { Phone, PhoneOff, Server, Video, Wifi, WifiOff } from 'lucide-react';
 import { sessionIds } from '@crocodile/protocol';
-import { closeModal, getClient, navigate, openModal, ui, useCroc, useUi } from './croc';
+import {
+  closeModal,
+  getClient,
+  navigate,
+  openModal,
+  playSound,
+  sounds,
+  ui,
+  useCroc,
+  useUi,
+} from './croc';
+import { messageSound } from './lib/sounds';
 import { desktop } from './platform';
 import { Onboarding } from './components/Onboarding';
 import { TopBar } from './components/TopBar';
@@ -11,6 +23,9 @@ import { RoomStage } from './components/RoomStage';
 import { PeopleView } from './components/PeopleView';
 import { CallDock } from './components/CallDock';
 import { CommandPalette } from './components/CommandPalette';
+import { joinAndOpen, openInvite } from './components/InviteCard';
+import { plain, setInviteLinkHandler } from './lib/format';
+import { mentionsIn } from './lib/markup';
 import { Avatar, Button, Toasts, UserName } from './components/ui';
 import { CrocMark, Logo } from './components/Logo';
 import { NETWORK_TEXT } from './lib/network';
@@ -23,6 +38,7 @@ import {
 import { ConfirmModal, NewDmModal, ProfileModal } from './modals/UserModals';
 import { LinkDeviceModal } from './modals/DeviceModals';
 import { SettingsModal } from './modals/Settings';
+import { CameraModal, ShareScreenModal } from './modals/VideoModals';
 
 export function App() {
   const phase = useCroc((s) => s.phase);
@@ -40,6 +56,7 @@ export function App() {
 
 function Shell() {
   useGlobalBehaviours();
+  useSounds();
   const view = useUi((s) => s.view);
   const showMembers = useUi((s) => s.showMembers);
   const spaces = useCroc((s) => s.spaces);
@@ -210,12 +227,20 @@ function Modals() {
       return <LinkDeviceModal />;
     case 'confirm':
       return <ConfirmModal {...modal} />;
+    case 'connection':
+      return <ConnectionModal sessionId={modal.sessionId} />;
+    case 'camera':
+      return <CameraModal />;
+    case 'share-screen':
+      return <ShareScreenModal />;
   }
 }
 
 function CallPrompts() {
   const incoming = useCroc((s) => s.incomingCall);
   const outgoing = useCroc((s) => s.outgoingCall);
+  const view = useUi((s) => s.view);
+  const me = useCroc((s) => s.me?.userId);
   const relayEnded = useCroc((s) => s.relayEnded);
   const trouble = useCroc((s) => s.connectionTrouble);
   const network = useCroc((s) => s.network);
@@ -237,7 +262,9 @@ function CallPrompts() {
         <div className="mt-4 text-lg font-bold">
           <UserName userId={incoming.from} />
         </div>
-        <div className="text-sm text-muted">is calling you</div>
+        <div className="text-sm text-muted">
+          {incoming.video ? 'is video calling you' : 'is calling you'}
+        </div>
         <div className="mt-5 flex justify-center gap-6">
           <button
             aria-label="Decline"
@@ -257,6 +284,19 @@ function CallPrompts() {
             }}
           >
             <Phone size={22} />
+          </button>
+          <button
+            aria-label="Accept with video"
+            title="Accept with video"
+            className="flex h-14 w-14 items-center justify-center rounded-full bg-accent text-on-accent hover:brightness-110"
+            onClick={() => {
+              navigate({ kind: 'dm', userId: incoming.from });
+              void client
+                .callDm(incoming.from, { video: true })
+                .catch((e) => client.reportError(e.message));
+            }}
+          >
+            <Video size={22} />
           </button>
         </div>
       </div>
@@ -281,9 +321,16 @@ function CallPrompts() {
         <p className="mt-2 text-sm text-muted">
           Your network or theirs blocks a direct connection. Relay through a coordination server?
           Voice and messages stay end-to-end encrypted; the server sees only their size and timing,
-          for up to an hour at a time.
+          and only while a direct connection doesn't work.
         </p>
         <div className="mt-4 flex justify-end gap-2">
+          <Button
+            variant="ghost"
+            className="mr-auto"
+            onClick={() => openModal({ kind: 'connection', sessionId: trouble.sessionId })}
+          >
+            Details
+          </Button>
           <Button variant="ghost" onClick={() => client.dismissConnectionTrouble()}>
             Not now
           </Button>
@@ -296,22 +343,28 @@ function CallPrompts() {
     return (
       <div className="island rise fixed right-5 top-20 z-[55] w-96 rounded-3xl p-5">
         <div className="flex items-center gap-2 font-bold">
-          <Server size={18} className="text-warn" /> Relay hour is over
+          <Server size={18} className="text-warn" /> The relay stopped
         </div>
         <p className="mt-2 text-sm text-muted">
           Your connection went through a volunteer coordination server because no direct path
-          worked. Relays are limited to an hour at a time. Continue for another hour?
+          worked, and the server ended it ({relayEnded.reason}). Connect through the relay again?
         </p>
         <div className="mt-4 flex justify-end gap-2">
           <Button variant="ghost" onClick={() => client.dismissRelayNotice()}>
             Not now
           </Button>
-          <Button onClick={() => void client.extendRelay(relayEnded.sessionId)}>Continue</Button>
+          <Button onClick={() => void client.extendRelay(relayEnded.sessionId)}>Reconnect</Button>
         </div>
       </div>
     );
   }
-  if (outgoing) {
+  // Looking at the DM, its call stage already shows the ringing (and Cancel).
+  const onStage =
+    !!outgoing &&
+    view.kind === 'dm' &&
+    !!me &&
+    sessionIds.dm(me, view.userId) === outgoing.sessionId;
+  if (outgoing && !onStage) {
     return (
       <div className="island rise fixed right-5 top-20 z-[55] flex items-center gap-3 rounded-full py-2 pl-2 pr-3">
         <Avatar userId={outgoing.to} size={36} round speaking />
@@ -372,6 +425,65 @@ function CallPrompts() {
   return null;
 }
 
+/** Ringing, call and message sounds. */
+function useSounds() {
+  const client = getClient();
+  const ringingIn = useCroc((s) => !!s.incomingCall);
+  const ringingOut = useCroc(
+    (s) => !!s.voiceSession && s.outgoingCall?.sessionId === s.voiceSession,
+  );
+  const enabled = useUi((s) => s.sounds.enabled);
+  const busy = useCroc((s) => s.settings.status === 'dnd');
+
+  // Rings repeat until answered, declined or given up.
+  useEffect(() => {
+    if (!enabled || !ringingIn || busy) return;
+    sounds.volume = ui.get().sounds.volume;
+    return sounds.loop('ring', 2000);
+  }, [enabled, ringingIn, busy]);
+  useEffect(() => {
+    if (!enabled || !ringingOut) return;
+    sounds.volume = ui.get().sounds.volume;
+    return sounds.loop('ringback', 3000);
+  }, [enabled, ringingOut]);
+
+  useEffect(() => {
+    const offMessage = client.on('message', ({ channel, message, mine, update }) => {
+      const s = client.state;
+      const sound = messageSound({
+        mine,
+        update,
+        mentionsMe: !!s.me && mentionsIn(message.body).includes(s.me.userId),
+        busy: s.settings.status === 'dnd',
+        watching: document.hasFocus() && s.activeChannel === channel,
+      });
+      if (sound) playSound(sound);
+    });
+    // Others coming and going in our call.
+    const offCall = client.on('call', ({ event }) => {
+      if (event === 'joined') playSound('join');
+      else if (event === 'left') playSound('leave');
+    });
+    // Our own: joining a call, leaving or being hung up on, muting.
+    let prev = client.state;
+    const offStore = client.store.subscribe(() => {
+      const s = client.state;
+      if (s.voiceSession !== prev.voiceSession) {
+        if (!prev.voiceSession) playSound('join');
+        else if (!s.voiceSession) playSound('hangup');
+      } else if (s.voiceSession && s.muted !== prev.muted) {
+        playSound(s.muted ? 'mute' : 'unmute');
+      }
+      prev = s;
+    });
+    return () => {
+      offMessage();
+      offCall();
+      offStore();
+    };
+  }, [client]);
+}
+
 /** Push-to-talk (in-window), notifications, unread badge and invite deep links. */
 function useGlobalBehaviours() {
   const client = getClient();
@@ -411,17 +523,19 @@ function useGlobalBehaviours() {
 
   useEffect(
     () =>
-      client.on('message', ({ channel, message, mine }) => {
+      client.on('message', ({ channel, message, mine, update }) => {
         const s = client.state;
-        if (mine || !s.settings.notifications || s.settings.status === 'dnd') return;
+        if (mine || update || !s.settings.notifications || s.settings.status === 'dnd') return;
         if (document.hasFocus() && s.activeChannel === channel) return;
         const author = s.profiles[message.author]?.username ?? 'Someone';
         const space = Object.values(s.spaces).find((sp) =>
           sp.channels.some((c) => c.id === channel),
         );
         const chName = space?.channels.find((c) => c.id === channel)?.name;
-        const n = new Notification(space ? `${author} · ${chName} · ${space.name}` : author, {
-          body: message.body.slice(0, 200),
+        const mentioned = !!s.me && mentionsIn(message.body).includes(s.me.userId);
+        const who = mentioned ? `${author} mentioned you` : author;
+        const n = new Notification(space ? `${who} · ${chName} · ${space.name}` : who, {
+          body: plain(message.body).slice(0, 200),
         });
         n.onclick = () => {
           window.focus();
@@ -440,29 +554,34 @@ function useGlobalBehaviours() {
   }, [totalUnread]);
 
   useEffect(() => {
+    // Invite links clicked in a chat.
+    setInviteLinkHandler(askToJoin);
     if (!desktop) return;
     const handle = (url: string | null) => {
-      if (!url) return;
-      const m = url.match(/^croc:\/\/join\/([a-z2-7]+)/i);
-      if (!m) return;
-      closeModal();
-      openModal({
-        kind: 'confirm',
-        title: 'Join this space?',
-        body: `You were invited with the code ${m[1]!.toLowerCase()}.`,
-        action: 'Join',
-        onConfirm: async () => {
-          const spaceId = await client.joinWithInvite(m[1]!);
-          const space = client.state.spaces[spaceId];
-          navigate({
-            kind: 'space',
-            spaceId,
-            channelId: space?.channels.find((c) => c.kind === 'text')?.id ?? null,
-          });
-        },
-      });
+      const m = url?.match(/^croc:\/\/join\/([a-z2-7]+)/i);
+      if (m) askToJoin(m[1]!.toLowerCase());
     };
     void desktop.app.takeDeepLink().then(handle);
     return desktop.app.onDeepLink(handle);
   }, [client]);
+}
+
+/** An invite link was opened: join that space, after asking (or just open it if we're in). */
+function askToJoin(code: string) {
+  const client = getClient();
+  void client
+    .previewInvite(code)
+    .catch(() => null)
+    .then((preview) => {
+      if (preview?.joined) return openInvite(preview);
+      if (preview?.expired) return client.reportError('This invite has expired or was revoked.');
+      closeModal();
+      openModal({
+        kind: 'confirm',
+        title: preview ? `Join ${preview.name}?` : 'Join this space?',
+        body: `You were invited with the code ${code}.`,
+        action: 'Join',
+        onConfirm: () => joinAndOpen(code),
+      });
+    });
 }

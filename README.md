@@ -2,23 +2,33 @@
 
 # Crocodile
 
-**Peer-to-peer, end-to-end encrypted voice and text chat.** Hang out like on
-Discord or TeamSpeak (spaces, text channels, voice rooms, friends, DMs,
-calls) with the privacy of Signal: your voice and messages go only between
-the people in the conversation. Servers never see them.
+**Peer-to-peer, end-to-end encrypted voice, video and text chat.** Hang out
+like on Discord or TeamSpeak (spaces, text channels, voice rooms, friends,
+DMs, calls, screen sharing) with the privacy of Signal: your voice, video and
+messages go only between the people in the conversation. Servers never see
+them.
 
 - **Always E2E, always P2P.** Voice frames and messages are encrypted on your
   device with ratcheting keys and post-quantum (ML-KEM) key exchange. For
   groups, the member with the best connection hosts a tiny relay that
   forwards ciphertext it cannot read, and a runner-up stands by to take over.
+- **Video calls and screen sharing.** Turn your camera on in a call or a
+  voice room, or share a screen or a window, sharp for text and slides or
+  smooth for motion. People see cameras right away and choose which screens
+  to watch, full screen or in a pop-out window. Encrypted end to end like
+  voice.
 - **No passwords, no accounts to lose.** Your account is a key pair; you get a
   recovery key once. Pick a name and you're in. Add your other computers by
   typing a short code.
 - **Works on strict networks too.** If a direct connection is impossible you
   can opt in to relaying your (still encrypted) traffic through a volunteer
-  server, an hour at a time.
+  server, only while a direct connection is impossible.
 - **Messages wait for offline friends.** Your device keeps them until you're
   both online; optionally a server holds them sealed for up to a few days.
+- **Files of any size, straight to your people.** Pictures, videos and other
+  files go directly from one member's device to another's, encrypted, never
+  through a server, and resume if the connection drops. Anyone who has a file
+  can pass it on, so it stays available after the sender goes offline.
 - **Community-run coordination.** Volunteer coordination servers introduce
   peers, elect hosts and replicate _signed_ public metadata among themselves.
   Your app picks the fastest one automatically and keeps a backup.
@@ -47,6 +57,21 @@ are code-signed, browser downloads show a one-time warning; see
 [docs/DISTRIBUTION.md](docs/DISTRIBUTION.md).
 
 Mobile apps are on the [roadmap](docs/ROADMAP.md).
+
+### Command line
+
+`crocodile` sends and receives files from a terminal, for servers and
+scripts, straight to and from the people you'd send them to in the app:
+
+```sh
+npm install -g crocodile-cli
+# or: curl -fsSL https://raw.githubusercontent.com/pwalda/crocodile/main/scripts/install.sh | sh -s -- --cli
+crocodile link                    # use your account (or: crocodile init <name>)
+crocodile send backup.tar.gz --to alice#1234
+crocodile get --from bob#5678
+```
+
+See [apps/cli](apps/cli/README.md).
 
 ## How it works
 
