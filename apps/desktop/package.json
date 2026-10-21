@@ -39,7 +39,7 @@
     "react-dom": "^19.3.0",
     "tailwindcss": "^4.3.3",
     "uiohook-napi": "^1.5.5",
-    "vite": "^8.3.2"
+    "vite": "^8.3.3"
   },
   "homepage": "https://github.com/pwalda/crocodile",
   "desktopName": "crocodile.desktop"
