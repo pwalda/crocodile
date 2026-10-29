@@ -189,7 +189,7 @@ picture size.
   clients and out of the list and term answers it gives other servers, and
   gives a space's member records (which name the invite each member joined
   with) only to its owner and members. A user who leaves or is banned stops
-  being served within seconds. This is not a boundary against servers, which
+  being served as soon as the server hears of it, and within ten seconds at the latest. This is not a boundary against servers, which
   replicate invites and memberships among themselves and can read the ones
   they store.
 - Linked devices share the account seed; per-device signing keys certified by

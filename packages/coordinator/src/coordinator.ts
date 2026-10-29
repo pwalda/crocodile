@@ -577,6 +577,16 @@ export class Coordinator {
         : record.kind === 'note'
           ? record.key.split(':')[1]
           : undefined;
+    // A join, a leave, a ban or a deleted space changes who may read the member list
+    // of that space: what a connection found out about it is looked up again.
+    if (record.kind === 'space' || record.kind === 'member') {
+      const body = record.body as { spaceId?: string; userId?: string };
+      const spaceId = record.kind === 'space' ? record.key.slice('space:'.length) : body.spaceId;
+      for (const client of this.presence.localClients()) {
+        if (record.kind === 'space' || client.userId === body.userId)
+          (client as ClientConnection).forgetMembers(spaceId);
+      }
+    }
     for (const client of this.presence.localClients()) {
       const conn = client as ClientConnection;
       if (friendOf?.has(client.userId) || forUser === client.userId) {
@@ -586,10 +596,9 @@ export class Coordinator {
         const space = conn.othersMemberOf(record);
         if (space === undefined) client.send('record', { record });
         else
-          void conn
-            .mayReadMembers(space)
-            .then((ok) => ok && client.send('record', { record }))
-            .catch(() => {});
+          void conn.mayReadMembers(space).then((ok) => {
+            if (ok) client.send('record', { record });
+          });
       }
     }
   }

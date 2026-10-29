@@ -34,8 +34,12 @@ import { FRAME_BUDGET, RateLimiter, RpcFailure, cutToFrame, jsonBytes, sendJson 
 
 /** Keys `records.get` looks up first (the window doubles). */
 const GET_WINDOW = 20;
-/** How long a user found to be in a space keeps reading its member list before it is looked up again. */
+/** How long what was found about who may read a space's member list holds, before it is looked up again. */
 const MEMBER_LIST_TTL_MS = 10_000;
+const NOT_MEMBER_TTL_MS = 3_000;
+/** Spaces whose member lists one request looks at (a client asks for one), and spaces remembered. */
+const MEMBER_LOOKUPS = 8;
+const MEMBER_CACHE_MAX = 256;
 
 /** Unreadable pages `records.list` looks past before handing back where it got to. */
 const LIST_SKIPS = 4;
@@ -63,8 +67,9 @@ export class ClientConnection implements ClientHandle {
   status: OwnStatus = 'online';
   statusText?: string;
   subscriptions = new Set<string>();
-  /** Spaces whose member lists this user may read, and until when that was last found to hold. */
-  private readonly memberLists = new Map<string, number>();
+  /** Whether this user may read the member list of a space, as last found, and until when that holds. */
+  private readonly memberLists = new Map<string, { ok: boolean; until: number }>();
+  private readonly memberLookups = new Map<string, Promise<boolean>>();
   presenceWatch = new Set<string>();
   voiceWatch = new Set<string>();
 
@@ -299,7 +304,7 @@ export class ClientConnection implements ClientHandle {
         if (!this.writeLimiter.take()) throw new RpcFailure('rate_limited', 'too many writes');
         const r = await hub.dist.putFromClient(record);
         // Joining, leaving or editing a space changes what this user may read of it.
-        if (record.kind === 'member' || record.kind === 'space') this.memberLists.clear();
+        if (record.kind === 'member' || record.kind === 'space') this.forgetMembers();
         return {
           accepted: r.accepted,
           current: r.current,
@@ -316,7 +321,11 @@ export class ClientConnection implements ClientHandle {
           const window = keys.slice(i, i + step);
           const order = new Map(window.map((k, j) => [k, i + j]));
           const found = (
-            await this.readable(await hub.dist.get(window.filter((k) => this.mayReadKey(k))))
+            await this.filterMemberLists(
+              (await hub.dist.get(window.filter((k) => this.mayReadKey(k)))).filter((r) =>
+                this.mayRead(r),
+              ),
+            )
           ).sort((a, b) => order.get(a.key)! - order.get(b.key)!);
           for (const r of found) {
             const cost = jsonBytes(r) + 1;
@@ -343,7 +352,9 @@ export class ClientConnection implements ClientHandle {
         let cursor = after;
         for (let rounds = 1; ; rounds++) {
           const found = await hub.dist.list(prefix, limit ?? 1000, cursor);
-          const readable = await this.readable(found.records.filter((r) => this.mayEnumerate(r)));
+          const readable = await this.filterMemberLists(
+            found.records.filter((r) => this.mayEnumerate(r)),
+          );
           const last = found.records.at(-1)?.key;
           if (readable.length === 0 && found.more) {
             // Nowhere further to go from here.
@@ -523,25 +534,30 @@ export class ClientConnection implements ClientHandle {
     return !record.key.startsWith(recordKey.invitePrefix) && this.mayRead(record);
   }
 
-  /** The records of `records` this user may read, member lists included. */
-  async readable(records: SignedRecord[]): Promise<SignedRecord[]> {
+  /** Leaves out the member records of spaces this user may not read the list of. */
+  async filterMemberLists(records: SignedRecord[]): Promise<SignedRecord[]> {
     const spaces = new Set<string>();
-    for (const r of records) if (this.mayRead(r)) spaces.add(this.othersMemberOf(r) ?? '');
-    spaces.delete('');
+    for (const r of records) {
+      const id = this.othersMemberOf(r);
+      if (id) spaces.add(id);
+    }
     const allowed = new Set<string>();
     await Promise.all(
-      [...spaces].map(async (id) => {
+      [...spaces].slice(0, MEMBER_LOOKUPS).map(async (id) => {
         if (await this.mayReadMembers(id)) allowed.add(id);
       }),
     );
     return records.filter((r) => {
-      if (!this.mayRead(r)) return false;
-      const space = this.othersMemberOf(r);
-      return space === undefined || allowed.has(space);
+      const id = this.othersMemberOf(r);
+      return id === undefined || allowed.has(id);
     });
   }
 
-  /** The space a member record of somebody else belongs to; undefined for any other record. */
+  /**
+   * The space a member record of somebody else belongs to; undefined for any
+   * other record, and for this user's own. A key without a space gives '', which
+   * nobody may read.
+   */
   othersMemberOf(record: SignedRecord): string | undefined {
     if (!record.key.startsWith('member:')) return undefined;
     const [, spaceId, userId] = record.key.split(':');
@@ -553,9 +569,33 @@ export class ClientConnection implements ClientHandle {
    * its author joined with. The space's owner and members may read the list, nobody else.
    * (Other servers still see them: they must, to check a join.)
    */
-  async mayReadMembers(spaceId: string): Promise<boolean> {
-    const now = Date.now();
-    if ((this.memberLists.get(spaceId) ?? 0) > now) return true;
+  mayReadMembers(spaceId: string): Promise<boolean> {
+    const hit = this.memberLists.get(spaceId);
+    if (hit && hit.until > Date.now()) return Promise.resolve(hit.ok);
+    let look = this.memberLookups.get(spaceId);
+    if (!look) {
+      // A change seen while looking (forgetMembers) makes what comes back stale: not kept.
+      const current = () => this.memberLookups.get(spaceId) === look;
+      look = this.lookUpMembership(spaceId).then(
+        (ok) => {
+          if (current()) {
+            this.memberLookups.delete(spaceId);
+            this.rememberMembership(spaceId, ok);
+          }
+          return ok;
+        },
+        () => {
+          if (current()) this.memberLookups.delete(spaceId);
+          // Not known, so not served; asked again next time.
+          return false;
+        },
+      );
+      this.memberLookups.set(spaceId, look);
+    }
+    return look;
+  }
+
+  private async lookUpMembership(spaceId: string): Promise<boolean> {
     const spaceKey = recordKey.space(spaceId);
     const mineKey = recordKey.member(spaceId, this.userId);
     const found = await this.hub.dist.get([spaceKey, mineKey]);
@@ -563,14 +603,35 @@ export class ClientConnection implements ClientHandle {
       SignedRecord<'space'> | undefined;
     const mine = found.find((r) => r.key === mineKey && r.kind === 'member') as
       SignedRecord<'member'> | undefined;
-    const ok =
+    return (
       !!space &&
       !space.body.deleted &&
       (space.body.owner === this.userId ||
-        (!!mine && !mine.body.left && !space.body.bans.includes(this.userId)));
-    // Kept briefly, so that a burst of joins is not a lookup per record per subscriber.
-    if (ok) this.memberLists.set(spaceId, now + MEMBER_LIST_TTL_MS);
-    return ok;
+        (!!mine && !mine.body.left && !space.body.bans.includes(this.userId)))
+    );
+  }
+
+  private rememberMembership(spaceId: string, ok: boolean) {
+    const now = Date.now();
+    if (this.memberLists.size >= MEMBER_CACHE_MAX) {
+      for (const [id, e] of this.memberLists) if (e.until <= now) this.memberLists.delete(id);
+      if (this.memberLists.size >= MEMBER_CACHE_MAX) this.memberLists.clear();
+    }
+    this.memberLists.set(spaceId, {
+      ok,
+      until: now + (ok ? MEMBER_LIST_TTL_MS : NOT_MEMBER_TTL_MS),
+    });
+  }
+
+  /** What was found about a space (or all of them) is no longer to be trusted: a join, a leave or a ban. */
+  forgetMembers(spaceId?: string) {
+    if (spaceId === undefined) {
+      this.memberLists.clear();
+      this.memberLookups.clear();
+    } else {
+      this.memberLists.delete(spaceId);
+      this.memberLookups.delete(spaceId);
+    }
   }
 
   mayReadKey(key: string): boolean {

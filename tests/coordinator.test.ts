@@ -211,7 +211,7 @@ describe('member lists', () => {
     expect(keysOf(await eve.conn.request('records.list', { prefix })).length).toBe(4);
   });
 
-  it('stop being readable to somebody who leaves or is banned', async () => {
+  it('stop being readable to somebody who leaves or is banned, to a list or a push', async () => {
     const c = await server();
     const alice = await user(c);
     const bob = await user(c);
@@ -220,25 +220,42 @@ describe('member lists', () => {
     await joinSpace(bob, spaceId, code);
     await joinSpace(carol, spaceId, code);
     const prefix = recordKey.memberPrefix(spaceId);
-    for (const u of [bob, carol])
+    const mine = (u: TestUser) => recordKey.member(spaceId, u.identity.userId);
+    for (const u of [alice, bob, carol]) {
       expect((await u.conn.request('records.list', { prefix })).records).toHaveLength(3);
+      await u.conn.request('records.subscribe', { prefixes: [prefix] });
+    }
+    const told = (u: TestUser, key: string) =>
+      u.events.some(
+        (e) => e.ev === 'record' && (e.d as { record: SignedRecord }).record.key === key,
+      );
+    const join = async (name: string) => {
+      const u = await user(c, name);
+      await joinSpace(u, spaceId, code);
+      return u;
+    };
 
+    // Both are told of a new member.
+    const dave = await join('dave');
+    await waitFor(() => told(bob, mine(dave)) && told(carol, mine(dave)), 2000, 'told of dave');
+
+    // Bob leaves: his list is his own record, and nothing more is pushed to him.
     expectAccepted(
       await bob.conn.request('records.put', {
         record: signRecord(
           bob.identity,
           'member',
-          recordKey.member(spaceId, bob.identity.userId),
+          mine(bob),
           { spaceId, userId: bob.identity.userId, left: true },
           Date.now() + 10,
         ),
       }),
     );
     expect((await bob.conn.request('records.list', { prefix })).records.map((r) => r.key)).toEqual([
-      recordKey.member(spaceId, bob.identity.userId),
+      mine(bob),
     ]);
 
-    // Banned: found out once the space record says so (after the short memory of the last look).
+    // Carol is banned by the owner: closed to her at once, from the next list and push.
     const space = (await alice.conn.request('records.get', { keys: [recordKey.space(spaceId)] }))
       .records[0] as SignedRecord<'space'>;
     expectAccepted(
@@ -252,15 +269,31 @@ describe('member lists', () => {
         ),
       }),
     );
-    vi.useFakeTimers({ toFake: ['Date'] });
-    try {
-      vi.setSystemTime(Date.now() + 60_000);
-      expect(
-        (await carol.conn.request('records.list', { prefix })).records.map((r) => r.key),
-      ).toEqual([recordKey.member(spaceId, carol.identity.userId)]);
-    } finally {
-      vi.useRealTimers();
-    }
+    expect(
+      (await carol.conn.request('records.list', { prefix })).records.map((r) => r.key),
+    ).toEqual([mine(carol)]);
+    const erin = await join('erin');
+    // Alice, still in, is told; the two who are out are not.
+    await waitFor(() => told(alice, mine(erin)), 2000, 'the owner told of erin');
+    await new Promise((done) => setTimeout(done, 100));
+    expect(told(bob, mine(erin)) || told(carol, mine(erin))).toBe(false);
+  });
+
+  it('are not served while it cannot be found out who may read them', async () => {
+    const c = await server();
+    const alice = await user(c);
+    const bob = await user(c);
+    const { spaceId, code } = await createSpace(alice);
+    await joinSpace(bob, spaceId, code);
+    const prefix = recordKey.memberPrefix(spaceId);
+    const get = vi.spyOn(c.dist, 'get').mockRejectedValueOnce(new Error('owners unreachable'));
+    // Not an error that loses the page, and not a list given out unchecked.
+    const down = await bob.conn.request('records.list', { prefix });
+    expect(down.records.map((r) => r.key)).toEqual([
+      recordKey.member(spaceId, bob.identity.userId),
+    ]);
+    get.mockRestore();
+    expect((await bob.conn.request('records.list', { prefix })).records).toHaveLength(2);
   });
 });
 
