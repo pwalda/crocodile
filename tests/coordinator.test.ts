@@ -184,6 +184,11 @@ describe('member lists', () => {
     expect(keysOf(await alice.conn.request('records.list', { prefix }))).toEqual(both);
     expect(keysOf(await bob.conn.request('records.list', { prefix }))).toEqual(both);
 
+    // A prefix spanning spaces gives a member only their own records.
+    expect(keysOf(await bob.conn.request('records.list', { prefix: 'member:' }))).toEqual([
+      recordKey.member(spaceId, bob.identity.userId),
+    ]);
+
     // Eve gets nothing, by listing (also by a shorter prefix) or by asking for a key.
     for (const p of [prefix, 'member:', 'mem'])
       expect((await eve.conn.request('records.list', { prefix: p, limit: 5000 })).records).toEqual(
@@ -197,6 +202,7 @@ describe('member lists', () => {
     await eve.conn.request('records.subscribe', { prefixes: [prefix] });
     await bob.conn.request('records.subscribe', { prefixes: [prefix] });
     const carol = await user(c);
+    const lookups = vi.spyOn(c.dist, 'get');
     await joinSpace(carol, spaceId, code);
     const carolKey = recordKey.member(spaceId, carol.identity.userId);
     const told = (u: { events: { ev: string; d: unknown }[] }) =>
@@ -205,6 +211,13 @@ describe('member lists', () => {
       );
     await waitFor(() => told(bob), 2000, 'a member told of the new member');
     expect(told(eve)).toBe(false);
+    // Eve's subscription was not kept, so no join costs a look-up on her account.
+    expect(
+      lookups.mock.calls.some(([keys]) =>
+        keys.includes(recordKey.member(spaceId, eve.identity.userId)),
+      ),
+    ).toBe(false);
+    lookups.mockRestore();
 
     // Eve's own record is hers to read; and once she is in, she reads the list at once.
     await joinSpace(eve, spaceId, code);
@@ -287,13 +300,62 @@ describe('member lists', () => {
     await joinSpace(bob, spaceId, code);
     const prefix = recordKey.memberPrefix(spaceId);
     const get = vi.spyOn(c.dist, 'get').mockRejectedValueOnce(new Error('owners unreachable'));
-    // Not an error that loses the page, and not a list given out unchecked.
-    const down = await bob.conn.request('records.list', { prefix });
-    expect(down.records.map((r) => r.key)).toEqual([
-      recordKey.member(spaceId, bob.identity.userId),
-    ]);
+    // An error to try again, not a list that looks complete and is not.
+    await expect(bob.conn.request('records.list', { prefix })).rejects.toThrow(/try again/);
     get.mockRestore();
-    expect((await bob.conn.request('records.list', { prefix })).records).toHaveLength(2);
+  });
+
+  it('are not sent to somebody banned while it was being found out whether they may have them', async () => {
+    const c = await server();
+    const alice = await user(c);
+    const carol = await user(c);
+    const { spaceId, code } = await createSpace(alice);
+    await joinSpace(carol, spaceId, code);
+    const prefix = recordKey.memberPrefix(spaceId);
+    await carol.conn.request('records.subscribe', { prefixes: [prefix] });
+    const told = (key: string) =>
+      carol.events.some(
+        (e) => e.ev === 'record' && (e.d as { record: SignedRecord }).record.key === key,
+      );
+
+    // What was found out about carol has run out. The next look-up answers at once, but is
+    // delivered only after the ban: the answer it gives is out of date by then.
+    vi.useFakeTimers({ toFake: ['Date'] });
+    const original = c.dist.get.bind(c.dist);
+    let release = () => {};
+    const gate = new Promise<void>((done) => (release = done));
+    const carolKey = recordKey.member(spaceId, carol.identity.userId);
+    const lookup = vi.spyOn(c.dist, 'get').mockImplementation(async (keys) => {
+      const found = await original(keys);
+      if (keys.includes(carolKey)) await gate;
+      return found;
+    });
+    try {
+      vi.setSystemTime(Date.now() + 60_000);
+      const dave = await user(c);
+      await joinSpace(dave, spaceId, code);
+      await waitFor(() => lookup.mock.calls.some(([k]) => k.includes(carolKey)), 2000, 'look-up');
+      const space = (await alice.conn.request('records.get', { keys: [recordKey.space(spaceId)] }))
+        .records[0] as SignedRecord<'space'>;
+      expectAccepted(
+        await alice.conn.request('records.put', {
+          record: signRecord(
+            alice.identity,
+            'space',
+            space.key,
+            { ...space.body, bans: [carol.identity.userId] },
+            space.version + 1,
+          ),
+        }),
+      );
+      release();
+      await new Promise((done) => setTimeout(done, 200));
+      expect(told(recordKey.member(spaceId, dave.identity.userId))).toBe(false);
+    } finally {
+      release();
+      lookup.mockRestore();
+      vi.useRealTimers();
+    }
   });
 });
 

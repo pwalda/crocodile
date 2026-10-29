@@ -40,6 +40,10 @@ const NOT_MEMBER_TTL_MS = 3_000;
 /** Spaces whose member lists one request looks at (a client asks for one), and spaces remembered. */
 const MEMBER_LOOKUPS = 8;
 const MEMBER_CACHE_MAX = 256;
+/** Before a member record pushed to a client is tried again, when it could not be found out if it may have it. */
+const MEMBER_RETRY_MS = 1000;
+/** The space a prefix of member records is for, if it names one. */
+const MEMBER_PREFIX = /^member:([^:]+):/;
 
 /** Unreadable pages `records.list` looks past before handing back where it got to. */
 const LIST_SKIPS = 4;
@@ -69,7 +73,7 @@ export class ClientConnection implements ClientHandle {
   subscriptions = new Set<string>();
   /** Whether this user may read the member list of a space, as last found, and until when that holds. */
   private readonly memberLists = new Map<string, { ok: boolean; until: number }>();
-  private readonly memberLookups = new Map<string, Promise<boolean>>();
+  private readonly memberLookups = new Map<string, { stale: boolean; promise: Promise<boolean> }>();
   presenceWatch = new Set<string>();
   voiceWatch = new Set<string>();
 
@@ -303,8 +307,10 @@ export class ClientConnection implements ClientHandle {
           throw new RpcFailure('forbidden', 'records are written by their author');
         if (!this.writeLimiter.take()) throw new RpcFailure('rate_limited', 'too many writes');
         const r = await hub.dist.putFromClient(record);
-        // Joining, leaving or editing a space changes what this user may read of it.
-        if (record.kind === 'member' || record.kind === 'space') this.forgetMembers();
+        // Joining, leaving or editing a space changes what this user may read of it. (The
+        // owners may be other servers, which this one hears from a little later.)
+        if (r.accepted && (record.kind === 'member' || record.kind === 'space'))
+          this.forgetMembers();
         return {
           accepted: r.accepted,
           current: r.current,
@@ -346,14 +352,23 @@ export class ClientConnection implements ClientHandle {
         // Nothing here is listable, and paging through it only to drop it all is work for nothing.
         if (recordKey.invitePrefix.startsWith(prefix) || prefix.startsWith(recordKey.invitePrefix))
           return { records: [] };
+        // A prefix naming a space is for its member list: asked once, not for every page. Anything
+        // shorter spans spaces, and gives member records of this user alone.
+        const space = MEMBER_PREFIX.exec(prefix)?.[1];
+        if (space !== undefined && !(await this.membersReadable(space))) {
+          const own = recordKey.member(space, this.userId);
+          return {
+            records: own.startsWith(prefix) ? await hub.dist.get([own]) : [],
+          };
+        }
         // In key order, so that `after` names where to go on from. A page may hold nothing this
         // user may read (another's notes, say) and still have others after it: look at a few more,
         // then hand back where we got to.
         let cursor = after;
         for (let rounds = 1; ; rounds++) {
           const found = await hub.dist.list(prefix, limit ?? 1000, cursor);
-          const readable = await this.filterMemberLists(
-            found.records.filter((r) => this.mayEnumerate(r)),
+          const readable = found.records.filter(
+            (r) => this.mayEnumerate(r) && (space !== undefined || !this.othersMemberOf(r)),
           );
           const last = found.records.at(-1)?.key;
           if (readable.length === 0 && found.more) {
@@ -379,7 +394,19 @@ export class ClientConnection implements ClientHandle {
         const fresh = prefixes.filter((x) => !this.subscriptions.has(x));
         if (this.subscriptions.size + fresh.length > MAX_SUBSCRIPTIONS)
           throw new RpcFailure('bad_request', `at most ${MAX_SUBSCRIPTIONS} subscriptions`);
-        for (const prefix of fresh) this.subscriptions.add(prefix);
+        // A member list of a space this user is found not to be in would be followed for nothing.
+        let looked = 0;
+        for (const prefix of fresh) {
+          const space = MEMBER_PREFIX.exec(prefix)?.[1];
+          if (space !== undefined && looked++ < MEMBER_LOOKUPS) {
+            const closed = await this.mayReadMembers(space).then(
+              (ok) => !ok,
+              () => false,
+            );
+            if (closed) continue;
+          }
+          this.subscriptions.add(prefix);
+        }
         hub.dist.refreshWatchesSoon();
         return {};
       }
@@ -541,10 +568,12 @@ export class ClientConnection implements ClientHandle {
       const id = this.othersMemberOf(r);
       if (id) spaces.add(id);
     }
+    if (spaces.size > MEMBER_LOOKUPS)
+      throw new RpcFailure('bad_request', 'too many spaces at once');
     const allowed = new Set<string>();
     await Promise.all(
-      [...spaces].slice(0, MEMBER_LOOKUPS).map(async (id) => {
-        if (await this.mayReadMembers(id)) allowed.add(id);
+      [...spaces].map(async (id) => {
+        if (await this.membersReadable(id)) allowed.add(id);
       }),
     );
     return records.filter((r) => {
@@ -564,51 +593,67 @@ export class ClientConnection implements ClientHandle {
     return userId === this.userId ? undefined : (spaceId ?? '');
   }
 
+  /** `mayReadMembers`, where not being able to tell is an error the client may try again. */
+  private async membersReadable(spaceId: string): Promise<boolean> {
+    try {
+      return await this.mayReadMembers(spaceId);
+    } catch {
+      throw new RpcFailure('unavailable', 'could not check the space just now; try again');
+    }
+  }
+
   /**
    * Who is in a space is for those in it: a member record names the invite
    * its author joined with. The space's owner and members may read the list, nobody else.
    * (Other servers still see them: they must, to check a join.)
+   * Rejects when that cannot be found out.
    */
-  mayReadMembers(spaceId: string): Promise<boolean> {
-    const hit = this.memberLists.get(spaceId);
-    if (hit && hit.until > Date.now()) return Promise.resolve(hit.ok);
-    let look = this.memberLookups.get(spaceId);
-    if (!look) {
-      // A change seen while looking (forgetMembers) makes what comes back stale: not kept.
-      const current = () => this.memberLookups.get(spaceId) === look;
-      look = this.lookUpMembership(spaceId).then(
-        (ok) => {
-          if (current()) {
-            this.memberLookups.delete(spaceId);
-            this.rememberMembership(spaceId, ok);
-          }
-          return ok;
-        },
-        () => {
-          if (current()) this.memberLookups.delete(spaceId);
-          // Not known, so not served; asked again next time.
-          return false;
-        },
-      );
-      this.memberLookups.set(spaceId, look);
+  async mayReadMembers(spaceId: string): Promise<boolean> {
+    // An answer overtaken by a change in the space (a ban, a leave) is not used: ask again.
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const hit = this.memberLists.get(spaceId);
+      if (hit && hit.until > Date.now()) return hit.ok;
+      let lookup = this.memberLookups.get(spaceId);
+      if (!lookup) {
+        const started: { stale: boolean; promise: Promise<boolean> } = {
+          stale: false,
+          promise: Promise.resolve(false),
+        };
+        started.promise = this.hub.isSpaceMember(spaceId, this.userId).then(
+          (ok) => {
+            if (!started.stale) {
+              this.memberLookups.delete(spaceId);
+              this.rememberMembership(spaceId, ok);
+            }
+            return ok;
+          },
+          (err) => {
+            if (!started.stale) this.memberLookups.delete(spaceId);
+            throw err;
+          },
+        );
+        this.memberLookups.set(spaceId, started);
+        lookup = started;
+      }
+      const ok = await lookup.promise;
+      if (!lookup.stale) return ok;
     }
-    return look;
+    throw new Error('the space keeps changing');
   }
 
-  private async lookUpMembership(spaceId: string): Promise<boolean> {
-    const spaceKey = recordKey.space(spaceId);
-    const mineKey = recordKey.member(spaceId, this.userId);
-    const found = await this.hub.dist.get([spaceKey, mineKey]);
-    const space = found.find((r) => r.key === spaceKey && r.kind === 'space') as
-      SignedRecord<'space'> | undefined;
-    const mine = found.find((r) => r.key === mineKey && r.kind === 'member') as
-      SignedRecord<'member'> | undefined;
-    return (
-      !!space &&
-      !space.body.deleted &&
-      (space.body.owner === this.userId ||
-        (!!mine && !mine.body.left && !space.body.bans.includes(this.userId)))
-    );
+  /**
+   * Sends a member record of a space to this client if it may read the list
+   * there; if that cannot be found out, once more a moment later.
+   */
+  async sendMemberRecord(record: SignedRecord, spaceId: string) {
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        if (await this.mayReadMembers(spaceId)) this.send('record', { record });
+        return;
+      } catch {
+        await new Promise((done) => setTimeout(done, MEMBER_RETRY_MS).unref?.());
+      }
+    }
   }
 
   private rememberMembership(spaceId: string, ok: boolean) {
@@ -625,13 +670,13 @@ export class ClientConnection implements ClientHandle {
 
   /** What was found about a space (or all of them) is no longer to be trusted: a join, a leave or a ban. */
   forgetMembers(spaceId?: string) {
-    if (spaceId === undefined) {
-      this.memberLists.clear();
-      this.memberLookups.clear();
-    } else {
-      this.memberLists.delete(spaceId);
-      this.memberLookups.delete(spaceId);
+    for (const [id, lookup] of this.memberLookups) {
+      if (spaceId !== undefined && id !== spaceId) continue;
+      lookup.stale = true;
+      this.memberLookups.delete(id);
     }
+    if (spaceId === undefined) this.memberLists.clear();
+    else this.memberLists.delete(spaceId);
   }
 
   mayReadKey(key: string): boolean {

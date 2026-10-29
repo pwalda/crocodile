@@ -577,28 +577,25 @@ export class Coordinator {
         : record.kind === 'note'
           ? record.key.split(':')[1]
           : undefined;
-    // A join, a leave, a ban or a deleted space changes who may read the member list
-    // of that space: what a connection found out about it is looked up again.
-    if (record.kind === 'space' || record.kind === 'member') {
-      const body = record.body as { spaceId?: string; userId?: string };
-      const spaceId = record.kind === 'space' ? record.key.slice('space:'.length) : body.spaceId;
-      for (const client of this.presence.localClients()) {
-        if (record.kind === 'space' || client.userId === body.userId)
-          (client as ClientConnection).forgetMembers(spaceId);
-      }
-    }
+    // A join, a leave, a ban or a deleted space changes who may read the member list of that
+    // space (of a member record, for that user alone): what a connection found out is looked up again.
+    const space =
+      record.kind === 'space'
+        ? record.key.slice('space:'.length)
+        : record.kind === 'member'
+          ? (record as SignedRecord<'member'>).body.spaceId
+          : undefined;
     for (const client of this.presence.localClients()) {
       const conn = client as ClientConnection;
+      if (space !== undefined && (record.kind === 'space' || forUser === client.userId))
+        conn.forgetMembers(space);
       if (friendOf?.has(client.userId) || forUser === client.userId) {
         client.send('record', { record });
       } else if (conn.wants(record)) {
-        // Who is in a space is told to those in it (a lookup, so it may take a moment).
-        const space = conn.othersMemberOf(record);
-        if (space === undefined) client.send('record', { record });
-        else
-          void conn.mayReadMembers(space).then((ok) => {
-            if (ok) client.send('record', { record });
-          });
+        // Who is in a space is told to those in it (found out first, so it may take a moment).
+        const others = conn.othersMemberOf(record);
+        if (others === undefined) client.send('record', { record });
+        else void conn.sendMemberRecord(record, others);
       }
     }
   }
