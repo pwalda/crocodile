@@ -105,6 +105,64 @@ describe('records', () => {
     });
     expect(members.records).toHaveLength(2);
   });
+
+  it('does not let a stranger enumerate invite codes', async () => {
+    const c = await server();
+    const alice = await user(c);
+    const { spaceId, code } = await createSpace(alice);
+    const eve = await user(c); // never handed the invite code
+
+    // No prefix sweep reveals an invite. The server's undefined invite shard
+    // used to serve every invite it held for any prefix >= 3 chars.
+    for (const prefix of ['invite:', 'invite', 'inv']) {
+      const res = await eve.conn.request('records.list', { prefix, limit: 5000 });
+      expect(res.records.some((r) => r.key.startsWith('invite:'))).toBe(false);
+    }
+
+    // A subscription must not stream invites either. Subscribe to the invite
+    // and friends prefixes, then put a fresh invite and a fresh friends record;
+    // only the non-invite one should arrive.
+    await eve.conn.request('records.subscribe', { prefixes: ['invite:', 'friends:'] });
+    const code2 = randomId(6);
+    expectAccepted(
+      await alice.conn.request('records.put', {
+        record: signRecord(alice.identity, 'invite', recordKey.invite(code2), {
+          spaceId,
+          code: code2,
+          expiresAt: null,
+        }),
+      }),
+    );
+    expectAccepted(
+      await alice.conn.request('records.put', {
+        record: signRecord(alice.identity, 'friends', recordKey.friends(alice.identity.userId), {
+          friends: [],
+          blocked: [],
+        }),
+      }),
+    );
+    const key = (e: { d: unknown }) => {
+      const d = e.d as { record?: { key?: string }; key?: string };
+      return d.record?.key ?? d.key ?? '';
+    };
+    await waitFor(
+      () => eve.events.find((e) => e.ev === 'record' && key(e).startsWith('friends:')),
+      2000,
+      'non-invite record over the subscription',
+    );
+    expect(eve.events.some((e) => e.ev === 'record' && key(e).startsWith('invite:'))).toBe(false);
+
+    // Other servers get the same: they fetch an invite by its key, never by listing.
+    const asked = (m: 'rec_list' | 'rec_term', p: object) =>
+      c.dist.handleRequest('another-server', m, p) as Promise<{ records: SignedRecord[] }>;
+    expect((await asked('rec_list', { prefix: 'invite:' })).records).toEqual([]);
+    expect((await asked('rec_term', { term: `invite-space:${spaceId}` })).records).toEqual([]);
+    expect((await asked('rec_list', { prefix: 'space:' })).records.length).toBeGreaterThan(0);
+
+    // The legitimate path is untouched: with the exact code in hand, get works.
+    const got = await eve.conn.request('records.get', { keys: [recordKey.invite(code)] });
+    expect(got.records.map((r) => r.key)).toEqual([recordKey.invite(code)]);
+  });
 });
 
 describe('server hello', () => {

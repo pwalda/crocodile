@@ -4,7 +4,12 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { FILE_BLOCK_SIZE } from '@crocodile/protocol';
 import { newFileId } from '@crocodile/crypto';
-import { FileExports, FileStore, RISKY_EXTENSIONS } from '../apps/desktop/src/main/file-store';
+import {
+  FileExports,
+  FileStore,
+  RISKY_EXTENSIONS,
+  safeFileName,
+} from '../apps/desktop/src/main/file-store';
 
 const dirs: string[] = [];
 afterEach(() => {
@@ -86,5 +91,74 @@ describe('saving files', () => {
       expect(RISKY_EXTENSIONS.has(ext)).toBe(true);
     for (const ext of ['pdf', 'png', 'txt', 'mp4', 'zip'])
       expect(RISKY_EXTENSIONS.has(ext)).toBe(false);
+  });
+
+  it('asks before opening the less common kinds Windows runs too', () => {
+    for (const ext of ['msc', 'pif', 'chm', 'inf', 'appref-ms', 'settingcontent-ms', 'vhdx', 'xll'])
+      expect(RISKY_EXTENSIONS.has(ext)).toBe(true);
+  });
+
+  it('names files so the extension seen is the one the system runs', () => {
+    // Windows drops trailing dots and spaces when it creates "evil.exe.", so
+    // the warning must see "exe", not an empty extension.
+    expect(safeFileName('evil.exe.')).toBe('evil.exe');
+    expect(safeFileName('evil.exe . .')).toBe('evil.exe');
+    expect(safeFileName('report.txt:evil.exe')).toBe('report.txt_evil.exe');
+    expect(safeFileName('a‮txt.exe')).toBe('a_txt.exe');
+    expect(safeFileName('..\\..\\x/../.bashrc')).toBe('bashrc');
+    expect(safeFileName('\u0000')).toBe('_');
+    expect(safeFileName('...')).toBe('file');
+    expect(safeFileName(42)).toBe('file');
+    expect(safeFileName('x'.repeat(300))).toHaveLength(255);
+  });
+
+  it('shortens long names whole-character and keeps the ending', () => {
+    const long = `${'x'.repeat(254)}😀`; // the cut would fall inside the emoji
+    const cut = safeFileName(long);
+    expect(cut.length).toBeLessThanOrEqual(255);
+    expect(cut).not.toMatch(/[\ud800-\udbff]$/);
+    // Names count in bytes too.
+    const wide = safeFileName(`${'日'.repeat(200)}.exe`);
+    expect(Buffer.byteLength(wide)).toBeLessThanOrEqual(255);
+    expect(wide).toMatch(/日\.exe$/);
+    expect(safeFileName('a\u0085b\u200bc\ufeffd\u061ce\u2028f')).toBe('a_b_c_d_e_f');
+    // A device prefix doesn't push a name over the limit.
+    expect(safeFileName(`nul.${'a'.repeat(251)}`).length).toBeLessThanOrEqual(255);
+    // The extension is what the risky-file check reads, so it survives.
+    expect(safeFileName(`${'a'.repeat(300)}.exe`)).toMatch(/\.exe$/);
+    expect(safeFileName(`${'a'.repeat(300)}.exe`)).toHaveLength(255);
+  });
+
+  it('asks before opening more of what Windows runs on open', () => {
+    for (const ext of ['rdp', 'iqy', 'slk', 'ps1xml', 'mjs', 'theme', 'ksh', 'msu'])
+      expect(RISKY_EXTENSIONS.has(ext)).toBe(true);
+  });
+
+  it('does not name a file after a Windows device', () => {
+    for (const name of [
+      'CON',
+      'nul',
+      'Aux.txt',
+      'prn.tar.gz',
+      'COM1',
+      'com9.exe',
+      'LPT1',
+      'lpt9.txt',
+      'CONIN$',
+      'conout$.log',
+      'NUL .txt',
+    ])
+      expect(safeFileName(name)).toBe(`_${name}`);
+    // Other names that merely start the same are ordinary files.
+    for (const name of [
+      'console.txt',
+      'nullable',
+      'com10.txt',
+      'com.txt',
+      'lpt.txt',
+      'a.con',
+      'auxiliary.md',
+    ])
+      expect(safeFileName(name)).toBe(name);
   });
 });

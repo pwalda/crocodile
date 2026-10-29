@@ -327,13 +327,16 @@ export class ClientConnection implements ClientHandle {
           limit?: number;
           after?: string;
         };
+        // Nothing here is listable, and paging through it only to drop it all is work for nothing.
+        if (recordKey.invitePrefix.startsWith(prefix) || prefix.startsWith(recordKey.invitePrefix))
+          return { records: [] };
         // In key order, so that `after` names where to go on from. A page may hold nothing this
         // user may read (another's notes, say) and still have others after it: look at a few more,
         // then hand back where we got to.
         let cursor = after;
         for (let rounds = 1; ; rounds++) {
           const found = await hub.dist.list(prefix, limit ?? 1000, cursor);
-          const readable = found.records.filter((r) => this.mayRead(r));
+          const readable = found.records.filter((r) => this.mayEnumerate(r));
           const last = found.records.at(-1)?.key;
           if (readable.length === 0 && found.more) {
             // Nowhere further to go from here.
@@ -491,7 +494,7 @@ export class ClientConnection implements ClientHandle {
 
   /** True if this client subscribed to a prefix covering the record key. */
   wants(record: SignedRecord): boolean {
-    if (!this.mayRead(record)) return false;
+    if (!this.mayEnumerate(record)) return false;
     for (const prefix of this.subscriptions) if (record.key.startsWith(prefix)) return true;
     return false;
   }
@@ -502,6 +505,15 @@ export class ClientConnection implements ClientHandle {
    */
   mayRead(record: SignedRecord): boolean {
     return this.mayReadKey(record.key);
+  }
+
+  /**
+   * Readable by exact-key get, but not by list or subscribe: an invite code is
+   * a space's join secret, so a client may fetch one it already has but can't
+   * discover codes by sweeping a prefix.
+   */
+  mayEnumerate(record: SignedRecord): boolean {
+    return !record.key.startsWith(recordKey.invitePrefix) && this.mayRead(record);
   }
 
   mayReadKey(key: string): boolean {

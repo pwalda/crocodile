@@ -153,7 +153,9 @@ picture size.
   mismatch means stop, and the link on that server shouldn't be retried.
 - Every signature is domain-separated (`SIG_DOMAIN` in `protocol/constants.ts`).
 - Local data (identity, prekeys, history) is encrypted at rest with a key
-  kept in the OS keychain (Electron `safeStorage`).
+  kept in the OS keychain (Electron `safeStorage`). The desktop window is
+  confined to the app's own pages, so a file dropped or opened into it cannot
+  navigate the window elsewhere and read the identity seed over the IPC bridge.
 
 ## Known gaps
 
@@ -183,6 +185,10 @@ picture size.
   from other owners are let in up to twice the per-account quota, so owners
   can end up holding different notes beyond it (the servers then keep
   trying to reconcile them, which costs bandwidth until the notes expire).
+- Invites: a server leaves invites out of the lists and subscriptions it gives
+  clients and out of the list and term answers it gives other servers. It is
+  not a boundary against servers, which replicate invites among themselves
+  and can read the ones they store.
 - Linked devices share the account seed; per-device signing keys certified by
   the identity (so a removed device can no longer sign) are planned.
 - Sender keys rather than MLS: good forward secrecy and 30-minute healing,
@@ -196,8 +202,10 @@ picture size.
   root, can use the account. Remove the device in the app if a machine is
   lost.
 - Files are checked for integrity, not for safety: the app never opens one by
-  itself, and warns before opening programs and scripts, but a file a member
-  sends can still be harmful.
+  itself, sanitises the names it suggests (no folders, and no reserved or
+  trailing-dot names that would hide the real extension), and warns before
+  opening programs and scripts (a wide list of executable types), but a file a
+  member sends can still be harmful.
 
 Please report vulnerabilities privately through
 [GitHub's private reporting](https://github.com/pwalda/crocodile/security/advisories/new)

@@ -267,6 +267,7 @@ export const recordKey = {
   friends: (userId: string) => `friends:${userId}`,
   space: (spaceId: string) => `space:${spaceId}`,
   invite: (code: string) => `invite:${code}`,
+  invitePrefix: 'invite:',
   member: (spaceId: string, userId: string) => `member:${spaceId}:${userId}`,
   memberPrefix: (spaceId: string) => `member:${spaceId}:`,
   note: (userId: string, noteId: string) => `note:${userId}:${noteId}`,

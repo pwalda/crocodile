@@ -143,6 +143,52 @@ export const RISKY_EXTENSIONS = new Set(
   (
     'exe com scr bat cmd msi msix msp ps1 psm1 vbs vbe js jse wsf wsh hta cpl lnk url reg ' +
     'jar app pkg dmg command sh bash zsh run bin appimage deb rpm py pl rb php scpt ' +
-    'docm xlsm pptm iso img html htm xhtml svg'
+    'docm xlsm pptm iso img html htm xhtml svg ' +
+    'msc pif chm hlp inf ins isp scf sct shb ws wsc gadget application appref-ms appx ' +
+    'appxbundle msixbundle settingcontent-ms library-ms search-ms searchconnector-ms diagcab ' +
+    'website mht mhtml xbap jnlp vhd vhdx dll ocx sys xll xlam dotm xltm potm ppsm sldm ' +
+    'one pyw pyz desktop terminal webloc inetloc fileloc workflow action ' +
+    'psc1 ps1xml msh msh1 msh2 mshxml msh1xml msh2xml rdp ade adp mde slk iqy scptd osx tool mjs ' +
+    'psd1 theme themepack msu cab diagcfg ksh csh fish apk'
   ).split(' '),
 );
+
+/**
+ * A file name the UI suggests, made safe to create and to judge by its
+ * extension: no folders, no control, direction or reserved characters (":"
+ * would name an NTFS stream), no dots or spaces at the ends (Windows drops
+ * trailing ones, so "evil.exe." would look extensionless and still run), and
+ * not a Windows device name ("nul.txt" would open the device, not a file).
+ */
+export function safeFileName(name: unknown): string {
+  const base = typeof name === 'string' ? name.split(/[\\/]/).pop()! : '';
+  const replaced = base.replace(
+    // eslint-disable-next-line no-control-regex
+    /[\u0000-\u001f\u007f-\u009f<>:"|?*\u00ad\u061c\u180e\u200b-\u200f\u2028-\u202e\u2060-\u2069\ufeff]|\u034f/g,
+    '_',
+  );
+  const clean = cut(replaced);
+  let start = 0;
+  let end = clean.length;
+  while (start < end && (clean[start] === '.' || /\s/.test(clean[start]!))) start++;
+  while (end > start && (clean[end - 1] === '.' || /\s/.test(clean[end - 1]!))) end--;
+  const safe = clean.slice(start, end) || 'file';
+  return WINDOWS_DEVICE.test(safe) ? cut(`_${safe}`) : safe;
+}
+
+/** CON, NUL, COM1 and the like are devices on Windows with or without an extension ("nul.txt"). */
+const WINDOWS_DEVICE = /^(con|prn|aux|nul|com[0-9¹²³]|lpt[0-9¹²³]|conin\$|conout\$) *(\.|$)/i;
+
+/**
+ * At most 255 characters and 255 bytes (file systems count either), from the
+ * front of the name but keeping its ending, whole characters only.
+ */
+function cut(name: string): string {
+  const fits = (s: string) => s.length <= 255 && Buffer.byteLength(s) <= 255;
+  if (fits(name)) return name;
+  const dot = name.lastIndexOf('.');
+  const ext = dot > 0 && name.length - dot <= 32 ? name.slice(dot) : '';
+  const stem = [...name.slice(0, dot > 0 && ext ? dot : name.length)];
+  while (stem.length > 0 && !fits(stem.join('') + ext)) stem.pop();
+  return stem.join('') + ext;
+}

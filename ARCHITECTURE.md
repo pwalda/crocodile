@@ -100,7 +100,10 @@ the owner's key, a counter `at`, the signature), so an admin's version can
 be checked on its own, by a server or a client that never saw the owner's.
 Each change of the list raises `at`, and a version signed under a lower `at`
 than the one held is refused. An invite works only while its maker is still
-the owner or an admin.
+the owner or an admin. A server's list and subscription answers to clients,
+and its list and term answers to peer servers, leave invite records out.
+Servers still replicate invites among themselves, and the one that stores an
+invite can read it.
 
 **Friends without telling the servers.** A friendship exists when both people
 list each other; listing someone who doesn't list you back is a request. No
