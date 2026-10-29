@@ -184,6 +184,13 @@ describe('member lists', () => {
     expect(keysOf(await alice.conn.request('records.list', { prefix }))).toEqual(both);
     expect(keysOf(await bob.conn.request('records.list', { prefix }))).toEqual(both);
 
+    // The same list asked without the colon; a prefix spanning spaces gives only a member's own.
+    expect(
+      keysOf(await alice.conn.request('records.list', { prefix: prefix.slice(0, -1) })),
+    ).toEqual(both);
+    expect(keysOf(await eve.conn.request('records.list', { prefix: prefix.slice(0, -1) }))).toEqual(
+      [],
+    );
     // A prefix spanning spaces gives a member only their own records.
     expect(keysOf(await bob.conn.request('records.list', { prefix: 'member:' }))).toEqual([
       recordKey.member(spaceId, bob.identity.userId),
@@ -202,7 +209,6 @@ describe('member lists', () => {
     await eve.conn.request('records.subscribe', { prefixes: [prefix] });
     await bob.conn.request('records.subscribe', { prefixes: [prefix] });
     const carol = await user(c);
-    const lookups = vi.spyOn(c.dist, 'get');
     await joinSpace(carol, spaceId, code);
     const carolKey = recordKey.member(spaceId, carol.identity.userId);
     const told = (u: { events: { ev: string; d: unknown }[] }) =>
@@ -211,13 +217,6 @@ describe('member lists', () => {
       );
     await waitFor(() => told(bob), 2000, 'a member told of the new member');
     expect(told(eve)).toBe(false);
-    // Eve's subscription was not kept, so no join costs a look-up on her account.
-    expect(
-      lookups.mock.calls.some(([keys]) =>
-        keys.includes(recordKey.member(spaceId, eve.identity.userId)),
-      ),
-    ).toBe(false);
-    lookups.mockRestore();
 
     // Eve's own record is hers to read; and once she is in, she reads the list at once.
     await joinSpace(eve, spaceId, code);

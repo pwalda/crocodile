@@ -982,7 +982,13 @@ export class CrocodileClient extends Emitter<ClientEvents> {
     const spaceIds = mine.spaces.map((s) => s.key.slice('space:'.length));
     // Members of our spaces, so we can verify peers and show member lists.
     for (const id of spaceIds) {
-      this.records.ingestAll(await fetchList(link, recordKey.memberPrefix(id)));
+      // One space the server cannot check just now does not hold up the rest; its
+      // members come with the next change in it.
+      try {
+        this.records.ingestAll(await fetchList(link, recordKey.memberPrefix(id)));
+      } catch (err) {
+        this.log('member list not loaded', { spaceId: id, err: String(err) });
+      }
     }
     await this.subscribe([
       recordKey.profile(me),
@@ -1931,7 +1937,11 @@ export class CrocodileClient extends Emitter<ClientEvents> {
     await this.link!.request('records.subscribe', {
       prefixes: [recordKey.space(spaceId), recordKey.memberPrefix(spaceId)],
     });
-    this.records.ingestAll(await fetchList(this.link!, recordKey.memberPrefix(spaceId)));
+    try {
+      this.records.ingestAll(await fetchList(this.link!, recordKey.memberPrefix(spaceId)));
+    } catch (err) {
+      this.log('member list not loaded', { spaceId, err: String(err) });
+    }
     const spaceIds = Object.keys(this.state.spaces);
     const { voice } = await this.link!.request('voice.watch', { spaceIds });
     for (const v of voice) this.setOccupancy(v);

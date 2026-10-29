@@ -43,7 +43,7 @@ const MEMBER_CACHE_MAX = 256;
 /** Before a member record pushed to a client is tried again, when it could not be found out if it may have it. */
 const MEMBER_RETRY_MS = 1000;
 /** The space a prefix of member records is for, if it names one. */
-const MEMBER_PREFIX = /^member:([^:]+):/;
+const MEMBER_PREFIX = /^member:([^:]+)(?::|$)/;
 
 /** Unreadable pages `records.list` looks past before handing back where it got to. */
 const LIST_SKIPS = 4;
@@ -368,7 +368,11 @@ export class ClientConnection implements ClientHandle {
         for (let rounds = 1; ; rounds++) {
           const found = await hub.dist.list(prefix, limit ?? 1000, cursor);
           const readable = found.records.filter(
-            (r) => this.mayEnumerate(r) && (space !== undefined || !this.othersMemberOf(r)),
+            (r) =>
+              this.mayEnumerate(r) &&
+              (space === undefined
+                ? !this.othersMemberOf(r)
+                : r.key.startsWith(`member:${space}:`)),
           );
           const last = found.records.at(-1)?.key;
           if (readable.length === 0 && found.more) {
@@ -394,19 +398,7 @@ export class ClientConnection implements ClientHandle {
         const fresh = prefixes.filter((x) => !this.subscriptions.has(x));
         if (this.subscriptions.size + fresh.length > MAX_SUBSCRIPTIONS)
           throw new RpcFailure('bad_request', `at most ${MAX_SUBSCRIPTIONS} subscriptions`);
-        // A member list of a space this user is found not to be in would be followed for nothing.
-        let looked = 0;
-        for (const prefix of fresh) {
-          const space = MEMBER_PREFIX.exec(prefix)?.[1];
-          if (space !== undefined && looked++ < MEMBER_LOOKUPS) {
-            const closed = await this.mayReadMembers(space).then(
-              (ok) => !ok,
-              () => false,
-            );
-            if (closed) continue;
-          }
-          this.subscriptions.add(prefix);
-        }
+        for (const prefix of fresh) this.subscriptions.add(prefix);
         hub.dist.refreshWatchesSoon();
         return {};
       }
@@ -568,11 +560,10 @@ export class ClientConnection implements ClientHandle {
       const id = this.othersMemberOf(r);
       if (id) spaces.add(id);
     }
-    if (spaces.size > MEMBER_LOOKUPS)
-      throw new RpcFailure('bad_request', 'too many spaces at once');
     const allowed = new Set<string>();
+    // As with any key that may not be read, those of spaces past the few looked at are not there.
     await Promise.all(
-      [...spaces].map(async (id) => {
+      [...spaces].slice(0, MEMBER_LOOKUPS).map(async (id) => {
         if (await this.membersReadable(id)) allowed.add(id);
       }),
     );
@@ -658,9 +649,13 @@ export class ClientConnection implements ClientHandle {
 
   private rememberMembership(spaceId: string, ok: boolean) {
     const now = Date.now();
+    // Room by dropping what has run out, then the oldest: made-up ids do not push out real ones for long.
     if (this.memberLists.size >= MEMBER_CACHE_MAX) {
       for (const [id, e] of this.memberLists) if (e.until <= now) this.memberLists.delete(id);
-      if (this.memberLists.size >= MEMBER_CACHE_MAX) this.memberLists.clear();
+      for (const id of this.memberLists.keys()) {
+        if (this.memberLists.size < MEMBER_CACHE_MAX) break;
+        this.memberLists.delete(id);
+      }
     }
     this.memberLists.set(spaceId, {
       ok,

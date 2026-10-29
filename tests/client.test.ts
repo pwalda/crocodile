@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   CoordinatorLink,
   CrocodileClient,
@@ -1571,6 +1571,37 @@ describe('leaving', () => {
     await waitFor(() => !bob.state.spaces[bobs]?.members.includes(aliceId), 5000, 'left bob space');
     await waitFor(() => !bob.state.friends.friends.includes(aliceId), 5000, 'unfriended');
     expect(bob.state.friends.outgoing).not.toContain(aliceId);
+  });
+
+  it('comes up on reconnect even when one space cannot be checked just now', async () => {
+    const coord = await server();
+    const alice = await signUp(makeClient(new FakeRelayNetwork(), coord), 'alice');
+    const spaceId = await alice.createSpace('Swamp');
+    const userId = alice.userId;
+    // The server cannot find out who is in the space: its member list is an error to try again.
+    const get = coord.dist.get.bind(coord.dist);
+    const spy = vi.spyOn(coord.dist, 'get').mockImplementation(async (keys) => {
+      if (keys.includes(recordKey.space(spaceId)) && keys.some((k) => k.startsWith('member:')))
+        throw new Error('owners unreachable');
+      return get(keys);
+    });
+    for (const client of coord.presence.localOf(userId)) client.close(4000, 'going away');
+    await waitFor(() => alice.state.link !== 'connected', 3000, 'disconnected');
+    await waitFor(() => alice.state.link === 'connected', 5000, 'reconnected');
+    // The rest of coming up still ran: the space is followed.
+    await waitFor(
+      () =>
+        coord.presence
+          .localOf(userId)
+          .some((c) =>
+            (c as unknown as { subscriptions: Set<string> }).subscriptions.has(
+              recordKey.space(spaceId),
+            ),
+          ),
+      3000,
+      'subscribed',
+    );
+    spy.mockRestore();
   });
 
   it('a stopped link fails requests at once instead of waiting for a server', async () => {
