@@ -578,12 +578,18 @@ export class Coordinator {
           ? record.key.split(':')[1]
           : undefined;
     for (const client of this.presence.localClients()) {
-      if (
-        (client as ClientConnection).wants(record) ||
-        friendOf?.has(client.userId) ||
-        forUser === client.userId
-      ) {
+      const conn = client as ClientConnection;
+      if (friendOf?.has(client.userId) || forUser === client.userId) {
         client.send('record', { record });
+      } else if (conn.wants(record)) {
+        // Who is in a space is told to those in it (a lookup, so it may take a moment).
+        const space = conn.othersMemberOf(record);
+        if (space === undefined) client.send('record', { record });
+        else
+          void conn
+            .mayReadMembers(space)
+            .then((ok) => ok && client.send('record', { record }))
+            .catch(() => {});
       }
     }
   }

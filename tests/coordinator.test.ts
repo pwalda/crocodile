@@ -165,6 +165,105 @@ describe('records', () => {
   });
 });
 
+describe('member lists', () => {
+  const keysOf = (res: { records: SignedRecord[] }) => res.records.map((r) => r.key).sort();
+
+  it('are read by the owner and the members of a space, not by anyone else', async () => {
+    const c = await server();
+    const alice = await user(c);
+    const bob = await user(c);
+    const eve = await user(c); // knows the space id, never joined
+    const { spaceId, code } = await createSpace(alice);
+    await joinSpace(bob, spaceId, code);
+    const prefix = recordKey.memberPrefix(spaceId);
+    const both = [
+      recordKey.member(spaceId, alice.identity.userId),
+      recordKey.member(spaceId, bob.identity.userId),
+    ].sort();
+
+    expect(keysOf(await alice.conn.request('records.list', { prefix }))).toEqual(both);
+    expect(keysOf(await bob.conn.request('records.list', { prefix }))).toEqual(both);
+
+    // Eve gets nothing, by listing (also by a shorter prefix) or by asking for a key.
+    for (const p of [prefix, 'member:', 'mem'])
+      expect((await eve.conn.request('records.list', { prefix: p, limit: 5000 })).records).toEqual(
+        [],
+      );
+    const asked = await eve.conn.request('records.get', {
+      keys: [recordKey.member(spaceId, bob.identity.userId), recordKey.space(spaceId)],
+    });
+    expect(asked.records.map((r) => r.key)).toEqual([recordKey.space(spaceId)]);
+    // Nor a share of what the members are told as people join.
+    await eve.conn.request('records.subscribe', { prefixes: [prefix] });
+    await bob.conn.request('records.subscribe', { prefixes: [prefix] });
+    const carol = await user(c);
+    await joinSpace(carol, spaceId, code);
+    const carolKey = recordKey.member(spaceId, carol.identity.userId);
+    const told = (u: { events: { ev: string; d: unknown }[] }) =>
+      u.events.some(
+        (e) => e.ev === 'record' && (e.d as { record: SignedRecord }).record.key === carolKey,
+      );
+    await waitFor(() => told(bob), 2000, 'a member told of the new member');
+    expect(told(eve)).toBe(false);
+
+    // Eve's own record is hers to read; and once she is in, she reads the list at once.
+    await joinSpace(eve, spaceId, code);
+    expect(keysOf(await eve.conn.request('records.list', { prefix })).length).toBe(4);
+  });
+
+  it('stop being readable to somebody who leaves or is banned', async () => {
+    const c = await server();
+    const alice = await user(c);
+    const bob = await user(c);
+    const carol = await user(c);
+    const { spaceId, code } = await createSpace(alice);
+    await joinSpace(bob, spaceId, code);
+    await joinSpace(carol, spaceId, code);
+    const prefix = recordKey.memberPrefix(spaceId);
+    for (const u of [bob, carol])
+      expect((await u.conn.request('records.list', { prefix })).records).toHaveLength(3);
+
+    expectAccepted(
+      await bob.conn.request('records.put', {
+        record: signRecord(
+          bob.identity,
+          'member',
+          recordKey.member(spaceId, bob.identity.userId),
+          { spaceId, userId: bob.identity.userId, left: true },
+          Date.now() + 10,
+        ),
+      }),
+    );
+    expect((await bob.conn.request('records.list', { prefix })).records.map((r) => r.key)).toEqual([
+      recordKey.member(spaceId, bob.identity.userId),
+    ]);
+
+    // Banned: found out once the space record says so (after the short memory of the last look).
+    const space = (await alice.conn.request('records.get', { keys: [recordKey.space(spaceId)] }))
+      .records[0] as SignedRecord<'space'>;
+    expectAccepted(
+      await alice.conn.request('records.put', {
+        record: signRecord(
+          alice.identity,
+          'space',
+          space.key,
+          { ...space.body, bans: [carol.identity.userId] },
+          space.version + 1,
+        ),
+      }),
+    );
+    vi.useFakeTimers({ toFake: ['Date'] });
+    try {
+      vi.setSystemTime(Date.now() + 60_000);
+      expect(
+        (await carol.conn.request('records.list', { prefix })).records.map((r) => r.key),
+      ).toEqual([recordKey.member(spaceId, carol.identity.userId)]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
 describe('server hello', () => {
   /** A WebSocket that lets someone on the path rewrite the server's hello. */
   function tampered(change: (hello: Record<string, unknown>) => Record<string, unknown>) {

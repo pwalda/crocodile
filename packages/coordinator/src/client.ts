@@ -34,6 +34,9 @@ import { FRAME_BUDGET, RateLimiter, RpcFailure, cutToFrame, jsonBytes, sendJson 
 
 /** Keys `records.get` looks up first (the window doubles). */
 const GET_WINDOW = 20;
+/** How long a user found to be in a space keeps reading its member list before it is looked up again. */
+const MEMBER_LIST_TTL_MS = 10_000;
+
 /** Unreadable pages `records.list` looks past before handing back where it got to. */
 const LIST_SKIPS = 4;
 /** Record prefixes, and users' presence, one connection may follow. */
@@ -60,6 +63,8 @@ export class ClientConnection implements ClientHandle {
   status: OwnStatus = 'online';
   statusText?: string;
   subscriptions = new Set<string>();
+  /** Spaces whose member lists this user may read, and until when that was last found to hold. */
+  private readonly memberLists = new Map<string, number>();
   presenceWatch = new Set<string>();
   voiceWatch = new Set<string>();
 
@@ -293,6 +298,8 @@ export class ClientConnection implements ClientHandle {
           throw new RpcFailure('forbidden', 'records are written by their author');
         if (!this.writeLimiter.take()) throw new RpcFailure('rate_limited', 'too many writes');
         const r = await hub.dist.putFromClient(record);
+        // Joining, leaving or editing a space changes what this user may read of it.
+        if (record.kind === 'member' || record.kind === 'space') this.memberLists.clear();
         return {
           accepted: r.accepted,
           current: r.current,
@@ -308,9 +315,9 @@ export class ClientConnection implements ClientHandle {
         for (let i = 0, step = GET_WINDOW; i < keys.length; i += step, step *= 2) {
           const window = keys.slice(i, i + step);
           const order = new Map(window.map((k, j) => [k, i + j]));
-          const found = (await hub.dist.get(window.filter((k) => this.mayReadKey(k))))
-            .filter((r) => this.mayRead(r))
-            .sort((a, b) => order.get(a.key)! - order.get(b.key)!);
+          const found = (
+            await this.readable(await hub.dist.get(window.filter((k) => this.mayReadKey(k))))
+          ).sort((a, b) => order.get(a.key)! - order.get(b.key)!);
           for (const r of found) {
             const cost = jsonBytes(r) + 1;
             if (records.length && size + cost > FRAME_BUDGET)
@@ -336,7 +343,7 @@ export class ClientConnection implements ClientHandle {
         let cursor = after;
         for (let rounds = 1; ; rounds++) {
           const found = await hub.dist.list(prefix, limit ?? 1000, cursor);
-          const readable = found.records.filter((r) => this.mayEnumerate(r));
+          const readable = await this.readable(found.records.filter((r) => this.mayEnumerate(r)));
           const last = found.records.at(-1)?.key;
           if (readable.length === 0 && found.more) {
             // Nowhere further to go from here.
@@ -514,6 +521,56 @@ export class ClientConnection implements ClientHandle {
    */
   mayEnumerate(record: SignedRecord): boolean {
     return !record.key.startsWith(recordKey.invitePrefix) && this.mayRead(record);
+  }
+
+  /** The records of `records` this user may read, member lists included. */
+  async readable(records: SignedRecord[]): Promise<SignedRecord[]> {
+    const spaces = new Set<string>();
+    for (const r of records) if (this.mayRead(r)) spaces.add(this.othersMemberOf(r) ?? '');
+    spaces.delete('');
+    const allowed = new Set<string>();
+    await Promise.all(
+      [...spaces].map(async (id) => {
+        if (await this.mayReadMembers(id)) allowed.add(id);
+      }),
+    );
+    return records.filter((r) => {
+      if (!this.mayRead(r)) return false;
+      const space = this.othersMemberOf(r);
+      return space === undefined || allowed.has(space);
+    });
+  }
+
+  /** The space a member record of somebody else belongs to; undefined for any other record. */
+  othersMemberOf(record: SignedRecord): string | undefined {
+    if (!record.key.startsWith('member:')) return undefined;
+    const [, spaceId, userId] = record.key.split(':');
+    return userId === this.userId ? undefined : (spaceId ?? '');
+  }
+
+  /**
+   * Who is in a space is for those in it: a member record names the invite
+   * its author joined with. The space's owner and members may read the list, nobody else.
+   * (Other servers still see them: they must, to check a join.)
+   */
+  async mayReadMembers(spaceId: string): Promise<boolean> {
+    const now = Date.now();
+    if ((this.memberLists.get(spaceId) ?? 0) > now) return true;
+    const spaceKey = recordKey.space(spaceId);
+    const mineKey = recordKey.member(spaceId, this.userId);
+    const found = await this.hub.dist.get([spaceKey, mineKey]);
+    const space = found.find((r) => r.key === spaceKey && r.kind === 'space') as
+      SignedRecord<'space'> | undefined;
+    const mine = found.find((r) => r.key === mineKey && r.kind === 'member') as
+      SignedRecord<'member'> | undefined;
+    const ok =
+      !!space &&
+      !space.body.deleted &&
+      (space.body.owner === this.userId ||
+        (!!mine && !mine.body.left && !space.body.bans.includes(this.userId)));
+    // Kept briefly, so that a burst of joins is not a lookup per record per subscriber.
+    if (ok) this.memberLists.set(spaceId, now + MEMBER_LIST_TTL_MS);
+    return ok;
   }
 
   mayReadKey(key: string): boolean {
