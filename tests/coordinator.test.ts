@@ -320,7 +320,11 @@ describe('member lists', () => {
     const get = vi.spyOn(c.dist, 'get').mockRejectedValueOnce(new Error('owners unreachable'));
     // An error to try again, not a list that looks complete and is not.
     await expect(bob.conn.request('records.list', { prefix })).rejects.toThrow(/try again/);
+    // Owners that do not answer give no error, only no space: not a "no" either.
+    get.mockResolvedValueOnce([]);
+    await expect(bob.conn.request('records.list', { prefix })).rejects.toThrow(/try again/);
     get.mockRestore();
+    expect((await bob.conn.request('records.list', { prefix })).records).toHaveLength(2);
   });
 
   it('are not sent to somebody banned while it was being found out whether they may have them', async () => {

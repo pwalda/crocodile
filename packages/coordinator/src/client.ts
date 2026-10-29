@@ -3,6 +3,7 @@ import {
   acceptChannel,
   signInChannelContext,
   createChannelKeys,
+  isSpaceMember,
   randomId,
   SecureChannel,
   sign,
@@ -58,6 +59,13 @@ let nextConnId = 1;
  * answers with its half and a signature binding its identity, device and
  * channel. Every later frame is AES-256-GCM encrypted and length-padded.
  */
+/** The space a space record or a member record belongs to; undefined for any other record. */
+export function spaceOfRecord(record: SignedRecord): string | undefined {
+  if (record.kind === 'space') return record.key.slice('space:'.length);
+  if (record.kind === 'member') return (record as SignedRecord<'member'>).body.spaceId;
+  return undefined;
+}
+
 export class ClientConnection implements ClientHandle {
   readonly connId = nextConnId++;
   userId = '';
@@ -310,11 +318,7 @@ export class ClientConnection implements ClientHandle {
         // Joining, leaving or editing a space changes what this user may read of it. (The
         // owners may be other servers, which this one hears from a little later.)
         if (r.accepted && (record.kind === 'member' || record.kind === 'space'))
-          this.forgetMembers(
-            record.kind === 'space'
-              ? record.key.slice('space:'.length)
-              : (record.body as { spaceId: string }).spaceId,
-          );
+          this.forgetMembers(spaceOfRecord(record));
         return {
           accepted: r.accepted,
           current: r.current,
@@ -596,7 +600,7 @@ export class ClientConnection implements ClientHandle {
     try {
       return await this.mayReadMembers(spaceId);
     } catch (err) {
-      this.hub.log.warn('member list check failed', { spaceId, err: String(err) });
+      this.hub.log.debug('member list check failed', { spaceId, err: String(err) });
       throw new RpcFailure('unavailable', 'could not check the space just now; try again');
     }
   }
@@ -618,7 +622,7 @@ export class ClientConnection implements ClientHandle {
           stale: false,
           promise: Promise.resolve(false),
         };
-        started.promise = this.hub.isSpaceMember(spaceId, this.userId).then(
+        started.promise = this.lookUpMembership(spaceId).then(
           (ok) => {
             if (!started.stale) {
               this.memberLookups.delete(spaceId);
@@ -645,6 +649,18 @@ export class ClientConnection implements ClientHandle {
   }
 
   /**
+   * Whether this user may read the member list of a space. The space itself must be found: a
+   * space that cannot be found (its owners not answering, say) is not "no", it is not known.
+   */
+  private async lookUpMembership(spaceId: string): Promise<boolean> {
+    const spaceKey = recordKey.space(spaceId);
+    const found = await this.hub.dist.get([spaceKey, recordKey.member(spaceId, this.userId)]);
+    const byKey = new Map(found.map((r) => [r.key, r]));
+    if (!byKey.has(spaceKey)) throw new Error('space not found');
+    return isSpaceMember({ get: (k) => byKey.get(k) }, spaceId, this.userId);
+  }
+
+  /**
    * Sends a member record of a space to this client if it may read the list
    * there; if that cannot be found out, once more a moment later.
    */
@@ -654,7 +670,7 @@ export class ClientConnection implements ClientHandle {
         if (await this.mayReadMembers(spaceId)) this.send('record', { record });
         return;
       } catch {
-        await new Promise((done) => setTimeout(done, MEMBER_RETRY_MS).unref?.());
+        if (attempt === 0) await new Promise((done) => setTimeout(done, MEMBER_RETRY_MS).unref?.());
       }
     }
   }
@@ -669,6 +685,8 @@ export class ClientConnection implements ClientHandle {
         this.memberLists.delete(id);
       }
     }
+    // Set again at the end, so that the oldest answer is the first in line.
+    this.memberLists.delete(spaceId);
     this.memberLists.set(spaceId, {
       ok,
       until: now + (ok ? MEMBER_LIST_TTL_MS : NOT_MEMBER_TTL_MS),

@@ -28,7 +28,7 @@ import {
   type OperatorInfo,
   isOperatorContact,
 } from '@crocodile/protocol';
-import { ClientConnection } from './client';
+import { ClientConnection, spaceOfRecord } from './client';
 import { DirectoryClient } from './directory-client';
 import { Distribution, defaultDistributionConfig, type DistributionConfig } from './distribution';
 import { Membership, defaultMembershipTiming, type MembershipTiming } from './membership';
@@ -579,12 +579,7 @@ export class Coordinator {
           : undefined;
     // A join, a leave, a ban or a deleted space changes who may read the member list of that
     // space (of a member record, for that user alone): what a connection found out is looked up again.
-    const space =
-      record.kind === 'space'
-        ? record.key.slice('space:'.length)
-        : record.kind === 'member'
-          ? (record as SignedRecord<'member'>).body.spaceId
-          : undefined;
+    const space = spaceOfRecord(record);
     for (const client of this.presence.localClients()) {
       const conn = client as ClientConnection;
       if (space !== undefined && (record.kind === 'space' || forUser === client.userId))
