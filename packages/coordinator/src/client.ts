@@ -70,6 +70,8 @@ export class ClientConnection implements ClientHandle {
   private readonly limiter = new RateLimiter(30, 120);
   private readonly writeLimiter = new RateLimiter(5, 40);
   private readonly linkLimiter = new RateLimiter(0.2, 5);
+  /** The steps after a claim only run on a code that was guessed or given, so they get a budget apart from guessing. */
+  private readonly linkStepLimiter = new RateLimiter(0.2, 10);
   private readonly mailLimiter = new RateLimiter(1, 30);
   private alive = true;
   private pingTimer?: ReturnType<typeof setInterval>;
@@ -275,6 +277,10 @@ export class ClientConnection implements ClientHandle {
     }
   }
 
+  private takeLink(limiter: RateLimiter) {
+    if (!limiter.take()) throw new RpcFailure('rate_limited', 'too many attempts; wait a minute');
+  }
+
   private async dispatch(method: RpcMethod, p: Record<string, never>): Promise<unknown> {
     const hub = this.hub;
     const store = hub.records.store;
@@ -427,15 +433,30 @@ export class ClientConnection implements ClientHandle {
       case 'servers.list':
         return { servers: [hub.info, ...hub.mesh.knownServers()].map(toPublicServerInfo) };
       case 'link.open': {
-        const { encKey } = p as unknown as { encKey: string };
+        const { encKey, kemKey, commit } = p as unknown as {
+          encKey: string;
+          kemKey: string;
+          commit: string;
+        };
         this.encKey = encKey;
-        return hub.openLink(this);
+        return hub.openLink(this, kemKey, commit);
       }
       case 'link.claim': {
-        if (!this.linkLimiter.take())
-          throw new RpcFailure('rate_limited', 'too many attempts; wait a minute');
+        this.takeLink(this.linkLimiter);
         const { code } = p as unknown as { code: string };
         return hub.claimLink(this, code);
+      }
+      case 'link.nonce': {
+        this.takeLink(this.linkStepLimiter);
+        const { code, nonce } = p as unknown as { code: string; nonce: string };
+        hub.nonceLink(this, code, nonce);
+        return {};
+      }
+      case 'link.reveal': {
+        this.takeLink(this.linkStepLimiter);
+        const { code, to, nonce } = p as unknown as { code: string; to: string; nonce: string };
+        hub.revealLink(this, code, to, nonce);
+        return {};
       }
       case 'link.send': {
         const { code, box } = p as unknown as { code: string; box: LinkBox };

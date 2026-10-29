@@ -1,14 +1,17 @@
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   SecureChannel,
   answerChannel,
   createIdentity,
+  createLinkKem,
   createPrekey,
   isSpaceMember,
+  linkNonce,
   randomDeviceId,
   randomId,
   sealAnonymous,
   sealForSelf,
+  sealLink,
   sealToDevice,
   sign,
   signRecord,
@@ -1550,5 +1553,155 @@ describe('version', () => {
   it('refuses a version longer than ServerInfo allows', async () => {
     expect((await server({ version: 'v'.repeat(32) })).info.version).toHaveLength(32);
     await expect(startCoordinator({ version: 'v'.repeat(33) })).rejects.toThrow(/version/);
+  });
+});
+
+describe('device linking', () => {
+  it('holds the link steps to their order and to the devices in them', async () => {
+    const c = await server();
+    const fresh = await user(c);
+    const encKey = fresh.identity.encPublicKey;
+    // An ML-KEM key of the wrong length never gets a code.
+    await expect(
+      fresh.conn.request('link.open', { encKey, kemKey: 'A'.repeat(1578), commit: linkNonce() }),
+    ).rejects.toThrow();
+    const kemKey = createLinkKem().publicKey;
+    const { code } = await fresh.conn.request('link.open', { encKey, kemKey, commit: linkNonce() });
+    const existing = await user(c);
+    await existing.conn.request('link.claim', { code });
+    // The account can't go out before the existing device's nonce has.
+    const box = sealLink(existing.identity, { encKey, kemKey }, new Uint8Array(32));
+    await expect(existing.conn.request('link.send', { code, box })).rejects.toThrow(/nonce/);
+    const claimed = new Promise<{ by: string }>((r) => fresh.conn.on('link_claimed', r));
+    await existing.conn.request('link.nonce', { code, nonce: linkNonce() });
+    const { by } = await claimed;
+    expect(by).toBe(existing.conn.peer);
+    // The new device's nonce goes only to the device that claimed the code.
+    const other = await user(c);
+    await expect(
+      fresh.conn.request('link.reveal', { code, to: other.conn.peer, nonce: linkNonce() }),
+    ).rejects.toThrow(/another device/);
+    await fresh.conn.request('link.reveal', { code, to: by, nonce: linkNonce() });
+    // It reveals once; a second nonce can't replace the first.
+    await expect(
+      fresh.conn.request('link.reveal', { code, to: by, nonce: linkNonce() }),
+    ).rejects.toThrow(/already revealed/);
+    await existing.conn.request('link.send', { code, box });
+    // Once the account is sent the link is spent: no more nonces.
+    await expect(existing.conn.request('link.nonce', { code, nonce: linkNonce() })).rejects.toThrow(
+      /claim the code first/,
+    );
+  });
+
+  it('limits code lookups per connection, whatever origin the frames name', async () => {
+    const c = await server();
+    let looked = 0;
+    const findLink = c.findLink.bind(c);
+    c.findLink = (code) => {
+      looked++;
+      return findLink(code);
+    };
+    const onFlood = (
+      c.mesh as unknown as { onFlood(f: unknown, from: string, link: object): void }
+    ).onFlood.bind(c.mesh);
+    const link = {};
+    // A server that names a new origin in every frame still has one budget.
+    for (let i = 0; i < 200; i++) {
+      onFlood(
+        {
+          t: 'flood',
+          id: `q${i}`,
+          origin: `origin-${i}`,
+          hops: 9,
+          f: { t: 'link_query', qid: `q${i}`, code: 'ABCD-EFGH' },
+        },
+        'peer',
+        link,
+      );
+    }
+    expect(looked).toBeGreaterThan(0);
+    expect(looked).toBeLessThan(100);
+    // Another connection has a budget of its own.
+    const before = looked;
+    onFlood(
+      {
+        t: 'flood',
+        id: 'other',
+        origin: 'o',
+        hops: 9,
+        f: { t: 'link_query', qid: 'other', code: 'ABCD-EFGH' },
+      },
+      'peer2',
+      {},
+    );
+    expect(looked).toBe(before + 1);
+  });
+
+  it('forgets the claims of links that ended without sending the account', async () => {
+    const c = await server();
+    const claims = (c as unknown as { claims: Map<string, unknown> }).claims;
+    const kemKey = createLinkKem().publicKey;
+    const fresh = await user(c);
+    const { code } = await fresh.conn.request('link.open', {
+      encKey: fresh.identity.encPublicKey,
+      kemKey,
+      commit: linkNonce(),
+    });
+    const existing = await user(c);
+    await existing.conn.request('link.claim', { code });
+    expect(claims.size).toBe(1);
+    vi.useFakeTimers({ toFake: ['Date'] });
+    try {
+      vi.setSystemTime(Date.now() + 11 * 60_000);
+      const other = await user(c);
+      await other.conn.request('link.open', {
+        encKey: other.identity.encPublicKey,
+        kemKey,
+        commit: linkNonce(),
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+    expect(claims.size).toBe(0);
+  });
+
+  it('gives the steps after a claim a budget of their own', async () => {
+    const c = await server();
+    const fresh = await user(c);
+    const kemKey = createLinkKem().publicKey;
+    const { code } = await fresh.conn.request('link.open', {
+      encKey: fresh.identity.encPublicKey,
+      kemKey,
+      commit: linkNonce(),
+    });
+    const existing = await user(c);
+    // Steps that fail still cost, and they don't draw on the budget for guessing codes.
+    const tries = [];
+    for (let i = 0; i < 12; i++) {
+      tries.push(
+        existing.conn
+          .request(i % 2 ? 'link.nonce' : 'link.reveal', {
+            code,
+            to: fresh.conn.peer,
+            nonce: linkNonce(),
+          })
+          .then(
+            () => 'ok',
+            (e: Error) => e.message,
+          ),
+      );
+    }
+    const results = await Promise.all(tries);
+    expect(results.filter((m) => /too many attempts/.test(m)).length).toBeGreaterThan(0);
+    // Guesses at codes are still five a burst.
+    const guesses = await Promise.all(
+      Array.from({ length: 8 }, () =>
+        existing.conn.request('link.claim', { code: 'WRONGCODE' }).then(
+          () => 'ok',
+          (e: Error) => e.message,
+        ),
+      ),
+    );
+    expect(guesses.filter((m) => /too many attempts/.test(m))).toHaveLength(3);
   });
 });

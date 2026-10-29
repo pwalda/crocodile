@@ -27,6 +27,9 @@ import { fnv1a } from './election';
 import { routedEvent } from './routes';
 import { RateLimiter, RpcFailure, chunkByBytes, sendJson, toWsUrl } from './util';
 
+/** A device-link code's new device, as another server reports it. */
+type LinkTarget = { peer: string; key: string; encKey: string; kemKey: string; commit: string };
+
 interface Link {
   ws: WebSocket;
   initiator: boolean;
@@ -379,10 +382,26 @@ export class Mesh {
     this.forward(frame);
   }
 
+  /**
+   * Code lookups other servers may make of us, per connection they arrive on
+   * (not per `origin`, which the sender picks). Their clients' own claim limit
+   * applies there, which a hostile server can skip.
+   */
+  private linkQueryLimits = new WeakMap<Link, RateLimiter>();
+
+  private takeLinkQuery(link: Link): boolean {
+    let limiter = this.linkQueryLimits.get(link);
+    if (!limiter) {
+      limiter = new RateLimiter(5, 50);
+      this.linkQueryLimits.set(link, limiter);
+    }
+    return limiter.take();
+  }
+
   private linkQueries = new Map<
     string,
     {
-      resolve: (v: { peer: string; key: string; encKey: string } | undefined) => void;
+      resolve: (v: LinkTarget | undefined) => void;
       timer: ReturnType<typeof setTimeout>;
     }
   >();
@@ -392,7 +411,7 @@ export class Mesh {
    * that does answers (through the overlay, which is already connected), so
    * an unknown code takes the full wait to come back empty.
    */
-  queryLink(code: string): Promise<{ peer: string; key: string; encKey: string } | undefined> {
+  queryLink(code: string, by: string): Promise<LinkTarget | undefined> {
     if (this.hub.membership.liveIds().length <= 1) return Promise.resolve(undefined);
     const qid = randomId(8);
     return new Promise((resolve) => {
@@ -401,11 +420,11 @@ export class Mesh {
         resolve(undefined);
       }, 5000);
       this.linkQueries.set(qid, { resolve, timer });
-      this.flood({ t: 'link_query', qid, code });
+      this.flood({ t: 'link_query', qid, code, by });
     });
   }
 
-  private onLinkAnswer(qid: string, found?: { peer: string; key: string; encKey: string }) {
+  private onLinkAnswer(qid: string, found?: LinkTarget) {
     const q = this.linkQueries.get(qid);
     if (!q || !found) return;
     this.linkQueries.delete(qid);
@@ -696,7 +715,7 @@ export class Mesh {
         if (this.hub.sessions.applyRemoteVoice(frame)) this.forward(frame, peerId);
         return;
       case 'flood':
-        this.onFlood(frame, peerId);
+        this.onFlood(frame, peerId, link);
         return;
       case 'req':
         if (!link.limiter.take()) {
@@ -758,7 +777,7 @@ export class Mesh {
     }
   }
 
-  private onFlood(frame: FedFlood, from: string) {
+  private onFlood(frame: FedFlood, from: string, link: Link) {
     if (this.floodSeen.has(frame.id) || frame.origin === this.selfId) return;
     const now = Date.now();
     this.floodSeen.set(frame.id, now);
@@ -775,13 +794,20 @@ export class Mesh {
         this.hub.mailbox.onRemoteAck(f.peer, f.ids, f.proof);
         return;
       case 'link_query': {
+        if (!this.takeLinkQuery(link)) return;
         const found = this.hub.findLink(f.code);
         if (!found) return;
-        found.claimedBy = `remote:${frame.origin}`;
+        found.claimedBy = f.by;
         this.flood({
           t: 'link_answer',
           qid: f.qid,
-          found: { peer: found.peer, key: found.key, encKey: found.encKey },
+          found: {
+            peer: found.peer,
+            key: found.key,
+            encKey: found.encKey,
+            kemKey: found.kemKey,
+            commit: found.commit,
+          },
         });
         return;
       }

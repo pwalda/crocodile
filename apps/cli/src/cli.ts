@@ -24,6 +24,8 @@ export interface Io {
   cwd: string;
   /** Resolves when the user asks to stop (Ctrl+C). */
   interrupted?: Promise<void>;
+  /** Reads one answer from the user; absent when there is no terminal to ask on. */
+  ask?(question: string): Promise<string>;
 }
 
 export const VERSION = process.env.CROC_CLI_VERSION ?? '0.0.0-dev';
@@ -62,7 +64,8 @@ const COMMAND_HELP: Record<string, string> = {
 Adds this computer to your Crocodile account. It shows a code: in the
 Crocodile app on a computer where you're signed in, open the account menu,
 choose "Link another device" and type it. Then check both show the same
-security code, and confirm in the app.`,
+security code, and confirm in the app and here. It needs a terminal: it asks
+you to type "yes" once the codes match.`,
   init: `crocodile init <name>
 
 Makes a new account just for this computer, for example for a server or a
@@ -279,8 +282,12 @@ async function link(ctx: Ctx) {
   if (ctx.client.state.phase === 'ready')
     throw new UsageError(`This computer already uses ${me(ctx)}.`);
   const io = ctx.io;
+  // Checked before a code goes out: nobody should enter one only to be refused.
+  const ask = io.ask;
+  if (!ask) throw new UsageError('Linking needs a terminal, to confirm the security code here.');
   void ctx.client.startDeviceLink();
   let shown = '';
+  let refused = '';
   const done = await until(
     ctx,
     () => {
@@ -295,9 +302,20 @@ async function link(ctx: Ctx) {
       if (l.step === 'claimed' && l.securityCode && shown !== 'claimed') {
         shown = 'claimed';
         io.err(
-          `Check that the app shows this security code, then confirm there:\n\n  ${l.securityCode}\n`,
+          `Check that the app shows exactly this security code, and confirm there too:\n\n  ${l.securityCode}\n`,
         );
+        // This computer takes the account only once someone here has compared
+        // the codes: a server could send a claim and an account of its own.
+        void ask('Does it match? Type "yes" to link this computer: ')
+          .then((answer) => {
+            if (answer.trim().toLowerCase() === 'yes') void ctx.client.confirmDeviceLink();
+            else refused = 'The security codes were not confirmed, so nothing was linked.';
+          })
+          .catch(() => {
+            refused = 'The security codes were not confirmed, so nothing was linked.';
+          });
       }
+      if (refused) return { ok: false, error: refused };
       if (l.step === 'error') return { ok: false, error: l.error ?? 'Linking failed' };
       if (l.step === 'done') return { ok: true, error: '' };
       return null;
@@ -308,7 +326,10 @@ async function link(ctx: Ctx) {
     ctx.client.cancelDeviceLink();
     throw new Error('Stopped before the device was linked.');
   }
-  if (!done.ok) throw new Error(done.error);
+  if (!done.ok) {
+    ctx.client.cancelDeviceLink();
+    throw new Error(done.error);
+  }
   await connected(ctx);
   await until(ctx, () => ctx.client.state.me, 15_000);
   io.err(`Linked: this computer is now one of ${me(ctx)}'s devices.`);
