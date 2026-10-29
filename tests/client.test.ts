@@ -1578,11 +1578,15 @@ describe('leaving', () => {
     const alice = await signUp(makeClient(new FakeRelayNetwork(), coord), 'alice');
     const spaceId = await alice.createSpace('Swamp');
     const userId = alice.userId;
-    // The server cannot find out who is in the space: its member list is an error to try again.
+    const link = (alice as unknown as { link: CoordinatorLink }).link;
+    const asked = vi.spyOn(link, 'request');
+    // The server cannot find out who is in the space, the first two times it is asked: its member
+    // list is an error to try again.
     const get = coord.dist.get.bind(coord.dist);
+    let failures = 2;
     const spy = vi.spyOn(coord.dist, 'get').mockImplementation(async (keys) => {
       if (keys.includes(recordKey.space(spaceId)) && keys.some((k) => k.startsWith('member:')))
-        throw new Error('owners unreachable');
+        if (failures-- > 0) throw new Error('owners unreachable');
       return get(keys);
     });
     for (const client of coord.presence.localOf(userId)) client.close(4000, 'going away');
@@ -1601,6 +1605,17 @@ describe('leaving', () => {
       3000,
       'subscribed',
     );
+    // And the member list was asked for again.
+    const lists = () =>
+      asked.mock.calls.filter(
+        ([m, p]) =>
+          m === 'records.list' &&
+          (p as { prefix: string }).prefix === recordKey.memberPrefix(spaceId),
+      ).length;
+    // The first two asks fail (coming up, and what a change in the space makes the client do);
+    // a third is the client trying again by itself.
+    await waitFor(() => lists() >= 3, 8000, 'member list asked for again');
+    asked.mockRestore();
     spy.mockRestore();
   });
 

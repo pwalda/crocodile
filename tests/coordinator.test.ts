@@ -291,6 +291,25 @@ describe('member lists', () => {
     expect(told(bob, mine(erin)) || told(carol, mine(erin))).toBe(false);
   });
 
+  it('are followed through a prefix naming the space, not a broad one', async () => {
+    const c = await server();
+    const alice = await user(c);
+    const bob = await user(c);
+    const { spaceId, code } = await createSpace(alice);
+    await joinSpace(bob, spaceId, code);
+    await bob.conn.request('records.subscribe', { prefixes: ['member:'] });
+    const carol = await user(c);
+    await joinSpace(carol, spaceId, code);
+    await new Promise((done) => setTimeout(done, 150));
+    const told = (key: string) =>
+      bob.events.some(
+        (e) => e.ev === 'record' && (e.d as { record: SignedRecord }).record.key === key,
+      );
+    expect(told(recordKey.member(spaceId, carol.identity.userId))).toBe(false);
+    // Bob's own record is still his to hear of, wherever he wrote it from.
+    expect(told(recordKey.member(spaceId, bob.identity.userId))).toBe(true);
+  });
+
   it('are not served while it cannot be found out who may read them', async () => {
     const c = await server();
     const alice = await user(c);

@@ -43,7 +43,7 @@ const MEMBER_CACHE_MAX = 256;
 /** Before a member record pushed to a client is tried again, when it could not be found out if it may have it. */
 const MEMBER_RETRY_MS = 1000;
 /** The space a prefix of member records is for, if it names one. */
-const MEMBER_PREFIX = /^member:([^:]+)(?::|$)/;
+const MEMBER_PREFIX = /^member:([a-z2-7]{26})(?::|$)/;
 
 /** Unreadable pages `records.list` looks past before handing back where it got to. */
 const LIST_SKIPS = 4;
@@ -310,7 +310,11 @@ export class ClientConnection implements ClientHandle {
         // Joining, leaving or editing a space changes what this user may read of it. (The
         // owners may be other servers, which this one hears from a little later.)
         if (r.accepted && (record.kind === 'member' || record.kind === 'space'))
-          this.forgetMembers();
+          this.forgetMembers(
+            record.kind === 'space'
+              ? record.key.slice('space:'.length)
+              : (record.body as { spaceId: string }).spaceId,
+          );
         return {
           accepted: r.accepted,
           current: r.current,
@@ -371,7 +375,7 @@ export class ClientConnection implements ClientHandle {
             (r) =>
               this.mayEnumerate(r) &&
               (space === undefined
-                ? !this.othersMemberOf(r)
+                ? this.othersMemberOf(r) === undefined
                 : r.key.startsWith(`member:${space}:`)),
           );
           const last = found.records.at(-1)?.key;
@@ -532,7 +536,10 @@ export class ClientConnection implements ClientHandle {
   /** True if this client subscribed to a prefix covering the record key. */
   wants(record: SignedRecord): boolean {
     if (!this.mayEnumerate(record)) return false;
-    for (const prefix of this.subscriptions) if (record.key.startsWith(prefix)) return true;
+    // Another's member record is followed through a prefix naming its space, not a broad one.
+    const others = this.othersMemberOf(record) !== undefined;
+    for (const prefix of this.subscriptions)
+      if (record.key.startsWith(prefix) && (!others || MEMBER_PREFIX.test(prefix))) return true;
     return false;
   }
 
@@ -588,7 +595,8 @@ export class ClientConnection implements ClientHandle {
   private async membersReadable(spaceId: string): Promise<boolean> {
     try {
       return await this.mayReadMembers(spaceId);
-    } catch {
+    } catch (err) {
+      this.hub.log.warn('member list check failed', { spaceId, err: String(err) });
       throw new RpcFailure('unavailable', 'could not check the space just now; try again');
     }
   }
@@ -626,8 +634,12 @@ export class ClientConnection implements ClientHandle {
         this.memberLookups.set(spaceId, started);
         lookup = started;
       }
-      const ok = await lookup.promise;
-      if (!lookup.stale) return ok;
+      try {
+        const ok = await lookup.promise;
+        if (!lookup.stale) return ok;
+      } catch (err) {
+        if (!lookup.stale) throw err;
+      }
     }
     throw new Error('the space keeps changing');
   }

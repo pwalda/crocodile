@@ -424,6 +424,9 @@ const MAIL_REQUEST_BYTES = 512 * 1024;
 const FRIEND_NOTE_RETRY_MS = 5000;
 /** And how often while connected, whoever it is owed to. */
 const FRIEND_NOTE_SWEEP_MS = 10 * 60_000;
+/** A member list the server could not check is asked for again this many times, a little later each time. */
+const MEMBER_LIST_RETRIES = 3;
+const MEMBER_LIST_RETRY_MS = 2000;
 /** A caller rings again every 2.5 s at most: this long without a ring, it has gone. */
 const RING_SILENCE_MS = 8000;
 /** Time for a hang-up to go out before the call's connection closes. */
@@ -981,15 +984,7 @@ export class CrocodileClient extends Emitter<ClientEvents> {
     this.friendSweepTimer = setInterval(() => this.retryFriendNotes(0), FRIEND_NOTE_SWEEP_MS);
     const spaceIds = mine.spaces.map((s) => s.key.slice('space:'.length));
     // Members of our spaces, so we can verify peers and show member lists.
-    for (const id of spaceIds) {
-      // One space the server cannot check just now does not hold up the rest; its
-      // members come with the next change in it.
-      try {
-        this.records.ingestAll(await fetchList(link, recordKey.memberPrefix(id)));
-      } catch (err) {
-        this.log('member list not loaded', { spaceId: id, err: String(err) });
-      }
-    }
+    for (const id of spaceIds) await this.loadMembers(link, id);
     await this.subscribe([
       recordKey.profile(me),
       recordKey.friends(me),
@@ -1933,15 +1928,32 @@ export class CrocodileClient extends Emitter<ClientEvents> {
     }
   }
 
+  /**
+   * The members of a space. One the server cannot check just now does not hold up
+   * the rest of coming up: it is tried again a few times, a little later each time.
+   */
+  private async loadMembers(link: CoordinatorLink, spaceId: string, attempt = 0) {
+    try {
+      this.records.ingestAll(await fetchList(link, recordKey.memberPrefix(spaceId)));
+    } catch (err) {
+      this.log('member list not loaded', { spaceId, err: String(err) });
+      if (attempt >= MEMBER_LIST_RETRIES) return;
+      const timer = setTimeout(
+        () => {
+          if (this.link === link && this.state.spaces[spaceId])
+            void this.loadMembers(link, spaceId, attempt + 1);
+        },
+        MEMBER_LIST_RETRY_MS * (attempt + 1),
+      );
+      timer.unref?.();
+    }
+  }
+
   private async afterSpaceJoined(spaceId: string) {
     await this.link!.request('records.subscribe', {
       prefixes: [recordKey.space(spaceId), recordKey.memberPrefix(spaceId)],
     });
-    try {
-      this.records.ingestAll(await fetchList(this.link!, recordKey.memberPrefix(spaceId)));
-    } catch (err) {
-      this.log('member list not loaded', { spaceId, err: String(err) });
-    }
+    await this.loadMembers(this.link!, spaceId);
     const spaceIds = Object.keys(this.state.spaces);
     const { voice } = await this.link!.request('voice.watch', { spaceIds });
     for (const v of voice) this.setOccupancy(v);
