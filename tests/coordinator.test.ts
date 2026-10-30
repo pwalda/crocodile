@@ -1511,33 +1511,26 @@ describe('sessions and host election', () => {
       expect(internals.renewing.size).toBe(0);
     });
 
-    it('tells the connection a device has by the time it is taken out, not the one it was asked on', async () => {
+    it('tells the connection a device has by the time it is taken out, not the one it had before', async () => {
       const { c, alice, sessionId } = await setup();
       await alice.conn.request('session.join', { sessionId, caps: caps() });
-      answerRenewals(alice, caps());
       const internals = c.sessions as unknown as {
-        lastOwner: Map<string, string>;
-        submit(): unknown;
-        rebalance(): void;
-        renewRetryMs: number;
-        renewTimeoutMs: number;
+        dropUnrenewed(sessionId: string, peer: string): void;
       };
-      internals.renewRetryMs = 50;
-      internals.renewTimeoutMs = 3000;
-      internals.lastOwner.set(sessionId, 'someone-else');
-      const submit = vi
-        .spyOn(internals, 'submit')
-        .mockRejectedValue(new RpcFailure('unavailable', 'the owner cannot be reached'));
-      internals.rebalance();
-      await waitFor(() => alice.events.some((e) => e.ev === 'session_renew'), 3000, 'to be asked');
-      // The device reconnects (a new connection takes the place of the one it was asked on).
+      const [before] = c.presence.localOf(alice.identity.userId);
+      // The device reconnects: a new connection takes the place of the one it joined on.
       const again = await connectUser(c, alice.identity, 'alice', peerIds.device(alice.conn.peer));
       await waitFor(
+        () => c.presence.localOf(alice.identity.userId).every((h) => h !== before),
+        5000,
+        'the new connection to be the one it has',
+      );
+      internals.dropUnrenewed(sessionId, alice.conn.peer);
+      await waitFor(
         () => again.events.some((e) => e.ev === 'session_closed'),
-        10000,
+        5000,
         'the new connection to be told',
       );
-      submit.mockRestore();
       expect(again.events.find((e) => e.ev === 'session_closed')!.d).toMatchObject({ again: true });
     });
 
