@@ -475,6 +475,24 @@ describe('events and session operations from other servers', () => {
       expect(state().epoch).toBeLessThan(5);
     });
 
+    it('keeps the host a hint names when only the backup it names is not a device that exists', async () => {
+      const net = await conversation();
+      const state = await joined(net);
+      const device = peerIds.device(net.alice.conn.peer);
+      net.toVictim.send(
+        presenceFrom(net.rogue, Date.now(), [entry(net.alice.identity.userId, [device])]),
+      );
+      const ghost = peerIds.make(net.alice.identity.userId, 'abcdefgh');
+      op(net, net.alice.conn.peer, {
+        op: 'join',
+        caps: caps(),
+        hint: { epoch: 1000, host: net.bob.conn.peer, backup: ghost },
+      });
+      await waitFor(() => state().epoch >= 1000, 5000, 'the hint');
+      expect(state().host).toBe(net.bob.conn.peer);
+      expect(state().backup).not.toBe(ghost);
+    });
+
     it("takes a device's operations in the order they were sent, also while its join is looked into", async () => {
       const net = await conversation();
       const state = await joined(net);

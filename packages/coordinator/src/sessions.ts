@@ -61,6 +61,9 @@ const VOICE_AHEAD_MS = 5 * 60_000;
  */
 const HOSTING_GRACE_MS = 1500;
 const HOSTING_WAITERS_MAX = 200;
+/** Whether a device's record says it was removed from the account. */
+const isRemoved = (record: SignedRecord<'device'> | null) => record?.body.revoked === true;
+
 const DEVICE_REMOVED = 'that device was removed from the account';
 const DEVICE_UNKNOWN = 'no record of that device on the account was found';
 /** How many may wait at once for the record of a device that has only just been published. */
@@ -210,7 +213,7 @@ export class SessionService {
     let record = await this.findDevice(peer);
     // Few may wait at once, and a device waits once however many rooms it is joining.
     if (patient && !record) record = await this.waitForDevice(peer);
-    const removed = record?.body.revoked === true;
+    const removed = isRemoved(record);
     return { device: removed ? null : record, removed };
   }
 
@@ -233,7 +236,7 @@ export class SessionService {
     }
     if (found.device) return { ...caps, platform: found.device.body.platform };
     if (found.removed) {
-      await this.leave(peer, sessionId);
+      void this.leave(peer, sessionId);
       throw new RpcFailure('forbidden', DEVICE_REMOVED);
     }
     // Not found is not the same as removed: the servers that hold it may not be reachable.
@@ -252,7 +255,7 @@ export class SessionService {
     op: FedSessionOp['op'],
   ): Promise<
     | { refused: string; code: 'forbidden' | 'unavailable' }
-    | { device: SignedRecord<'device'>; hintOk: boolean }
+    | { device: SignedRecord<'device'>; hint?: Hint }
   > {
     try {
       if (!(await this.connectedTo(server, peer)))
@@ -266,9 +269,8 @@ export class SessionService {
           ? { refused: DEVICE_REMOVED, code: 'forbidden' }
           : { refused: DEVICE_UNKNOWN, code: 'unavailable' };
       // What a hint names is looked into here too, not in the room's queue.
-      const hintOk =
-        op.op === 'join' && op.hint ? await this.hintAllowed(sessionId, op.hint) : true;
-      return { device, hintOk };
+      const hint = op.op === 'join' && op.hint ? await this.hintAllowed(sessionId, op.hint) : null;
+      return { device, ...(hint ? { hint } : {}) };
     } catch {
       return { refused: 'could not look up that device', code: 'unavailable' };
     }
@@ -304,7 +306,7 @@ export class SessionService {
       }
       const removed = new Set(
         records
-          .filter((r) => r.kind === 'device' && (r as SignedRecord<'device'>).body.revoked)
+          .filter((r) => r.kind === 'device' && isRemoved(r as SignedRecord<'device'>))
           .map((r) => r.key),
       );
       if (removed.size === 0) return;
@@ -358,7 +360,7 @@ export class SessionService {
       const forbidden = err instanceof RpcFailure && err.code === 'forbidden';
       if (!silent && current?.get(client.peer) === caps) {
         if (before && !forbidden) current.set(client.peer, before);
-        else await this.leave(client.peer, sessionId);
+        else void this.leave(client.peer, sessionId);
       }
       throw err;
     }
@@ -482,7 +484,7 @@ export class SessionService {
     const gateKey = `${frame.sessionId}|${frame.peer}`;
     const gate = this.gates.get(gateKey) ?? Promise.resolve();
     type Admitted =
-      Awaited<ReturnType<SessionService['admit']>> | { device?: undefined; hintOk?: undefined };
+      Awaited<ReturnType<SessionService['admit']>> | { device?: undefined; hint?: undefined };
     const admitted: Promise<Admitted> = gate
       .then(() =>
         frame.op.op === 'join'
@@ -544,7 +546,7 @@ export class SessionService {
   private async runRemoteOp(
     fromServer: string,
     frame: FedSessionOp,
-    admitted: { device?: SignedRecord<'device'>; hintOk?: boolean },
+    admitted: { device?: SignedRecord<'device'>; hint?: Hint },
   ): Promise<unknown> {
     let op = frame.op;
     if (op.op === 'update') {
@@ -560,30 +562,35 @@ export class SessionService {
     if (op.op === 'join') {
       await this.checkAccess(peerIds.user(frame.peer), frame.sessionId);
       // `admit` found the record; a join always comes with it.
-      op = { ...op, caps: { ...op.caps, platform: admitted.device!.body.platform } };
-      if (op.hint && !admitted.hintOk) {
-        const { hint: _hint, ...rest } = op;
-        op = rest;
+      if (!admitted.device) throw new RpcFailure('internal', 'join was not admitted');
+      op = { ...op, caps: { ...op.caps, platform: admitted.device.body.platform } };
+      if (op.hint) {
+        const { hint: _named, ...rest } = op;
+        op = admitted.hint ? { ...rest, hint: admitted.hint } : rest;
       }
     }
     return this.apply(frame.sessionId, frame.peer, fromServer, op);
   }
 
-  /** A hint is believed only if the host and backup it names may be in the session, as devices that exist. */
-  private async hintAllowed(sessionId: string, hint: Hint): Promise<boolean> {
-    if (hint.epoch < 0 || hint.epoch > HINT_EPOCH_MAX) return false;
-    try {
-      const named = [hint.host, hint.backup].filter((p): p is string => !!p);
-      const found = await Promise.all(
-        named.map(async (peer) => {
-          await this.checkAccess(peerIds.user(peer), sessionId);
-          return this.deviceOf(peer);
-        }),
-      );
-      return found.every(Boolean);
-    } catch {
-      return false;
-    }
+  /**
+   * What of a hint is believed: the host it names, and the backup, if they may be in the
+   * session as devices that exist (a record not yet found is waited for, as at a join). A
+   * backup that does not pass is left out and the host kept; a host that does not pass
+   * makes the whole hint worthless.
+   */
+  private async hintAllowed(sessionId: string, hint: Hint): Promise<Hint | null> {
+    if (hint.epoch < 0 || hint.epoch > HINT_EPOCH_MAX || !hint.host) return null;
+    const known = async (peer: string | null) => {
+      if (!peer) return null;
+      try {
+        await this.checkAccess(peerIds.user(peer), sessionId);
+        return (await this.lookupDevice(peer, true)).device ? peer : null;
+      } catch {
+        return null;
+      }
+    };
+    const [host, backup] = await Promise.all([known(hint.host), known(hint.backup)]);
+    return host ? { epoch: hint.epoch, host, backup } : null;
   }
 
   handleRemoteResult(opId: string, ok: unknown, err?: { code: string; message: string }) {
