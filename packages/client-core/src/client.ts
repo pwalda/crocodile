@@ -2190,7 +2190,8 @@ export class CrocodileClient extends Emitter<ClientEvents> {
         await this.revokeInvite(code).catch(() => {});
       throw err;
     }
-    if ('invite' in previous) await this.revokeInvite(previous.invite.body.code).catch(() => {});
+    if (previous.state === 'good')
+      await this.revokeInvite(previous.invite.body.code).catch(() => {});
     return code;
   }
 
@@ -2311,6 +2312,7 @@ export class CrocodileClient extends Emitter<ClientEvents> {
       // The link anyone can use is the one the space has on, no older one.
       (invite.body.for === undefined &&
         (invite.body.expiresAt === null ||
+          code.length < OPEN_CODE_LENGTH ||
           space.body.publicInvite !== inviteCommitment(spaceId, code))) ||
       (invite.body.expiresAt !== null && invite.body.expiresAt < Date.now());
     return {
@@ -2338,6 +2340,11 @@ export class CrocodileClient extends Emitter<ClientEvents> {
       (invite.body.expiresAt !== null && invite.body.expiresAt < Date.now())
     )
       throw new Error('That invite has expired or was revoked.');
+    if (
+      invite.body.for === undefined &&
+      (invite.body.expiresAt === null || invite.body.code.length < OPEN_CODE_LENGTH)
+    )
+      throw new Error('That link is out of date. Ask for a new one.');
     const { spaceId } = invite.body;
     const space = await this.link!.request('records.get', { keys: [recordKey.space(spaceId)] });
     // The link anyone can use is the one the space has on: a newer one replaces it.

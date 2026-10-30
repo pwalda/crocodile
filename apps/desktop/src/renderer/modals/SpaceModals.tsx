@@ -162,9 +162,8 @@ export function InviteModal({ spaceId }: { spaceId: string }) {
     const timer = setInterval(() => setTick((n) => n + 1), 5000);
     return () => clearInterval(timer);
   }, []);
-  // What the space has on (it is read again whenever the space changes).
-  const link =
-    space?.publicInvite !== undefined ? client.openLinkOf(spaceId) : { state: 'none' as const };
+  // What the space has on (it is read again whenever the space changes, and now and then).
+  const link = client.openLinkOf(spaceId);
   const invite = 'invite' in link ? link.invite : undefined;
   const code = link.state === 'good' ? invite!.body.code : null;
   const run = async (what: () => Promise<unknown>) => {
