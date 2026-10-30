@@ -2759,14 +2759,14 @@ export class CrocodileClient extends Emitter<ClientEvents> {
   private async deviceOf(peer: string): Promise<DeviceBody | null> {
     const userId = peerIds.user(peer);
     const key = recordKey.device(userId, peerIds.device(peer));
-    let r = this.records.get(key) as SignedRecord<'device'> | undefined;
+    let r = this.deviceRecord(peer);
     if (!r || r.body.prekey.expiresAt < Date.now()) {
       const res = await this.link?.request('records.get', { keys: [key] }).catch(() => null);
       if (res) this.records.ingestAll(res.records);
       void this.link
         ?.request('records.subscribe', { prefixes: [recordKey.devicePrefix(userId)] })
         .catch(() => {});
-      r = this.records.get(key) as SignedRecord<'device'> | undefined;
+      r = this.deviceRecord(peer);
     }
     if (!r || r.body.revoked) return null;
     return r.body;
