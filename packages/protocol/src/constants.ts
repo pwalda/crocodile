@@ -59,4 +59,6 @@ export const SIG_DOMAIN = {
   spaceAdmins: 'croc/v1/space-admins',
   /** A device's own join, update or report in a session. */
   sessionOp: 'croc/v1/session-op',
+  /** A joiner's use of the secret in an open link (a ticket), for one user in one space. */
+  ticketUse: 'croc/v1/ticket-use',
 } as const;
