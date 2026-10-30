@@ -77,13 +77,13 @@ export class CoordinatorConnection extends Emitter<ConnectionEvents> {
     }
   >();
   private closed = false;
+  /** How many times we have left each room on this connection: an answer from before that is no news. */
+  private lineage = new Map<string, number>();
   /**
    * What the server has taken from us in each room on this connection: the time of the join
    * (what later operations name) and how many updates followed, and the latest join, while it is
    * on its way. A join counts only once it is taken.
    */
-  /** How many times we have left each room on this connection: an answer from before that is no news. */
-  private lineage = new Map<string, number>();
   private signing = new Map<string, { since?: number; n: number; joining?: Promise<unknown> }>();
   /**
    * The time of the last join signed for each room, across connections to the same server: it
@@ -300,8 +300,10 @@ export class CoordinatorConnection extends Emitter<ConnectionEvents> {
       const at = Math.max(Date.now() + this.clockOffset, (joined.get(key) ?? 0) + 1);
       joined.set(key, at);
       // Of no use once it is too old for a join to be taken after it anyway.
+      // (Only this server's: the times of another are by another clock.)
+      const mine = `${this.server.id}|`;
       for (const [k, v] of joined)
-        if (v < Date.now() + this.clockOffset - 15 * 60_000) joined.delete(k);
+        if (k.startsWith(mine) && v < Date.now() + this.clockOffset - 15 * 60_000) joined.delete(k);
       proof = signSessionOp(
         this.signer,
         sessionId,

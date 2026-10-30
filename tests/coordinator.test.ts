@@ -1195,6 +1195,34 @@ describe('sessions and host election', () => {
         expect(floors.has(`${c.info.id}|${alice.conn.peer}|${sessionId}`)).toBe(true);
       });
 
+      it('does not forget the floor of its joins on one server when it joins on another', async () => {
+        const { alice, sessionId } = await setup();
+        const floors = (alice.conn.constructor as unknown as { joinedAt: Map<string, number> })
+          .joinedAt;
+        // A join on another server, long ago by the clock of that server.
+        const other = `another-server|${alice.conn.peer}|${sessionId}`;
+        floors.set(other, Date.now() - 20 * 60_000);
+        await alice.conn.request('session.join', { sessionId, caps: caps() });
+        expect(floors.has(other)).toBe(true);
+        floors.delete(other);
+      });
+
+      it('keeps what a device said of itself when the owner did not answer an update', async () => {
+        const { c, alice, sessionId } = await setup();
+        await alice.conn.request('session.join', { sessionId, caps: caps({ nat: 'cone' }) });
+        const internals = c.sessions as unknown as {
+          local: Map<string, Map<string, { nat: string }>>;
+          submit(): unknown;
+        };
+        const submit = vi.spyOn(internals, 'submit').mockRejectedValueOnce(new OwnerSilent());
+        await expect(
+          alice.conn.request('session.update', { sessionId, caps: caps({ nat: 'open' }) }),
+        ).rejects.toThrow();
+        submit.mockRestore();
+        // The owner may have taken it.
+        expect(internals.local.get(sessionId)!.get(alice.conn.peer)!.nat).toBe('open');
+      });
+
       it('lets a device that left join again', async () => {
         const { c, alice, sessionId } = await setup();
         await alice.conn.request('session.join', { sessionId, caps: caps() });

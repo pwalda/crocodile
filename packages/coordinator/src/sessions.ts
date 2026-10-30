@@ -528,8 +528,10 @@ export class SessionService {
     try {
       await this.submit(sessionId, client.peer, { op: 'update', caps }, proof);
     } catch (err) {
-      // Not taken: what we hold is what the owner has (unless it was said again meanwhile).
-      if (members.get(client.peer) === said) members.set(client.peer, current);
+      // Not taken: what we hold is what the owner has (unless it was said again meanwhile, or the
+      // owner simply did not answer: it may have applied it).
+      if (!(err instanceof OwnerSilent) && members.get(client.peer) === said)
+        members.set(client.peer, current);
       throw err;
     }
   }
