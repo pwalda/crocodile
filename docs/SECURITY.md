@@ -239,9 +239,13 @@ picture size.
   lost.
 - Files are checked for integrity, not for safety: the app never opens one by
   itself, sanitises the names it suggests (no folders, and no reserved or
-  trailing-dot names that would hide the real extension), and warns before
-  opening programs and scripts (a wide list of executable types), but a file a
-  member sends can still be harmful.
+  trailing-dot names that would hide the real extension), marks a saved or
+  opened file as coming from outside (Mark-of-the-Web on Windows, the
+  quarantine attribute on macOS, so the system's own checks apply; Linux has
+  no such mark, and a drive that can't carry it is left unmarked), and asks
+  before opening anything but pictures, sound, video, plain text, PDFs and
+  Office or OpenDocument files without macros. A file a member sends can still
+  be harmful.
 
 Please report vulnerabilities privately through
 [GitHub's private reporting](https://github.com/pwalda/crocodile/security/advisories/new)

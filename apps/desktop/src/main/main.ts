@@ -22,7 +22,13 @@ import { pathToFileURL } from 'node:url';
 import { cpus } from 'node:os';
 import { contextMenuTemplate } from './context-menu';
 import { configureGlobalPtt, stopGlobalPtt } from './global-ptt';
-import { FileExports, FileStore, RISKY_EXTENSIONS, safeFileName } from './file-store';
+import {
+  FileExports,
+  FileStore,
+  opensWithoutAsking,
+  RISKY_EXTENSIONS,
+  safeFileName,
+} from './file-store';
 import { SecureStore, type Protection } from './secure-store';
 import { isAllowedNavigation } from './navigation';
 import { allowAsking, handle, useIpc } from './ipc-guard';
@@ -235,16 +241,19 @@ handle('files:end', async (_e, token: string, then: 'open' | 'reveal' | 'none') 
   if (then === 'reveal') shell.showItemInFolder(path);
   if (then === 'open') {
     // Asked here rather than in the UI, so nothing the UI does can skip it.
-    if (RISKY_EXTENSIONS.has(extname(safeFileName(path)).slice(1).toLowerCase())) {
+    if (!opensWithoutAsking(path)) {
+      const runsCode = RISKY_EXTENSIONS.has(extname(safeFileName(path)).slice(1).toLowerCase());
       const options = {
         type: 'warning' as const,
         buttons: ['Cancel', 'Open anyway'],
         defaultId: 0,
         cancelId: 0,
         message: `Open ${basename(path)}?`,
-        detail:
-          'This kind of file can run code on your computer. Only open it if you trust ' +
-          'the person who sent it and expected it.',
+        detail: runsCode
+          ? 'This kind of file can run code on your computer. Only open it if you trust ' +
+            'the person who sent it and expected it.'
+          : "Crocodile doesn't know this kind of file, and some can run code on your " +
+            'computer. Only open it if you trust the person who sent it and expected it.',
       };
       const res = win
         ? await dialog.showMessageBox(win, options)

@@ -7,6 +7,8 @@ import { newFileId } from '@crocodile/crypto';
 import {
   FileExports,
   FileStore,
+  markFromOutside,
+  opensWithoutAsking,
   RISKY_EXTENSIONS,
   safeFileName,
 } from '../apps/desktop/src/main/file-store';
@@ -160,5 +162,107 @@ describe('saving files', () => {
       'auxiliary.md',
     ])
       expect(safeFileName(name)).toBe(name);
+  });
+});
+
+describe('files received from other people', () => {
+  const deps = (platform: NodeJS.Platform) => {
+    const calls: string[][] = [];
+    return {
+      calls,
+      deps: {
+        platform,
+        now: () => 1_700_000_000_000,
+        writeStream: async (p: string, text: string) => void calls.push(['stream', p, text]),
+        setQuarantine: async (p: string, v: string) => void calls.push(['quarantine', p, v]),
+      },
+    };
+  };
+
+  it('are marked as downloaded on Windows (Mark-of-the-Web)', async () => {
+    const { calls, deps: d } = deps('win32');
+    expect(await markFromOutside('C:\\Users\\me\\Downloads\\report.docx', d)).toBe(true);
+    expect(calls).toEqual([
+      [
+        'stream',
+        'C:\\Users\\me\\Downloads\\report.docx:Zone.Identifier',
+        '[ZoneTransfer]\r\nZoneId=3\r\nHostUrl=about:internet\r\n',
+      ],
+    ]);
+  });
+
+  it('are quarantined on macOS', async () => {
+    const { calls, deps: d } = deps('darwin');
+    expect(await markFromOutside('/Users/me/Downloads/app.zip', d)).toBe(true);
+    expect(calls).toEqual([
+      ['quarantine', '/Users/me/Downloads/app.zip', '0083;6553f100;Crocodile;'],
+    ]);
+  });
+
+  it('are left as they are where there is no such mark, or the drive cannot carry it', async () => {
+    const linux = deps('linux');
+    expect(await markFromOutside('/home/me/x.pdf', linux.deps)).toBe(false);
+    expect(linux.calls).toEqual([]);
+    const fat = deps('win32');
+    fat.deps.writeStream = async () => {
+      throw new Error('EINVAL');
+    };
+    expect(await markFromOutside('E:\\x.pdf', fat.deps)).toBe(false);
+  });
+
+  it('are marked when finished, whether saved or opened, but not when abandoned', async () => {
+    const dir = tempDir();
+    const marked: string[] = [];
+    const x = new FileExports(async (p) => void marked.push(p));
+    const saved = join(dir, 'a.pdf');
+    const t1 = await x.begin(saved, false);
+    await x.chunk(t1, new Uint8Array([1]));
+    expect(marked).toEqual([]);
+    expect(await x.end(t1)).toBe(saved);
+    const opened = await x.tempPath('b.pdf');
+    const t2 = await x.begin(opened, true);
+    await x.end(t2);
+    const t3 = await x.begin(join(dir, 'c.pdf'), false);
+    await x.abort(t3);
+    expect(marked).toEqual([saved, opened]);
+    x.cleanup();
+  });
+
+  it('are still saved when the mark cannot be written', async () => {
+    const dir = tempDir();
+    const x = new FileExports(async () => {
+      throw new Error('no xattr here');
+    });
+    const t = await x.begin(join(dir, 'a.pdf'), false);
+    await expect(x.end(t)).resolves.toBe(join(dir, 'a.pdf'));
+  });
+
+  it('open without asking only if they are a kind known to be safe', () => {
+    for (const name of [
+      'photo.PNG',
+      'song.mp3',
+      'clip.mp4',
+      'notes.txt',
+      'paper.pdf',
+      'sheet.xlsx',
+    ])
+      expect(opensWithoutAsking(name), name).toBe(true);
+    // Programs, macro documents and web pages, archives, kinds not heard of, and no kind at all.
+    for (const name of [
+      'a.exe',
+      'a.docm',
+      'a.html',
+      'a.svg',
+      'a.zip',
+      'a.7z',
+      'a.iso',
+      'a.xyz',
+      'README',
+      'a.pdf.exe',
+      'a.exe.',
+      'a.exe.',
+      '.pdf',
+    ])
+      expect(opensWithoutAsking(name), name).toBe(false);
   });
 });
