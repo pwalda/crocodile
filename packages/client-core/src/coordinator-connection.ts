@@ -3,6 +3,7 @@ import {
   SecureChannel,
   signInChannelContext,
   sign,
+  signSessionOp,
   verifyPayload,
   type Identity,
 } from '@crocodile/crypto';
@@ -16,6 +17,7 @@ import {
   type RpcMethod,
   type RpcMethods,
   type RpcParamsOf,
+  type SessionOpProof,
   type ServerEvents,
   type ServerFrame,
   type ServerHello,
@@ -75,6 +77,13 @@ export class CoordinatorConnection extends Emitter<ConnectionEvents> {
     }
   >();
   private closed = false;
+  /**
+   * What we have signed in each room on this connection: the time of the join (what later
+   * operations name) and how many updates followed, and the join, while it is on its way.
+   */
+  private signing = new Map<string, { since: number; n: number; joining?: Promise<unknown> }>();
+  /** The time of the last join signed for each room, across connections: it only goes up. */
+  private static joinedAt = new Map<string, number>();
 
   private constructor(
     private readonly ws: WebSocket,
@@ -86,6 +95,8 @@ export class CoordinatorConnection extends Emitter<ConnectionEvents> {
     readonly peer: string,
     /** Who runs the server, as it says; dropped unless well-formed. */
     readonly operator?: OperatorInfo,
+    /** What signs what we ask of a session (the account's key). */
+    private readonly signer?: Pick<Identity, 'signSecret'>,
   ) {
     super();
     ws.onmessage = (ev) => this.onMessage(ev.data);
@@ -200,6 +211,7 @@ export class CoordinatorConnection extends Emitter<ConnectionEvents> {
               frame.userId,
               frame.peer,
               OperatorInfo.safeParse(hello.operator).data,
+              opts.identity,
             ),
           );
         } else if (frame.t === 'error') {
@@ -218,6 +230,23 @@ export class CoordinatorConnection extends Emitter<ConnectionEvents> {
     params: RpcParamsOf<M>,
     timeoutMs = 15_000,
   ): Promise<RpcMethods[M]> {
+    if (method === 'session.join' || method === 'session.update' || method === 'session.report')
+      return this.signedRequest(
+        method,
+        params as RpcParamsOf<'session.join' | 'session.update' | 'session.report'>,
+        timeoutMs,
+      ) as Promise<RpcMethods[M]>;
+    const sent = this.send(method, params, timeoutMs);
+    if (method === 'session.leave')
+      this.signing.delete((params as RpcParamsOf<'session.leave'>).sessionId);
+    return sent;
+  }
+
+  private send<M extends RpcMethod>(
+    method: M,
+    params: RpcParamsOf<M>,
+    timeoutMs: number,
+  ): Promise<RpcMethods[M]> {
     if (this.closed) return Promise.reject(new RpcCallError('unavailable', 'not connected'));
     const id = this.nextId++;
     return new Promise((resolve, reject) => {
@@ -228,6 +257,64 @@ export class CoordinatorConnection extends Emitter<ConnectionEvents> {
       this.pending.set(id, { resolve: resolve as (v: unknown) => void, reject, timer });
       this.ws.send(JSON.stringify(this.channel.seal({ t: 'req', id, m: method, p: params })));
     });
+  }
+
+  /**
+   * A join, update or report, with the account's signature on it, made now and for this very
+   * server, so that no other can speak for this device. An update or a report goes after a join
+   * of the same room that is on its way (it names that join).
+   */
+  private async signedRequest(
+    method: 'session.join' | 'session.update' | 'session.report',
+    params: RpcParamsOf<'session.join' | 'session.update' | 'session.report'>,
+    timeoutMs: number,
+  ): Promise<unknown> {
+    // Already signed (or by someone that wants to be refused): as it is.
+    if (!this.signer || (params as { proof?: unknown }).proof)
+      return this.send(method, params, timeoutMs);
+    const { sessionId } = params;
+    if (method !== 'session.join') await this.signing.get(sessionId)?.joining?.catch(() => {});
+    const room = this.signing.get(sessionId);
+    let proof: SessionOpProof | undefined;
+    if (method === 'session.join') {
+      const p = params as RpcParamsOf<'session.join'>;
+      const key = `${this.peer}|${sessionId}`;
+      // Each join is later than the last, whatever the clock does: it is what the others name.
+      const at = Math.max(Date.now(), (CoordinatorConnection.joinedAt.get(key) ?? 0) + 1);
+      CoordinatorConnection.joinedAt.set(key, at);
+      proof = signSessionOp(
+        this.signer,
+        sessionId,
+        this.peer,
+        { op: 'join', caps: p.caps },
+        { server: this.server.id, at },
+      );
+      const joining: Promise<unknown> = this.send(method, { ...p, proof }, timeoutMs);
+      this.signing.set(sessionId, { since: at, n: 0, joining });
+      return joining;
+    }
+    // Not in the room as far as we know: the server says so.
+    if (!room) return this.send(method, params, timeoutMs);
+    if (method === 'session.update') {
+      const p = params as RpcParamsOf<'session.update'>;
+      proof = signSessionOp(
+        this.signer,
+        sessionId,
+        this.peer,
+        { op: 'update', caps: p.caps },
+        { server: this.server.id, since: room.since, n: ++room.n },
+      );
+      return this.send(method, { ...p, proof }, timeoutMs);
+    }
+    const p = params as RpcParamsOf<'session.report'>;
+    proof = signSessionOp(
+      this.signer,
+      sessionId,
+      this.peer,
+      { op: 'report', epoch: p.epoch, issue: p.issue },
+      { server: this.server.id, since: room.since },
+    );
+    return this.send(method, { ...p, proof }, timeoutMs);
   }
 
   close() {

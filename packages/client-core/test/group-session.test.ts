@@ -152,6 +152,18 @@ describe('group session', () => {
     return { ...made, joins: () => sent.filter((t) => t === 'session.join').length };
   }
 
+  it('signs a new join when the server asks for one, and not for a session it has left', async () => {
+    const { s, joins } = joinFirst();
+    await s.join();
+    expect(joins()).toBe(1);
+    // The server that keeps the session changed: a join of its own, on top of one in flight too.
+    await s.renew();
+    expect(joins()).toBe(2);
+    await s.leave();
+    await s.renew();
+    expect(joins()).toBe(2);
+  });
+
   it('joins the session first when asked for a relay before it has', async () => {
     const { s, joins } = joinFirst();
     await s.useServerRelay();

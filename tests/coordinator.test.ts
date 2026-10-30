@@ -3,6 +3,7 @@ import {
   SecureChannel,
   answerChannel,
   createIdentity,
+  signSessionOp,
   createLinkKem,
   createPrekey,
   isSpaceMember,
@@ -32,11 +33,17 @@ import {
 } from '@crocodile/protocol';
 import { CoordinatorConnection } from '@crocodile/client-core';
 import { Coordinator, lanAddress, rendezvousOwner } from '@crocodile/coordinator';
-import { DEVICE_REMOVED, OwnerSilent } from '../packages/coordinator/src/sessions';
+import {
+  DEVICE_REMOVED,
+  NOT_RECENT,
+  OwnerSilent,
+  UNSIGNED,
+} from '../packages/coordinator/src/sessions';
 import { RpcFailure } from '../packages/coordinator/src/util';
 import {
   caps,
   connectUser,
+  answerRenewals,
   createSpace,
   expectAccepted,
   joinSpace,
@@ -948,14 +955,17 @@ describe('sessions and host election', () => {
       expect(Date.now() - start).toBeLessThan(250);
     });
 
-    it('lets go of a member the owner refuses after the owner changed, instead of trying for ever', async () => {
+    it('lets go of a device the new owner finds removed when it is asked to sign again, instead of asking for ever', async () => {
       const { c, alice, sessionId } = await setup();
       await alice.conn.request('session.join', { sessionId, caps: caps() });
+      answerRenewals(alice, caps());
       const internals = c.sessions as unknown as {
         lastOwner: Map<string, string>;
         submit(): unknown;
         rebalance(): void;
-        rebalanceTimer?: unknown;
+        renewing: Map<string, unknown>;
+        renewRetryMs: number;
+        renewTimeoutMs: number;
       };
       internals.lastOwner.set(sessionId, 'someone-else');
       const submit = vi
@@ -964,7 +974,92 @@ describe('sessions and host election', () => {
       internals.rebalance();
       await waitFor(() => !c.sessions.inSession(alice.conn.peer, sessionId), 3000, 'to let go');
       submit.mockRestore();
-      expect(internals.rebalanceTimer).toBeUndefined();
+      expect(internals.renewing.size).toBe(0);
+      expect(alice.events.filter((e) => e.ev === 'session_renew')).toHaveLength(1);
+    });
+
+    describe('what a device signs', () => {
+      const body = { op: 'join', caps: caps() } as const;
+      /** What an app that is not up to date sends: no signature. */
+      const unsigned = (
+        u: TestUser,
+        method: 'session.join' | 'session.update',
+        sessionId: string,
+      ) =>
+        (u.conn as unknown as { send(m: string, p: unknown, t: number): Promise<unknown> }).send(
+          method,
+          { sessionId, caps: caps() },
+          5000,
+        );
+
+      it('refuses a join, an update and a report that are not signed', async () => {
+        const { c, alice, sessionId } = await setup();
+        await expect(unsigned(alice, 'session.join', sessionId)).rejects.toThrow(UNSIGNED);
+        expect(c.sessions.inSession(alice.conn.peer, sessionId)).toBe(false);
+        await alice.conn.request('session.join', { sessionId, caps: caps() });
+        await expect(unsigned(alice, 'session.update', sessionId)).rejects.toThrow(UNSIGNED);
+      });
+
+      it('refuses what was signed for another server, or by another account, or for another room', async () => {
+        const { c, alice, bob, sessionId } = await setup();
+        const proof = (who: TestUser, over: { server?: string; room?: string } = {}) =>
+          signSessionOp(who.identity, over.room ?? sessionId, alice.conn.peer, body, {
+            server: over.server ?? c.info.id,
+          });
+        const join = (p: unknown) =>
+          alice.conn.request('session.join', { sessionId, caps: caps(), proof: p as never });
+        await expect(join(proof(alice, { server: 'another-server' }))).rejects.toThrow(
+          /another server/,
+        );
+        await expect(join(proof(bob))).rejects.toThrow(/signature/);
+        await expect(
+          join(proof(alice, { room: `voice:${'a'.repeat(8)}:${'b'.repeat(8)}` })),
+        ).rejects.toThrow(/signature/);
+        expect(c.sessions.inSession(alice.conn.peer, sessionId)).toBe(false);
+        await join(proof(alice));
+        expect(c.sessions.inSession(alice.conn.peer, sessionId)).toBe(true);
+      });
+
+      it('takes a join that is four minutes off by the clock and refuses one that is six', async () => {
+        const { c, alice, sessionId } = await setup();
+        const at = (ms: number) =>
+          signSessionOp(alice.identity, sessionId, alice.conn.peer, body, {
+            server: c.info.id,
+            at: Date.now() + ms,
+          });
+        const join = (p: unknown) =>
+          alice.conn.request('session.join', { sessionId, caps: caps(), proof: p as never });
+        await expect(join(at(-6 * 60_000))).rejects.toThrow(NOT_RECENT);
+        await expect(join(at(6 * 60_000))).rejects.toThrow(NOT_RECENT);
+        await join(at(-4 * 60_000));
+        expect(c.sessions.inSession(alice.conn.peer, sessionId)).toBe(true);
+      });
+
+      it('counts a report that is sent just after a new join of the same device', async () => {
+        const { c, alice, bob, carol, sessionId } = await setup();
+        await alice.conn.request('session.join', { sessionId, caps: caps({ nat: 'open' }) });
+        const { state } = await bob.conn.request('session.join', { sessionId, caps: caps() });
+        await carol.conn.request('session.join', { sessionId, caps: caps() });
+        expect(state.host).toBe(alice.conn.peer);
+        // Bob joins again (as when he is asked to) and reports at once, without waiting for it.
+        const rejoin = bob.conn.request('session.join', { sessionId, caps: caps() });
+        const report = bob.conn.request('session.report', {
+          sessionId,
+          epoch: state.epoch,
+          issue: 'host_unreachable',
+        });
+        await Promise.all([rejoin, report]);
+        // Two other people, one vote is enough: the host is changed.
+        expect(c.sessions.ownedState(sessionId)!.epoch).toBeGreaterThan(state.epoch);
+      });
+
+      it('lets a device that left join again', async () => {
+        const { c, alice, sessionId } = await setup();
+        await alice.conn.request('session.join', { sessionId, caps: caps() });
+        await alice.conn.request('session.leave', { sessionId });
+        await alice.conn.request('session.join', { sessionId, caps: caps() });
+        expect(c.sessions.inSession(alice.conn.peer, sessionId)).toBe(true);
+      });
     });
 
     it('does not keep a device in the room when the owner answers that it cannot tell', async () => {
@@ -979,22 +1074,32 @@ describe('sessions and host election', () => {
       expect(c.sessions.inSession(alice.conn.peer, sessionId)).toBe(false);
     });
 
-    it('keeps trying a member after the owner changed when it says the member may not be there, as it may be behind', async () => {
+    it('asks again for a join after the owner changed when the new owner says the member may not be there, as it may be behind', async () => {
       const { c, alice, sessionId } = await setup();
       await alice.conn.request('session.join', { sessionId, caps: caps() });
+      answerRenewals(alice, caps());
       const internals = c.sessions as unknown as {
         lastOwner: Map<string, string>;
         submit(): unknown;
         rebalance(): void;
-        rebalanceTimer?: unknown;
+        renewing: Map<string, unknown>;
+        renewRetryMs: number;
+        renewTimeoutMs: number;
       };
+      internals.renewRetryMs = 50;
       internals.lastOwner.set(sessionId, 'someone-else');
       const submit = vi
         .spyOn(internals, 'submit')
         .mockRejectedValueOnce(new RpcFailure('forbidden', 'not a member of this space'));
       internals.rebalance();
-      await waitFor(() => internals.rebalanceTimer, 3000, 'a new try');
+      await waitFor(
+        () => alice.events.filter((e) => e.ev === 'session_renew').length >= 2,
+        3000,
+        'to be asked again',
+      );
       submit.mockRestore();
+      // The second is taken, and the device stayed in the room meanwhile.
+      await waitFor(() => internals.renewing.size === 0, 3000, 'the wait to end');
       expect(c.sessions.inSession(alice.conn.peer, sessionId)).toBe(true);
     });
 
@@ -1009,7 +1114,10 @@ describe('sessions and host election', () => {
         .mockImplementation(async () => {
           // The first is slower than the second.
           await new Promise((r) => setTimeout(r, calls++ === 0 ? 300 : 50));
-          return { device: { body: { platform: 'bot' } }, removed: false };
+          return {
+            device: { author: alice.identity.publicKey, body: { platform: 'bot' } },
+            removed: false,
+          };
         });
       const join = () => alice.conn.request('session.join', { sessionId, caps: caps() });
       const first = join();
@@ -1020,23 +1128,78 @@ describe('sessions and host election', () => {
       expect(c.sessions.inSession(alice.conn.peer, sessionId)).toBe(true);
     });
 
-    it('keeps trying a member after the owner changed when the owner could not tell', async () => {
+    it('asks again for a join after the owner changed when the owner could not tell', async () => {
+      const { c, alice, sessionId } = await setup();
+      await alice.conn.request('session.join', { sessionId, caps: caps() });
+      answerRenewals(alice, caps());
+      const internals = c.sessions as unknown as {
+        lastOwner: Map<string, string>;
+        submit(): unknown;
+        rebalance(): void;
+        renewing: Map<string, unknown>;
+        renewRetryMs: number;
+        renewTimeoutMs: number;
+      };
+      internals.renewRetryMs = 50;
+      internals.lastOwner.set(sessionId, 'someone-else');
+      const submit = vi
+        .spyOn(internals, 'submit')
+        .mockRejectedValueOnce(new RpcFailure('unavailable', 'no record of that device'));
+      internals.rebalance();
+      await waitFor(
+        () => alice.events.filter((e) => e.ev === 'session_renew').length >= 2,
+        3000,
+        'to be asked again',
+      );
+      submit.mockRestore();
+      await waitFor(() => internals.renewing.size === 0, 3000, 'the wait to end');
+      expect(c.sessions.inSession(alice.conn.peer, sessionId)).toBe(true);
+    });
+
+    it('takes a device out of the room that does not sign a new join when the owner changed', async () => {
       const { c, alice, sessionId } = await setup();
       await alice.conn.request('session.join', { sessionId, caps: caps() });
       const internals = c.sessions as unknown as {
         lastOwner: Map<string, string>;
         submit(): unknown;
         rebalance(): void;
-        rebalanceTimer?: unknown;
+        renewing: Map<string, unknown>;
+        renewRetryMs: number;
+        renewTimeoutMs: number;
       };
+      internals.renewTimeoutMs = 200;
       internals.lastOwner.set(sessionId, 'someone-else');
-      const submit = vi
-        .spyOn(internals, 'submit')
-        .mockRejectedValueOnce(new RpcFailure('unavailable', 'no record of that device'));
       internals.rebalance();
-      await waitFor(() => internals.rebalanceTimer, 3000, 'a new try');
-      submit.mockRestore();
-      expect(c.sessions.inSession(alice.conn.peer, sessionId)).toBe(true);
+      await waitFor(() => alice.events.some((e) => e.ev === 'session_renew'), 3000, 'to be asked');
+      await waitFor(() => !c.sessions.inSession(alice.conn.peer, sessionId), 3000, 'to be let go');
+      await waitFor(() => alice.events.some((e) => e.ev === 'session_closed'), 3000, 'to be told');
+      expect(internals.renewing.size).toBe(0);
+    });
+
+    it('keeps a device in the room that signs a new join when the owner changed', async () => {
+      const { c, alice, bob, sessionId } = await setup();
+      await alice.conn.request('session.join', { sessionId, caps: caps({ nat: 'open' }) });
+      await bob.conn.request('session.join', { sessionId, caps: caps() });
+      answerRenewals(alice, caps({ nat: 'open' }));
+      answerRenewals(bob, caps());
+      const internals = c.sessions as unknown as {
+        lastOwner: Map<string, string>;
+        submit(): unknown;
+        rebalance(): void;
+        renewing: Map<string, unknown>;
+        renewRetryMs: number;
+        renewTimeoutMs: number;
+      };
+      const before = c.sessions.ownedState(sessionId)!;
+      internals.lastOwner.set(sessionId, 'someone-else');
+      internals.rebalance();
+      await waitFor(() => internals.renewing.size === 0, 3000, 'both to answer');
+      const after = c.sessions.ownedState(sessionId)!;
+      expect(after.members.map((m) => m.peer).sort()).toEqual(
+        before.members.map((m) => m.peer).sort(),
+      );
+      expect(after.host).toBe(before.host);
+      expect(after.epoch).toBe(before.epoch);
     });
 
     it('keeps the kind of device the join found when it updates, without looking it up', async () => {
@@ -1062,7 +1225,10 @@ describe('sessions and host election', () => {
         )
         .mockImplementationOnce(async () => {
           await new Promise((r) => setTimeout(r, 300));
-          return { device: { body: { platform: 'bot' } }, removed: false };
+          return {
+            device: { author: alice.identity.publicKey, body: { platform: 'bot' } },
+            removed: false,
+          };
         });
       const joining = gone.conn
         .request('session.join', { sessionId, caps: caps() })
@@ -1085,7 +1251,10 @@ describe('sessions and host election', () => {
         )
         .mockImplementation(async () => {
           await new Promise((r) => setTimeout(r, 200));
-          return { device: { body: { platform: 'bot' } }, removed: false };
+          return {
+            device: { author: alice.identity.publicKey, body: { platform: 'bot' } },
+            removed: false,
+          };
         });
       const join = () => alice.conn.request('session.join', { sessionId, caps: caps() });
       const results = await Promise.all([join(), join()]);
@@ -1103,7 +1272,10 @@ describe('sessions and host election', () => {
         )
         .mockImplementationOnce(async () => {
           await new Promise((r) => setTimeout(r, 300));
-          return { device: { body: { platform: 'bot' } }, removed: false };
+          return {
+            device: { author: alice.identity.publicKey, body: { platform: 'bot' } },
+            removed: false,
+          };
         });
       const joining = alice.conn.request('session.join', { sessionId, caps: caps() }).then(
         () => 'joined',
@@ -1367,6 +1539,8 @@ describe('coordination mesh', () => {
     const sessionId = `voice:${s.spaceId}:${s.voiceChannel}`;
     const r1 = await alice.conn.request('session.join', { sessionId, caps: caps({ nat: 'open' }) });
     const r2 = await bob.conn.request('session.join', { sessionId, caps: caps() });
+    answerRenewals(alice, caps({ nat: 'open' }));
+    answerRenewals(bob, caps());
     expect(r2.state.host).toBe(alice.conn.peer);
     expect(r2.state.id).toBe(r1.state.id);
 
@@ -1499,8 +1673,9 @@ describe('coordination mesh', () => {
     await joinSpace(bob, s.spaceId, s.code);
     await waitFor(() => isSpaceMember(c.records, s.spaceId, bob.identity.userId), 3000);
     await bob.conn.request('session.join', { sessionId, caps: caps() });
+    answerRenewals(bob, caps());
 
-    // C dies; B's first re-join with A is lost on the way.
+    // C dies; Bob's new join, which B sends to A, is lost on the way the first time.
     let dropped = 0;
     const sendTo = b.mesh.sendTo.bind(b.mesh);
     b.mesh.sendTo = ((id: string, frame: { t: string }) => {

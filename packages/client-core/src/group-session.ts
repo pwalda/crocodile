@@ -330,6 +330,15 @@ export class GroupSession extends Emitter<GroupSessionEvents> {
     this.applyState(state);
   }
 
+  /**
+   * The server that keeps the session changed, and asks for a new signed join (it asks again if
+   * the new one is not taken, and takes us out if it hears nothing).
+   */
+  async renew() {
+    if (this.left) return;
+    await this.join({ fresh: true }).catch(() => {});
+  }
+
   async updateCaps() {
     if (this.left) return;
     const caps = await this.ctx.caps();

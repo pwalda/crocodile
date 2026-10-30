@@ -1,4 +1,11 @@
-import { isSpaceMember, keyMatchesUserId, randomId, sign, verifyPayload } from '@crocodile/crypto';
+import {
+  isSpaceMember,
+  keyMatchesUserId,
+  randomId,
+  sign,
+  verifyPayload,
+  verifySessionOp,
+} from '@crocodile/crypto';
 import {
   DEFAULT_RELAY_SLOTS,
   LIMITS,
@@ -11,7 +18,9 @@ import {
   type FedVoice,
   type HostCaps,
   type SessionOp,
+  type SessionOpProof,
   type SessionState,
+  type SignedSessionOp,
   type SignedRecord,
   type VoiceOccupancy,
 } from '@crocodile/protocol';
@@ -26,6 +35,8 @@ interface OwnedSession {
   penalties: Map<string, number>;
   /** Devices that have said the host is unreachable, with their user (one vote a person). */
   reports: Map<string, string>;
+  /** What each member's device signed for: its key, its join (`since`) and the last count of an update. */
+  signed: Map<string, { key: string; since: number; n: number }>;
   /** Host adopted from a hint whose member has not re-joined yet. */
   pendingHostUntil: number;
   timer?: ReturnType<typeof setTimeout>;
@@ -52,9 +63,17 @@ type Hint = { epoch: number; host: string | null; backup: string | null };
 const PENDING_HOST_GRACE_MS = 4000;
 const HOST_PENALTY_MS = 60_000;
 const OP_TIMEOUT_MS = 8000;
+/** How far the time on a signed join may be from ours (as for mailbox proofs). */
+const SESSION_OP_SKEW_MS = 5 * 60_000;
+/** A device asked to sign a new join (the room's server changed) has this long to give one that is taken. */
+const RENEW_TIMEOUT_MS = 10_000;
+/** A join of that kind that was not taken (the new owner may not be reachable yet) is asked for again this soon. */
+const RENEW_RETRY_MS = 1000;
+/** How often the record of which joins were taken is cleaned of those too old to be replayed. */
+const JOIN_SWEEP_MS = 60_000;
+export const UNSIGNED = 'session operations must be signed (is the app up to date?)';
+export const NOT_RECENT = 'that join is not recent: is the time on this device right?';
 const MEMBER_RECONNECT_GRACE_MS = 10_000;
-/** A member server re-joins a session whose new owner it could not reach this soon. */
-const REJOIN_RETRY_MS = 1000;
 /**
  * The owner repeats what it says about an occupied room this often, and a
  * server believes an announcement for this long: an old one that someone
@@ -124,6 +143,16 @@ export class SessionService {
 
   private voiceRefresh: ReturnType<typeof setInterval>;
   private deviceRecheck: ReturnType<typeof setInterval>;
+  private joinSweep: ReturnType<typeof setInterval>;
+  /**
+   * The time (`at`) of the last join signed for each device in each room that we own, also after
+   * it has left: the same join is not taken twice. Only those that could still pass for recent are kept.
+   */
+  private joinedAt = new Map<string, number>();
+  /** Devices asked to sign a new join, by room and device: what ends the wait, and when. */
+  private renewing = new Map<string, { timer: ReturnType<typeof setTimeout>; deadline: number }>();
+  private renewTimeoutMs = RENEW_TIMEOUT_MS;
+  private renewRetryMs = RENEW_RETRY_MS;
 
   constructor(private readonly hub: Coordinator) {
     this.voiceRefresh = setInterval(() => this.refreshVoice(), VOICE_REFRESH_MS);
@@ -136,6 +165,11 @@ export class SessionService {
       DEVICE_RECHECK_MS,
     );
     this.deviceRecheck.unref?.();
+    this.joinSweep = setInterval(() => {
+      const oldest = Date.now() - 2 * SESSION_OP_SKEW_MS;
+      for (const [key, at] of this.joinedAt) if (at < oldest) this.joinedAt.delete(key);
+    }, JOIN_SWEEP_MS);
+    this.joinSweep.unref?.();
   }
 
   get selfId() {
@@ -148,6 +182,36 @@ export class SessionService {
 
   ownerOf(sessionId: string): string {
     return rendezvousOwner(sessionId, this.liveServers());
+  }
+
+  // -------------------------------------------------------------------------
+  // What a device signed
+  // -------------------------------------------------------------------------
+
+  /**
+   * Whether `proof` is the device's own signature on this operation, made for `server` (the
+   * one that sent it to us), with the key of its account. A join must also be recent. What
+   * the operation is compared with (the join it belongs to, the count) is up to the owner.
+   */
+  private checkProof(
+    key: string,
+    sessionId: string,
+    peer: string,
+    server: string,
+    op: Exclude<SessionOp, { op: 'leave' }>,
+    proof: SessionOpProof | undefined,
+  ) {
+    if (!proof) throw new RpcFailure('bad_request', UNSIGNED);
+    if (proof.server !== server) throw new RpcFailure('forbidden', 'signed for another server');
+    if (op.op === 'join' && Math.abs(Date.now() - proof.at) > SESSION_OP_SKEW_MS)
+      throw new RpcFailure('forbidden', NOT_RECENT);
+    // What a server may add (a hint) or must set (the kind of device) is not what was signed.
+    const signed: SignedSessionOp =
+      op.op === 'report'
+        ? { op: 'report', epoch: op.epoch, issue: op.issue }
+        : { op: op.op, caps: op.caps };
+    if (!verifySessionOp(key, sessionId, peer, signed, proof))
+      throw new RpcFailure('forbidden', 'the signature on that operation is not valid');
   }
 
   // -------------------------------------------------------------------------
@@ -242,7 +306,8 @@ export class SessionService {
     } catch {
       throw new RpcFailure('unavailable', 'could not look up that device');
     }
-    if (found.device) return { ...caps, platform: found.device.body.platform };
+    if (found.device)
+      return { caps: { ...caps, platform: found.device.body.platform }, device: found.device };
     if (found.removed) {
       void this.leave(peer, sessionId);
       throw new RpcFailure('forbidden', DEVICE_REMOVED);
@@ -344,15 +409,38 @@ export class SessionService {
     return this.local.get(sessionId)?.has(peer) ?? false;
   }
 
-  async join(client: ClientHandle, sessionId: string, caps: HostCaps): Promise<SessionState> {
+  async join(
+    client: ClientHandle,
+    sessionId: string,
+    caps: HostCaps,
+    proof: SessionOpProof | undefined,
+  ): Promise<SessionState> {
     const joinKey = `${sessionId}|${client.peer}`;
+    // The device's own signature, for us, before anything is spent on it.
+    this.checkProof(
+      client.publicKey,
+      sessionId,
+      client.peer,
+      this.selfId,
+      { op: 'join', caps },
+      proof,
+    );
+    // It answered, if it was asked to sign again (the wait starts again if what it sent is not taken).
+    const renewal = this.renewing.get(joinKey);
+    clearTimeout(renewal?.timer);
+    this.renewing.delete(joinKey);
     const wait = this.joining.get(joinKey) ?? { pending: 0, leaves: 0 };
     this.joining.set(joinKey, wait);
     wait.pending += 1;
     const leavesBefore = wait.leaves;
+    let vouched: HostCaps;
+    let device: SignedRecord<'device'>;
     try {
       await this.checkAccess(client.userId, sessionId);
-      caps = await this.vouchOrDrop(client.peer, sessionId, caps, true);
+      ({ caps: vouched, device } = await this.vouchOrDrop(client.peer, sessionId, caps, true));
+    } catch (err) {
+      this.askAgain(renewal, sessionId, client.peer, err);
+      throw err;
     } finally {
       if (--wait.pending === 0 && this.joining.get(joinKey) === wait) this.joining.delete(joinKey);
     }
@@ -367,43 +455,65 @@ export class SessionService {
     let members = this.local.get(sessionId);
     if (!members) this.local.set(sessionId, (members = new Map()));
     const before = members.get(client.peer);
-    members.set(client.peer, caps);
+    members.set(client.peer, vouched);
     this.lastOwner.set(sessionId, this.ownerOf(sessionId));
     const hint = this.lastKnown.get(sessionId);
     try {
-      return (await this.submit(sessionId, client.peer, {
-        op: 'join',
-        caps,
-        ...(hint ? { hint } : {}),
-      })) as SessionState;
+      // What was signed goes on as it was; the owner sets the kind of device from the record itself.
+      return (await this.submit(
+        sessionId,
+        client.peer,
+        { op: 'join', caps, ...(hint ? { hint } : {}) },
+        proof,
+        device,
+      )) as SessionState;
     } catch (err) {
       // Refused: the client is told so, and must not be treated as in the room (or as having
       // said what was refused) meanwhile. Not if another join of it has since taken its place.
       // Not when the owner simply did not answer: it may have applied the join.
       const current = this.local.get(sessionId);
       const silent = err instanceof OwnerSilent;
+      // A device that is out for good is let go; a refusal of the new owner (which may be behind
+      // on the records) is not final for a device that was in the room, while it is asked again.
+      const final = err instanceof RpcFailure && err.message === DEVICE_REMOVED;
       const forbidden = err instanceof RpcFailure && err.code === 'forbidden';
-      if (!silent && current?.get(client.peer) === caps) {
-        if (before && !forbidden) current.set(client.peer, before);
+      const keep = !final && !!renewal && Date.now() < renewal.deadline;
+      if (!silent && current?.get(client.peer) === vouched) {
+        if (before && (!forbidden || keep)) current.set(client.peer, before);
         else void this.leave(client.peer, sessionId);
       }
+      if (!final) this.askAgain(renewal, sessionId, client.peer, err);
       throw err;
     }
   }
 
-  async update(client: ClientHandle, sessionId: string, caps: HostCaps) {
+  async update(
+    client: ClientHandle,
+    sessionId: string,
+    caps: HostCaps,
+    proof: SessionOpProof | undefined,
+  ) {
     const members = this.local.get(sessionId);
     const current = members?.get(client.peer);
     if (!members || !current) throw new RpcFailure('not_found', 'not in session');
+    this.checkProof(
+      client.publicKey,
+      sessionId,
+      client.peer,
+      this.selfId,
+      { op: 'update', caps },
+      proof,
+    );
     // What kind of device it is was settled by the join; a removed device is found by the recheck.
-    caps = { ...caps, platform: current.platform };
-    members.set(client.peer, caps);
-    await this.submit(sessionId, client.peer, { op: 'update', caps });
+    members.set(client.peer, { ...caps, platform: current.platform });
+    await this.submit(sessionId, client.peer, { op: 'update', caps }, proof);
   }
 
   async leave(peer: string, sessionId: string) {
     const joining = this.joining.get(`${sessionId}|${peer}`);
     if (joining) joining.leaves += 1;
+    clearTimeout(this.renewing.get(`${sessionId}|${peer}`)?.timer);
+    this.renewing.delete(`${sessionId}|${peer}`);
     const members = this.local.get(sessionId);
     if (!members?.delete(peer)) return;
     if (members.size === 0) {
@@ -411,13 +521,21 @@ export class SessionService {
       this.lastOwner.delete(sessionId);
       this.lastKnown.delete(sessionId);
     }
+    // Not signed: the server a device joined from says so when it goes (the device cannot, then).
     await this.submit(sessionId, peer, { op: 'leave' }).catch(() => {});
   }
 
-  async report(client: ClientHandle, sessionId: string, epoch: number) {
+  async report(
+    client: ClientHandle,
+    sessionId: string,
+    epoch: number,
+    proof: SessionOpProof | undefined,
+  ) {
     if (!this.inSession(client.peer, sessionId))
       throw new RpcFailure('not_found', 'not in session');
-    await this.submit(sessionId, client.peer, { op: 'report', epoch, issue: 'host_unreachable' });
+    const op = { op: 'report', epoch, issue: 'host_unreachable' } as const;
+    this.checkProof(client.publicKey, sessionId, client.peer, this.selfId, op, proof);
+    await this.submit(sessionId, client.peer, op, proof);
   }
 
   private pendingLeaves = new Map<string, ReturnType<typeof setTimeout>>();
@@ -462,11 +580,33 @@ export class SessionService {
   // Routing to the owner
   // -------------------------------------------------------------------------
 
-  private submit(sessionId: string, peer: string, op: SessionOp): Promise<unknown> {
+  private submit(
+    sessionId: string,
+    peer: string,
+    op: SessionOp,
+    proof?: SessionOpProof,
+    /** The record of the device, for a join (we have already found it). */
+    device?: SignedRecord<'device'>,
+  ): Promise<unknown> {
     const owner = this.ownerOf(sessionId);
     if (owner === this.selfId) {
       try {
-        return Promise.resolve(this.apply(sessionId, peer, this.selfId, op));
+        // As if from another server: what was signed is checked, and the kind of device set, all the same.
+        const frame: FedSessionOp = {
+          t: 'session_op',
+          opId: '',
+          sessionId,
+          peer,
+          op,
+          ...(proof ? { proof } : {}),
+        };
+        const hint = op.op === 'join' ? op.hint : undefined;
+        return Promise.resolve(
+          this.runRemoteOp(this.selfId, frame, {
+            ...(device ? { device } : {}),
+            ...(hint ? { hint } : {}),
+          }),
+        );
       } catch (err) {
         return Promise.reject(err);
       }
@@ -478,7 +618,14 @@ export class SessionService {
         reject(new OwnerSilent());
       }, OP_TIMEOUT_MS);
       this.pendingOps.set(opId, { server: owner, resolve, reject, timer });
-      const sent = this.hub.mesh.sendTo(owner, { t: 'session_op', opId, sessionId, peer, op });
+      const sent = this.hub.mesh.sendTo(owner, {
+        t: 'session_op',
+        opId,
+        sessionId,
+        peer,
+        op,
+        ...(proof ? { proof } : {}),
+      });
       if (!sent) {
         clearTimeout(timer);
         this.pendingOps.delete(opId);
@@ -569,33 +716,64 @@ export class SessionService {
     }
   }
 
-  /** The owner's side of an operation: whoever joins must still be allowed, and so must the host they name. */
-  private async runRemoteOp(
+  /**
+   * The owner's side of an operation (also of our own members', which come the same way): whoever
+   * joins must still be allowed, and so must the host they name; and what the device signed
+   * must be its own, for the server that sent it, and the next in line.
+   */
+  private runRemoteOp(
     fromServer: string,
     frame: FedSessionOp,
     admitted: { device?: SignedRecord<'device'>; hint?: Hint },
-  ): Promise<unknown> {
+  ): unknown {
+    const { sessionId, peer } = frame;
+    const proof = frame.proof as SessionOpProof;
     let op = frame.op;
-    if (op.op === 'update') {
-      // Only what the server a member joined from says about it is believed, and what kind of
-      // device it is stays what the join found.
-      const member = this.owned
-        .get(frame.sessionId)
-        ?.state.members.find((m) => m.peer === frame.peer);
-      if (!member || this.owned.get(frame.sessionId)!.memberServer.get(frame.peer) !== fromServer)
-        return {};
-      op = { ...op, caps: { ...op.caps, platform: member.caps.platform } };
-    }
+    // The server a member joined from says when it has gone, as it must (the device cannot then).
+    if (op.op === 'leave') return this.apply(sessionId, peer, fromServer, op);
     if (op.op === 'join') {
       // `admit` checked that the account may be in the room, and found the record; a join always comes with it.
       if (!admitted.device) throw new RpcFailure('internal', 'join was not admitted');
+      const key = admitted.device.author;
+      this.checkProof(key, sessionId, peer, fromServer, op, frame.proof);
+      const joinKey = `${sessionId}|${peer}`;
+      const last = this.joinedAt.get(joinKey);
+      if (last !== undefined && proof.at <= last) {
+        // The same join said twice, or one overtaken by a later: nothing to do for a member that
+        // is in. One that was taken and is out again is not taken a second time.
+        const s = this.owned.get(sessionId);
+        if (
+          s?.memberServer.get(peer) === fromServer &&
+          s.state.members.some((m) => m.peer === peer)
+        )
+          return s.state;
+        throw new RpcFailure('forbidden', 'that join was already used');
+      }
       op = { ...op, caps: { ...op.caps, platform: admitted.device.body.platform } };
       if (op.hint) {
         const { hint: _named, ...rest } = op;
         op = admitted.hint ? { ...rest, hint: admitted.hint } : rest;
       }
+      const state = this.apply(sessionId, peer, fromServer, op);
+      this.joinedAt.set(joinKey, proof.at);
+      this.owned.get(sessionId)?.signed.set(peer, { key, since: proof.at, n: 0 });
+      return state;
     }
-    return this.apply(frame.sessionId, frame.peer, fromServer, op);
+    // Only what the server a member joined from says about it is believed.
+    const s = this.owned.get(sessionId);
+    const member = s?.state.members.find((m) => m.peer === peer);
+    const signed = s?.signed.get(peer);
+    if (!s || !member || !signed || s.memberServer.get(peer) !== fromServer) return {};
+    this.checkProof(signed.key, sessionId, peer, fromServer, op, frame.proof);
+    // One of an earlier join of the device, or an older update than one taken: of no account now.
+    if (proof.since !== signed.since) return {};
+    if (op.op === 'update') {
+      if (proof.n === undefined || proof.n <= signed.n) return {};
+      signed.n = proof.n;
+      // What kind of device it is stays what the join found.
+      op = { ...op, caps: { ...op.caps, platform: member.caps.platform } };
+    }
+    return this.apply(sessionId, peer, fromServer, op);
   }
 
   /**
@@ -653,6 +831,7 @@ export class SessionService {
             updatedAt: now,
           },
           memberServer: new Map(),
+          signed: new Map(),
           penalties: new Map(),
           reports: new Map(),
           pendingHostUntil: 0,
@@ -726,6 +905,7 @@ export class SessionService {
     const before = s.state.members.length;
     s.state.members = s.state.members.filter((m) => m.peer !== peer);
     s.memberServer.delete(peer);
+    s.signed.delete(peer);
     s.reports.delete(peer);
     if (s.state.members.length === before) return;
     if (s.state.members.length === 0) {
@@ -949,11 +1129,7 @@ export class SessionService {
     this.rebalance();
   }
 
-  private rebalanceTimer: ReturnType<typeof setTimeout> | undefined;
-
   private rebalance() {
-    clearTimeout(this.rebalanceTimer);
-    this.rebalanceTimer = undefined;
     for (const sessionId of [...this.owned.keys()]) {
       if (this.ownerOf(sessionId) !== this.selfId) this.dropOwned(sessionId, false);
     }
@@ -961,32 +1137,62 @@ export class SessionService {
       const owner = this.ownerOf(sessionId);
       if (this.lastOwner.get(sessionId) === owner) continue;
       this.lastOwner.set(sessionId, owner);
-      const hint = this.lastKnown.get(sessionId);
-      for (const [peer, caps] of members) {
-        this.submit(sessionId, peer, { op: 'join', caps, ...(hint ? { hint } : {}) }).catch(
-          (err) => {
-            this.hub.log.warn('re-join after owner change failed', { sessionId, err: String(err) });
-            // Only a device found removed is final: whatever else a new owner says (it may be
-            // behind on the records) is tried again.
-            if (err instanceof RpcFailure && err.message === DEVICE_REMOVED) {
-              if (this.local.get(sessionId)?.get(peer) === caps) void this.leave(peer, sessionId);
-              return;
-            }
-            // Try again shortly, unless the owner changed meanwhile (that re-joins anyway).
-            if (this.lastOwner.get(sessionId) !== owner) return;
-            this.lastOwner.delete(sessionId);
-            this.rebalanceTimer ??= setTimeout(() => this.rebalance(), REJOIN_RETRY_MS);
-            this.rebalanceTimer.unref?.();
-          },
-        );
-      }
+      // The device signed for the server it joined from, and its join is too old to give to
+      // the new one: it is asked to sign a new one, and leaves the room if it does not.
+      for (const peer of [...members.keys()]) this.askToRenew(sessionId, peer);
     }
   }
 
+  private askToRenew(sessionId: string, peer: string, deadline = Date.now() + this.renewTimeoutMs) {
+    const key = `${sessionId}|${peer}`;
+    clearTimeout(this.renewing.get(key)?.timer);
+    const client = this.hub.presence.localOf(peerIds.user(peer)).find((c) => c.peer === peer);
+    if (!client) {
+      this.renewing.delete(key);
+      void this.leave(peer, sessionId);
+      return;
+    }
+    const timer = setTimeout(
+      () => {
+        this.renewing.delete(key);
+        this.hub.log.warn('device did not sign a new join; taking it out', { sessionId, peer });
+        void this.leave(peer, sessionId);
+        client.send('session_closed', { sessionId, reason: 'did not sign a new join' });
+      },
+      Math.max(0, deadline - Date.now()),
+    );
+    timer.unref?.();
+    this.renewing.set(key, { timer, deadline });
+    client.send('session_renew', { sessionId });
+  }
+
+  /**
+   * A new join that was not taken (the new owner may not be reachable yet, or may be behind on
+   * the records) is asked for again soon, until the time given for it has gone.
+   */
+  private askAgain(
+    renewal: { deadline: number } | undefined,
+    sessionId: string,
+    peer: string,
+    err: unknown,
+  ) {
+    if (!renewal || Date.now() >= renewal.deadline) return;
+    if (err instanceof RpcFailure && err.message === DEVICE_REMOVED) return;
+    const key = `${sessionId}|${peer}`;
+    if (this.renewing.has(key)) return;
+    const timer = setTimeout(() => {
+      if (this.renewing.get(key)?.timer === timer)
+        this.askToRenew(sessionId, peer, renewal.deadline);
+    }, this.renewRetryMs);
+    timer.unref?.();
+    this.renewing.set(key, { timer, deadline: renewal.deadline });
+  }
+
   close() {
-    clearTimeout(this.rebalanceTimer);
     clearInterval(this.voiceRefresh);
     clearInterval(this.deviceRecheck);
+    clearInterval(this.joinSweep);
+    for (const r of this.renewing.values()) clearTimeout(r.timer);
     for (const t of this.pendingLeaves.values()) clearTimeout(t);
     for (const t of this.orphanTimers.values()) clearTimeout(t);
     for (const s of this.owned.values()) if (s.timer) clearTimeout(s.timer);

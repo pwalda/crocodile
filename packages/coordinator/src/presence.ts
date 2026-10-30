@@ -23,6 +23,8 @@ export interface ClientHandle {
   readonly deviceId: string;
   /** `<userId>.<deviceId>` */
   readonly peer: string;
+  /** The account's key, as proved at sign-in. */
+  readonly publicKey: string;
   readonly platform: Platform;
   readonly connectedAt: number;
   status: OwnStatus;

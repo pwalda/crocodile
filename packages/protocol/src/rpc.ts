@@ -392,6 +392,11 @@ export interface ServerEvents {
   record: { record: SignedRecord };
   presence: PresenceEntry;
   session: { state: SessionState };
+  /**
+   * The server that keeps the session changed: sign a new join for it (`session.join`). A device
+   * that does not is taken out of the session.
+   */
+  session_renew: { sessionId: string };
   /** The session no longer includes you (kicked, space left, or server moved it). */
   session_closed: { sessionId: string; reason: string };
   /** `from` is a peer id. */
