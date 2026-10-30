@@ -196,8 +196,10 @@ export function shardOfTerm(term: string): string | undefined {
 /** The invite a membership was made with: the code it names, or the ticket it carries. */
 export function inviteCodeOfMember(body: unknown): string | undefined {
   const b = body as { inviteCode?: unknown; ticket?: { invite?: { body?: { code?: unknown } } } };
-  const code = b?.inviteCode ?? b?.ticket?.invite?.body?.code;
-  return typeof code === 'string' && code ? code : undefined;
+  // (Nothing is looked up under a name that is not one: the record has not been checked yet.)
+  for (const code of [b?.inviteCode, b?.ticket?.invite?.body?.code])
+    if (typeof code === 'string' && /^[a-z2-7]{8,32}$/.test(code)) return code;
+  return undefined;
 }
 
 /** Records a record's checks look at, besides the record itself. */

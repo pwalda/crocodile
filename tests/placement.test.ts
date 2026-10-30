@@ -115,5 +115,13 @@ describe('placement', () => {
       recordKey.invite(ticket.tid),
     ]);
     expect(dependenciesOf(withCode, bob.userId)).toEqual([...wanted, recordKey.invite('abcdefgh')]);
+    // Nothing is looked up under what is not the name of an invite.
+    const odd = { ...withTicket, body: { ...withTicket.body, inviteCode: '' } };
+    expect(dependenciesOf(odd, bob.userId)).toEqual([...wanted, recordKey.invite(ticket.tid)]);
+    const long = {
+      ...withTicket,
+      body: { spaceId, userId: bob.userId, inviteCode: 'x'.repeat(500) },
+    };
+    expect(dependenciesOf(long, bob.userId)).toEqual(wanted);
   });
 });

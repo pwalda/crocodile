@@ -787,6 +787,10 @@ describe('open link tickets', () => {
       // (The space we hold may be older than the one that lists them: try again later.)
       retryable: true,
     });
+    // A write straight from its author is not held to be tried again.
+    const written = validateRecord(joinWith(carol, byMallory), ctx([space()]));
+    expect(written).toMatchObject({ ok: false });
+    expect(written).not.toMatchObject({ retryable: true });
   });
 
   it('keeps those an admin let in when the owner removes the admin, if the owner lists them as former', () => {

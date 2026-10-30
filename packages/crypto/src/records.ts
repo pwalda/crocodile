@@ -306,7 +306,8 @@ export function validateRecord(input: unknown, ctx: ValidationContext): Validati
         if (body.inviteCode)
           return reject('a membership uses a ticket or an invite code, not both');
         const problem = ticketProblem(body.spaceId, space.body, body);
-        if (problem) return reject(problem.reason, problem.retryable);
+        // (Not for a write straight from its author: it is told, and can write again.)
+        if (problem) return reject(problem.reason, problem.retryable && !ctx.fresh);
         if (ctx.fresh) {
           const tid = body.ticket.invite.body.code;
           const invite = ctx.get(`invite:${tid}`) as SignedRecord<'invite'> | undefined;
