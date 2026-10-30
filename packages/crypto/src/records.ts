@@ -92,7 +92,8 @@ export function ticketFromSecret(secret: string): Ticket | null {
   const clean = secret.trim().toLowerCase();
   if (!/^[a-z2-7]+$/.test(clean) || clean.length !== TICKET_SECRET_LENGTH) return null;
   const seed = fromB32(clean);
-  if (seed.length !== 32) return null;
+  // (52 characters hold 260 bits: the 4 that are over must be 0, or one secret has many spellings.)
+  if (seed.length !== 32 || toB32(seed) !== clean) return null;
   const tpub = toB64u(ed25519.getPublicKey(seed));
   return { secret: clean, tpub, tid: ticketIdOf(tpub) };
 }
@@ -305,12 +306,16 @@ export function validateRecord(input: unknown, ctx: ValidationContext): Validati
         if (body.inviteCode)
           return reject('a membership uses a ticket or an invite code, not both');
         const problem = ticketProblem(body.spaceId, space.body, body);
-        if (problem) return reject(problem);
+        // (A space record older than the one that lists the maker is no reason to refuse for good.)
+        if (problem) return reject(problem, problem === TICKET_MAKER_UNKNOWN);
         if (ctx.fresh) {
           const tid = body.ticket.invite.body.code;
           const invite = ctx.get(`invite:${tid}`) as SignedRecord<'invite'> | undefined;
           if (!invite) return reject('unknown invite', true);
-          if (invite.body.tpub !== body.ticket.invite.body.tpub)
+          if (
+            invite.body.tpub !== body.ticket.invite.body.tpub ||
+            invite.body.spaceId !== body.spaceId
+          )
             return reject('ticket does not match its invite');
           if (invite.body.revoked) return reject('invite was revoked');
           if (space.body.publicInvite !== tid)
@@ -473,6 +478,9 @@ export function mayInviteByName(space: SpaceBody, userId: string): boolean {
   return canManageSpace(space, userId) || space.invitePolicy === 'members';
 }
 
+/** Said of a ticket whose maker the space we hold does not (yet) know; a newer space record may. */
+export const TICKET_MAKER_UNKNOWN = 'invite was made by someone who could not invite';
+
 /** May have made a ticket that still admits those it let in: the owner, an admin, or a former one. */
 export function mayHaveIssuedTicket(space: SpaceBody, userId: string): boolean {
   return (
@@ -482,8 +490,8 @@ export function mayHaveIssuedTicket(space: SpaceBody, userId: string): boolean {
 
 /**
  * Why a member record's ticket does not admit its user to the space, if it does not. It needs no
- * clock and no other record, so that every server and app reaches the same answer; whether the
- * link is still on is for those who take a join as it is made.
+ * clock and no other record than the space; whether the link is still on is for those who take a
+ * join as it is made.
  */
 export function ticketProblem(
   spaceId: string,
@@ -501,8 +509,7 @@ export function ticketProblem(
   if (invite.body.revoked) return 'invite was revoked';
   if (!verifyPayload(invite.author, SIG_DOMAIN.record, signedPart(invite), invite.sig))
     return 'bad signature on the ticket';
-  if (!mayHaveIssuedTicket(space, userIdFromKey(invite.author)))
-    return 'invite was made by someone who could not invite';
+  if (!mayHaveIssuedTicket(space, userIdFromKey(invite.author))) return TICKET_MAKER_UNKNOWN;
   if (
     !verifyPayload(
       invite.body.tpub,

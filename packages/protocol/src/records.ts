@@ -235,15 +235,20 @@ export const InviteBody = z.object({
 });
 export type InviteBody = z.infer<typeof InviteBody>;
 
-/** The invite record a ticket carries, as signed by its maker. */
-export const TicketInvite = z.object({
+export const SignedRecordEnvelope = z.object({
   v: z.literal(1),
-  kind: z.literal('invite'),
+  kind: z.enum(RECORD_KINDS),
   key: z.string().min(3).max(200),
   author: pubKey,
   version: z.number().int().positive(),
-  body: InviteBody,
+  body: z.unknown(),
   sig: z.string().regex(/^[A-Za-z0-9_-]{86}$/),
+});
+
+/** The invite record a ticket carries, as signed by its maker. */
+export const TicketInvite = SignedRecordEnvelope.extend({
+  kind: z.literal('invite'),
+  body: InviteBody,
 });
 export type TicketInvite = z.infer<typeof TicketInvite>;
 
@@ -293,16 +298,6 @@ export interface SignedRecord<K extends RecordKind = RecordKind> {
   body: RecordBodies[K];
   sig: string;
 }
-
-export const SignedRecordEnvelope = z.object({
-  v: z.literal(1),
-  kind: z.enum(RECORD_KINDS),
-  key: z.string().min(3).max(200),
-  author: pubKey,
-  version: z.number().int().positive(),
-  body: z.unknown(),
-  sig: z.string().regex(/^[A-Za-z0-9_-]{86}$/),
-});
 
 export const recordKey = {
   profile: (userId: string) => `profile:${userId}`,

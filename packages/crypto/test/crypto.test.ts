@@ -711,6 +711,10 @@ describe('open link tickets', () => {
     expect(ticketFromSecret(ticket.secret.toUpperCase())).toEqual(ticket);
     expect(ticket.tid).not.toContain(ticket.secret.slice(0, 8));
     expect(ticketFromSecret(ticket.secret.slice(1))).toBeNull();
+    // One spelling for one secret: the bits of the last character beyond the 256 are 0.
+    const alphabet = 'abcdefghijklmnopqrstuvwxyz234567';
+    const last = alphabet.indexOf(ticket.secret.at(-1)!);
+    expect(ticketFromSecret(ticket.secret.slice(0, -1) + alphabet[last ^ 1])).toBeNull();
     expect(ticketFromSecret('1'.repeat(52))).toBeNull();
     expect(newTicket().secret).not.toBe(ticket.secret);
   });
@@ -780,6 +784,8 @@ describe('open link tickets', () => {
     expect(validateRecord(joinWith(carol, byMallory), ctx([space()], false))).toMatchObject({
       ok: false,
       reason: 'invite was made by someone who could not invite',
+      // (The space we hold may be older than the one that lists them: try again later.)
+      retryable: true,
     });
   });
 
@@ -932,6 +938,15 @@ describe('open link tickets', () => {
       reason: 'you are banned from this space',
     });
     expect(validateRecord(join, ctx([space()]))).toMatchObject({ ok: false, retryable: true });
+    // The invite held for the name is that of this space.
+    const elsewhere = signRecord(alice, 'invite', recordKey.invite(ticket.tid), {
+      ...inv.body,
+      spaceId: spaceIdFor(alice.publicKey, randomId()),
+    });
+    expect(validateRecord(join, ctx([space(), elsewhere]))).toMatchObject({
+      ok: false,
+      reason: 'ticket does not match its invite',
+    });
     // A membership already made is still one when the link is turned off.
     expect(validateRecord(join, ctx([replaced, revoked], false)).ok).toBe(true);
     // Another invite's record does not stand in for the one the member carries.
