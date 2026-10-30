@@ -430,8 +430,9 @@ const MAIL_REQUEST_BYTES = 512 * 1024;
 const FRIEND_NOTE_RETRY_MS = 5000;
 /** And how often while connected, whoever it is owed to. */
 const FRIEND_NOTE_SWEEP_MS = 10 * 60_000;
-/** How long an invitation to a named person can be accepted. */
-const PRIVATE_INVITE_MS = 7 * 24 * 3600_000;
+const DAY_MS = 24 * 3600_000;
+/** How long an invite lasts unless asked otherwise, and an invitation to a named person can be accepted. */
+const INVITE_MS = 7 * DAY_MS;
 /** A member list the server could not check is asked for again this many times, a little later each time. */
 const MEMBER_LIST_RETRIES = 3;
 const MEMBER_LIST_RETRY_MS = 2000;
@@ -2014,9 +2015,10 @@ export class CrocodileClient extends Emitter<ClientEvents> {
       };
     } else {
       // What only the owner decides stays as the owner left it.
-      const { owner, nonce, admins, authority } = r.body;
-      body = { ...body, owner, nonce, admins, authority, deleted: r.body.deleted };
+      const { owner, nonce, admins, authority, invitePolicy } = r.body;
+      body = { ...body, owner, nonce, admins, authority, invitePolicy, deleted: r.body.deleted };
       if (body.deleted === undefined) delete body.deleted;
+      if (body.invitePolicy === undefined) delete body.invitePolicy;
       body.bans = body.bans.filter((u) => u !== owner && !admins.includes(u));
     }
     await this.putRecord(signRecord(this.identity!, 'space', key, body, this.nextVersion(key)));
@@ -2076,7 +2078,7 @@ export class CrocodileClient extends Emitter<ClientEvents> {
    */
   async shareInvite(spaceId: string): Promise<string> {
     const me = this.identity!.publicKey;
-    const minExpiry = Date.now() + 24 * 3600_000;
+    const minExpiry = Date.now() + DAY_MS;
     const reusable = (this.records.list('invite:') as SignedRecord<'invite'>[])
       .filter(
         (r) =>
@@ -2093,7 +2095,7 @@ export class CrocodileClient extends Emitter<ClientEvents> {
   /** Creates an invite code others can use to join, or one only `forUser` can. */
   async createInvite(
     spaceId: string,
-    expiresInMs: number | null = 7 * 24 * 3600_000,
+    expiresInMs: number | null = INVITE_MS,
     forUser?: string,
   ): Promise<string> {
     const code = randomId(5);
@@ -2139,11 +2141,10 @@ export class CrocodileClient extends Emitter<ClientEvents> {
           r.body.for === userId &&
           !r.body.revoked &&
           r.body.expiresAt !== null &&
-          r.body.expiresAt > Date.now() + 24 * 3600_000,
+          r.body.expiresAt > Date.now() + DAY_MS,
       )
       .sort((a, b) => b.version - a.version)[0];
-    const code =
-      waiting?.body.code ?? (await this.createInvite(spaceId, PRIVATE_INVITE_MS, userId));
+    const code = waiting?.body.code ?? (await this.createInvite(spaceId, INVITE_MS, userId));
     try {
       await this.sendMessage(await this.openDm(userId), `croc://join/${code}`);
     } catch (err) {

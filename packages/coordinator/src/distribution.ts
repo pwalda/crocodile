@@ -210,6 +210,9 @@ export class Distribution {
     const need = (k: string) => !inBatch.has(k) && !this.lookup(k);
     const keys = new Set<string>();
     const invites = new Map<string, Set<string>>();
+    // The space a join is checked against, as it is now: what we kept of it may be from before a
+    // ban or a change of who may invite.
+    const spaces = new Set<string>();
     for (const record of records) {
       let authorId: string;
       try {
@@ -221,12 +224,14 @@ export class Distribution {
       // An invite reaches the owners of its space before those of its code.
       const body = record.body as { spaceId?: string; inviteCode?: string };
       if (record.kind === 'member' && body.inviteCode && body.spaceId) {
+        spaces.add(`space:${body.spaceId}`);
         const key = `invite:${body.inviteCode}`;
         if (!need(key)) continue;
         const set = invites.get(body.spaceId) ?? new Set();
         invites.set(body.spaceId, set.add(key));
       }
     }
+    if (spaces.size) await this.get([...spaces]).catch(() => {});
     if (keys.size) await this.get([...keys]).catch(() => {});
     // Invites the code's own owners didn't have: ask the space's.
     await Promise.all(
@@ -240,6 +245,34 @@ export class Distribution {
           .catch(() => {});
       }),
     );
+    // A join with an invitation to a named person is checked against whether its maker is in
+    // the space: that record is on the space's owners, not necessarily on the joiner's.
+    const makers = new Set<string>();
+    for (const record of records) {
+      const body = record.body as { spaceId?: string; inviteCode?: string };
+      if (record.kind !== 'member' || !body.inviteCode || !body.spaceId) continue;
+      const invite = this.lookup(`invite:${body.inviteCode}`) as SignedRecord<'invite'> | undefined;
+      if (invite?.body.for === undefined) continue;
+      try {
+        const key = `member:${body.spaceId}:${userIdFromKey(invite.author)}`;
+        if (need(key)) makers.add(key);
+      } catch {
+        // An unreadable author: the check will say so.
+      }
+    }
+    // A membership is taken on trust only with the invite it was made with, which may itself
+    // need its own maker's: a few rounds, each asking for what the last one found out.
+    let wanted = makers;
+    for (let round = 0; round < 3 && wanted.size; round++) {
+      const got = await this.get([...wanted]).catch(() => [] as SignedRecord[]);
+      const codes = new Set<string>();
+      for (const r of got) {
+        const code = (r.body as { inviteCode?: string }).inviteCode;
+        if (r.kind === 'member' && code && need(`invite:${code}`)) codes.add(`invite:${code}`);
+      }
+      if (codes.size) await this.get([...codes]).catch(() => {});
+      wanted = new Set([...wanted].filter(need));
+    }
   }
 
   // -------------------------------------------------------------------------

@@ -13,6 +13,7 @@ import {
   linkCommitment,
   linkNonce,
   randomDeviceId,
+  randomId,
   sealAnonymous,
   sealToDevice,
   signMailProof,
@@ -166,6 +167,74 @@ describe('sharded records', () => {
     expect((await readers[4]!.conn.request('records.list', { prefix })).records).toEqual([]);
     const mine = await readers[3]!.conn.request('spaces.mine', {});
     expect(mine.spaces.map((s) => s.key)).toEqual([space.key]);
+  });
+
+  it('lets a person join with an invitation a member made, whichever servers hold what', async () => {
+    const servers = await network(6);
+    const alice = await user(servers[0]!, 'alice');
+    const bob = await user(servers[1]!, 'bob');
+    const { spaceId, code } = await createSpace(alice, 'Swamp');
+    await joinSpace(bob, spaceId, code);
+    const spaceKey = recordKey.space(spaceId);
+    const space = (await alice.conn.request('records.get', { keys: [spaceKey] }))
+      .records[0] as SignedRecord<'space'>;
+    await put(
+      alice,
+      signRecord(
+        alice.identity,
+        'space',
+        spaceKey,
+        { ...space.body, invitePolicy: 'members' },
+        space.version + 1,
+      ),
+    );
+    await waitFor(
+      () =>
+        servers
+          .filter((c) => owners(servers, space).includes(c.info.id))
+          .every(
+            (c) => (c.store.get(spaceKey) as SignedRecord<'space'>).body.invitePolicy === 'members',
+          ),
+      8000,
+      'the space owners have the new setting',
+    );
+    // The people invited are spread over the servers, so for some the owners of their records are
+    // not the owners of the space, and have not got the member who invited them.
+    for (let i = 0; i < 8; i++) {
+      const guest = await user(servers[i % servers.length]!);
+      const k = randomId(6);
+      const invite = signRecord(bob.identity, 'invite', recordKey.invite(k), {
+        spaceId,
+        code: k,
+        expiresAt: Date.now() + 3600_000,
+        for: guest.identity.userId,
+      });
+      // Bob's membership reaches the owners of the space a moment after he joins.
+      let taken = false;
+      for (const start = Date.now(); !taken && Date.now() - start < 8000;) {
+        taken = (await bob.conn.request('records.put', { record: invite })).accepted;
+        if (!taken) await new Promise((done) => setTimeout(done, 100));
+      }
+      expect(taken).toBe(true);
+      // The invitation reaches the owners of its code a moment after those of its space.
+      // The invitation reaches the owners of its code a moment after those of its space, so a
+      // join that cannot find it yet is tried again; any other refusal is the answer.
+      const join = signRecord(
+        guest.identity,
+        'member',
+        recordKey.member(spaceId, guest.identity.userId),
+        { spaceId, userId: guest.identity.userId, inviteCode: k },
+      );
+      let res = await guest.conn.request('records.put', { record: join });
+      for (
+        const start = Date.now();
+        !res.accepted && /unknown invite/.test(res.reason ?? '') && Date.now() - start < 8000;
+      ) {
+        await new Promise((done) => setTimeout(done, 100));
+        res = await guest.conn.request('records.put', { record: join });
+      }
+      expectAccepted(res);
+    }
   });
 
   it('keeps the overlay sparse, and still reaches every server', async () => {

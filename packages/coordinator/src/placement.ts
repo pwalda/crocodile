@@ -196,8 +196,12 @@ export function shardOfTerm(term: string): string | undefined {
 /** Records a record's checks look at, besides the record itself. */
 export function dependenciesOf(record: SignedRecord, authorId: string): string[] {
   const deps = record.kind === 'note' ? [] : [`profile:${authorId}`];
-  const body = record.body as { spaceId?: string; inviteCode?: string };
-  if (record.kind === 'invite') deps.push(`space:${body.spaceId}`);
+  const body = record.body as { spaceId?: string; inviteCode?: string; for?: string };
+  if (record.kind === 'invite') {
+    deps.push(`space:${body.spaceId}`);
+    // Where members may invite, a named invitation is checked against its maker's membership.
+    if (body.for !== undefined) deps.push(`member:${body.spaceId}:${authorId}`);
+  }
   if (record.kind === 'member') {
     deps.push(`space:${body.spaceId}`);
     if (body.inviteCode) deps.push(`invite:${body.inviteCode}`);

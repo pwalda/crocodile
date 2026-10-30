@@ -252,6 +252,31 @@ describe('records', () => {
       now - 2000,
     );
 
+    it('leaves who may invite to the owner', () => {
+      const byAdmin = signRecord(
+        bob,
+        'space',
+        key,
+        { ...withBob.body, invitePolicy: 'members' },
+        now - 1000,
+      );
+      expect(validateRecord(byAdmin, ctx([withBob]))).toMatchObject({
+        ok: false,
+        reason: 'only the owner chooses who may invite',
+      });
+      // A change of name leaves it as it was, set or not.
+      const renamed = signRecord(bob, 'space', key, { ...withBob.body, name: 'Pond' }, now - 1000);
+      expect(validateRecord(renamed, ctx([withBob])).ok).toBe(true);
+      const byOwner = signRecord(
+        alice,
+        'space',
+        key,
+        { ...withBob.body, invitePolicy: 'members' },
+        now - 1000,
+      );
+      expect(validateRecord(byOwner, ctx([withBob])).ok).toBe(true);
+    });
+
     it("lets an admin change the space, checked on its own, without the owner's record", () => {
       const renamed = signRecord(bob, 'space', key, { ...withBob.body, name: 'Pond' }, now - 1000);
       expect(validateRecord(renamed, ctx([withBob])).ok).toBe(true);
@@ -315,7 +340,7 @@ describe('records', () => {
         return signRecord(who, 'invite', recordKey.invite(code), {
           spaceId,
           code,
-          expiresAt: null,
+          expiresAt: Date.now() + 7 * 24 * 3600_000,
           for: to,
           ...extra,
         });
@@ -351,6 +376,35 @@ describe('records', () => {
           ok: false,
           reason: 'invite is for somebody else',
         });
+      });
+
+      it('lapse, within 30 days, and need not outlive a change of policy', () => {
+        expect(
+          validateRecord(privateInvite(alice, dave.userId, { expiresAt: null }), ctx([admins])),
+        ).toMatchObject({ ok: false, reason: expect.stringMatching(/needs an end/) });
+        const far = Date.now() + 31 * 24 * 3600_000;
+        expect(
+          validateRecord(privateInvite(alice, dave.userId, { expiresAt: far }), ctx([admins])),
+        ).toMatchObject({ ok: false, reason: expect.stringMatching(/within 30 days/) });
+        // The maker takes one back even after the space stops letting members invite.
+        const byBob = privateInvite(bob, dave.userId);
+        const withdraw = signRecord(
+          bob,
+          'invite',
+          byBob.key,
+          { ...byBob.body, revoked: true },
+          byBob.version + 1,
+        );
+        expect(validateRecord(withdraw, fresh([admins, bobIsIn, byBob])).ok).toBe(true);
+        // But not somebody else's, and not to change it.
+        const other = signRecord(
+          carol,
+          'invite',
+          byBob.key,
+          { ...byBob.body, revoked: true },
+          byBob.version + 1,
+        );
+        expect(validateRecord(other, fresh([admins, bobIsIn, byBob]))).toMatchObject({ ok: false });
       });
 
       it('names somebody else, and a person never changes', () => {

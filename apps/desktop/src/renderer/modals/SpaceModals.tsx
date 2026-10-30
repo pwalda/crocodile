@@ -362,20 +362,22 @@ export function SpaceSettingsModal({ spaceId }: { spaceId: string }) {
           <Input value={name} maxLength={64} onChange={(e) => setName(e.target.value)} />
         </div>
       </div>
-      <div className="mt-6 flex items-center gap-3">
-        <div className="flex-1">
-          <Label>Members can invite people</Label>
-          <p className="text-xs text-muted">
-            Otherwise only the owner and admins can invite someone by name. The invite link for
-            everyone always stays with them.
-          </p>
+      {isOwner && (
+        <div className="mt-6 flex items-center gap-3">
+          <div className="flex-1">
+            <Label>Members can invite people</Label>
+            <p className="text-xs text-muted">
+              Otherwise only the owner and admins can invite someone by name. The invite link for
+              everyone always stays with them.
+            </p>
+          </div>
+          <Toggle
+            checked={membersInvite}
+            label="Members can invite people"
+            onChange={setMembersInvite}
+          />
         </div>
-        <Toggle
-          checked={membersInvite}
-          label="Members can invite people"
-          onChange={setMembersInvite}
-        />
-      </div>
+      )}
       <div className="mt-6">
         <Label>Channels</Label>
         {space.channels.map((c) => (

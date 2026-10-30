@@ -1368,7 +1368,7 @@ describe('record quotas', () => {
       return signRecord(who.identity, 'invite', recordKey.invite(k), {
         spaceId,
         code: k,
-        expiresAt: null,
+        expiresAt: Date.now() + 3600_000,
         for: to.identity.userId,
       });
     };
@@ -1513,7 +1513,7 @@ describe('record quotas', () => {
       return signRecord(who.identity, 'invite', recordKey.invite(k), {
         spaceId,
         code: k,
-        expiresAt: null,
+        expiresAt: Date.now() + 3600_000,
         revoked: true,
         for: createIdentity().userId,
       });
@@ -1524,6 +1524,42 @@ describe('record quotas', () => {
     // The owner is not held to it.
     expectAccepted(await put(alice, named(alice)));
     expectAccepted(await put(alice, named(alice)));
+    expectAccepted(await put(alice, named(alice)));
+  });
+
+  it("keeps a member's waiting invitations to a share of the space's", async () => {
+    const c = await server({ quotas: { privateInvitesPerMember: 2 } });
+    const alice = await user(c);
+    const bob = await user(c);
+    const { spaceId, code } = await createSpace(alice);
+    await joinSpace(bob, spaceId, code);
+    const space = (await alice.conn.request('records.get', { keys: [recordKey.space(spaceId)] }))
+      .records[0] as SignedRecord<'space'>;
+    expectAccepted(
+      await put(
+        alice,
+        signRecord(
+          alice.identity,
+          'space',
+          space.key,
+          { ...space.body, invitePolicy: 'members' },
+          space.version + 1,
+        ),
+      ),
+    );
+    const named = (who: TestUser) => {
+      const k = randomId(6);
+      return signRecord(who.identity, 'invite', recordKey.invite(k), {
+        spaceId,
+        code: k,
+        expiresAt: Date.now() + 3600_000,
+        for: createIdentity().userId,
+      });
+    };
+    expectAccepted(await put(bob, named(bob)));
+    expectAccepted(await put(bob, named(bob)));
+    expect((await put(bob, named(bob))).reason).toMatch(/at most 2 invitations waiting per member/);
+    // The owner still has the room.
     expectAccepted(await put(alice, named(alice)));
   });
 

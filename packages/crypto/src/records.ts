@@ -154,6 +154,12 @@ export function validateRecord(input: unknown, ctx: ValidationContext): Validati
         return reject('only the owner or an admin may change a space');
       if (body.deleted || (existing?.body as SpaceBody | undefined)?.deleted)
         return reject('only the owner may delete a space');
+      // Whether members may invite is the owner's to decide, as who the admins are.
+      if (
+        existing &&
+        ((existing.body as SpaceBody).invitePolicy ?? 'admins') !== (body.invitePolicy ?? 'admins')
+      )
+        return reject('only the owner chooses who may invite');
       if (body.bans.some((u) => u === body.owner || body.admins.includes(u)))
         return reject('admins cannot ban the owner or other admins');
       return { ok: true, authorId };
@@ -168,20 +174,32 @@ export function validateRecord(input: unknown, ctx: ValidationContext): Validati
       if (body.for !== undefined) {
         if (!USER_ID.test(body.for)) return reject('bad invite recipient');
         if (body.for === authorId) return reject('an invite is for somebody else');
+        // It lapses: a named invitation does not wait for ever.
+        if (body.expiresAt === null || body.expiresAt > ctx.now + PRIVATE_INVITE_MAX_MS)
+          return reject('an invitation to a person needs an end, within 30 days');
       }
       // The owner and current admins make and revoke invites. (A removed
       // admin's invites stop working anyway; see 'member' below.)
       if (!canManageSpace(space.body, authorId)) {
-        // A named person may also be invited by a member, where the space allows it. Whether the
-        // author is one can be told only by those who hold the space's member list; the others
-        // take the word of the server that took the invite, as for an invite's expiry.
-        if (body.for === undefined || space.body.invitePolicy !== 'members')
-          return reject('only the space owner or an admin may create invites');
-        if (ctx.fresh && !isSpaceMember(ctx, body.spaceId, authorId))
-          return reject('only a member of the space may invite');
-        // An invite is changed by its maker or by the owner and admins.
-        if (existing && existing.author !== record.author)
-          return reject('only its maker, the owner or an admin may change an invite');
+        // Its maker may always withdraw an invitation, whatever the space allows now.
+        const withdrawing =
+          !!existing &&
+          existing.author === record.author &&
+          body.revoked === true &&
+          body.for !== undefined &&
+          before?.for === body.for;
+        if (!withdrawing) {
+          // A named person may also be invited by a member, where the space allows it. Whether the
+          // author is one can be told only by those who hold the space's member list; the others
+          // take the word of the server that took the invite, as for an invite's expiry.
+          if (body.for === undefined || space.body.invitePolicy !== 'members')
+            return reject('only the space owner or an admin may create invites');
+          if (ctx.fresh && !isSpaceMember(ctx, body.spaceId, authorId))
+            return reject('only a member of the space may invite');
+          // An invite is changed by its maker or by the owner and admins.
+          if (existing && existing.author !== record.author)
+            return reject('only its maker, the owner or an admin may change an invite');
+        }
       }
       // Who an invite is for does not change: a new invite is a new code.
       if (before && before.for !== body.for) return reject('an invite cannot change who it is for');
@@ -253,6 +271,9 @@ export function validateRecord(input: unknown, ctx: ValidationContext): Validati
 }
 
 const USER_ID = /^[a-z2-7]{26}$/;
+
+/** The furthest ahead an invitation to a named person may end. */
+const PRIVATE_INVITE_MAX_MS = 30 * 24 * 3600_000;
 
 /** May change the space: its owner, or one of its admins. */
 export function canManageSpace(space: SpaceBody, userId: string): boolean {

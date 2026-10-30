@@ -111,15 +111,18 @@ themselves, and the one that stores an invite can read it.
 **Invitations to one person.** An invite may name a user (`for`); only that
 user can join with it, whoever holds the code, so reading it from a member
 record gives nobody else a way in. A person is sent one as a message, which
-reaches a stranger as a request they can ignore, and it lapses after a week
-by default. The space record's `invitePolicy` says who may send these: the
-owner and admins (the default), or members too; the invite link for anyone
-stays with the owner and admins either way. A member's invitation stops
-working when they leave or the space stops allowing it. Only the servers that
+reaches a stranger as a request they can ignore, and it lapses (a week by
+default, 30 days at most). The space record's `invitePolicy`, which only the
+owner sets, says who may send these: the owner and admins (the default), or
+members too; the invite link for anyone stays with the owner and admins
+either way. A member's invitation stops working when they leave or the space
+stops allowing it (it works again if the owner allows it again before it
+lapses); its maker can always withdraw it. Only the servers that
 take an invite check that its maker is a member (a client cannot read the
 member list before it has joined), as they do for its expiry. A space holds
-at most 100 invitations still waiting, and the server that stores an
-invitation can see whom it names.
+at most 100 invitations still waiting (10 from any one member, who may make
+50 invite records in all), and the server that stores an invitation can see
+whom it names.
 
 **Friends without telling the servers.** A friendship exists when both people
 list each other; listing someone who doesn't list you back is a request. No
