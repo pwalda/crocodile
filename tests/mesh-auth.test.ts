@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { randomBytes } from 'node:crypto';
 import {
   createChannelKeys,
@@ -17,7 +17,14 @@ import {
   type FedPresence,
 } from '@crocodile/protocol';
 import { Coordinator, rendezvousOwner } from '@crocodile/coordinator';
-import { caps, connectUser, meshLinkTo, startCoordinator, waitFor } from './helpers';
+import {
+  caps,
+  connectUser,
+  meshLinkTo,
+  registerDevice,
+  startCoordinator,
+  waitFor,
+} from './helpers';
 
 const cleanup: (() => Promise<void> | void)[] = [];
 afterEach(async () => {
@@ -464,6 +471,38 @@ describe('events and session operations from other servers', () => {
       await settled(net);
       expect(state().host).not.toBe(ghost);
       expect(state().epoch).toBeLessThan(5);
+    });
+
+    it('looks into an update only if it comes from the server the member joined from', async () => {
+      const net = await conversation();
+      await joined(net);
+      const find = vi.spyOn(
+        net.victim.sessions as unknown as { findDevice(): unknown },
+        'findDevice',
+      );
+      // The rogue server updates a device of Bob's, and one that does not exist.
+      op(net, net.bob.conn.peer, { op: 'update', caps: caps({ nat: 'open' }) });
+      op(net, peerIds.make(net.alice.identity.userId, 'abcdefgh'), {
+        op: 'update',
+        caps: caps({ nat: 'open' }),
+      });
+      await settled(net);
+      expect(find).not.toHaveBeenCalled();
+      find.mockRestore();
+    });
+
+    it('takes out of a room a device on another server that has been removed', async () => {
+      const net = await conversation();
+      const state = await joined(net);
+      expect(state().members).toHaveLength(2);
+      await registerDevice(net.bob, 'bot', true, Date.now() + 1000);
+      // The record has to reach the owner's server first.
+      const until = Date.now() + 5000;
+      while (state().members.length > 1 && Date.now() < until) {
+        await net.victim.sessions.recheckDevices();
+        await new Promise((r) => setTimeout(r, 50));
+      }
+      expect(state().members[0]!.peer).toBe(net.alice.conn.peer);
     });
 
     it('does not take a host from a member who was never there', async () => {

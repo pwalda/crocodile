@@ -896,6 +896,12 @@ describe('sessions and host election', () => {
       expect(members()).toContain(bob.conn.peer);
       // Its own server forgets it too, so it can no longer signal the room or ask for a relay.
       expect(c.sessions.inSession(second.conn.peer, sessionId)).toBe(false);
+      // And it is told, rather than left to find out from failing requests.
+      await waitFor(
+        () => second.events.find((e) => e.ev === 'session_closed'),
+        3000,
+        'to be told it was removed',
+      );
       await expect(
         second.conn.request('session.join', { sessionId, caps: caps() }),
       ).rejects.toThrow(/device/);
@@ -931,6 +937,15 @@ describe('sessions and host election', () => {
       ).rejects.toThrow();
       apply.mockRestore();
       expect(c.sessions.inSession(alice.conn.peer, sessionId)).toBe(false);
+    });
+
+    it('does not start a second look-up while one is running', async () => {
+      const { c, alice, sessionId } = await setup();
+      await alice.conn.request('session.join', { sessionId, caps: caps() });
+      const get = vi.spyOn(c.dist, 'get');
+      await Promise.all([c.sessions.recheckDevices(), c.sessions.recheckDevices()]);
+      expect(get).toHaveBeenCalledTimes(1);
+      get.mockRestore();
     });
 
     it('takes a revoked host out and elects another', async () => {
