@@ -20,7 +20,6 @@ import {
   linkNonce,
   sealLink,
   sign,
-  newTicket,
   signRecord,
   ticketFromSecret,
 } from '@crocodile/crypto';
@@ -1853,14 +1852,8 @@ describe('leaving', () => {
       const kept = async () =>
         Object.keys((await kv.get<Record<string, string>>('invite-tickets')) ?? {});
       expect(await kept()).toEqual([ticketFromSecret(first)!.tid]);
-      // The app is closed and opened again: the link can still be shown. (A secret left by a
-      // link that was never made is not kept.)
+      // The app is closed and opened again: the link can still be shown.
       await alice.shutdown();
-      const stray = newTicket();
-      await kv.set('invite-tickets', {
-        ...(await kv.get<Record<string, string>>('invite-tickets')),
-        [stray.tid]: stray.secret,
-      });
       const again = new CrocodileClient(
         { ...alice.platform, kv },
         {
@@ -1873,8 +1866,6 @@ describe('leaving', () => {
       await again.init();
       await waitFor(() => again.state.spaces[spaceId], 8000, 'the space is back');
       expect(await again.shareInvite(spaceId)).toBe(first);
-      await new Promise((r) => setTimeout(r, 300));
-      expect(await kept()).toEqual([ticketFromSecret(first)!.tid]);
       // A new link ends that one, and its secret is of no use any more.
       const second = await again.createInvite(spaceId);
       await again.createInvite(spaceId);
@@ -1966,6 +1957,17 @@ describe('leaving', () => {
       ).keepTicket({ tid: 'abcdefgh', secret: 'secret' });
       await new Promise((r) => setTimeout(r, 400));
       expect(await kv.get('invite-tickets')).toBeUndefined();
+    });
+
+    it('asks for the record of a link it made when it does not hold it, and shows the link once it does', async () => {
+      const { alice, spaceId } = await trio();
+      const link = await alice.shareInvite(spaceId);
+      const tid = ticketFromSecret(link)!.tid;
+      // (This device's copy of the records is behind.)
+      (alice.records as unknown as { map: Map<string, unknown> }).map.delete(`invite:${tid}`);
+      expect(alice.openLinkOf(spaceId).state).toBe('elsewhere');
+      await waitFor(() => alice.openLinkOf(spaceId).state === 'good', 5000, 'the record to come');
+      expect(await alice.shareInvite(spaceId)).toBe(link);
     });
 
     it('cannot show a link made on another device, and replaces it with a new one', async () => {

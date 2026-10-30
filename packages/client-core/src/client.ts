@@ -618,8 +618,8 @@ export class CrocodileClient extends Emitter<ClientEvents> {
     await this.files?.load();
     this.store.set({ settings, dms, dmRequests, deviceId: this.deviceId });
     await this.records.load();
-    // (The secrets of links that ran out while the app was closed, or were never made.)
-    if (this.dropEndedTickets(undefined, true)) void this.saveTickets();
+    // (The secrets of links that ran out while the app was closed.)
+    if (this.dropEndedTickets()) void this.saveTickets();
     const seed = await this.platform.kv.get<string>('identity-seed');
     if (!seed) {
       this.store.set({ phase: 'onboarding' });
@@ -2170,8 +2170,11 @@ export class CrocodileClient extends Emitter<ClientEvents> {
           r.body.tpub === undefined &&
           namedBy(spaceId, r.body.code, false) === named,
       );
-    if (!invite || invite.body.spaceId !== spaceId || invite.body.for !== undefined)
+    if (!invite || invite.body.spaceId !== spaceId || invite.body.for !== undefined) {
+      // A link we made whose record we do not hold yet (it is not on this device's copy): ask for it.
+      if (!invite && this.tickets.has(named)) this.fetchWanted([recordKey.invite(named)]);
       return { state: 'elsewhere' };
+    }
     // (One that never ends is not a link any more: servers turn joins with it away.)
     const good =
       !invite.body.revoked &&
@@ -2221,20 +2224,11 @@ export class CrocodileClient extends Emitter<ClientEvents> {
   }
 
   /** Those of links that have ended are no use. (An invite we hold no record of is kept.) */
-  private dropEndedTickets(except?: string, unmade = false) {
+  private dropEndedTickets(except?: string) {
     const before = this.tickets.size;
-    // `unmade`: those for no invite we hold, that no space names, are of a link never made.
-    const named = new Set(
-      (this.records.list('space:') as SignedRecord<'space'>[]).map((r) => r.body.publicInvite),
-    );
     for (const tid of [...this.tickets.keys()]) {
       const r = this.records.get(recordKey.invite(tid)) as SignedRecord<'invite'> | undefined;
-      if (tid === except) continue;
-      if (
-        r
-          ? r.body.revoked || (r.body.expiresAt ?? Infinity) < Date.now()
-          : unmade && !named.has(tid)
-      )
+      if (tid !== except && r && (r.body.revoked || (r.body.expiresAt ?? Infinity) < Date.now()))
         this.tickets.delete(tid);
     }
     return this.tickets.size !== before;
@@ -2296,7 +2290,7 @@ export class CrocodileClient extends Emitter<ClientEvents> {
   // Changes of the open link go one after the other, each seeing what the last made.
   private linkWork: Promise<unknown> = Promise.resolve();
   private oneLinkChangeAtATime<T>(work: () => Promise<T>): Promise<T> {
-    const run = this.linkWork.then(work, work);
+    const run = this.linkWork.then(work);
     this.linkWork = run.catch(() => {});
     return run;
   }
