@@ -216,7 +216,6 @@ describe('sharded records', () => {
         if (!taken) await new Promise((done) => setTimeout(done, 100));
       }
       expect(taken).toBe(true);
-      // The invitation reaches the owners of its code a moment after those of its space.
       // The invitation reaches the owners of its code a moment after those of its space, so a
       // join that cannot find it yet is tried again; any other refusal is the answer.
       const join = signRecord(

@@ -132,26 +132,35 @@ export class RecordService {
           if (this.store.countByTerm(`invite-space:${spaceId}`) >= q.invitesPerSpace)
             return `at most ${q.invitesPerSpace} invites per space`;
         }
+        // An invitation that was withdrawn or lapsed and is revived waits again.
+        const wasWaiting = known !== undefined && this.outstanding(known.body);
+        const waits = this.outstanding(body) && !wasWaiting;
         // A member invites by name, where the space allows it, and may not use up the space's room.
         const space = this.lookup(recordKey.space(spaceId)) as SignedRecord<'space'> | undefined;
         const member =
           !!space && !canManageSpace(space.body, userIdFromKey(record.author))
             ? record.author
             : null;
-        if (!known && member) {
-          const made = this.store
-            .findByTerm(`invite-space:${spaceId}`, q.invitesPerSpace)
-            .filter((r) => r.author === member).length;
-          if (made >= q.invitesPerMember) return `at most ${q.invitesPerMember} invites per member`;
+        if (!waits && !(member && !known)) return undefined;
+        // One pass over the space's invites for all that is counted.
+        const now = Date.now();
+        let made = 0;
+        let waiting = 0;
+        let waitingOfMember = 0;
+        for (const r of this.store.findByTerm(`invite-space:${spaceId}`, q.invitesPerSpace)) {
+          if (r.key === record.key) continue;
+          if (r.author === member) made++;
+          if (!this.waitingFor(r, now)) continue;
+          waiting++;
+          if (r.author === member) waitingOfMember++;
         }
-        // An invitation that was withdrawn or lapsed and is revived waits again.
-        const wasWaiting = known !== undefined && this.outstanding(known.body);
-        if (!this.outstanding(body) || wasWaiting) return undefined;
-        if (this.outstandingInvites(spaceId, record.key) >= q.privateInvitesPerSpace)
+        if (member && !known && made >= q.invitesPerMember)
+          return `at most ${q.invitesPerMember} invites per member`;
+        if (!waits) return undefined;
+        if (waiting >= q.privateInvitesPerSpace)
           return `at most ${q.privateInvitesPerSpace} invitations waiting per space`;
         // A member's share of that: the room is not theirs to use up.
-        return member &&
-          this.outstandingInvites(spaceId, record.key, member) >= q.privateInvitesPerMember
+        return member && waitingOfMember >= q.privateInvitesPerMember
           ? `at most ${q.privateInvitesPerMember} invitations waiting per member`
           : undefined;
       }
@@ -180,20 +189,14 @@ export class RecordService {
     );
   }
 
-  /** How many invitations to named people wait in a space, not counting the one under `except`. */
-  private outstandingInvites(spaceId: string, except: string, author?: string) {
-    const now = Date.now();
-    let n = 0;
-    for (const r of this.store.findByTerm(`invite-space:${spaceId}`, this.quotas.invitesPerSpace)) {
-      const body = r.body as RecordBodies['invite'];
-      if (r.key === except || !this.outstanding(body, now)) continue;
-      if (author !== undefined && r.author !== author) continue;
-      // One who has joined no longer waits.
-      const joined = this.store.get(recordKey.member(spaceId, body.for!)) as
-        SignedRecord<'member'> | undefined;
-      if (!joined || joined.body.left) n++;
-    }
-    return n;
+  /** Whether an invite record is an invitation to a named person still waiting to be taken up. */
+  private waitingFor(r: SignedRecord, now: number) {
+    const body = r.body as RecordBodies['invite'];
+    if (!this.outstanding(body, now)) return false;
+    // One who has joined no longer waits.
+    const joined = this.store.get(recordKey.member(body.spaceId, body.for!)) as
+      SignedRecord<'member'> | undefined;
+    return !joined || joined.body.left === true;
   }
 
   onAccepted(fn: RecordListener) {

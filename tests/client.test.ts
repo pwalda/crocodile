@@ -1747,8 +1747,11 @@ describe('leaving', () => {
         'bob in',
       );
       await expect(alice.inviteToSpace(spaceId, bob.userId)).rejects.toThrow(/already/);
+      expect(alice.spacesToInviteTo(bob.userId)).toEqual([]);
+      expect(alice.spacesToInviteTo(carol.userId).map((s) => s.id)).toEqual([spaceId]);
       await alice.banMember(spaceId, carol.userId);
       await expect(alice.inviteToSpace(spaceId, carol.userId)).rejects.toThrow(/can't be invited/);
+      expect(alice.spacesToInviteTo(carol.userId)).toEqual([]);
       await alice.updateSpace(spaceId, (b) => ({ ...b, bans: [] }));
       // Asked twice, the same invitation is sent again.
       await alice.openChannel(await alice.openDm(carol.userId));

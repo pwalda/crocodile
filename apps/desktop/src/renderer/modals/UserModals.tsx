@@ -14,10 +14,8 @@ export function ProfileModal({ userId }: { userId: string }) {
   const isMe = me?.userId === userId;
   const isFriend = friends.friends.includes(userId);
   const pending = friends.outgoing.includes(userId);
-  const spaces = useCroc((s) => s.spaces);
-  const canInvite = Object.values(spaces).some(
-    (s) => client.canInviteTo(s.id) && !s.members.includes(userId) && !s.bans.includes(userId),
-  );
+  useCroc((s) => s.spaces);
+  const canInvite = !isMe && client.spacesToInviteTo(userId).length > 0;
   return (
     <div
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/55 backdrop-blur-sm"

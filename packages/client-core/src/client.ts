@@ -29,6 +29,7 @@ import {
   signSpaceAuthority,
   spaceAuthorityValid,
   mayInviteByName,
+  signedInvitePolicy,
   spaceIdFor,
   userTag,
   verifyChatMessage,
@@ -1998,10 +1999,9 @@ export class CrocodileClient extends Emitter<ClientEvents> {
     let body = mutate(structuredClone(r.body));
     if (r.body.owner === me) {
       const admins = [...new Set(body.admins)].filter((u) => u !== me);
-      const policy = body.invitePolicy === 'members' ? 'members' : undefined;
       const unchanged =
         !!r.body.authority &&
-        (r.body.invitePolicy === 'members' ? 'members' : undefined) === policy &&
+        signedInvitePolicy(r.body.invitePolicy) === signedInvitePolicy(body.invitePolicy) &&
         admins.length === r.body.admins.length &&
         admins.every((u, i) => u === r.body.admins[i]);
       body = {
@@ -2112,6 +2112,14 @@ export class CrocodileClient extends Emitter<ClientEvents> {
       }),
     );
     return code;
+  }
+
+  /** The spaces we could invite this person to by name: ours to invite to, and they are neither in nor banned. */
+  spacesToInviteTo(userId: string): SpaceView[] {
+    if (userId === this.userId) return [];
+    return Object.values(this.state.spaces).filter(
+      (s) => this.canInviteTo(s.id) && !s.members.includes(userId) && !s.bans.includes(userId),
+    );
   }
 
   /** Whether we may invite a named person to a space: its owner and admins, and members where it allows. */

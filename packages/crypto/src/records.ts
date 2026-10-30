@@ -282,7 +282,13 @@ function authorityPayload(
 ) {
   // Members being let invite is the owner's to say, so it is in what the owner signs. (The
   // default is left out, which keeps what was signed before the setting existed valid.)
-  return { spaceId, admins, at, ...(invitePolicy === 'members' ? { invitePolicy } : {}) };
+  const policy = signedInvitePolicy(invitePolicy);
+  return { spaceId, admins, at, ...(policy ? { invitePolicy: policy } : {}) };
+}
+
+/** The part of a space's invite policy the owner signs: only the one that is not the default. */
+export function signedInvitePolicy(policy: SpaceBody['invitePolicy']): 'members' | undefined {
+  return policy === 'members' ? 'members' : undefined;
 }
 
 /** The owner's signature on a space's admin list, for its `authority`. */

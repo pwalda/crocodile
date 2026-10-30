@@ -184,13 +184,11 @@ export function InviteModal({ spaceId }: { spaceId: string }) {
 
 /** Pick a space to invite one person to: an invitation only they can use, sent as a message. */
 export function InvitePersonModal({ userId }: { userId: string }) {
-  const spaces = useCroc((s) => s.spaces);
+  useCroc((s) => s.spaces);
   const profile = useCroc((s) => s.profiles[userId]);
   const [busy, setBusy] = useState<string | null>(null);
   const client = getClient();
-  const choices = Object.values(spaces).filter(
-    (s) => client.canInviteTo(s.id) && !s.members.includes(userId) && !s.bans.includes(userId),
-  );
+  const choices = client.spacesToInviteTo(userId);
   const name = profile?.username ?? 'this person';
   return (
     <Modal
