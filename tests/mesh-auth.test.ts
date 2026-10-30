@@ -451,6 +451,8 @@ describe('events and session operations from other servers', () => {
       );
       op(net, peer, { op: 'join', caps: caps({ nat: 'open' }) });
       await settled(net);
+      // The record is looked for for a moment before the join is given up on.
+      await new Promise((r) => setTimeout(r, 1500));
       expect(state().members.map((m) => m.peer)).not.toContain(peer);
     });
 

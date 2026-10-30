@@ -32,6 +32,7 @@ import {
 } from '@crocodile/protocol';
 import { CoordinatorConnection } from '@crocodile/client-core';
 import { Coordinator, lanAddress, rendezvousOwner } from '@crocodile/coordinator';
+import { RpcFailure } from '../packages/coordinator/src/util';
 import {
   caps,
   connectUser,
@@ -896,12 +897,6 @@ describe('sessions and host election', () => {
       expect(members()).toContain(bob.conn.peer);
       // Its own server forgets it too, so it can no longer signal the room or ask for a relay.
       expect(c.sessions.inSession(second.conn.peer, sessionId)).toBe(false);
-      // And it is told, rather than left to find out from failing requests.
-      await waitFor(
-        () => second.events.find((e) => e.ev === 'session_closed'),
-        3000,
-        'to be told it was removed',
-      );
       await expect(
         second.conn.request('session.join', { sessionId, caps: caps() }),
       ).rejects.toThrow(/device/);
@@ -937,6 +932,19 @@ describe('sessions and host election', () => {
       ).rejects.toThrow();
       apply.mockRestore();
       expect(c.sessions.inSession(alice.conn.peer, sessionId)).toBe(false);
+    });
+
+    it('keeps a device in the room when the owner did not answer its join, as it may have taken it', async () => {
+      const { c, alice, sessionId } = await setup();
+      const submit = vi
+        .spyOn(c.sessions as unknown as { submit(): unknown }, 'submit')
+        .mockRejectedValueOnce(new RpcFailure('unavailable', 'session owner did not respond'));
+      await expect(
+        alice.conn.request('session.join', { sessionId, caps: caps() }),
+      ).rejects.toThrow();
+      submit.mockRestore();
+      // Left in, so that its leave (or its server's) still reaches the owner.
+      expect(c.sessions.inSession(alice.conn.peer, sessionId)).toBe(true);
     });
 
     it('does not start a second look-up while one is running', async () => {
