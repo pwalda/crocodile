@@ -252,7 +252,7 @@ describe('records', () => {
       now - 2000,
     );
 
-    it('leaves who may invite to the owner', () => {
+    it('leaves who may invite to the owner, bound into what the owner signs', () => {
       const byAdmin = signRecord(
         bob,
         'space',
@@ -260,21 +260,40 @@ describe('records', () => {
         { ...withBob.body, invitePolicy: 'members' },
         now - 1000,
       );
-      expect(validateRecord(byAdmin, ctx([withBob]))).toMatchObject({
-        ok: false,
-        reason: 'only the owner chooses who may invite',
-      });
+      // Refused with the owner's earlier version to compare with, and without it.
+      for (const known of [[withBob], []])
+        expect(validateRecord(byAdmin, ctx(known))).toMatchObject({
+          ok: false,
+          reason: 'bad admin list signature',
+        });
       // A change of name leaves it as it was, set or not.
       const renamed = signRecord(bob, 'space', key, { ...withBob.body, name: 'Pond' }, now - 1000);
       expect(validateRecord(renamed, ctx([withBob])).ok).toBe(true);
+      // The owner signs it with the list, and an admin can then carry it on.
       const byOwner = signRecord(
         alice,
         'space',
         key,
-        { ...withBob.body, invitePolicy: 'members' },
-        now - 1000,
+        {
+          ...withBob.body,
+          invitePolicy: 'members',
+          authority: signSpaceAuthority(alice, spaceId, [bob.userId], now - 900, 'members'),
+        },
+        now - 900,
       );
       expect(validateRecord(byOwner, ctx([withBob])).ok).toBe(true);
+      const carried = signRecord(bob, 'space', key, { ...byOwner.body, name: 'Pond' }, now - 800);
+      expect(validateRecord(carried, ctx([byOwner])).ok).toBe(true);
+      expect(validateRecord(carried, ctx([])).ok).toBe(true);
+      // An admin cannot take it away again, either.
+      const taken = signRecord(
+        bob,
+        'space',
+        key,
+        { ...byOwner.body, invitePolicy: 'admins' },
+        now - 700,
+      );
+      expect(validateRecord(taken, ctx([byOwner]))).toMatchObject({ ok: false });
     });
 
     it("lets an admin change the space, checked on its own, without the owner's record", () => {

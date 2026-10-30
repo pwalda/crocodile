@@ -205,7 +205,7 @@ export class Distribution {
    * Fetch what a group of records needs to pass validation, all at once: a
    * batch of hundreds waits for one round of lookups, not one per record.
    */
-  private async ensureDependencies(records: SignedRecord[]) {
+  private async ensureDependencies(records: SignedRecord[], fresh = false) {
     const inBatch = new Set(records.map((r) => r.key));
     const need = (k: string) => !inBatch.has(k) && !this.lookup(k);
     const keys = new Set<string>();
@@ -224,7 +224,7 @@ export class Distribution {
       // An invite reaches the owners of its space before those of its code.
       const body = record.body as { spaceId?: string; inviteCode?: string };
       if (record.kind === 'member' && body.inviteCode && body.spaceId) {
-        spaces.add(`space:${body.spaceId}`);
+        if (fresh) spaces.add(`space:${body.spaceId}`);
         const key = `invite:${body.inviteCode}`;
         if (!need(key)) continue;
         const set = invites.get(body.spaceId) ?? new Set();
@@ -249,6 +249,7 @@ export class Distribution {
     // the space: that record is on the space's owners, not necessarily on the joiner's.
     const makers = new Set<string>();
     for (const record of records) {
+      if (!fresh) break;
       const body = record.body as { spaceId?: string; inviteCode?: string };
       if (record.kind !== 'member' || !body.inviteCode || !body.spaceId) continue;
       const invite = this.lookup(`invite:${body.inviteCode}`) as SignedRecord<'invite'> | undefined;
@@ -270,7 +271,9 @@ export class Distribution {
         const code = (r.body as { inviteCode?: string }).inviteCode;
         if (r.kind === 'member' && code && need(`invite:${code}`)) codes.add(`invite:${code}`);
       }
-      if (codes.size) await this.get([...codes]).catch(() => {});
+      // Nothing more to go on: the maker's membership is not to be found, and asking again will not.
+      if (!codes.size) break;
+      await this.get([...codes]).catch(() => {});
       wanted = new Set([...wanted].filter(need));
     }
   }
@@ -310,7 +313,7 @@ export class Distribution {
     opts: { fresh: boolean; origin: string | null },
   ): Promise<PutResult> {
     if (SignedRecordEnvelope.safeParse(input).success)
-      await this.ensureDependencies([input as SignedRecord]);
+      await this.ensureDependencies([input as SignedRecord], opts.fresh);
     const res = this.hub.records.put(input, opts);
     if (res.accepted && opts.fresh) await this.storeOnOtherShards(input as SignedRecord);
     return res;

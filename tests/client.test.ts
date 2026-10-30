@@ -1682,6 +1682,16 @@ describe('leaving', () => {
       expect(await alice.shareInvite(spaceId)).not.toBe(code);
     });
 
+    it('says plainly when an invitation is withdrawn', async () => {
+      const { alice, bob, spaceId, sentTo } = await trio();
+      await alice.openChannel(await alice.openDm(bob.userId));
+      await alice.inviteToSpace(spaceId, bob.userId);
+      await waitFor(() => codeIn(sentTo(bob)), 5000, 'the invitation is sent');
+      const code = codeIn(sentTo(bob))!;
+      await alice.revokeInvite(code);
+      await expect(bob.joinWithInvite(code)).rejects.toThrow(/expired or was revoked/);
+    });
+
     it('is asked for by the owner and admins, and by members where the space says so', async () => {
       const { alice, bob, carol, spaceId } = await trio();
       const code = await alice.createInvite(spaceId);

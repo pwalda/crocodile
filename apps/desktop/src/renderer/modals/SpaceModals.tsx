@@ -189,7 +189,7 @@ export function InvitePersonModal({ userId }: { userId: string }) {
   const [busy, setBusy] = useState<string | null>(null);
   const client = getClient();
   const choices = Object.values(spaces).filter(
-    (s) => client.canInviteTo(s.id) && !s.members.includes(userId),
+    (s) => client.canInviteTo(s.id) && !s.members.includes(userId) && !s.bans.includes(userId),
   );
   const name = profile?.username ?? 'this person';
   return (
@@ -310,8 +310,9 @@ export function SpaceSettingsModal({ spaceId }: { spaceId: string }) {
   const me = useCroc((s) => s.me?.userId);
   const [name, setName] = useState(space?.name ?? '');
   const [icon, setIcon] = useState(space?.icon);
-  const [membersInvite, setMembersInvite] = useState(space?.invitePolicy === 'members');
-  const [policyAtOpen] = useState(space?.invitePolicy === 'members');
+  // Null until the switch is touched: what is saved is what was chosen here, never a stale guess.
+  const [chosenInvite, setChosenInvite] = useState<boolean | null>(null);
+  const membersInvite = chosenInvite ?? space?.invitePolicy === 'members';
   const client = getClient();
   if (!space) return null;
   const isOwner = space.owner === me;
@@ -323,9 +324,7 @@ export function SpaceSettingsModal({ spaceId }: { spaceId: string }) {
       name: name.trim() || b.name,
       ...(icon ? { icon } : {}),
       // Only what was changed here: a change somebody else made meanwhile stays.
-      ...(membersInvite !== policyAtOpen
-        ? { invitePolicy: membersInvite ? 'members' : 'admins' }
-        : {}),
+      ...(chosenInvite !== null ? { invitePolicy: chosenInvite ? 'members' : 'admins' } : {}),
     }));
     closeModal();
   };
@@ -374,7 +373,7 @@ export function SpaceSettingsModal({ spaceId }: { spaceId: string }) {
           <Toggle
             checked={membersInvite}
             label="Members can invite people"
-            onChange={setMembersInvite}
+            onChange={setChosenInvite}
           />
         </div>
       )}

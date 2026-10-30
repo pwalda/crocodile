@@ -154,12 +154,6 @@ export function validateRecord(input: unknown, ctx: ValidationContext): Validati
         return reject('only the owner or an admin may change a space');
       if (body.deleted || (existing?.body as SpaceBody | undefined)?.deleted)
         return reject('only the owner may delete a space');
-      // Whether members may invite is the owner's to decide, as who the admins are.
-      if (
-        existing &&
-        ((existing.body as SpaceBody).invitePolicy ?? 'admins') !== (body.invitePolicy ?? 'admins')
-      )
-        return reject('only the owner chooses who may invite');
       if (body.bans.some((u) => u === body.owner || body.admins.includes(u)))
         return reject('admins cannot ban the owner or other admins');
       return { ok: true, authorId };
@@ -192,7 +186,7 @@ export function validateRecord(input: unknown, ctx: ValidationContext): Validati
           // A named person may also be invited by a member, where the space allows it. Whether the
           // author is one can be told only by those who hold the space's member list; the others
           // take the word of the server that took the invite, as for an invite's expiry.
-          if (body.for === undefined || space.body.invitePolicy !== 'members')
+          if (body.for === undefined || !mayInviteByName(space.body, authorId))
             return reject('only the space owner or an admin may create invites');
           if (ctx.fresh && !isSpaceMember(ctx, body.spaceId, authorId))
             return reject('only a member of the space may invite');
@@ -234,7 +228,7 @@ export function validateRecord(input: unknown, ctx: ValidationContext): Validati
           !canManageSpace(space.body, maker) &&
           !(
             invite.body.for !== undefined &&
-            space.body.invitePolicy === 'members' &&
+            mayInviteByName(space.body, maker) &&
             isSpaceMember(ctx, body.spaceId, maker)
           )
         )
@@ -280,8 +274,15 @@ export function canManageSpace(space: SpaceBody, userId: string): boolean {
   return space.owner === userId || (!!space.authority && space.admins.includes(userId));
 }
 
-function authorityPayload(spaceId: string, admins: string[], at: number) {
-  return { spaceId, admins, at };
+function authorityPayload(
+  spaceId: string,
+  admins: string[],
+  at: number,
+  invitePolicy?: SpaceBody['invitePolicy'],
+) {
+  // Members being let invite is the owner's to say, so it is in what the owner signs. (The
+  // default is left out, which keeps what was signed before the setting existed valid.)
+  return { spaceId, admins, at, ...(invitePolicy === 'members' ? { invitePolicy } : {}) };
 }
 
 /** The owner's signature on a space's admin list, for its `authority`. */
@@ -290,11 +291,12 @@ export function signSpaceAuthority(
   spaceId: string,
   admins: string[],
   at: number,
+  invitePolicy?: SpaceBody['invitePolicy'],
 ): NonNullable<SpaceBody['authority']> {
   return {
     ownerKey: owner.publicKey,
     at,
-    sig: sign(owner, SIG_DOMAIN.spaceAdmins, authorityPayload(spaceId, admins, at)),
+    sig: sign(owner, SIG_DOMAIN.spaceAdmins, authorityPayload(spaceId, admins, at, invitePolicy)),
   };
 }
 
@@ -308,12 +310,21 @@ export function spaceAuthorityValid(spaceId: string, body: SpaceBody): boolean {
     return verifyPayload(
       a.ownerKey,
       SIG_DOMAIN.spaceAdmins,
-      authorityPayload(spaceId, body.admins, a.at),
+      authorityPayload(spaceId, body.admins, a.at, body.invitePolicy),
       a.sig,
     );
   } catch {
     return false;
   }
+}
+
+/**
+ * May make an invitation to a named person, as far as the space record tells: the owner and
+ * admins, and members where the space lets them. (That the maker is a member is for
+ * those who hold the member list to check.)
+ */
+export function mayInviteByName(space: SpaceBody, userId: string): boolean {
+  return canManageSpace(space, userId) || space.invitePolicy === 'members';
 }
 
 /** True if the user currently belongs to the space (owner or active, non-banned member). */

@@ -16,7 +16,7 @@ export function ProfileModal({ userId }: { userId: string }) {
   const pending = friends.outgoing.includes(userId);
   const spaces = useCroc((s) => s.spaces);
   const canInvite = Object.values(spaces).some(
-    (s) => client.canInviteTo(s.id) && !s.members.includes(userId),
+    (s) => client.canInviteTo(s.id) && !s.members.includes(userId) && !s.bans.includes(userId),
   );
   return (
     <div
