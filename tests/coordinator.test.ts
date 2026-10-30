@@ -947,6 +947,39 @@ describe('sessions and host election', () => {
       expect(c.sessions.inSession(alice.conn.peer, sessionId)).toBe(true);
     });
 
+    it('does not wait for the record of a device when too many are already waited for', async () => {
+      const { c, alice, sessionId } = await setup();
+      const bare = await connectUser(c, alice.identity, 'alice', randomDeviceId(), false);
+      cleanup.push(() => bare.conn.close());
+      const internals = c.sessions as unknown as { hostingWaiters: number };
+      internals.hostingWaiters = 1_000_000;
+      const start = Date.now();
+      await expect(bare.conn.request('session.join', { sessionId, caps: caps() })).rejects.toThrow(
+        /device/,
+      );
+      internals.hostingWaiters = 0;
+      expect(Date.now() - start).toBeLessThan(250);
+    });
+
+    it('lets go of a member the owner refuses after the owner changed, instead of trying for ever', async () => {
+      const { c, alice, sessionId } = await setup();
+      await alice.conn.request('session.join', { sessionId, caps: caps() });
+      const internals = c.sessions as unknown as {
+        lastOwner: Map<string, string>;
+        submit(): unknown;
+        rebalance(): void;
+        rebalanceTimer?: unknown;
+      };
+      internals.lastOwner.set(sessionId, 'someone-else');
+      const submit = vi
+        .spyOn(internals, 'submit')
+        .mockRejectedValueOnce(new RpcFailure('forbidden', 'not a member of this space'));
+      internals.rebalance();
+      await waitFor(() => !c.sessions.inSession(alice.conn.peer, sessionId), 3000, 'to let go');
+      submit.mockRestore();
+      expect(internals.rebalanceTimer).toBeUndefined();
+    });
+
     it('does not start a second look-up while one is running', async () => {
       const { c, alice, sessionId } = await setup();
       await alice.conn.request('session.join', { sessionId, caps: caps() });

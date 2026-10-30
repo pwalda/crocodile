@@ -475,6 +475,32 @@ describe('events and session operations from other servers', () => {
       expect(state().epoch).toBeLessThan(5);
     });
 
+    it("takes a device's operations in the order they were sent, also while its join is looked into", async () => {
+      const net = await conversation();
+      const state = await joined(net);
+      // Another device of Alice's, with a record, that the rogue server says is on it.
+      const second = await connectUser(net.victim, net.alice.identity, 'alice');
+      cleanup.push(() => second.conn.close());
+      const device = peerIds.device(second.conn.peer);
+      net.toVictim.send(
+        presenceFrom(net.rogue, Date.now(), [entry(net.alice.identity.userId, [device])]),
+      );
+      const sessions = net.victim.sessions as unknown as {
+        admit(...a: unknown[]): Promise<unknown>;
+      };
+      const real = sessions.admit.bind(sessions);
+      const admit = vi.spyOn(sessions, 'admit').mockImplementation(async (...a) => {
+        await new Promise((r) => setTimeout(r, 400));
+        return real(...a);
+      });
+      op(net, second.conn.peer, { op: 'join', caps: caps() });
+      op(net, second.conn.peer, { op: 'leave' });
+      await settled(net);
+      await new Promise((r) => setTimeout(r, 1200));
+      admit.mockRestore();
+      expect(state().members.map((m) => m.peer)).not.toContain(second.conn.peer);
+    });
+
     it('looks into an update only if it comes from the server the member joined from', async () => {
       const net = await conversation();
       await joined(net);
