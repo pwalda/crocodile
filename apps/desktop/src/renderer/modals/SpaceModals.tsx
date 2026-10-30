@@ -1,5 +1,6 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Check, Copy, Hash, Volume2 } from 'lucide-react';
+import { INVITE_MAX_MS } from '@crocodile/crypto';
 import type { ChannelKind } from '@crocodile/protocol';
 import { closeModal, getClient, navigate, openModal, useCroc } from '../croc';
 import { copyText, imageToDataUrl, initials } from '../lib/format';
@@ -144,7 +145,7 @@ export function AddSpaceModal() {
 }
 
 const DAY_MS = 86_400_000;
-const LINK_LIFETIMES = { '1d': DAY_MS, '7d': 7 * DAY_MS, '30d': 30 * DAY_MS } as const;
+const LINK_LIFETIMES = { '1d': DAY_MS, '7d': 7 * DAY_MS, '30d': INVITE_MAX_MS } as const;
 type LinkLifetime = keyof typeof LINK_LIFETIMES;
 
 export function InviteModal({ spaceId }: { spaceId: string }) {
@@ -157,13 +158,18 @@ export function InviteModal({ spaceId }: { spaceId: string }) {
   const [confirm, setConfirm] = useState<'new' | 'off' | null>(null);
   const open = client.openInviteOf(spaceId);
   const code = open?.body.code ?? null;
-  // The link on offer is the one the space has on; one is made when the window opens and there is none.
+  // The link on offer is the one the space has on, looked for before one is made; with none, one is
+  // made when the window opens.
   const [offered, setOffered] = useState(false);
+  const started = useRef(false);
   useEffect(() => {
-    if (offered || open) return;
-    setOffered(true);
-    client.shareInvite(spaceId).catch((e: Error) => setError(e.message));
-  }, [client, spaceId, offered, open]);
+    if (started.current) return;
+    started.current = true;
+    client
+      .shareInvite(spaceId)
+      .catch((e: Error) => setError(e.message))
+      .finally(() => setOffered(true));
+  }, [client, spaceId]);
   const run = async (what: () => Promise<unknown>) => {
     setBusy(true);
     setError(null);

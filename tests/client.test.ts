@@ -1680,9 +1680,44 @@ describe('leaving', () => {
       expect(carol.state.spaces[spaceId]).toBeDefined();
     });
 
+    it('is looked for before a new one is made: an admin who has not seen it does not replace it', async () => {
+      const { alice, carol, spaceId } = await trio();
+      const link = await alice.shareInvite(spaceId);
+      // Carol came in with an invitation of her own, so she has never seen the open link's record.
+      const own = await alice.createInvite(spaceId, 7 * 24 * 3600_000, carol.userId);
+      await carol.joinWithInvite(own);
+      await alice.updateSpace(spaceId, (b) => ({ ...b, admins: [carol.userId] }));
+      await waitFor(
+        () => carol.state.spaces[spaceId]?.admins.includes(carol.userId),
+        5000,
+        'carol is an admin',
+      );
+      expect(carol.records.get(`invite:${link}`)).toBeUndefined();
+      expect(await carol.shareInvite(spaceId)).toBe(link);
+      await carol.stopOpenInvite(spaceId);
+      expect(alice.openInviteOf(spaceId)?.body.code).not.toBe(link);
+    });
+
+    it('is not left behind when it could not be named', async () => {
+      const { alice, spaceId } = await trio();
+      const before = new Set(
+        (alice.records.list('invite:') as SignedRecord<'invite'>[]).map((r) => r.key),
+      );
+      const update = vi.spyOn(alice, 'updateSpace').mockRejectedValueOnce(new Error('offline'));
+      await expect(alice.createInvite(spaceId)).rejects.toThrow(/offline/);
+      update.mockRestore();
+      const made = (alice.records.list('invite:') as SignedRecord<'invite'>[]).filter(
+        (r) => !before.has(r.key),
+      );
+      expect(made).toHaveLength(1);
+      expect(made[0]!.body.revoked).toBe(true);
+    });
+
     it('lasts 30 days at most', async () => {
       const { alice, spaceId } = await trio();
-      await expect(alice.createInvite(spaceId, 31 * 24 * 3600_000)).rejects.toThrow(/30 days/);
+      await expect(alice.createInvite(spaceId, 32 * 24 * 3600_000)).rejects.toThrow(/30 days/);
+      for (const bad of [0, -1, NaN])
+        await expect(alice.createInvite(spaceId, bad)).rejects.toThrow(/time to last/);
       const code = await alice.createInvite(spaceId, 30 * 24 * 3600_000);
       expect(alice.openInviteOf(spaceId)?.body.code).toBe(code);
     });

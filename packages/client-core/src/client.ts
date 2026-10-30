@@ -29,6 +29,7 @@ import {
   signSpaceAuthority,
   spaceAuthorityValid,
   mayInviteByName,
+  INVITE_MAX_MS,
   signedInvitePolicy,
   spaceIdFor,
   userTag,
@@ -2092,11 +2093,27 @@ export class CrocodileClient extends Emitter<ClientEvents> {
   }
 
   /**
+   * The space's open link, fetching its invite record if this device has not seen it: the
+   * record is only there for those who have joined with it. Rejects if it cannot be told
+   * (so that nothing is made for want of looking).
+   */
+  async loadOpenInvite(spaceId: string): Promise<SignedRecord<'invite'> | undefined> {
+    const code = (this.records.get(recordKey.space(spaceId)) as SignedRecord<'space'> | undefined)
+      ?.body.publicInvite;
+    if (!code) return undefined;
+    if (!this.records.get(recordKey.invite(code))) {
+      const got = await this.link!.request('records.get', { keys: [recordKey.invite(code)] });
+      this.records.ingestAll(got.records, false);
+    }
+    return this.openInviteOf(spaceId);
+  }
+
+  /**
    * The link to share: the one the space has on if it has a day or more left, else a new one.
    * Making a new one replaces the old, so it is not done while the old one is good.
    */
   async shareInvite(spaceId: string): Promise<string> {
-    const open = this.openInviteOf(spaceId);
+    const open = await this.loadOpenInvite(spaceId);
     if (open && (open.body.expiresAt === null || open.body.expiresAt > Date.now() + DAY_MS))
       return open.body.code;
     return this.createInvite(spaceId);
@@ -2111,7 +2128,9 @@ export class CrocodileClient extends Emitter<ClientEvents> {
     expiresInMs: number = INVITE_MS,
     forUser?: string,
   ): Promise<string> {
-    if (expiresInMs > 30 * DAY_MS) throw new Error('An invite can last 30 days at most.');
+    if (!Number.isFinite(expiresInMs) || expiresInMs <= 0)
+      throw new Error('An invite needs a time to last.');
+    if (expiresInMs > INVITE_MAX_MS) throw new Error('An invite can last 30 days at most.');
     const code = randomId(5);
     const invite = signRecord(this.identity!, 'invite', recordKey.invite(code), {
       spaceId,
@@ -2124,16 +2143,22 @@ export class CrocodileClient extends Emitter<ClientEvents> {
       return code;
     }
     // The invite first, then the space naming it: until then the old link goes on working.
-    const previous = this.openInviteOf(spaceId);
+    const previous = await this.loadOpenInvite(spaceId);
     await this.putRecord(invite);
-    await this.updateSpace(spaceId, (b) => ({ ...b, publicInvite: code }));
+    try {
+      await this.updateSpace(spaceId, (b) => ({ ...b, publicInvite: code }));
+    } catch (err) {
+      // Not named, so not a link: do not leave it counting against the space.
+      await this.revokeInvite(code).catch(() => {});
+      throw err;
+    }
     if (previous) await this.revokeInvite(previous.body.code).catch(() => {});
     return code;
   }
 
   /** Turns the space's open link off: the link stops working. People already in stay. */
   async stopOpenInvite(spaceId: string) {
-    const previous = this.openInviteOf(spaceId);
+    const previous = await this.loadOpenInvite(spaceId);
     await this.updateSpace(spaceId, (b) => {
       const { publicInvite: _, ...rest } = b;
       return rest;

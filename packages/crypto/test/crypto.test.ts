@@ -402,7 +402,7 @@ describe('records', () => {
         expect(
           validateRecord(privateInvite(alice, dave.userId, { expiresAt: null }), ctx([admins])),
         ).toMatchObject({ ok: false, reason: expect.stringMatching(/needs an end/) });
-        const far = Date.now() + 31 * 24 * 3600_000;
+        const far = Date.now() + 32 * 24 * 3600_000;
         expect(
           validateRecord(privateInvite(alice, dave.userId, { expiresAt: far }), ctx([admins])),
         ).toMatchObject({ ok: false, reason: expect.stringMatching(/within 30 days/) });
@@ -594,14 +594,26 @@ describe('records', () => {
         expect(validateRecord(join(other), ctx([named, b], false)).ok).toBe(true);
       });
 
+      it('is never one that has no end, however the space came to name it', () => {
+        const legacy = open(code, null);
+        expect(validateRecord(join(code), ctx([named, legacy]))).toMatchObject({
+          ok: false,
+          reason: 'this link has no end; make a new one',
+        });
+      });
+
       it('ends within 30 days when it is made, and what was made before stays as it was', () => {
-        const month = 31 * 24 * 3600_000;
+        const month = 32 * 24 * 3600_000;
         for (const expiresAt of [null, now + month])
           expect(validateRecord(open(code, expiresAt), ctx([named]))).toMatchObject({
             ok: false,
             reason: 'an invite needs an end, within 30 days',
           });
         expect(validateRecord(open(code, now + week), ctx([named])).ok).toBe(true);
+        // A clock a little ahead of the server's does not turn the full 30 days away.
+        expect(
+          validateRecord(open(code, now + 30 * 24 * 3600_000 + 3600_000), ctx([named])).ok,
+        ).toBe(true);
         // Seen again later, or withdrawn, it is not turned away for lacking an end.
         expect(validateRecord(open(code, null), ctx([named], false)).ok).toBe(true);
         const withdrawn = signRecord(alice, 'invite', recordKey.invite(code), {
