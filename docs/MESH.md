@@ -181,5 +181,7 @@ by name goes to `name:<name>`.
 - The live set is eventually consistent. Right after servers join or leave, a
   read can miss a record written a moment earlier on the other side of the
   change; it shows up once the records have moved.
-- Servers on protocol 1 can't join a protocol 2 network (and the other way
-  round): update coordination servers together.
+- Servers on an older protocol can't join a network on a newer one (and the
+  other way round): update coordination servers together. Protocol 4 added
+  session operations signed by the device they are for, so a server on 3 or
+  lower is refused by one on 4.

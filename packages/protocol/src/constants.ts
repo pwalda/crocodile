@@ -1,8 +1,9 @@
 /**
  * 2: sharded records and a sparse server overlay (docs/MESH.md).
  * 3: presence and voice frames signed by the server they come from.
+ * 4: session operations signed by the device they are for.
  */
-export const PROTOCOL_VERSION = 3;
+export const PROTOCOL_VERSION = 4;
 export const APP_NAME = 'Crocodile';
 
 /** Number of simultaneous speaker slots a host relay forwards to each listener. */
