@@ -1,11 +1,11 @@
 import {
   closeSync,
+  fstatSync,
   linkSync,
   openSync,
   readFileSync,
   readdirSync,
   renameSync,
-  statSync,
   unlinkSync,
   writeSync,
 } from 'node:fs';
@@ -50,9 +50,19 @@ function release(path: string) {
   held.delete(path);
   try {
     // Only our own: a lock another process has taken over since is not ours to remove.
-    if (pidIn(readFileSync(path, 'utf8')) === process.pid) unlinkSync(path);
+    if (pidIn(readLock(path).text) === process.pid) unlinkSync(path);
   } catch {
     // Already gone.
+  }
+}
+
+/** A lock's text and age, read through one open file so both are of the same file. */
+function readLock(path: string): { text: string; ageMs: number } {
+  const fd = openSync(path, 'r');
+  try {
+    return { text: readFileSync(fd, 'utf8'), ageMs: Date.now() - fstatSync(fd).mtimeMs };
+  } finally {
+    closeSync(fd);
   }
 }
 
@@ -78,15 +88,6 @@ function alive(pid: number): boolean {
 /** A lock being written has no text yet; one that stays empty is a crash's leftover. */
 const UNWRITTEN_MS = 5_000;
 
-/** Whether a lock with no process id in it has been that way too long to be one being written. */
-function unwritten(path: string): boolean {
-  try {
-    return Date.now() - statSync(path).mtimeMs >= UNWRITTEN_MS;
-  } catch {
-    return false; // gone meanwhile; the next round finds out
-  }
-}
-
 /**
  * Removes a lock left behind. The file is first moved aside to a name of our
  * own, which only one process can do; if what was moved was not the lock we
@@ -100,7 +101,7 @@ function takeOver(path: string, seen: string) {
     return; // someone else moved it first
   }
   try {
-    if (readFileSync(aside, 'utf8') !== seen) {
+    if (readLock(aside).text !== seen) {
       try {
         linkSync(aside, path); // fails if yet another lock has been made, which then stands
       } catch {
@@ -138,15 +139,18 @@ export function lockProfile(path: string): () => void {
       if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err;
     }
     // Someone made it first: is it still theirs?
-    let text: string;
+    let found: { text: string; ageMs: number };
     try {
-      text = readFileSync(path, 'utf8');
+      found = readLock(path);
     } catch {
       continue; // gone meanwhile; try again
     }
+    const { text } = found;
     const pid = pidIn(text);
     // Our own id in a lock we do not hold is a crash's leftover too (a container's first process is always 1).
-    const gone = pid === undefined ? unwritten(path) : pid === process.pid || !alive(pid);
+    // A lock with no process id yet may be being written; one that stays so is a crash's leftover.
+    const gone =
+      pid === undefined ? found.ageMs >= UNWRITTEN_MS : pid === process.pid || !alive(pid);
     if (!gone) throw new ProfileInUse(pid, path);
     takeOver(path, text);
   }
