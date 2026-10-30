@@ -103,13 +103,23 @@ by name goes to `name:<name>`.
 ## Everything else
 
 - **Sessions** are owned by one live server chosen by rendezvous hashing, as
-  before; members' servers reach it over a direct link. The owner admits a
-  member only if the sending server has said that member's device is
-  connected to it, checks again that the member may be in the session and that
-  the device has a record on the member's account that has not been removed,
-  and believes a host hint only if the host and backup it names may be in the
-  session and are such devices too; afterwards it
-  takes operations on that member only from the server it joined from. A client event
+  before; members' servers reach it over a direct link. A device signs its
+  own join, update and report with its account's key, for the server it is
+  connected to (with the time, the join an update or report belongs to, and a
+  count); the owner checks the signature against the key in the device's record,
+  that the sending server is the one it was signed for, that a join is within
+  five minutes of its own clock and newer than the last it took from that device,
+  and that an update or report is for the device's current join and is the next in
+  line. Without that, a server cannot join, change or vote for a device that is on
+  another. The owner also admits a member only if the sending server has said
+  that member's device is connected to it, checks again that the member may be in
+  the session and that the device has a record on the member's account that has
+  not been removed, and believes a host hint only if the host and backup it names
+  may be in the session and are such devices too; afterwards it takes operations
+  on that member only from the server it joined from (a leave, which the
+  member's server sends when the device disconnects, is not signed). When a
+  session's owner changes, each member's server asks its device to sign a new
+  join, and takes it out of the session if it does not. A client event
   routed to us is delivered only if it comes from a server that could be
   sending it: a signal from the server the sending device is connected to, a
   session's state or a conversation invitation from the session's owner.
@@ -171,5 +181,7 @@ by name goes to `name:<name>`.
 - The live set is eventually consistent. Right after servers join or leave, a
   read can miss a record written a moment earlier on the other side of the
   change; it shows up once the records have moved.
-- Servers on protocol 1 can't join a protocol 2 network (and the other way
-  round): update coordination servers together.
+- Servers on an older protocol can't join a network on a newer one (and the
+  other way round): update coordination servers together. Protocol 4 added
+  session operations signed by the device they are for, so a server on 3 or
+  lower is refused by one on 4.

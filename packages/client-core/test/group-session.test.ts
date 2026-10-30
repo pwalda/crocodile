@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createIdentity } from '@crocodile/crypto';
 import { GroupKeyring } from '../src/keyring';
 import type { RelayGrant, SealedBox, SessionState } from '@crocodile/protocol';
@@ -151,6 +151,157 @@ describe('group session', () => {
     );
     return { ...made, joins: () => sent.filter((t) => t === 'session.join').length };
   }
+
+  it('signs a new join when the server asks for one, and not for a session it has left', async () => {
+    const { s, joins } = joinFirst();
+    await s.join();
+    expect(joins()).toBe(1);
+    // The server that keeps the session changed: a join of its own, on top of one in flight too.
+    await s.renew();
+    expect(joins()).toBe(2);
+    await s.leave();
+    await s.renew();
+    expect(joins()).toBe(2);
+  });
+
+  it('joins again when the server says an update or a report is not for the join it has', async () => {
+    const sent: string[] = [];
+    let said = false;
+    const { s } = session(
+      async () => grant(60_000),
+      async (type) => {
+        sent.push(type);
+        if (type === 'session.update' && !said) {
+          said = true;
+          throw Object.assign(new Error('that is not the join'), { code: 'conflict' });
+        }
+        return type === 'session.join'
+          ? { state: state('bbbbbbbbbbbbbbbbbbbbbbbbbb.dev1', 1) }
+          : {};
+      },
+    );
+    await s.join();
+    await s.updateCaps();
+    await wait(50);
+    expect(sent.filter((t) => t === 'session.join')).toHaveLength(2);
+    // Not for any other kind of failure.
+    await s.updateCaps();
+    await wait(50);
+    expect(sent.filter((t) => t === 'session.join')).toHaveLength(2);
+  });
+
+  it('does not start a join for every update that finds it is not in the room', async () => {
+    const sent: string[] = [];
+    const { s } = session(
+      async () => grant(60_000),
+      async (type) => {
+        sent.push(type);
+        if (type === 'session.update')
+          throw Object.assign(new Error('not in session'), { code: 'not_found' });
+        return type === 'session.join'
+          ? { state: state('bbbbbbbbbbbbbbbbbbbbbbbbbb.dev1', 1) }
+          : {};
+      },
+    );
+    await s.join();
+    await s.updateCaps();
+    await s.updateCaps();
+    await s.updateCaps();
+    await wait(50);
+    expect(sent.filter((t) => t === 'session.join')).toHaveLength(2);
+  });
+
+  it('joins again, more than once if it must, when taken out of the room', async () => {
+    let joins = 0;
+    const { s } = session(
+      async () => grant(60_000),
+      async (type) => {
+        if (type !== 'session.join') return {};
+        if (++joins < 3) throw new Error('the owner cannot be reached');
+        return { state: state('bbbbbbbbbbbbbbbbbbbbbbbbbb.dev1', 1) };
+      },
+    );
+    await s.rejoin();
+    expect(joins).toBe(3);
+    await s.leave();
+    await s.rejoin();
+    expect(joins).toBe(3);
+  });
+
+  it('goes on joining again for as long as the owner cannot be reached, and leaves the room when refused again and again', async () => {
+    vi.useFakeTimers();
+    try {
+      let joins = 0;
+      let refuse = false;
+      const { s } = session(
+        async () => grant(60_000),
+        async (type) => {
+          if (type !== 'session.join') return {};
+          joins++;
+          if (refuse)
+            throw Object.assign(new Error('not a member of this space'), { code: 'forbidden' });
+          if (joins < 10) throw new Error('the owner cannot be reached');
+          return { state: state('bbbbbbbbbbbbbbbbbbbbbbbbbb.dev1', 1) };
+        },
+      );
+      const done = s.rejoin();
+      await vi.advanceTimersByTimeAsync(10 * 60_000);
+      await done;
+      expect(joins).toBe(10);
+      // Refused again and again: no more tries, and the room is left. (Asked twice, it is one loop.)
+      const before = joins;
+      refuse = true;
+      void s.rejoin();
+      void s.rejoin();
+      await vi.advanceTimersByTimeAsync(10 * 60_000);
+      expect(joins - before).toBe(8);
+      expect(s.status).toBe('left');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('does not leave a room because some of the answers it got while joining again were refusals', async () => {
+    vi.useFakeTimers();
+    try {
+      let joins = 0;
+      const { s } = session(
+        async () => grant(60_000),
+        async (type) => {
+          if (type !== 'session.join') return {};
+          // Refused, and not reached, in turn.
+          if (++joins < 30)
+            throw joins % 2
+              ? Object.assign(new Error('not a member of this space'), { code: 'forbidden' })
+              : new Error('the owner cannot be reached');
+          return { state: state('bbbbbbbbbbbbbbbbbbbbbbbbbb.dev1', 1) };
+        },
+      );
+      const done = s.rejoin();
+      await vi.advanceTimersByTimeAsync(60 * 60_000);
+      await done;
+      expect(joins).toBe(30);
+      expect(s.status).not.toBe('left');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('does not join a room it was never in because an update finds it is not', async () => {
+    const sent: string[] = [];
+    const { s } = session(
+      async () => grant(60_000),
+      async (type) => {
+        sent.push(type);
+        if (type === 'session.update')
+          throw Object.assign(new Error('not in session'), { code: 'not_found' });
+        return {};
+      },
+    );
+    await s.updateCaps();
+    await wait(50);
+    expect(sent).toEqual(['session.update']);
+  });
 
   it('joins the session first when asked for a relay before it has', async () => {
     const { s, joins } = joinFirst();

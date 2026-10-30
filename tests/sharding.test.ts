@@ -390,6 +390,7 @@ describe('sharded records', () => {
   it.each([
     ['one with no protocol field', undefined],
     ['one before presence was signed', 2],
+    ['one before session operations were signed', 3],
   ])('refuses servers that speak the old protocol (%s)', async (_name, protocol) => {
     const a = await server('new');
     const ws = new WebSocket(a.url.replace('http', 'ws') + '/v1/federation');

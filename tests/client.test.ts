@@ -692,6 +692,45 @@ describe('calls', () => {
       on: () => () => {},
     }) as unknown as VoiceEngine;
 
+  it('signs a new join when the server that keeps a room changed, and joins again when it is taken out', async () => {
+    const coord = await server();
+    const net = new FakeRelayNetwork();
+    const alice = await signUp(makeClient(net, coord, { nat: 'open' }), 'alice');
+    const spaceId = await alice.createSpace('Room');
+    const sid = sessionIds.space(spaceId);
+    const internals = coord.sessions as unknown as {
+      local: Map<string, Map<string, unknown>>;
+      lastOwner: Map<string, string>;
+      rebalance(): void;
+      renewing: Map<string, unknown>;
+      dropUnrenewed(sessionId: string, peer: string, again?: boolean): void;
+      submit(sessionId: string, peer: string, op: { op: string }): unknown;
+    };
+    await waitFor(() => internals.local.get(sid)?.size === 1, 10000, 'in the room');
+    const peer = [...internals.local.get(sid)!.keys()][0]!;
+    const joins = vi.spyOn(internals, 'submit');
+    const joined = () => joins.mock.calls.filter((c) => c[2].op === 'join').length;
+    // The owner changed: the app is asked for a new join, and gives one. (Only joins from here on count.)
+    joins.mockClear();
+    internals.lastOwner.set(sid, 'someone-else');
+    internals.rebalance();
+    await waitFor(() => joined() >= 1 && internals.renewing.size === 0, 10000, 'a new join');
+    expect(internals.local.get(sid)?.has(peer)).toBe(true);
+    // Taken out of the room: it joins again.
+    const renewed = joined();
+    internals.dropUnrenewed(sid, peer);
+    await waitFor(() => joined() > renewed, 10000, 'to join again');
+    await waitFor(() => internals.local.get(sid)?.has(peer), 10000, 'back in the room');
+    // Taken out because it may no longer be there: it does not try to join again.
+    const settled = joined();
+    internals.dropUnrenewed(sid, peer, false);
+    await waitFor(() => alice.state.sessions[sid]?.status === 'left', 5000, 'to leave the room');
+    await new Promise((r) => setTimeout(r, 2500));
+    expect(joined()).toBe(settled);
+    expect(internals.local.get(sid)?.has(peer) ?? false).toBe(false);
+    joins.mockRestore();
+  });
+
   it('signing out during a call ends it and turns the microphone off', async () => {
     const coord = await server();
     const net = new FakeRelayNetwork();

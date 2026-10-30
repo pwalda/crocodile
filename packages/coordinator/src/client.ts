@@ -28,6 +28,7 @@ import {
   type ServerFrame,
   type SignedRecord,
   type MailProof,
+  type SessionOpProof,
 } from '@crocodile/protocol';
 import type { Coordinator } from './coordinator';
 import type { ClientHandle, OwnStatus } from './presence';
@@ -443,8 +444,12 @@ export class ClientConnection implements ClientHandle {
         return {};
       }
       case 'session.join': {
-        const { sessionId, caps } = p as unknown as { sessionId: string; caps: never };
-        return { state: await hub.sessions.join(this, sessionId, caps) };
+        const { sessionId, caps, proof } = p as unknown as {
+          sessionId: string;
+          caps: never;
+          proof?: SessionOpProof;
+        };
+        return { state: await hub.sessions.join(this, sessionId, caps, proof) };
       }
       case 'session.leave': {
         const { sessionId } = p as unknown as { sessionId: string };
@@ -452,13 +457,21 @@ export class ClientConnection implements ClientHandle {
         return {};
       }
       case 'session.update': {
-        const { sessionId, caps } = p as unknown as { sessionId: string; caps: never };
-        await hub.sessions.update(this, sessionId, caps);
+        const { sessionId, caps, proof } = p as unknown as {
+          sessionId: string;
+          caps: never;
+          proof?: SessionOpProof;
+        };
+        await hub.sessions.update(this, sessionId, caps, proof);
         return {};
       }
       case 'session.report': {
-        const { sessionId, epoch } = p as unknown as { sessionId: string; epoch: number };
-        await hub.sessions.report(this, sessionId, epoch);
+        const { sessionId, epoch, proof } = p as unknown as {
+          sessionId: string;
+          epoch: number;
+          proof?: SessionOpProof;
+        };
+        await hub.sessions.report(this, sessionId, epoch, proof);
         return {};
       }
       case 'voice.watch': {

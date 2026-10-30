@@ -226,10 +226,14 @@ flooded. See [docs/MESH.md](docs/MESH.md).
 **Sessions.** Each session (a space's text mesh, a voice channel, a DM) is
 owned by one server chosen by rendezvous hashing over the live servers, so every
 server independently agrees on the owner. Member servers keep a registry of
-their local members and forward operations to the owner. When the mesh changes
-and ownership moves, member servers re-submit their joins with a hint of the
-last known host, so the new owner rebuilds the same state without interrupting
-the call.
+their local members and forward operations to the owner. A device signs its own
+join, update and report with its account's key, for the server it is connected
+to, and the owner checks the signature against the key in the device's record,
+so a server cannot speak for a device that is on another. When the mesh changes
+and ownership moves, each member server asks its devices to sign a new join and
+sends it with a hint of the last known host, so the new owner rebuilds the same
+state without interrupting the call. A device that does not answer is taken out
+of the session.
 
 **Storage.** SQLite (`node:sqlite`) with secondary indexes, or a
 JSON-snapshotted memory store where SQLite is unavailable.

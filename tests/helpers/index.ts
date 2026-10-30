@@ -72,6 +72,7 @@ export async function connectUser(
     'record',
     'presence',
     'session',
+    'session_renew',
     'signal',
     'voice',
     'replaced',
@@ -115,6 +116,16 @@ export async function registerDevice(
       record: signRecord(identity, 'device', key, body, version),
     }),
   );
+}
+
+/**
+ * What an app does when the server that keeps a room changes: it signs a new join when asked.
+ * `said` is what it says of itself in each.
+ */
+export function answerRenewals(user: Pick<TestUser, 'conn'>, said: HostCaps) {
+  user.conn.on('session_renew', ({ sessionId }) => {
+    void user.conn.request('session.join', { sessionId, caps: said }).catch(() => {});
+  });
 }
 
 export async function createSpace(user: TestUser, name = 'Swamp') {

@@ -51,6 +51,7 @@ const FORWARDED_EVENTS: (keyof ServerEvents)[] = [
   'record',
   'presence',
   'session',
+  'session_renew',
   'session_closed',
   'signal',
   'voice',

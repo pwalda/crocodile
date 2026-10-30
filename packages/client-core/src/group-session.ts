@@ -181,6 +181,13 @@ export type GroupSessionEvents = {
  * be (werift's limit, which host relays use).
  */
 const HISTORY_CHUNK_BYTES = 32 * 1024;
+/** Joined again, when taken out of the room: tries this far apart, twice as far each time up to the most. */
+const REJOIN_RETRY_MS = 1_000;
+const REJOIN_RETRY_MAX_MS = 30_000;
+/** Refused this many times running, it is taken that it is not allowed in (a server behind on records says the same for a while). */
+const REJOIN_REFUSALS = 8;
+/** An update or report that finds we are not in the room starts a join no more often than this. */
+const JOIN_LOST_RETRY_MS = 5_000;
 const PENDING_TTL_MS = 15_000;
 /** The least time between two asks for history because a live message could not be opened. */
 const MISSED_HISTORY_MS = 5_000;
@@ -330,14 +337,70 @@ export class GroupSession extends Emitter<GroupSessionEvents> {
     this.applyState(state);
   }
 
+  /**
+   * Taken out of the room by the server (it did not hear from us in time): joins again, for as
+   * long as the owner cannot be reached (the server does not ask for this one). Refused again and
+   * again (no longer allowed in): the room is left instead. One at a time: asked again while it
+   * goes on, it is the same.
+   */
+  rejoin(): Promise<void> {
+    return (this.rejoining ??= this.rejoinLoop().finally(() => {
+      this.rejoining = undefined;
+    }));
+  }
+  private rejoining?: Promise<void>;
+
+  private async rejoinLoop() {
+    let refused = 0;
+    for (let attempt = 0; !this.left; attempt++) {
+      try {
+        await this.join({ fresh: true });
+        return;
+      } catch (err) {
+        // (Running: any other answer in between starts the count again.)
+        refused = (err as { code?: string }).code === 'forbidden' ? refused + 1 : 0;
+        if (refused >= REJOIN_REFUSALS) return this.leave();
+        await new Promise((r) =>
+          setTimeout(r, Math.min(REJOIN_RETRY_MS * 2 ** attempt, REJOIN_RETRY_MAX_MS)),
+        );
+      }
+    }
+  }
+
+  /**
+   * The server that keeps the session changed, and asks for a new signed join (it asks again if
+   * the new one is not taken, and takes us out if it hears nothing).
+   */
+  async renew() {
+    if (this.left) return;
+    await this.join({ fresh: true }).catch(() => {});
+  }
+
   async updateCaps() {
     if (this.left) return;
     const caps = await this.ctx.caps();
     await this.ctx
       .link()
       .request('session.update', { sessionId: this.sessionId, caps })
-      .catch(() => {});
+      .catch((err) => this.joinLost(err));
   }
+
+  /**
+   * An update or a report that the server says is not for the join it has (or that we are not in it):
+   * a join that was taken whose answer never came, or the other way round. Joining again sets it right.
+   */
+  private joinLost(err: unknown) {
+    const code = (err as { code?: string }).code;
+    if (code !== 'conflict' && code !== 'not_found') return;
+    // Not on top of a join that is on its way, nor again and again.
+    const now = Date.now();
+    // (Only for a room we are in: one that was never joined is not joined by an update.)
+    if (!this.state || this.left || this.joining) return;
+    if (now - this.joinLostAt < JOIN_LOST_RETRY_MS) return;
+    this.joinLostAt = now;
+    void this.join().catch(() => {});
+  }
+  private joinLostAt = 0;
 
   async leave() {
     if (this.left) return;
@@ -522,7 +585,7 @@ export class GroupSession extends Emitter<GroupSessionEvents> {
       void this.ctx
         .link()
         .request('session.report', { sessionId: this.sessionId, epoch, issue: 'host_unreachable' })
-        .catch(() => {});
+        .catch((err) => this.joinLost(err));
     }
     clearTimeout(this.retryTimer);
     // Every ten seconds at first, then less often: the same host may be named for a long time.
@@ -751,7 +814,7 @@ export class GroupSession extends Emitter<GroupSessionEvents> {
             epoch: entry.epoch,
             issue: 'host_unreachable',
           })
-          .catch(() => {});
+          .catch((err) => this.joinLost(err));
       }
       if (
         this.failures >= 2 &&

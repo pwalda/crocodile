@@ -5,7 +5,9 @@ import {
   createIdentity,
   keyMatchesUserId,
   sign,
+  signSessionOp,
   verifyPayload,
+  type Identity,
 } from '@crocodile/crypto';
 import {
   PROTOCOL_VERSION,
@@ -15,6 +17,7 @@ import {
   sessionIds,
   voiceSigned,
   type FedPresence,
+  type HostCaps,
 } from '@crocodile/protocol';
 import { Coordinator, rendezvousOwner } from '@crocodile/coordinator';
 import { RpcFailure } from '../packages/coordinator/src/util';
@@ -339,8 +342,39 @@ describe('events and session operations from other servers', () => {
     await waitFor(() => online(net.victim, marker), 3000, 'the marker to land');
   }
 
-  const op = (net: Net, peer: string, body: unknown) =>
-    net.toVictim.send({ t: 'session_op', opId: 'o1', sessionId: net.sessionId, peer, op: body });
+  /**
+   * What the rogue server sends the owner for a device. With `holder`, the holder of the
+   * account's key has signed it for the rogue server (the device is on it, as far as the others
+   * can tell): the one thing it cannot do for an account it holds no key of.
+   */
+  const op = (
+    net: Net,
+    peer: string,
+    body: { op: string; caps?: unknown; epoch?: number; issue?: string; hint?: unknown },
+    holder?: Identity,
+    ctx: { at?: number; since?: number; n?: number } = {},
+  ) => {
+    const signed =
+      holder && body.op !== 'leave'
+        ? signSessionOp(
+            holder,
+            net.sessionId,
+            peer,
+            body.op === 'report'
+              ? { op: 'report', epoch: body.epoch!, issue: 'host_unreachable' }
+              : { op: body.op as 'join' | 'update', caps: body.caps as HostCaps },
+            { server: net.rogue.info.id, ...ctx },
+          )
+        : undefined;
+    net.toVictim.send({
+      t: 'session_op',
+      opId: 'o1',
+      sessionId: net.sessionId,
+      peer,
+      op: body,
+      ...(signed ? { proof: signed } : {}),
+    });
+  };
 
   describe('routed events', () => {
     it('delivers a signal only from the server that has the sender connected', async () => {
@@ -433,10 +467,16 @@ describe('events and session operations from other servers', () => {
       const net = await conversation();
       const state = await joined(net);
       // The rogue server says Mallory is on it, which it may; she is not in the conversation.
-      const mallory = createIdentity().userId;
+      const outsider = createIdentity();
+      const mallory = outsider.userId;
       const peer = peerIds.make(mallory, 'abcdefgh');
       net.toVictim.send(presenceFrom(net.rogue, Date.now(), [entry(mallory, ['abcdefgh'])]));
-      op(net, peer, { op: 'join', caps: caps(), hint: { epoch: 1e9, host: peer, backup: null } });
+      op(
+        net,
+        peer,
+        { op: 'join', caps: caps(), hint: { epoch: 1e9, host: peer, backup: null } },
+        outsider,
+      );
       await settled(net);
       expect(state().members.map((m) => m.userId)).not.toContain(mallory);
       expect(state().epoch).toBeLessThan(5);
@@ -450,7 +490,7 @@ describe('events and session operations from other servers', () => {
       net.toVictim.send(
         presenceFrom(net.rogue, Date.now(), [entry(net.alice.identity.userId, ['abcdefgh'])]),
       );
-      op(net, peer, { op: 'join', caps: caps({ nat: 'open' }) });
+      op(net, peer, { op: 'join', caps: caps({ nat: 'open' }) }, net.alice.identity);
       await settled(net);
       // The record is looked for for a moment before the join is given up on.
       await new Promise((r) => setTimeout(r, 1500));
@@ -466,11 +506,16 @@ describe('events and session operations from other servers', () => {
         presenceFrom(net.rogue, Date.now(), [entry(net.alice.identity.userId, [device])]),
       );
       const ghost = peerIds.make(net.alice.identity.userId, 'abcdefgh');
-      op(net, net.alice.conn.peer, {
-        op: 'join',
-        caps: caps(),
-        hint: { epoch: 1000, host: ghost, backup: null },
-      });
+      op(
+        net,
+        net.alice.conn.peer,
+        {
+          op: 'join',
+          caps: caps(),
+          hint: { epoch: 1000, host: ghost, backup: null },
+        },
+        net.alice.identity,
+      );
       await settled(net);
       expect(state().host).not.toBe(ghost);
       expect(state().epoch).toBeLessThan(5);
@@ -519,11 +564,16 @@ describe('events and session operations from other servers', () => {
       net.toVictim.send(
         presenceFrom(net.rogue, Date.now(), [entry(net.alice.identity.userId, [device])]),
       );
-      op(net, net.alice.conn.peer, {
-        op: 'join',
-        caps: caps(),
-        hint: { epoch: 1000, host: null, backup: null },
-      });
+      op(
+        net,
+        net.alice.conn.peer,
+        {
+          op: 'join',
+          caps: caps(),
+          hint: { epoch: 1000, host: null, backup: null },
+        },
+        net.alice.identity,
+      );
       await waitFor(() => state().epoch >= 1000, 5000, 'the epoch to be kept');
     });
 
@@ -535,11 +585,16 @@ describe('events and session operations from other servers', () => {
         presenceFrom(net.rogue, Date.now(), [entry(net.alice.identity.userId, [device])]),
       );
       const ghost = peerIds.make(net.alice.identity.userId, 'abcdefgh');
-      op(net, net.alice.conn.peer, {
-        op: 'join',
-        caps: caps(),
-        hint: { epoch: 1000, host: net.bob.conn.peer, backup: ghost },
-      });
+      op(
+        net,
+        net.alice.conn.peer,
+        {
+          op: 'join',
+          caps: caps(),
+          hint: { epoch: 1000, host: net.bob.conn.peer, backup: ghost },
+        },
+        net.alice.identity,
+      );
       await waitFor(() => state().epoch >= 1000, 5000, 'the hint');
       expect(state().host).toBe(net.bob.conn.peer);
       expect(state().backup).not.toBe(ghost);
@@ -563,7 +618,7 @@ describe('events and session operations from other servers', () => {
         await new Promise((r) => setTimeout(r, 400));
         return real(...a);
       });
-      op(net, second.conn.peer, { op: 'join', caps: caps() });
+      op(net, second.conn.peer, { op: 'join', caps: caps() }, net.alice.identity);
       op(net, second.conn.peer, { op: 'leave' });
       await settled(net);
       await new Promise((r) => setTimeout(r, 1200));
@@ -611,14 +666,242 @@ describe('events and session operations from other servers', () => {
         presenceFrom(net.rogue, Date.now(), [entry(net.alice.identity.userId, ['abcdefgh'])]),
       );
       const mallory = peerIds.make(createIdentity().userId, 'abcdefgh');
-      op(net, peerIds.make(net.alice.identity.userId, 'abcdefgh'), {
-        op: 'join',
-        caps: caps(),
-        hint: { epoch: 1e9, host: mallory, backup: null },
-      });
+      op(
+        net,
+        peerIds.make(net.alice.identity.userId, 'abcdefgh'),
+        {
+          op: 'join',
+          caps: caps(),
+          hint: { epoch: 1e9, host: mallory, backup: null },
+        },
+        net.alice.identity,
+      );
       await settled(net);
       expect(state().host).not.toBe(mallory);
       expect(state().epoch).toBeLessThan(5);
+    });
+
+    describe('what a device signs', () => {
+      type Owned = Map<
+        string,
+        {
+          memberServer: Map<string, string>;
+          signed: Map<string, { since: number; n: number }>;
+          reports: Map<string, string>;
+        }
+      >;
+      const owned = (net: Net) =>
+        (net.victim.sessions as unknown as { owned: Owned }).owned.get(net.sessionId)!;
+      /** The rogue server claims Bob's device is on it, as a server that wants to speak for it must. */
+      const claimBob = (net: Net) =>
+        net.toVictim.send(
+          presenceFrom(net.rogue, Date.now(), [
+            entry(net.bob.identity.userId, [peerIds.device(net.bob.conn.peer)]),
+          ]),
+        );
+      const memberOf = (net: Net, peer: string) =>
+        net.victim.sessions.ownedState(net.sessionId)!.members.find((m) => m.peer === peer);
+      const serverOf = (net: Net) => owned(net).memberServer.get(net.bob.conn.peer);
+      const pause = () => new Promise((r) => setTimeout(r, 300));
+
+      it('does not let a server take over the membership of a device that is on another', async () => {
+        const net = await conversation();
+        await joined(net);
+        claimBob(net);
+        expect(serverOf(net)).toBe(net.honest.info.id);
+        // Nothing signed, and a signature by somebody else, as the key of Bob is not theirs.
+        op(net, net.bob.conn.peer, { op: 'join', caps: caps({ nat: 'open' }) });
+        op(net, net.bob.conn.peer, { op: 'join', caps: caps({ nat: 'open' }) }, createIdentity());
+        await settled(net);
+        await pause();
+        expect(serverOf(net)).toBe(net.honest.info.id);
+        expect(memberOf(net, net.bob.conn.peer)!.caps.nat).not.toBe('open');
+        // Nor can it make Bob leave, or change what he says of himself.
+        op(net, net.bob.conn.peer, { op: 'update', caps: caps({ nat: 'symmetric' }) });
+        op(net, net.bob.conn.peer, { op: 'leave' });
+        await settled(net);
+        await pause();
+        expect(memberOf(net, net.bob.conn.peer)!.caps.nat).not.toBe('symmetric');
+        expect(memberOf(net, net.bob.conn.peer)).toBeDefined();
+      });
+
+      it('looks up the record of a device only for a join that is signed for the sender and recent', async () => {
+        const net = await conversation();
+        await joined(net);
+        claimBob(net);
+        const find = vi.spyOn(
+          net.victim.sessions as unknown as { findDevice(): unknown },
+          'findDevice',
+        );
+        const body = { op: 'join', caps: caps() };
+        op(net, net.bob.conn.peer, body);
+        op(net, net.bob.conn.peer, body, net.bob.identity, { at: Date.now() - 10 * 60_000 });
+        const forOther = signSessionOp(
+          net.bob.identity,
+          net.sessionId,
+          net.bob.conn.peer,
+          { op: 'join', caps: caps() },
+          { server: net.honest.info.id },
+        );
+        net.toVictim.send({
+          t: 'session_op',
+          opId: 'o2',
+          sessionId: net.sessionId,
+          peer: net.bob.conn.peer,
+          op: body,
+          proof: forOther,
+        });
+        await settled(net);
+        await new Promise((r) => setTimeout(r, 300));
+        expect(find).not.toHaveBeenCalled();
+        op(net, net.bob.conn.peer, body, net.bob.identity, { at: Date.now() + 1000 });
+        await waitFor(() => find.mock.calls.length > 0, 3000, 'the look-up of a join that is fine');
+        find.mockRestore();
+      });
+
+      it('does not take a join that was signed for another server', async () => {
+        const net = await conversation();
+        await joined(net);
+        claimBob(net);
+        // Bob signs for his own server; the rogue one passes it on.
+        const body = { op: 'join', caps: caps({ nat: 'open' }) } as const;
+        const proof = signSessionOp(net.bob.identity, net.sessionId, net.bob.conn.peer, body, {
+          server: net.honest.info.id,
+        });
+        net.toVictim.send({
+          t: 'session_op',
+          opId: 'o1',
+          sessionId: net.sessionId,
+          peer: net.bob.conn.peer,
+          op: body,
+          proof,
+        });
+        await settled(net);
+        await pause();
+        expect(serverOf(net)).toBe(net.honest.info.id);
+      });
+
+      it('lets a device move to another server, and then ignores the old one', async () => {
+        const net = await conversation();
+        await joined(net);
+        claimBob(net);
+        // Bob's app now signs for the rogue server, which he really is on.
+        op(net, net.bob.conn.peer, { op: 'join', caps: caps() }, net.bob.identity);
+        await waitFor(() => serverOf(net) === net.rogue.info.id, 3000, 'the move');
+        // The server he left says he has gone, late.
+        net.bob.conn.close();
+        // (The rogue server goes on saying that he is on it, so he does not go offline.)
+        await new Promise((r) => setTimeout(r, 1500));
+        expect(memberOf(net, net.bob.conn.peer)).toBeDefined();
+      });
+
+      it('takes a join that is up to five minutes off by the clock, and not one that is more', async () => {
+        const net = await conversation();
+        await joined(net);
+        claimBob(net);
+        const body = { op: 'join', caps: caps() };
+        op(net, net.bob.conn.peer, body, net.bob.identity, { at: Date.now() - 6 * 60_000 });
+        op(net, net.bob.conn.peer, body, net.bob.identity, { at: Date.now() + 6 * 60_000 });
+        await settled(net);
+        await pause();
+        expect(serverOf(net)).toBe(net.honest.info.id);
+        op(net, net.bob.conn.peer, body, net.bob.identity, { at: Date.now() + 4 * 60_000 });
+        await waitFor(() => serverOf(net) === net.rogue.info.id, 3000, 'the join');
+      });
+
+      it('takes a join from a server whose clock is behind that of the one the device came from', async () => {
+        const net = await conversation();
+        await joined(net);
+        claimBob(net);
+        // Dated a minute before the join Bob's own server sent: another clock, not a replay.
+        op(net, net.bob.conn.peer, { op: 'join', caps: caps() }, net.bob.identity, {
+          at: Date.now() - 60_000,
+        });
+        await waitFor(() => serverOf(net) === net.rogue.info.id, 3000, 'the join');
+      });
+
+      it('does not take the same join twice after the device has left, and takes a later one', async () => {
+        const net = await conversation();
+        await joined(net);
+        claimBob(net);
+        const body = { op: 'join', caps: caps() };
+        // (Later than Bob's own join, which came first.)
+        const at = Date.now() + 1000;
+        op(net, net.bob.conn.peer, body, net.bob.identity, { at });
+        await waitFor(() => serverOf(net) === net.rogue.info.id, 3000, 'the join');
+        op(net, net.bob.conn.peer, { op: 'leave' });
+        await waitFor(() => !memberOf(net, net.bob.conn.peer), 3000, 'the leave');
+        claimBob(net);
+        // Said again: the same signature, which the rogue server kept.
+        op(net, net.bob.conn.peer, body, net.bob.identity, { at });
+        await settled(net);
+        await pause();
+        expect(memberOf(net, net.bob.conn.peer)).toBeUndefined();
+        op(net, net.bob.conn.peer, body, net.bob.identity, { at: at + 1 });
+        await waitFor(() => memberOf(net, net.bob.conn.peer), 3000, 'the later join');
+      });
+
+      it('takes an update or a report only if it is signed, for the join, and the next in line', async () => {
+        const net = await conversation();
+        await joined(net);
+        claimBob(net);
+        // (Later than Bob's own join, which came first.)
+        const at = Date.now() + 1000;
+        op(net, net.bob.conn.peer, { op: 'join', caps: caps() }, net.bob.identity, { at });
+        await waitFor(() => serverOf(net) === net.rogue.info.id, 3000, 'the join');
+        const update = (
+          nat: 'open' | 'cone' | 'symmetric',
+          ctx?: { since: number; n: number },
+          who = net.bob.identity,
+        ) => op(net, net.bob.conn.peer, { op: 'update', caps: caps({ nat }) }, who, ctx);
+        const nat = () => memberOf(net, net.bob.conn.peer)!.caps.nat;
+        // Not signed, signed by someone else, for another join.
+        op(net, net.bob.conn.peer, { op: 'update', caps: caps({ nat: 'open' }) });
+        update('open', { since: at, n: 1 }, createIdentity());
+        update('open', { since: at + 5, n: 1 });
+        await settled(net);
+        await pause();
+        expect(nat()).not.toBe('open');
+        // In order; one that comes later and is older is of no account.
+        update('open', { since: at, n: 2 });
+        await waitFor(() => nat() === 'open', 3000, 'the update');
+        update('cone', { since: at, n: 1 });
+        update('cone', { since: at, n: 2 });
+        await settled(net);
+        await pause();
+        expect(nat()).toBe('open');
+      });
+
+      it('takes a report only if it is signed, and for the join', async () => {
+        const net = await conversation();
+        // Alice is the better host, so that Bob has somebody else's host to report.
+        await net.alice.conn.request('session.join', {
+          sessionId: net.sessionId,
+          caps: caps({ nat: 'open' }),
+        });
+        await net.bob.conn.request('session.join', {
+          sessionId: net.sessionId,
+          caps: caps({ nat: 'symmetric' }),
+        });
+        claimBob(net);
+        // (Later than Bob's own join, which came first.)
+        const at = Date.now() + 1000;
+        op(net, net.bob.conn.peer, { op: 'join', caps: caps() }, net.bob.identity, { at });
+        await waitFor(() => serverOf(net) === net.rogue.info.id, 3000, 'the join');
+        const state = net.victim.sessions.ownedState(net.sessionId)!;
+        expect(state.host).toBe(net.alice.conn.peer);
+        const epoch = state.epoch;
+        const report = { op: 'report', epoch, issue: 'host_unreachable' };
+        op(net, net.bob.conn.peer, report);
+        op(net, net.bob.conn.peer, report, net.bob.identity, { since: at + 5 });
+        op(net, net.bob.conn.peer, report, createIdentity(), { since: at });
+        await settled(net);
+        await pause();
+        expect(state.epoch).toBe(epoch);
+        // Signed, for the join: the only other person is enough for the host to be changed.
+        op(net, net.bob.conn.peer, report, net.bob.identity, { since: at });
+        await waitFor(() => state.epoch > epoch, 3000, 'the vote');
+      });
     });
   });
 });
