@@ -1616,6 +1616,27 @@ describe('sessions and host election', () => {
       });
     });
 
+    it('tells a device that was removed from the account while it was asked for a join that it is out', async () => {
+      const { c, alice, sessionId } = await setup();
+      await alice.conn.request('session.join', { sessionId, caps: caps() });
+      answerRenewals(alice, caps());
+      const internals = c.sessions as unknown as {
+        lastOwner: Map<string, string>;
+        vouchOrDrop(): Promise<unknown>;
+        rebalance(): void;
+      };
+      internals.lastOwner.set(sessionId, 'someone-else');
+      const vouch = vi
+        .spyOn(internals, 'vouchOrDrop')
+        .mockRejectedValueOnce(new RpcFailure('forbidden', DEVICE_REMOVED));
+      internals.rebalance();
+      await waitFor(() => alice.events.some((e) => e.ev === 'session_closed'), 3000, 'to be told');
+      vouch.mockRestore();
+      expect(alice.events.find((e) => e.ev === 'session_closed')!.d).toMatchObject({
+        again: false,
+      });
+    });
+
     it('keeps a device whose join is refused while a later ask gave it more time', async () => {
       const { c, alice, sessionId } = await setup();
       await alice.conn.request('session.join', { sessionId, caps: caps() });

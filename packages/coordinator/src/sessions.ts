@@ -448,12 +448,7 @@ export class SessionService {
       ({ caps: vouched, device } = await this.vouchOrDrop(client.peer, sessionId, caps, true));
     } catch (err) {
       // No longer allowed in (left the space, say): asking again would only be refused again.
-      if (
-        renewal &&
-        err instanceof RpcFailure &&
-        err.code === 'forbidden' &&
-        err.message !== DEVICE_REMOVED
-      ) {
+      if (renewal && err instanceof RpcFailure && err.code === 'forbidden') {
         this.endRenewal(joinKey);
         this.dropUnrenewed(sessionId, client.peer, false);
       } else this.askAgain(renewal, sessionId, client, err);
