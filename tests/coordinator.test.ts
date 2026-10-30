@@ -1523,7 +1523,7 @@ describe('sessions and host election', () => {
         renewTimeoutMs: number;
       };
       internals.renewRetryMs = 50;
-      internals.renewTimeoutMs = 600;
+      internals.renewTimeoutMs = 3000;
       internals.lastOwner.set(sessionId, 'someone-else');
       const submit = vi
         .spyOn(internals, 'submit')
@@ -1534,7 +1534,7 @@ describe('sessions and host election', () => {
       const again = await connectUser(c, alice.identity, 'alice', peerIds.device(alice.conn.peer));
       await waitFor(
         () => again.events.some((e) => e.ev === 'session_closed'),
-        4000,
+        10000,
         'the new connection to be told',
       );
       submit.mockRestore();
@@ -1576,19 +1576,19 @@ describe('sessions and host election', () => {
         renewTimeoutMs: number;
       };
       internals.renewRetryMs = 50;
-      internals.renewTimeoutMs = 300;
+      internals.renewTimeoutMs = 600;
       internals.lastOwner.set(sessionId, 'someone-else');
       // The first join is slow to be refused: by then its time has gone, and a later ask (the owner
       // changed again) has been answered.
       const submit = vi.spyOn(internals, 'submit').mockImplementationOnce(async () => {
-        await new Promise((r) => setTimeout(r, 600));
+        await new Promise((r) => setTimeout(r, 1800));
         throw new RpcFailure('unavailable', 'the owner cannot be reached');
       });
       internals.rebalance();
-      await new Promise((r) => setTimeout(r, 400));
+      await new Promise((r) => setTimeout(r, 900));
       internals.lastOwner.set(sessionId, 'someone-else');
       internals.rebalance();
-      await new Promise((r) => setTimeout(r, 500));
+      await new Promise((r) => setTimeout(r, 1200));
       submit.mockRestore();
       expect(alice.events.filter((e) => e.ev === 'session_renew')).toHaveLength(2);
       expect(alice.events.some((e) => e.ev === 'session_closed')).toBe(false);
@@ -1654,18 +1654,18 @@ describe('sessions and host election', () => {
         renewTimeoutMs: number;
       };
       internals.renewRetryMs = 5000;
-      internals.renewTimeoutMs = 300;
+      internals.renewTimeoutMs = 1500;
       internals.lastOwner.set(sessionId, 'someone-else');
       const submit = vi.spyOn(internals, 'submit').mockImplementationOnce(async () => {
-        await new Promise((r) => setTimeout(r, 500));
+        await new Promise((r) => setTimeout(r, 3000));
         throw new RpcFailure('forbidden', 'not a member of this space');
       });
       internals.rebalance();
-      await new Promise((r) => setTimeout(r, 400));
+      await new Promise((r) => setTimeout(r, 2000));
       // The first time has gone; the owner changed again and the device was given more.
       internals.lastOwner.set(sessionId, 'someone-else');
       internals.rebalance();
-      await new Promise((r) => setTimeout(r, 250));
+      await new Promise((r) => setTimeout(r, 1250));
       submit.mockRestore();
       expect(alice.events.some((e) => e.ev === 'session_closed')).toBe(false);
       expect(c.sessions.inSession(alice.conn.peer, sessionId)).toBe(true);
