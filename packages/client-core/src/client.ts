@@ -2412,6 +2412,7 @@ export class CrocodileClient extends Emitter<ClientEvents> {
         isAllowedPeer: (sid, p) => this.isAllowedPeer(sid, p),
         isMemberPeer: (sid, p) => this.isMemberPeer(sid, p),
         refreshPeer: (sid, p) => this.refreshPeer(sid, p),
+        hasDevice: (p) => this.hasDevice(p),
         relay: {
           allowed: () => this.state.settings.allowServerRelay,
           request: async (sid) =>
@@ -2758,14 +2759,14 @@ export class CrocodileClient extends Emitter<ClientEvents> {
   private async deviceOf(peer: string): Promise<DeviceBody | null> {
     const userId = peerIds.user(peer);
     const key = recordKey.device(userId, peerIds.device(peer));
-    let r = this.records.get(key) as SignedRecord<'device'> | undefined;
+    let r = this.deviceRecord(peer);
     if (!r || r.body.prekey.expiresAt < Date.now()) {
       const res = await this.link?.request('records.get', { keys: [key] }).catch(() => null);
       if (res) this.records.ingestAll(res.records);
       void this.link
         ?.request('records.subscribe', { prefixes: [recordKey.devicePrefix(userId)] })
         .catch(() => {});
-      r = this.records.get(key) as SignedRecord<'device'> | undefined;
+      r = this.deviceRecord(peer);
     }
     if (!r || r.body.revoked) return null;
     return r.body;
@@ -2808,12 +2809,22 @@ export class CrocodileClient extends Emitter<ClientEvents> {
     if (!scope) return false;
     const userId = peerIds.user(peer);
     if (peer.includes('.')) {
-      const device = this.records.get(recordKey.device(userId, peerIds.device(peer))) as
-        SignedRecord<'device'> | undefined;
-      if (device?.body.revoked) return false;
+      if (this.deviceRecord(peer)?.body.revoked) return false;
     }
     if (scope.kind === 'dm') return scope.users.includes(userId);
     return isSpaceMember(this.records, scope.spaceId, userId);
+  }
+
+  /** The record of a peer's device, if we hold one. */
+  private deviceRecord(peer: string) {
+    return this.records.get(recordKey.device(peerIds.user(peer), peerIds.device(peer))) as
+      SignedRecord<'device'> | undefined;
+  }
+
+  /** Whether we hold a record for the peer's device, and it has not been removed. */
+  hasDevice(peer: string): boolean {
+    const device = this.deviceRecord(peer);
+    return !!device && !device.body.revoked;
   }
 
   /**

@@ -1151,6 +1151,8 @@ describe('multiple devices', () => {
     const alice2Peer = `${alice2.userId}.${alice2.deviceId}`;
     await waitFor(() => !bob.isAllowedPeer(sid, alice2Peer), 12000, 'revocation seen by bob');
     expect(bob.isAllowedPeer(sid, `${alice1.userId}.${alice1.deviceId}`)).toBe(true);
+    expect(bob.hasDevice(`${alice1.userId}.${alice1.deviceId}`)).toBe(true);
+    expect(bob.hasDevice(alice2Peer)).toBe(false);
   });
 
   it('links when the new device confirms before the account arrives', async () => {

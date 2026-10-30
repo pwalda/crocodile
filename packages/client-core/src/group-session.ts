@@ -54,6 +54,8 @@ export interface SessionContext {
   isAllowedPeer(sessionId: string, peer: string): boolean;
   /** Whether a peer belongs in the session at all, blocked or not (they are still connected to). */
   isMemberPeer(sessionId: string, peer: string): boolean;
+  /** Whether we hold a device record, not removed, for the peer. */
+  hasDevice(peer: string): boolean;
   /** Fetch the records needed to judge a peer we know nothing about yet. */
   refreshPeer(sessionId: string, peer: string): Promise<void>;
   /** Channels whose history belongs to the session. */
@@ -180,6 +182,10 @@ export type GroupSessionEvents = {
  */
 const HISTORY_CHUNK_BYTES = 32 * 1024;
 const PENDING_TTL_MS = 15_000;
+/** The least time between two asks for history because a live message could not be opened. */
+const MISSED_HISTORY_MS = 5_000;
+/** How far back history is asked for again: the message missed may be older than the newest held. */
+const MISSED_LOOKBACK_MS = 120_000;
 /** How far a sealed sender key's date may be from our clock. */
 const SENDER_KEY_SKEW_MS = 10 * 60_000;
 
@@ -259,6 +265,8 @@ export class GroupSession extends Emitter<GroupSessionEvents> {
     [];
   private historyServedAt = new Map<string, number[]>();
   private historyAsked = new Set<string>();
+  /** When history was last asked for again because of a message from each peer. */
+  private missedAt = new Map<string, number>();
   private relayRequested = false;
   /** Peers we already offered our outbox to on this connection. */
   private outboxOffered = new Set<string>();
@@ -488,7 +496,7 @@ export class GroupSession extends Emitter<GroupSessionEvents> {
     }
     if (this.left || this.state?.epoch !== epoch || this.state.host !== host || this.transport)
       return;
-    if (this.mayConnect(host)) {
+    if (this.mayConnectHost(host)) {
       this.connectTransport();
       return;
     }
@@ -505,7 +513,11 @@ export class GroupSession extends Emitter<GroupSessionEvents> {
     // Told only when our records of it are as new as the fetch could make them: a fetch that
     // failed says nothing about the host.
     // Not for a host we only blocked: the server knows nothing of blocks.
-    if (fetched && !this.ctx.isMemberPeer(this.sessionId, host) && this.reportedEpoch !== epoch) {
+    if (
+      fetched &&
+      (!this.ctx.isMemberPeer(this.sessionId, host) || !this.ctx.hasDevice(host)) &&
+      this.reportedEpoch !== epoch
+    ) {
       this.reportedEpoch = epoch;
       void this.ctx
         .link()
@@ -529,6 +541,11 @@ export class GroupSession extends Emitter<GroupSessionEvents> {
       : this.ctx.isMemberPeer(this.sessionId, host);
   }
 
+  /** Whether the host the server named is one we connect to: a member, on a device we know of. */
+  private mayConnectHost(host: string) {
+    return this.ctx.hasDevice(host) && this.mayConnect(host);
+  }
+
   /** The host (and epoch) being checked, and the one we refused to connect to. */
   private vetting?: string;
   private refused?: string;
@@ -542,7 +559,7 @@ export class GroupSession extends Emitter<GroupSessionEvents> {
   private recheckHost() {
     const host = this.state?.host;
     if (!host || host === this.me || this.left) return;
-    const member = this.mayConnect(host);
+    const member = this.mayConnectHost(host);
     if (!member && this.transport?.host === host) this.connectTransport();
     else if (member && this.refused === `${this.state!.epoch}|${host}`) {
       this.refused = undefined;
@@ -586,7 +603,7 @@ export class GroupSession extends Emitter<GroupSessionEvents> {
     this.closeTransport();
     this.forgetConnection();
     if (!state?.host || this.left) return;
-    if (state.host !== this.me && !this.mayConnect(state.host)) {
+    if (state.host !== this.me && !this.mayConnectHost(state.host)) {
       this.setStatus(this.failures > 0 ? 'reconnecting' : 'connecting');
       void this.vetHost(state.epoch, state.host);
       return;
@@ -1073,6 +1090,7 @@ export class GroupSession extends Emitter<GroupSessionEvents> {
             this.ctx.log('could not add video to the call', { err: String(err) }),
           );
         this.historyAsked.clear();
+        this.missedAt.clear();
         this.outboxOffered.clear();
         for (const p of msg.peers) this.onPeerPresent(p.id);
         this.requestHistory([...this.peers.keys()]);
@@ -1407,6 +1425,11 @@ export class GroupSession extends Emitter<GroupSessionEvents> {
     }
     const result = this.keyring.decrypt(env.kid, env.g, env.ct);
     if (!result) {
+      // A key we hold that cannot open it: the message is from before the key we were given.
+      if (this.keyring.isBehind(from, env.kid, env.g)) {
+        this.missed(from);
+        return;
+      }
       this.pendingGroup.push({ from, env, at: Date.now() });
       if (this.pendingGroup.length > 500) this.pendingGroup.shift();
       return;
@@ -1505,37 +1528,55 @@ export class GroupSession extends Emitter<GroupSessionEvents> {
     this.pendingGroup = [];
     for (const p of queue) {
       const result = this.keyring.decrypt(p.env.kid, p.env.g, p.env.ct);
-      if (!result) this.pendingGroup.push(p);
-      else if (result.peer === p.from) await this.onGroupPlaintext(p.from, result.plaintext);
+      if (result) {
+        if (result.peer === p.from) await this.onGroupPlaintext(p.from, result.plaintext);
+      } else if (this.keyring.isBehind(p.from, p.env.kid, p.env.g)) this.missed(p.from);
+      else this.pendingGroup.push(p);
     }
+  }
+
+  /**
+   * A message sent live that we cannot open any more (it was sent before the key we got for it
+   * could reach us). It is not lost: the sender holds it, so history is asked of them again (of
+   * the host if they are not there), at most every few seconds for each.
+   */
+  private missed(from: string) {
+    const now = Date.now();
+    if (now - (this.missedAt.get(from) ?? 0) < MISSED_HISTORY_MS) return;
+    if (this.requestHistory([from], true)) this.missedAt.set(from, now);
   }
 
   // -------------------------------------------------------------------------
   // History sync
   // -------------------------------------------------------------------------
 
-  private requestHistory(candidates: string[]) {
+  /** Whether a request was made. */
+  private requestHistory(candidates: string[], again = false): boolean {
     const channels = this.ctx.historyChannels(this.sessionId);
-    if (channels.length === 0) return;
+    if (channels.length === 0) return false;
     const st = this.state;
-    const preferred = [st?.host, st?.backup, ...candidates].filter(
+    const preferred = [...(again ? candidates : []), st?.host, st?.backup, ...candidates].filter(
       (u): u is string =>
         !!u &&
         u !== this.me &&
         this.peers.has(u) &&
-        !this.historyAsked.has(u) &&
+        (again || !this.historyAsked.has(u)) &&
         this.ctx.isAllowedPeer(this.sessionId, u),
     );
-    const targets = [...new Set(preferred)].slice(0, 2);
-    if (targets.length === 0) return;
+    const targets = [...new Set(preferred)].slice(0, again ? 1 : 2);
+    if (targets.length === 0) return false;
     void (async () => {
       const since: Record<string, number> = {};
-      for (const ch of channels) since[ch] = await this.ctx.syncCursor(ch);
+      for (const ch of channels) {
+        const cursor = await this.ctx.syncCursor(ch);
+        since[ch] = again ? Math.max(0, cursor - MISSED_LOOKBACK_MS) : cursor;
+      }
       for (const t of targets) {
         this.historyAsked.add(t);
         await this.sendSealed(t, { type: 'history_req', since });
       }
     })();
+    return true;
   }
 
   private async serveHistory(to: string, since: Record<string, number>) {
