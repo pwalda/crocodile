@@ -237,7 +237,8 @@ picture size.
   read (mode 600), not in an OS keychain; anyone with that user's access, or
   root, can use the account. One process at a time may hold the file (a lock
   file with its process id; a lock left by a process that is gone is taken
-  over), and each save goes to a new temporary file, is flushed to disk and
+  over, but one whose id an unrelated program has since taken is not: the
+  message names the file to delete), and each save goes to a new temporary file, is flushed to disk and
   replaces the old one, so two commands cannot overwrite each other's changes
   or leave half a file. Remove the device in the app if a machine is
   lost.

@@ -101,7 +101,16 @@ export class JsonFileStore implements KeyValueStore {
   }
 
   private schedule() {
-    this.timer ??= setTimeout(() => this.flush(), 200);
+    this.timer ??= setTimeout(() => this.saveLater(), 200);
+  }
+
+  /** A failed background save is tried again, not thrown from a timer; `close()` reports a lasting failure. */
+  private saveLater() {
+    try {
+      this.flush();
+    } catch {
+      this.timer = setTimeout(() => this.saveLater(), 1000);
+    }
   }
 
   /** Writes now (also called before exiting). */
@@ -131,14 +140,15 @@ export class JsonFileStore implements KeyValueStore {
     syncFolder(dirname(this.path));
   }
 
-  /** Writes what is pending and gives the file up for the next process. */
+  /**
+   * Writes what is pending and gives the file up for the next process. If the
+   * write fails the file is kept (and so is what was to be saved, for another
+   * try); the lock goes when the process does.
+   */
   close() {
-    try {
-      this.flush();
-    } finally {
-      this.unlock?.();
-      this.unlock = undefined;
-    }
+    this.flush();
+    this.unlock?.();
+    this.unlock = undefined;
   }
 }
 
@@ -272,6 +282,22 @@ export function createCliPlatform(opts: { dir: string; version: string; stun: ()
 } {
   mkdirSync(opts.dir, { recursive: true, mode: 0o700 });
   const kv = new JsonFileStore(join(opts.dir, 'state.json'));
+  try {
+    return buildPlatform(opts, kv);
+  } catch (err) {
+    try {
+      kv.close();
+    } catch {
+      // The setup failed first; that is the error to show.
+    }
+    throw err;
+  }
+}
+
+function buildPlatform(
+  opts: { version: string; stun: () => string[]; dir: string },
+  kv: JsonFileStore,
+) {
   const files = new CliFileStore(join(opts.dir, 'files'));
   const PC = RTCPeerConnection as unknown as typeof globalThis.RTCPeerConnection;
   const probeNetwork = createNetworkProber(PC, opts.stun);

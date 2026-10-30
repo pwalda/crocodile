@@ -37,7 +37,7 @@ describe('the account state file', () => {
     const first = new JsonFileStore(path);
     await first.set('seed', 'abc');
     expect(() => new JsonFileStore(path)).toThrow(ProfileInUse);
-    expect(() => new JsonFileStore(path)).toThrow(/Another Crocodile command.*--profile/);
+    expect(() => new JsonFileStore(path)).toThrow(/already open in this program/);
     first.close();
     const second = new JsonFileStore(path);
     expect(await second.get('seed')).toBe('abc');
@@ -97,16 +97,69 @@ describe('the account state file', () => {
     // What an interrupted older version left, and something else that is in the way.
     mkdirSync(`${path}.tmp`);
     writeFileSync(`${path}.123.dead.tmp`, 'half a file');
-    writeFileSync(`${path}.tmp`.replace('.tmp', '.9.tmp'), 'x');
+    // The shape a crashed write leaves; and files of the user's own that merely look similar.
+    writeFileSync(`${path}.4242.0a1b2c3d.tmp`, 'half a file');
+    writeFileSync(`${path}.backup.tmp`, 'mine');
+    writeFileSync(`${path}.1.tmp`, 'mine too');
     const store = new JsonFileStore(path);
-    expect(existsSync(`${path}.123.dead.tmp`)).toBe(false);
+    expect(existsSync(`${path}.123.dead.tmp`)).toBe(true); // not our shape
+    expect(existsSync(`${path}.4242.0a1b2c3d.tmp`)).toBe(false);
     await store.set('k', 'v');
     store.close();
     expect(JSON.parse(readFileSync(path, 'utf8'))).toEqual({ k: 'v' });
     expect(readdirSync(join(path, '..')).filter((f) => f.endsWith('.tmp'))).toEqual([
+      'state.json.1.tmp',
+      'state.json.123.dead.tmp',
+      'state.json.backup.tmp',
       'state.json.tmp',
     ]);
     expect(statLikeMode(path)).toBe(0o600);
+  });
+
+  it('takes over a lock that names this very process but is not held, as in a container where every start is process 1', () => {
+    const path = join(tempDir(), 'state.json');
+    writeFileSync(`${path}.lock`, JSON.stringify({ pid: process.pid, at: Date.now() }));
+    new JsonFileStore(path).close();
+  });
+
+  it('names the lock file to delete, for a process id that was reused', () => {
+    const path = join(tempDir(), 'state.json');
+    const other = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 30000)']);
+    children.push(other);
+    writeFileSync(`${path}.lock`, JSON.stringify({ pid: other.pid, at: Date.now() }));
+    expect(() => new JsonFileStore(path)).toThrow(/If none is running, delete .*state\.json\.lock/);
+  });
+
+  it('says the account is open in this program, not that another command has it', () => {
+    const path = join(tempDir(), 'state.json');
+    const a = new JsonFileStore(path);
+    expect(() => new JsonFileStore(path)).toThrow(/already open in this program/);
+    a.close();
+  });
+
+  it('keeps what it could not save, and the lock, so closing can be tried again', async () => {
+    const path = join(tempDir(), 'state.json');
+    const store = new JsonFileStore(path);
+    await store.set('ratchet', 5);
+    mkdirSync(path); // the state cannot be replaced by a file now
+    expect(() => store.close()).toThrow();
+    expect(existsSync(`${path}.lock`)).toBe(true);
+    rmSync(path, { recursive: true });
+    store.close();
+    expect(existsSync(`${path}.lock`)).toBe(false);
+    expect(JSON.parse(readFileSync(path, 'utf8'))).toEqual({ ratchet: 5 });
+  });
+
+  it('tries a failed background save again instead of throwing from a timer', async () => {
+    const path = join(tempDir(), 'state.json');
+    const store = new JsonFileStore(path);
+    mkdirSync(path);
+    await store.set('k', 'v'); // saved in the background after 0.2 s, which fails
+    await new Promise((r) => setTimeout(r, 400));
+    rmSync(path, { recursive: true });
+    for (let i = 0; i < 40 && !existsSync(path); i++) await new Promise((r) => setTimeout(r, 100));
+    expect(JSON.parse(readFileSync(path, 'utf8'))).toEqual({ k: 'v' });
+    store.close();
   });
 
   it('does not write after it was closed', async () => {
@@ -138,10 +191,15 @@ describe('crocodile commands on the same account', () => {
       cwd: home,
       interrupted: new Promise(() => {}),
     };
-    const holder = new JsonFileStore(join(home, 'state.json'));
+    // Another program holds it: a live process that is not this one.
+    const other = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 30000)']);
+    children.push(other);
+    const lock = join(home, 'state.json.lock');
+    writeFileSync(lock, JSON.stringify({ pid: other.pid, at: Date.now() }));
     expect(await run(['whoami', '--server', 'http://127.0.0.1:1'], io)).toBe(1);
-    expect(err.join('\n')).toMatch(/Another Crocodile command .* is using this account/);
-    holder.close();
+    expect(err.join('\n')).toMatch(/Another Crocodile command .* is using this account.*--profile/);
+    other.kill();
+    await new Promise((r) => other.once('exit', r));
     err.length = 0;
     // Not signed in yet, but it got as far as the account: it is not the lock that stops it.
     await run(['whoami', '--server', 'http://127.0.0.1:1'], io);

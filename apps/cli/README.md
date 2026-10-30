@@ -70,7 +70,8 @@ One command at a time can use an account: a second one (say `send` while
 `get --keep` is waiting) stops and says so, because both would otherwise keep
 their own copy of the keys and ratchets and one would overwrite the other's
 changes. Give each its own `--profile`, or wait for the first to finish. A
-command that was killed leaves nothing behind that blocks the next.
+command that was killed does not block the next (if the message names a
+process that is not a Crocodile command, delete the file it names).
 
 ## How it works
 

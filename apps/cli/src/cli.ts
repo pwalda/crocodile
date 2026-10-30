@@ -143,30 +143,47 @@ export async function run(argv: string[], io: Io): Promise<number> {
     io.err(`Error: ${(err as Error).message}`);
     return 1;
   }
+  let code: number;
   try {
-    switch (command) {
-      case 'init':
-        return await init(ctx, rest.join(' '));
-      case 'link':
-        return await link(ctx);
-      case 'whoami':
-        return await whoami(ctx);
-      case 'send':
-        return await send(ctx, rest, opts.to, opts.message);
-      case 'get':
-        return await get(ctx, { from: opts.from, dir: opts.dir, keep: !!opts.keep });
-    }
-    return 2;
+    code = await runCommand(ctx, command, rest, opts);
   } catch (err) {
     if (err instanceof UsageError) {
       io.err(err.message);
-      return 2;
+      code = 2;
+    } else {
+      io.err(`Error: ${(err as Error).message}`);
+      code = 1;
     }
-    io.err(`Error: ${(err as Error).message}`);
-    return 1;
-  } finally {
-    await ctx.close();
   }
+  try {
+    await ctx.close();
+  } catch (err) {
+    // The keys and ratchets could not be saved: a command that looked fine is not.
+    io.err(`Error: couldn't save this account's state: ${(err as Error).message}`);
+    code = 1;
+  }
+  return code;
+}
+
+async function runCommand(
+  ctx: Ctx,
+  command: string,
+  rest: string[],
+  opts: { to?: string; message?: string; dir?: string; from?: string; keep?: boolean },
+): Promise<number> {
+  switch (command) {
+    case 'init':
+      return await init(ctx, rest.join(' '));
+    case 'link':
+      return await link(ctx);
+    case 'whoami':
+      return await whoami(ctx);
+    case 'send':
+      return await send(ctx, rest, opts.to, opts.message);
+    case 'get':
+      return await get(ctx, { from: opts.from, dir: opts.dir, keep: !!opts.keep });
+  }
+  return 2;
 }
 
 interface Ctx {
@@ -204,7 +221,11 @@ async function start(
   try {
     return await startClient(io, opts, { platform, kv, files, ref });
   } catch (err) {
-    kv.close();
+    try {
+      kv.close();
+    } catch {
+      // The start failed first; that is the error to show.
+    }
     throw err;
   }
 }

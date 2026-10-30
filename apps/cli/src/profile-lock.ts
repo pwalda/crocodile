@@ -1,12 +1,15 @@
 import {
   closeSync,
+  linkSync,
   openSync,
   readFileSync,
   readdirSync,
+  renameSync,
   statSync,
   unlinkSync,
   writeSync,
 } from 'node:fs';
+import { randomBytes } from 'node:crypto';
 import { basename, dirname, join } from 'node:path';
 
 /**
@@ -20,10 +23,17 @@ import { basename, dirname, join } from 'node:path';
 
 /** Thrown when another process holds the account. */
 export class ProfileInUse extends Error {
-  constructor(readonly pid: number | undefined) {
+  constructor(
+    readonly pid: number | undefined,
+    lockFile?: string,
+  ) {
     super(
-      `Another Crocodile command${pid ? ` (process ${pid})` : ''} is using this account. ` +
-        'Wait for it to finish, or use --profile <name> for a separate account.',
+      pid === process.pid
+        ? 'This account is already open in this program.'
+        : `Another Crocodile command${pid ? ` (process ${pid})` : ''} is using this account. ` +
+            'Wait for it to finish, or use --profile <name> for a separate account.' +
+            // A process id can be reused by an unrelated program after a crash.
+            (lockFile ? ` If none is running, delete ${lockFile}.` : ''),
     );
   }
 }
@@ -68,6 +78,45 @@ function alive(pid: number): boolean {
 /** A lock being written has no text yet; one that stays empty is a crash's leftover. */
 const UNWRITTEN_MS = 5_000;
 
+/** Whether a lock with no process id in it has been that way too long to be one being written. */
+function unwritten(path: string): boolean {
+  try {
+    return Date.now() - statSync(path).mtimeMs >= UNWRITTEN_MS;
+  } catch {
+    return false; // gone meanwhile; the next round finds out
+  }
+}
+
+/**
+ * Removes a lock left behind. The file is first moved aside to a name of our
+ * own, which only one process can do; if what was moved was not the lock we
+ * looked at (another process took over in between), it is put back.
+ */
+function takeOver(path: string, seen: string) {
+  const aside = `${path}.${process.pid}.${randomBytes(4).toString('hex')}.old`;
+  try {
+    renameSync(path, aside);
+  } catch {
+    return; // someone else moved it first
+  }
+  try {
+    if (readFileSync(aside, 'utf8') !== seen) {
+      try {
+        linkSync(aside, path); // fails if yet another lock has been made, which then stands
+      } catch {
+        // Nothing more to do.
+      }
+    }
+  } catch {
+    // Unreadable: nothing to put back.
+  }
+  try {
+    unlinkSync(aside);
+  } catch {
+    // Already gone.
+  }
+}
+
 /** Takes the lock, or throws ProfileInUse. Returns what to call to give it up. */
 export function lockProfile(path: string): () => void {
   if (!exitHook) {
@@ -75,7 +124,7 @@ export function lockProfile(path: string): () => void {
     process.on('exit', releaseAll);
   }
   for (let attempt = 0; attempt < 3; attempt++) {
-    if (held.has(path)) throw new ProfileInUse(process.pid);
+    if (held.has(path)) throw new ProfileInUse(process.pid, path);
     try {
       const fd = openSync(path, 'wx', 0o600);
       try {
@@ -96,16 +145,12 @@ export function lockProfile(path: string): () => void {
       continue; // gone meanwhile; try again
     }
     const pid = pidIn(text);
-    if (pid !== undefined ? alive(pid) : Date.now() - statSync(path).mtimeMs < UNWRITTEN_MS)
-      throw new ProfileInUse(pid);
-    // Left behind. Remove it only if it is still the very one we looked at.
-    try {
-      if (readFileSync(path, 'utf8') === text) unlinkSync(path);
-    } catch {
-      // Taken over by someone else already.
-    }
+    // Our own id in a lock we do not hold is a crash's leftover too (a container's first process is always 1).
+    const gone = pid === undefined ? unwritten(path) : pid === process.pid || !alive(pid);
+    if (!gone) throw new ProfileInUse(pid, path);
+    takeOver(path, text);
   }
-  throw new ProfileInUse(undefined);
+  throw new ProfileInUse(undefined, path);
 }
 
 /** Temporary files a crashed write left beside the state file (each one tried alone). */
@@ -118,8 +163,12 @@ export function removeLeftovers(statePath: string) {
   } catch {
     return;
   }
+  // The names this program gives: the fixed one of older versions, or "<pid>.<8 hex>".
+  const mine = new RegExp(
+    `^${name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\.(?:\\d+\\.[0-9a-f]{8}\\.)?tmp$`,
+  );
   for (const f of files) {
-    if (!f.startsWith(`${name}.`) || !f.endsWith('.tmp')) continue;
+    if (!mine.test(f)) continue;
     try {
       unlinkSync(join(dir, f));
     } catch {
