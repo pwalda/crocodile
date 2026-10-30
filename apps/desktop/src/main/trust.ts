@@ -42,3 +42,18 @@ export function mayAsk(asker: Asker, pages: Pages): boolean {
 export function honoursTestSettings(packaged: boolean, meta: { crocTestBuild?: unknown }): boolean {
   return !packaged || meta.crocTestBuild === true;
 }
+
+/**
+ * Chromium and Node switches that open the running app to another program
+ * (a debugging port or pipe, an inspector). The fuses turn off Node's; these
+ * Chromium's are refused at start. Returns the first one found.
+ */
+export function openingSwitch(argv: readonly string[]): string | undefined {
+  return argv.find((a) => /^--(remote-debugging-|remote-allow-origins|inspect|debug)/.test(a));
+}
+
+/** The environment for a script the app starts: a release passes no relaunch command to it. */
+export function scriptEnvironment(env: NodeJS.ProcessEnv, honoured: boolean): NodeJS.ProcessEnv {
+  const { CROC_RELAUNCH, ...rest } = env;
+  return honoured && CROC_RELAUNCH !== undefined ? { ...rest, CROC_RELAUNCH } : rest;
+}

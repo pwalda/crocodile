@@ -8,17 +8,21 @@
  */
 export interface DropEvent {
   defaultPrevented: boolean;
-  dataTransfer: { dropEffect: string } | null;
+  dataTransfer: { dropEffect: string; types: readonly string[] } | null;
   preventDefault(): void;
 }
 
 export function refuseStrayDrops(doc: {
   addEventListener(type: 'dragover' | 'drop', fn: (e: DropEvent) => void): void;
 }) {
+  // Only files: text dragged within or into a field is left alone.
+  const carriesFiles = (e: DropEvent) => !!e.dataTransfer?.types.includes('Files');
   doc.addEventListener('dragover', (e) => {
-    if (e.defaultPrevented) return;
+    if (e.defaultPrevented || !carriesFiles(e)) return;
     e.preventDefault();
     if (e.dataTransfer) e.dataTransfer.dropEffect = 'none';
   });
-  doc.addEventListener('drop', (e) => e.preventDefault());
+  doc.addEventListener('drop', (e) => {
+    if (carriesFiles(e)) e.preventDefault();
+  });
 }

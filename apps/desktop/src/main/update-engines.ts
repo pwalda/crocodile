@@ -4,7 +4,8 @@ import { execFile, spawn } from 'node:child_process';
 import { accessSync, constants, existsSync, readFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { promisify } from 'node:util';
-import { testSetting } from './test-settings';
+import { testSetting, testSettingsOn } from './test-settings';
+import { scriptEnvironment } from './trust';
 import {
   electronUpdaterEngine,
   MacSwapEngine,
@@ -58,7 +59,11 @@ export async function createUpdateEngine(): Promise<UpdateEngine | null> {
           ])
         ).stdout.trim(),
       runDetached: (script, args) =>
-        spawn('/bin/sh', [script, ...args], { detached: true, stdio: 'ignore' }).unref(),
+        spawn('/bin/sh', [script, ...args], {
+          detached: true,
+          stdio: 'ignore',
+          env: scriptEnvironment(process.env, testSettingsOn),
+        }).unref(),
       openPath: (p) => void shell.openPath(p),
       quit: () => app.quit(),
       pid: process.pid,

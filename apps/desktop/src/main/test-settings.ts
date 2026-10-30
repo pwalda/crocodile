@@ -11,9 +11,9 @@ function buildInfo(): { crocTestBuild?: unknown } {
   }
 }
 
-const honoured = honoursTestSettings(app.isPackaged, buildInfo());
+export const testSettingsOn = honoursTestSettings(app.isPackaged, buildInfo());
 
 /** An environment variable for tests and development: unset in a release. */
 export function testSetting(name: string): string | undefined {
-  return honoured ? process.env[name] : undefined;
+  return testSettingsOn ? process.env[name] : undefined;
 }

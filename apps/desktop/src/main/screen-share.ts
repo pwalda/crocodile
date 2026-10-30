@@ -1,4 +1,4 @@
-import { desktopCapturer, session, systemPreferences } from 'electron';
+import { desktopCapturer, session, systemPreferences, type WebFrameMain } from 'electron';
 import { handle } from './ipc-guard';
 import type { ScreenSource, ScreenSources } from './ipc-types';
 
@@ -16,7 +16,8 @@ const CHOICE_TTL_MS = 30_000;
 
 let chosen: { id: string; audio: boolean; at: number } | null = null;
 
-export function setupScreenShare() {
+/** `mayCapture` says whether the frame asking is the app's own page. */
+export function setupScreenShare(mayCapture: (frame: WebFrameMain | null) => boolean) {
   handle('screen:sources', async (): Promise<ScreenSources> => {
     // macOS asks once, in System Settings, whether the app may record the screen.
     const access =
@@ -43,7 +44,9 @@ export function setupScreenShare() {
     chosen = { id, audio: audio === true && CAN_SHARE_SOUND, at: Date.now() };
   });
 
-  session.defaultSession.setDisplayMediaRequestHandler((_request, callback) => {
+  session.defaultSession.setDisplayMediaRequestHandler((request, callback) => {
+    // Another page does not get the choice, nor use it up.
+    if (!mayCapture(request.frame ?? null)) return callback({});
     const c = chosen;
     chosen = null;
     if (!c || Date.now() - c.at > CHOICE_TTL_MS) return callback({});

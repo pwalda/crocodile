@@ -12,6 +12,7 @@ import {
   shell,
   Tray,
   utilityProcess,
+  webContents,
   type UtilityProcess,
   type WebContents,
 } from 'electron';
@@ -25,8 +26,8 @@ import { FileExports, FileStore, RISKY_EXTENSIONS, safeFileName } from './file-s
 import { SecureStore } from './secure-store';
 import { isAllowedNavigation } from './navigation';
 import { allowAsking, handle, useIpc } from './ipc-guard';
-import { testSetting } from './test-settings';
-import { mayAsk, type Pages } from './trust';
+import { testSetting, testSettingsOn } from './test-settings';
+import { mayAsk, openingSwitch, type Pages } from './trust';
 import { createUpdateEngine } from './update-engines';
 import { UpdateController } from './updates';
 import type {
@@ -42,6 +43,8 @@ import { setupScreenShare } from './screen-share';
 // A packaged app never loads a renderer from elsewhere, whatever the environment says.
 const isDev = !app.isPackaged && !!process.env.CROC_RENDERER_URL;
 const APP_PROTOCOL = 'croc';
+// A release does not start with a debugging port or inspector open to other programs.
+if (!testSettingsOn && openingSwitch(process.argv)) app.exit(1);
 useIpc(ipcMain);
 /** The one page that may ask the main process for anything. */
 const pages: Pages = {
@@ -391,15 +394,11 @@ app.on('web-contents-created', (_e, contents) => {
 });
 
 app.whenReady().then(() => {
+  // One question for every way in: is it the app's own page, in the app's window?
+  const fromApp = (wc: WebContents | null | undefined, url: string | undefined, top: boolean) =>
+    mayAsk({ fromWindow: !!wc && wc === win?.webContents, url, topFrame: top }, pages);
   allowAsking((e) =>
-    mayAsk(
-      {
-        fromWindow: !!win && e.sender === win.webContents,
-        url: e.senderFrame?.url,
-        topFrame: !!e.senderFrame && e.senderFrame === e.sender.mainFrame,
-      },
-      pages,
-    ),
+    fromApp(e.sender, e.senderFrame?.url, !!e.senderFrame && e.senderFrame === e.sender.mainFrame),
   );
   if (process.defaultApp && process.argv.length >= 2) {
     app.setAsDefaultProtocolClient(APP_PROTOCOL, process.execPath, [process.argv[1]!]);
@@ -418,10 +417,6 @@ app.whenReady().then(() => {
     'clipboard-sanitized-write',
     'speaker-selection',
   ];
-  // Only the app's own page gets any of these, not a frame inside it or
-  // whatever else the window might come to show.
-  const fromApp = (wc: WebContents | null, url: string | undefined, top: boolean) =>
-    mayAsk({ fromWindow: !!wc && wc === win?.webContents, url, topFrame: top }, pages);
   session.defaultSession.setPermissionRequestHandler((wc, permission, callback, details) => {
     callback(
       allowed.includes(permission) && fromApp(wc, details.requestingUrl, details.isMainFrame),
@@ -431,7 +426,13 @@ app.whenReady().then(() => {
     (wc, permission, _origin, details) =>
       allowed.includes(permission) && fromApp(wc, details.requestingUrl, details.isMainFrame),
   );
-  setupScreenShare();
+  setupScreenShare((frame) =>
+    fromApp(
+      frame ? webContents.fromFrame(frame) : null,
+      frame?.url,
+      !!frame && frame === frame.top,
+    ),
+  );
 
   createWindow();
   createTray();

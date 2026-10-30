@@ -3,7 +3,13 @@ import { createRequire } from 'node:module';
 import { join } from 'node:path';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { allowAsking, handle, useIpc } from '../apps/desktop/src/main/ipc-guard';
-import { honoursTestSettings, mayAsk, type Pages } from '../apps/desktop/src/main/trust';
+import {
+  honoursTestSettings,
+  mayAsk,
+  openingSwitch,
+  scriptEnvironment,
+  type Pages,
+} from '../apps/desktop/src/main/trust';
 import { refuseStrayDrops, type DropEvent } from '../apps/desktop/src/renderer/lib/drops';
 
 const handlers = new Map<string, (e: unknown, ...args: unknown[]) => unknown>();
@@ -79,6 +85,27 @@ describe('test settings', () => {
   });
 });
 
+describe('a release', () => {
+  it('refuses to start with a debugging port, pipe or inspector', () => {
+    for (const a of [
+      '--remote-debugging-port=9222',
+      '--remote-debugging-pipe',
+      '--inspect=0',
+      '--inspect-brk',
+      '--remote-allow-origins=*',
+    ])
+      expect(openingSwitch(['crocodile', '--foo', a])).toBe(a);
+    expect(openingSwitch(['crocodile', '--no-sandbox', 'croc://join/abc'])).toBeUndefined();
+  });
+
+  it('passes no relaunch command to the update script', () => {
+    const env = { PATH: '/bin', CROC_RELAUNCH: '/tmp/payload' };
+    expect(scriptEnvironment(env, false)).toEqual({ PATH: '/bin' });
+    expect(scriptEnvironment(env, true)).toEqual(env);
+    expect(scriptEnvironment({ PATH: '/bin' }, true)).toEqual({ PATH: '/bin' });
+  });
+});
+
 describe('Electron fuses', () => {
   const load = (testBuild: boolean) => {
     const was = process.env.CROC_TEST_BUILD;
@@ -92,7 +119,8 @@ describe('Electron fuses', () => {
         extraMetadata: Record<string, unknown>;
       };
     } finally {
-      process.env.CROC_TEST_BUILD = was ?? '';
+      if (was === undefined) delete process.env.CROC_TEST_BUILD;
+      else process.env.CROC_TEST_BUILD = was;
       delete require.cache[path];
     }
   };
@@ -121,13 +149,13 @@ describe('files dropped on the window', () => {
   function drop() {
     const listeners: Record<string, (e: DropEvent) => void> = {};
     refuseStrayDrops({ addEventListener: (type, fn) => void (listeners[type] = fn) });
-    const event = (handled = false): DropEvent & { prevented: boolean } => {
+    const event = (handled = false, withFiles = true): DropEvent & { prevented: boolean } => {
       const e = {
         prevented: handled,
         get defaultPrevented() {
           return this.prevented;
         },
-        dataTransfer: { dropEffect: 'copy' },
+        dataTransfer: { dropEffect: 'copy', types: withFiles ? ['Files'] : ['text/plain'] },
         preventDefault() {
           this.prevented = true;
         },
@@ -146,6 +174,17 @@ describe('files dropped on the window', () => {
     const dropped = event();
     listeners.drop!(dropped);
     expect(dropped.prevented).toBe(true);
+  });
+
+  it('leave text dragged in or within a field alone', () => {
+    const { listeners, event } = drop();
+    const over = event(false, false);
+    listeners.dragover!(over);
+    expect(over.prevented).toBe(false);
+    expect(over.dataTransfer!.dropEffect).toBe('copy');
+    const dropped = event(false, false);
+    listeners.drop!(dropped);
+    expect(dropped.prevented).toBe(false);
   });
 
   it('are left to a place that takes them', () => {
