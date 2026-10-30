@@ -397,8 +397,11 @@ export interface ServerEvents {
    * that does not is taken out of the session.
    */
   session_renew: { sessionId: string };
-  /** The session no longer includes you (kicked, space left, or server moved it). */
-  session_closed: { sessionId: string; reason: string };
+  /**
+   * The session no longer includes you (kicked, space left, or server moved it). `again`: you may
+   * join it again (you did not sign a new join in time), as opposed to having lost the right to.
+   */
+  session_closed: { sessionId: string; reason: string; again?: boolean };
   /** `from` is a peer id. */
   signal: { from: string; sessionId: string; data: SignalData };
   voice: VoiceOccupancy;

@@ -703,25 +703,30 @@ describe('calls', () => {
       lastOwner: Map<string, string>;
       rebalance(): void;
       renewing: Map<string, unknown>;
-      dropUnrenewed(sessionId: string, peer: string, client: unknown): void;
+      dropUnrenewed(sessionId: string, peer: string, again?: boolean): void;
       submit(sessionId: string, peer: string, op: { op: string }): unknown;
     };
     await waitFor(() => internals.local.get(sid)?.size === 1, 10000, 'in the room');
     const peer = [...internals.local.get(sid)!.keys()][0]!;
-    // (Its own joins have settled.)
-    await new Promise((r) => setTimeout(r, 1500));
     const joins = vi.spyOn(internals, 'submit');
     const joined = () => joins.mock.calls.filter((c) => c[2].op === 'join').length;
-    // The owner changed: the app is asked for a new join, and gives one.
+    // The owner changed: the app is asked for a new join, and gives one. (Only joins from here on count.)
+    joins.mockClear();
     internals.lastOwner.set(sid, 'someone-else');
     internals.rebalance();
-    await waitFor(() => joined() === 1 && internals.renewing.size === 0, 10000, 'a new join');
+    await waitFor(() => joined() >= 1 && internals.renewing.size === 0, 10000, 'a new join');
     expect(internals.local.get(sid)?.has(peer)).toBe(true);
     // Taken out of the room: it joins again.
-    const [handle] = coord.presence.localOf(alice.userId);
-    internals.dropUnrenewed(sid, peer, handle);
-    await waitFor(() => joined() === 2, 10000, 'to join again');
+    const renewed = joined();
+    internals.dropUnrenewed(sid, peer);
+    await waitFor(() => joined() > renewed, 10000, 'to join again');
     await waitFor(() => internals.local.get(sid)?.has(peer), 10000, 'back in the room');
+    // Taken out because it may no longer be there: it does not try to join again.
+    const settled = joined();
+    internals.dropUnrenewed(sid, peer, false);
+    await new Promise((r) => setTimeout(r, 2500));
+    expect(joined()).toBe(settled);
+    expect(internals.local.get(sid)?.has(peer) ?? false).toBe(false);
     joins.mockRestore();
   });
 

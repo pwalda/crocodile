@@ -1483,6 +1483,62 @@ describe('sessions and host election', () => {
       expect(internals.renewing.size).toBe(0);
     });
 
+    it('lets a device go, without asking it again or telling it to join again, when it is no longer allowed in the room', async () => {
+      const { c, alice, sessionId } = await setup();
+      await alice.conn.request('session.join', { sessionId, caps: caps() });
+      answerRenewals(alice, caps());
+      const internals = c.sessions as unknown as {
+        lastOwner: Map<string, string>;
+        checkAccess(): Promise<void>;
+        rebalance(): void;
+        renewing: Map<string, unknown>;
+        renewRetryMs: number;
+      };
+      internals.renewRetryMs = 50;
+      internals.lastOwner.set(sessionId, 'someone-else');
+      const check = vi
+        .spyOn(internals, 'checkAccess')
+        .mockRejectedValue(new RpcFailure('forbidden', 'not a member of this space'));
+      internals.rebalance();
+      await waitFor(() => alice.events.some((e) => e.ev === 'session_closed'), 3000, 'to be told');
+      await new Promise((r) => setTimeout(r, 300));
+      check.mockRestore();
+      expect(c.sessions.inSession(alice.conn.peer, sessionId)).toBe(false);
+      expect(alice.events.filter((e) => e.ev === 'session_renew')).toHaveLength(1);
+      expect(alice.events.find((e) => e.ev === 'session_closed')!.d).not.toHaveProperty('again');
+      expect(internals.renewing.size).toBe(0);
+    });
+
+    it('tells the connection a device has by the time it is taken out, not the one it was asked on', async () => {
+      const { c, alice, sessionId } = await setup();
+      await alice.conn.request('session.join', { sessionId, caps: caps() });
+      answerRenewals(alice, caps());
+      const internals = c.sessions as unknown as {
+        lastOwner: Map<string, string>;
+        submit(): unknown;
+        rebalance(): void;
+        renewRetryMs: number;
+        renewTimeoutMs: number;
+      };
+      internals.renewRetryMs = 50;
+      internals.renewTimeoutMs = 600;
+      internals.lastOwner.set(sessionId, 'someone-else');
+      const submit = vi
+        .spyOn(internals, 'submit')
+        .mockRejectedValue(new RpcFailure('unavailable', 'the owner cannot be reached'));
+      internals.rebalance();
+      await waitFor(() => alice.events.some((e) => e.ev === 'session_renew'), 3000, 'to be asked');
+      // The device reconnects (a new connection takes the place of the one it was asked on).
+      const again = await connectUser(c, alice.identity, 'alice', peerIds.device(alice.conn.peer));
+      await waitFor(
+        () => again.events.some((e) => e.ev === 'session_closed'),
+        4000,
+        'the new connection to be told',
+      );
+      submit.mockRestore();
+      expect(again.events.find((e) => e.ev === 'session_closed')!.d).toMatchObject({ again: true });
+    });
+
     it('keeps a device in the room that signs a new join when the owner changed', async () => {
       const { c, alice, bob, sessionId } = await setup();
       await alice.conn.request('session.join', { sessionId, caps: caps({ nat: 'open' }) });
