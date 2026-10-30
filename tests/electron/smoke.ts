@@ -111,6 +111,9 @@ const inviteText = await a.page.evaluate(
   () => document.body.innerText.match(/croc:\/\/join\/[a-z2-7]+/)![0],
 );
 await shot(a.page, '05-invite');
+// One link at a time: it can be replaced or turned off.
+await a.page.getByRole('button', { name: 'New link…' }).waitFor({ timeout: 5000 });
+await a.page.getByRole('button', { name: 'Turn off…' }).waitFor({ timeout: 5000 });
 await a.page.keyboard.press('Escape');
 
 // Bob joins.

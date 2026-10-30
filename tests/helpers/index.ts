@@ -1,6 +1,7 @@
 import { Coordinator, type CoordinatorConfig } from '@crocodile/coordinator';
 import {
   createIdentity,
+  inviteCommitment,
   randomDeviceId,
   randomId,
   signRecord,
@@ -85,12 +86,14 @@ export async function createSpace(user: TestUser, name = 'Swamp') {
   const spaceId = spaceIdFor(user.identity.publicKey, nonce);
   const text = randomId();
   const voice = randomId();
+  const code = randomId(16);
   const space = signRecord(user.identity, 'space', recordKey.space(spaceId), {
     name,
     owner: user.identity.userId,
     nonce,
     admins: [],
     bans: [],
+    publicInvite: inviteCommitment(spaceId, code),
     channels: [
       { id: text, name: 'general', kind: 'text' },
       { id: voice, name: 'Lounge', kind: 'voice' },
@@ -107,11 +110,10 @@ export async function createSpace(user: TestUser, name = 'Swamp') {
     },
   );
   expectAccepted(await user.conn.request('records.put', { record: member }));
-  const code = randomId(6);
   const invite = signRecord(user.identity, 'invite', recordKey.invite(code), {
     spaceId,
     code,
-    expiresAt: null,
+    expiresAt: Date.now() + 7 * 24 * 3600_000,
   });
   expectAccepted(await user.conn.request('records.put', { record: invite }));
   return { spaceId, textChannel: text, voiceChannel: voice, code, space };

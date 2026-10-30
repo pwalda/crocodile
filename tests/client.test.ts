@@ -1646,6 +1646,105 @@ describe('leaving', () => {
     spy.mockRestore();
   });
 
+  describe('the open invite', () => {
+    async function trio() {
+      const coord = await server();
+      const net = new FakeRelayNetwork();
+      const alice = await signUp(makeClient(net, coord), 'alice');
+      const bob = await signUp(makeClient(net, coord), 'bob');
+      const carol = await signUp(makeClient(net, coord), 'carol');
+      const spaceId = await alice.createSpace('Swamp');
+      return { alice, bob, carol, spaceId };
+    }
+
+    it('is one link: a new one replaces the old, and the space can turn it off', async () => {
+      const { alice, bob, carol, spaceId } = await trio();
+      const first = await alice.shareInvite(spaceId);
+      // Asked for again while it is good, it is the same link.
+      expect(await alice.shareInvite(spaceId)).toBe(first);
+      expect(await bob.previewInvite(first)).toMatchObject({ expired: false });
+      const second = await alice.createInvite(spaceId);
+      expect(second).not.toBe(first);
+      expect(await alice.shareInvite(spaceId)).toBe(second);
+      // The old link says so and cannot be used, the new one can.
+      expect(await bob.previewInvite(first)).toMatchObject({ expired: true });
+      await expect(bob.joinWithInvite(first)).rejects.toThrow(/revoked|replaced or turned off/);
+      await bob.joinWithInvite(second);
+      // Turned off, nothing joins until there is a new link.
+      await alice.stopOpenInvite(spaceId);
+      expect(alice.openInviteOf(spaceId)).toBeUndefined();
+      expect(await carol.previewInvite(second)).toMatchObject({ expired: true });
+      await expect(carol.joinWithInvite(second)).rejects.toThrow(/replaced or turned off|revoked/);
+      const third = await alice.shareInvite(spaceId);
+      await carol.joinWithInvite(third);
+      expect(carol.state.spaces[spaceId]).toBeDefined();
+    });
+
+    it('is not replaced by an admin who cannot see it: they are told, and can turn it off', async () => {
+      const { alice, carol, spaceId } = await trio();
+      const link = await alice.shareInvite(spaceId);
+      // Carol came in with an invitation of her own, so she holds no record of the open link.
+      const own = await alice.createInvite(spaceId, 7 * 24 * 3600_000, carol.userId);
+      await carol.joinWithInvite(own);
+      await alice.updateSpace(spaceId, (b) => ({ ...b, admins: [carol.userId] }));
+      await waitFor(
+        () => carol.state.spaces[spaceId]?.admins.includes(carol.userId),
+        5000,
+        'carol is an admin',
+      );
+      expect(carol.openLinkOf(spaceId)).toEqual({ state: 'elsewhere' });
+      await expect(carol.shareInvite(spaceId)).rejects.toThrow(/another device/);
+      // Nothing was replaced.
+      expect(alice.openInviteOf(spaceId)?.body.code).toBe(link);
+      await carol.stopOpenInvite(spaceId);
+      await waitFor(() => alice.state.spaces[spaceId]?.publicInvite === undefined, 5000, 'off');
+      expect(alice.openLinkOf(spaceId)).toEqual({ state: 'none' });
+    });
+
+    it("does not put the link's code in the space, only what the code makes", async () => {
+      const { alice, bob, spaceId } = await trio();
+      const link = await alice.shareInvite(spaceId);
+      const named = alice.state.spaces[spaceId]!.publicInvite!;
+      expect(named).not.toContain(link);
+      expect(
+        JSON.stringify(
+          (await bob.link!.request('records.get', { keys: [`space:${spaceId}`] })).records,
+        ),
+      ).not.toContain(link);
+      // A link is the one that is shared until it is about to run out, then a new one.
+      await alice.createInvite(spaceId, 3 * 3600_000);
+      const short = alice.openInviteOf(spaceId)!.body.code;
+      expect(await alice.shareInvite(spaceId)).toBe(short);
+      await alice.createInvite(spaceId, 1800_000);
+      const dying = alice.openInviteOf(spaceId)!.body.code;
+      expect(await alice.shareInvite(spaceId)).not.toBe(dying);
+    });
+
+    it('is not left behind when it could not be named', async () => {
+      const { alice, spaceId } = await trio();
+      const before = new Set(
+        (alice.records.list('invite:') as SignedRecord<'invite'>[]).map((r) => r.key),
+      );
+      const update = vi.spyOn(alice, 'updateSpace').mockRejectedValueOnce(new Error('offline'));
+      await expect(alice.createInvite(spaceId)).rejects.toThrow(/offline/);
+      update.mockRestore();
+      const made = (alice.records.list('invite:') as SignedRecord<'invite'>[]).filter(
+        (r) => !before.has(r.key),
+      );
+      expect(made).toHaveLength(1);
+      expect(made[0]!.body.revoked).toBe(true);
+    });
+
+    it('lasts 30 days at most', async () => {
+      const { alice, spaceId } = await trio();
+      await expect(alice.createInvite(spaceId, 32 * 24 * 3600_000)).rejects.toThrow(/30 days/);
+      for (const bad of [0, -1, NaN])
+        await expect(alice.createInvite(spaceId, bad)).rejects.toThrow(/time to last/);
+      const code = await alice.createInvite(spaceId, 30 * 24 * 3600_000);
+      expect(alice.openInviteOf(spaceId)?.body.code).toBe(code);
+    });
+  });
+
   describe('private invites', () => {
     async function trio() {
       const coord = await server();

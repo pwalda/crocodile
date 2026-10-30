@@ -118,7 +118,7 @@ main server puts the TCP side behind a reverse proxy on 443.
   connections per address (`--max-connections-per-ip`) and in total
   (`--capacity`), and times out connections that don't authenticate. Each
   account can make it store at most 100 devices, 100 spaces and 500
-  memberships, each space at most 1000 invites, and each account receives at
+  memberships, each space at most 5000 invites, and each account receives at
   most 200 unread friend notes (a server stops at twice that when other
   owners copy notes to it), and a connection can only write its own
   account's records. One account therefore cannot fill your disk, though

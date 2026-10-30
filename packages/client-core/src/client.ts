@@ -29,6 +29,9 @@ import {
   signSpaceAuthority,
   spaceAuthorityValid,
   mayInviteByName,
+  INVITE_MAX_MS,
+  inviteCommitment,
+  OPEN_CODE_LENGTH,
   signedInvitePolicy,
   spaceIdFor,
   userTag,
@@ -203,6 +206,8 @@ export interface SpaceView {
   admins: string[];
   /** Who may invite a named person: the owner and admins, or members too. */
   invitePolicy: 'admins' | 'members';
+  /** The code of the link anyone can join with, if one is on. */
+  publicInvite?: string;
 }
 
 /** A session as the UI sees it: user ids (devices collapsed). */
@@ -433,6 +438,9 @@ const FRIEND_NOTE_RETRY_MS = 5000;
 /** And how often while connected, whoever it is owed to. */
 const FRIEND_NOTE_SWEEP_MS = 10 * 60_000;
 const DAY_MS = 24 * 3600_000;
+/** Bytes of randomness in the code of an open link: 128 bits. */
+const OPEN_CODE_BYTES = 16;
+const HOUR_MS = 3600_000;
 /** How long an invite lasts unless asked otherwise, and an invitation to a named person can be accepted. */
 const INVITE_MS = 7 * DAY_MS;
 /** A member list the server could not check is asked for again this many times, a little later each time. */
@@ -1450,6 +1458,7 @@ export class CrocodileClient extends Emitter<ClientEvents> {
           bans: body.bans,
           admins: spaceAuthorityValid(id, body) ? body.admins : [],
           invitePolicy: body.invitePolicy ?? 'admins',
+          ...(body.publicInvite ? { publicInvite: body.publicInvite } : {}),
         };
       }
       patch.spaces = spaces;
@@ -1884,12 +1893,15 @@ export class CrocodileClient extends Emitter<ClientEvents> {
     const id = this.identity!;
     const nonce = randomId();
     const spaceId = spaceIdFor(id.publicKey, nonce);
+    // A new space starts with a link to share, which lasts a week.
+    const code = randomId(OPEN_CODE_BYTES);
     const body: SpaceBody = {
       name: name.trim(),
       owner: id.userId,
       nonce,
       admins: [],
       bans: [],
+      publicInvite: inviteCommitment(spaceId, code),
       channels: [
         { id: randomId(), name: 'general', kind: 'text' },
         { id: randomId(), name: 'General', kind: 'voice' },
@@ -1903,6 +1915,20 @@ export class CrocodileClient extends Emitter<ClientEvents> {
         userId: id.userId,
       }),
     );
+    await this.putRecord(
+      signRecord(id, 'invite', recordKey.invite(code), {
+        spaceId,
+        code,
+        expiresAt: Date.now() + INVITE_MS,
+      }),
+    ).catch(async (err) => {
+      // Do not leave the space naming a link that is not there.
+      this.log('first link not made', { err: String(err) });
+      await this.updateSpace(spaceId, (b) => {
+        const { publicInvite: _, ...rest } = b;
+        return rest;
+      }).catch(() => {});
+    });
     await this.afterSpaceJoined(spaceId);
     return spaceId;
   }
@@ -2076,42 +2102,108 @@ export class CrocodileClient extends Emitter<ClientEvents> {
   }
 
   /**
-   * An invite to share: one of ours for this space that is still valid for at
-   * least a day, or a new one. Reusing keeps the space under the server's
-   * invite quota.
+   * The state of the link anyone can join a space with: none on; on and good (with its record);
+   * on but run out; or on but made on another device, whose record we do not hold (the space
+   * names it by a hash of its code, so the code cannot be found from the space).
    */
-  async shareInvite(spaceId: string): Promise<string> {
-    const me = this.identity!.publicKey;
-    const minExpiry = Date.now() + DAY_MS;
-    const reusable = (this.records.list('invite:') as SignedRecord<'invite'>[])
-      .filter(
-        (r) =>
-          r.author === me &&
-          r.body.spaceId === spaceId &&
-          r.body.for === undefined &&
-          !r.body.revoked &&
-          (r.body.expiresAt === null || r.body.expiresAt > minExpiry),
-      )
-      .sort((a, b) => b.version - a.version)[0];
-    return reusable ? reusable.body.code : this.createInvite(spaceId);
+  openLinkOf(
+    spaceId: string,
+  ): { state: 'none' | 'elsewhere' } | { state: 'good' | 'ended'; invite: SignedRecord<'invite'> } {
+    const space = this.records.get(recordKey.space(spaceId)) as SignedRecord<'space'> | undefined;
+    const named = space?.body.publicInvite;
+    if (!named) return { state: 'none' };
+    const invite = (this.records.list('invite:') as SignedRecord<'invite'>[]).find(
+      (r) =>
+        r.body.spaceId === spaceId &&
+        r.body.for === undefined &&
+        inviteCommitment(spaceId, r.body.code) === named,
+    );
+    if (!invite) return { state: 'elsewhere' };
+    // (One that never ends is not a link any more: servers turn joins with it away.)
+    const good =
+      !invite.body.revoked &&
+      invite.body.expiresAt !== null &&
+      invite.body.expiresAt > Date.now() &&
+      invite.body.code.length >= OPEN_CODE_LENGTH;
+    return { state: good ? 'good' : 'ended', invite };
   }
 
-  /** Creates an invite code others can use to join, or one only `forUser` can. */
+  /** The record of the space's open link, if it is on, good, and we hold it. */
+  openInviteOf(spaceId: string): SignedRecord<'invite'> | undefined {
+    const link = this.openLinkOf(spaceId);
+    return link.state === 'good' ? link.invite : undefined;
+  }
+
+  /**
+   * The link to share: the one the space has on, or a new one if it has none, it has run out or
+   * it is about to. Not when one was made on another device that we cannot see: a new one would
+   * end it.
+   */
+  async shareInvite(spaceId: string): Promise<string> {
+    const link = this.openLinkOf(spaceId);
+    if (link.state === 'good' && link.invite.body.expiresAt! > Date.now() + HOUR_MS)
+      return link.invite.body.code;
+    if (link.state === 'elsewhere')
+      throw new Error(
+        'The link for this space was made on another device. Make a new link to replace it.',
+      );
+    return this.createInvite(spaceId);
+  }
+
+  /**
+   * Creates an invite. With `forUser`, one only that person can join with. Without, the space's
+   * open link: it replaces the one the space had, which stops working, and lasts at most 30 days.
+   */
   async createInvite(
     spaceId: string,
-    expiresInMs: number | null = INVITE_MS,
+    expiresInMs: number = INVITE_MS,
     forUser?: string,
   ): Promise<string> {
-    const code = randomId(5);
-    await this.putRecord(
-      signRecord(this.identity!, 'invite', recordKey.invite(code), {
-        spaceId,
-        code,
-        expiresAt: expiresInMs === null ? null : Date.now() + expiresInMs,
-        ...(forUser ? { for: forUser } : {}),
-      }),
-    );
+    if (!Number.isFinite(expiresInMs) || expiresInMs <= 0)
+      throw new Error('An invite needs a time to last.');
+    if (expiresInMs > INVITE_MAX_MS) throw new Error('An invite can last 30 days at most.');
+    // Long enough that the hash the space names it by cannot be turned back into it.
+    const code = randomId(forUser ? 5 : OPEN_CODE_BYTES);
+    const invite = signRecord(this.identity!, 'invite', recordKey.invite(code), {
+      spaceId,
+      code,
+      expiresAt: Date.now() + expiresInMs,
+      ...(forUser ? { for: forUser } : {}),
+    });
+    if (forUser) {
+      await this.putRecord(invite);
+      return code;
+    }
+    // The invite first, then the space naming it: until then the old link goes on working.
+    const previous = this.openLinkOf(spaceId);
+    await this.putRecord(invite);
+    try {
+      await this.updateSpace(spaceId, (b) => ({
+        ...b,
+        publicInvite: inviteCommitment(spaceId, code),
+      }));
+    } catch (err) {
+      // Not named, so not a link: do not leave it counting against the space. (Unless it was
+      // named after all and only the answer was lost.)
+      const now = this.records.get(recordKey.space(spaceId)) as SignedRecord<'space'> | undefined;
+      if (now?.body.publicInvite !== inviteCommitment(spaceId, code))
+        await this.revokeInvite(code).catch(() => {});
+      throw err;
+    }
+    if (previous.state === 'good')
+      await this.revokeInvite(previous.invite.body.code).catch(() => {});
     return code;
+  }
+
+  /** Turns the space's open link off: the link stops working. People already in stay. */
+  async stopOpenInvite(spaceId: string) {
+    const previous = this.openLinkOf(spaceId);
+    if (previous.state === 'none') return;
+    await this.updateSpace(spaceId, (b) => {
+      const { publicInvite: _, ...rest } = b;
+      return rest;
+    });
+    if ('invite' in previous) await this.revokeInvite(previous.invite.body.code).catch(() => {});
   }
 
   /** The spaces we could invite this person to by name: ours to invite to, and they are neither in nor banned. */
@@ -2217,6 +2309,11 @@ export class CrocodileClient extends Emitter<ClientEvents> {
     const expired =
       !!invite.body.revoked ||
       !makerMayInvite ||
+      // The link anyone can use is the one the space has on, no older one.
+      (invite.body.for === undefined &&
+        (invite.body.expiresAt === null ||
+          code.length < OPEN_CODE_LENGTH ||
+          space.body.publicInvite !== inviteCommitment(spaceId, code))) ||
       (invite.body.expiresAt !== null && invite.body.expiresAt < Date.now());
     return {
       code,
@@ -2243,8 +2340,22 @@ export class CrocodileClient extends Emitter<ClientEvents> {
       (invite.body.expiresAt !== null && invite.body.expiresAt < Date.now())
     )
       throw new Error('That invite has expired or was revoked.');
+    if (
+      invite.body.for === undefined &&
+      (invite.body.expiresAt === null || invite.body.code.length < OPEN_CODE_LENGTH)
+    )
+      throw new Error('That link is out of date. Ask for a new one.');
     const { spaceId } = invite.body;
     const space = await this.link!.request('records.get', { keys: [recordKey.space(spaceId)] });
+    // The link anyone can use is the one the space has on: a newer one replaces it.
+    const named = space.records.find((r) => r.key === recordKey.space(spaceId)) as
+      SignedRecord<'space'> | undefined;
+    if (
+      named &&
+      invite.body.for === undefined &&
+      named.body.publicInvite !== inviteCommitment(spaceId, code)
+    )
+      throw new Error('That link has been replaced or turned off. Ask for a new one.');
     this.records.ingestAll([...space.records, invite]);
     const me = this.userId;
     const key = recordKey.member(spaceId, me);
