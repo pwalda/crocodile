@@ -363,15 +363,24 @@ describe('records', () => {
           reason: 'bad invite recipient',
         });
         const invite = privateInvite(alice, dave.userId);
-        const redirected = signRecord(alice, 'invite', invite.key, {
-          ...invite.body,
-          for: eve.userId,
-        });
+        const redirected = signRecord(
+          alice,
+          'invite',
+          invite.key,
+          { ...invite.body, for: eve.userId },
+          invite.version + 1,
+        );
         expect(validateRecord(redirected, ctx([admins, invite]))).toMatchObject({
           ok: false,
           reason: 'an invite cannot change who it is for',
         });
-        const opened = signRecord(alice, 'invite', invite.key, { ...invite.body, for: undefined });
+        const opened = signRecord(
+          alice,
+          'invite',
+          invite.key,
+          { ...invite.body, for: undefined },
+          invite.version + 1,
+        );
         expect(validateRecord(opened, ctx([admins, invite]))).toMatchObject({ ok: false });
       });
 
@@ -398,7 +407,7 @@ describe('records', () => {
         expect(validateRecord(open, fresh([members, bobIsIn]))).toMatchObject({ ok: false });
         // Only its maker, the owner or an admin changes a member's invite.
         const revokeBy = (who: typeof bob) =>
-          signRecord(who, 'invite', byBob.key, { ...byBob.body, revoked: true });
+          signRecord(who, 'invite', byBob.key, { ...byBob.body, revoked: true }, byBob.version + 1);
         const carolIn = memberOf(carol, 'x'.repeat(8));
         expect(
           validateRecord(revokeBy(carol), fresh([members, bobIsIn, carolIn, byBob])),

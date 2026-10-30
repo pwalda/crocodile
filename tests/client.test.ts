@@ -1704,6 +1704,68 @@ describe('leaving', () => {
       await waitFor(() => bob.state.spaces[spaceId]?.invitePolicy === 'admins', 5000, 'policy');
       expect(bob.canInviteTo(spaceId)).toBe(false);
     });
+
+    it('stops working when the space takes the right to invite from members', async () => {
+      const { alice, bob, carol, spaceId } = await trio();
+      await bob.joinWithInvite(await alice.createInvite(spaceId));
+      await alice.setInvitePolicy(spaceId, 'members');
+      await waitFor(() => bob.state.spaces[spaceId]?.invitePolicy === 'members', 5000, 'policy');
+      await bob.openChannel(await bob.openDm(carol.userId));
+      await bob.inviteToSpace(spaceId, carol.userId);
+      const sent = () =>
+        (bob.state.messages[sessionIds.dm(bob.userId, carol.userId)] ?? []).map((m) => m.body);
+      await waitFor(() => codeIn(sent()), 5000, 'the invitation is sent');
+      const code = codeIn(sent())!;
+      expect(await carol.previewInvite(code)).toMatchObject({ expired: false });
+      await alice.setInvitePolicy(spaceId, 'admins');
+      // The card says so, and the server turns joining away.
+      let expired: boolean | undefined;
+      for (let i = 0; i < 100 && !expired; i++) {
+        expired = (await carol.previewInvite(code))?.expired;
+        if (!expired) await new Promise((r) => setTimeout(r, 50));
+      }
+      expect(expired).toBe(true);
+      await expect(carol.joinWithInvite(code)).rejects.toThrow(/may no longer invite/);
+    });
+
+    it('is not sent to somebody already in or banned, and sent again rather than made again', async () => {
+      const { alice, bob, carol, spaceId, sentTo } = await trio();
+      await bob.joinWithInvite(await alice.createInvite(spaceId));
+      await waitFor(
+        () => alice.state.spaces[spaceId]?.members.includes(bob.userId),
+        5000,
+        'bob in',
+      );
+      await expect(alice.inviteToSpace(spaceId, bob.userId)).rejects.toThrow(/already/);
+      await alice.banMember(spaceId, carol.userId);
+      await expect(alice.inviteToSpace(spaceId, carol.userId)).rejects.toThrow(/can't be invited/);
+      await alice.updateSpace(spaceId, (b) => ({ ...b, bans: [] }));
+      // Asked twice, the same invitation is sent again.
+      await alice.openChannel(await alice.openDm(carol.userId));
+      await alice.inviteToSpace(spaceId, carol.userId);
+      await alice.inviteToSpace(spaceId, carol.userId);
+      await waitFor(() => sentTo(carol).length >= 2, 5000, 'both sent');
+      const codes = new Set(sentTo(carol).map((b) => /join\/([a-z2-7]+)/.exec(b)?.[1]));
+      expect(codes.size).toBe(1);
+    });
+  });
+
+  describe('a private invite that could not be sent', () => {
+    it('is withdrawn, not left waiting', async () => {
+      const coord = await server();
+      const net = new FakeRelayNetwork();
+      const alice = await signUp(makeClient(net, coord), 'alice');
+      const carol = await signUp(makeClient(net, coord), 'carol');
+      const spaceId = await alice.createSpace('Swamp');
+      const send = vi.spyOn(alice, 'sendMessage').mockRejectedValueOnce(new Error('offline'));
+      await expect(alice.inviteToSpace(spaceId, carol.userId)).rejects.toThrow(/offline/);
+      send.mockRestore();
+      const made = (alice.records.list('invite:') as SignedRecord<'invite'>[]).filter(
+        (r) => r.body.for === carol.userId,
+      );
+      expect(made).toHaveLength(1);
+      expect(made[0]!.body.revoked).toBe(true);
+    });
   });
 
   it('a stopped link fails requests at once instead of waiting for a server', async () => {

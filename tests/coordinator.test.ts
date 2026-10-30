@@ -1455,12 +1455,76 @@ describe('record quotas', () => {
     );
     // Withdrawn, then accepted: a place each time.
     expectAccepted(
-      await send(signRecord(alice.identity, 'invite', first.key, { ...first.body, revoked: true })),
+      await send(
+        signRecord(
+          alice.identity,
+          'invite',
+          first.key,
+          { ...first.body, revoked: true },
+          first.version + 1,
+        ),
+      ),
     );
     expectAccepted(await send(invite(people[2]!)));
     expect((await send(invite(people[3]!))).reason).toMatch(/at most 2 invitations waiting/);
     await joinSpace(people[1]!, spaceId, (second.body as { code: string }).code);
     expectAccepted(await send(invite(people[3]!)));
+    // Bringing back one that was withdrawn counts as a new one waiting, not as a change.
+    expectAccepted(await send(invite(people[0]!, { revoked: true })));
+    const withdrawn = invite(people[0]!, { revoked: true });
+    expectAccepted(await send(withdrawn));
+    expect(
+      (
+        await send(
+          signRecord(
+            alice.identity,
+            'invite',
+            withdrawn.key,
+            { ...withdrawn.body, revoked: undefined },
+            withdrawn.version + 1,
+          ),
+        )
+      ).reason,
+    ).toMatch(/at most 2 invitations waiting/);
+  });
+
+  it('keeps a member who may invite from using up the invites of a space', async () => {
+    const c = await server({ quotas: { invitesPerMember: 2 } });
+    const alice = await user(c);
+    const bob = await user(c);
+    const { spaceId, code } = await createSpace(alice);
+    await joinSpace(bob, spaceId, code);
+    const space = (await alice.conn.request('records.get', { keys: [recordKey.space(spaceId)] }))
+      .records[0] as SignedRecord<'space'>;
+    expectAccepted(
+      await put(
+        alice,
+        signRecord(
+          alice.identity,
+          'space',
+          space.key,
+          { ...space.body, invitePolicy: 'members' },
+          space.version + 1,
+        ),
+      ),
+    );
+    const named = (who: TestUser) => {
+      const k = randomId(6);
+      return signRecord(who.identity, 'invite', recordKey.invite(k), {
+        spaceId,
+        code: k,
+        expiresAt: null,
+        revoked: true,
+        for: createIdentity().userId,
+      });
+    };
+    expectAccepted(await put(bob, named(bob)));
+    expectAccepted(await put(bob, named(bob)));
+    expect((await put(bob, named(bob))).reason).toMatch(/at most 2 invites per member/);
+    // The owner is not held to it.
+    expectAccepted(await put(alice, named(alice)));
+    expectAccepted(await put(alice, named(alice)));
+    expectAccepted(await put(alice, named(alice)));
   });
 
   it('limits active memberships; leaving frees a place', async () => {

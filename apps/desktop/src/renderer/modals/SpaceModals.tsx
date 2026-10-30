@@ -311,6 +311,7 @@ export function SpaceSettingsModal({ spaceId }: { spaceId: string }) {
   const [name, setName] = useState(space?.name ?? '');
   const [icon, setIcon] = useState(space?.icon);
   const [membersInvite, setMembersInvite] = useState(space?.invitePolicy === 'members');
+  const [policyAtOpen] = useState(space?.invitePolicy === 'members');
   const client = getClient();
   if (!space) return null;
   const isOwner = space.owner === me;
@@ -321,7 +322,10 @@ export function SpaceSettingsModal({ spaceId }: { spaceId: string }) {
       ...b,
       name: name.trim() || b.name,
       ...(icon ? { icon } : {}),
-      invitePolicy: membersInvite ? 'members' : 'admins',
+      // Only what was changed here: a change somebody else made meanwhile stays.
+      ...(membersInvite !== policyAtOpen
+        ? { invitePolicy: membersInvite ? 'members' : 'admins' }
+        : {}),
     }));
     closeModal();
   };

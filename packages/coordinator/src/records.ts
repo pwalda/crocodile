@@ -1,4 +1,4 @@
-import { userIdFromKey, validateRecord } from '@crocodile/crypto';
+import { canManageSpace, userIdFromKey, validateRecord } from '@crocodile/crypto';
 import {
   LIMITS,
   NOTE_TTL_MS,
@@ -33,6 +33,8 @@ export interface RecordQuotas {
   invitesPerSpace: number;
   /** Invitations to named people not yet accepted, withdrawn or out of time. */
   privateInvitesPerSpace: number;
+  /** Invite records one member (not an owner or admin) may have made in a space, withdrawn ones too. */
+  invitesPerMember: number;
   /** Spaces a user is an active member of. */
   membershipsPerUser: number;
   /** Unread notes for one user. */
@@ -47,6 +49,7 @@ export const defaultRecordQuotas: RecordQuotas = {
   spacesPerUser: 100,
   invitesPerSpace: 1000,
   privateInvitesPerSpace: 100,
+  invitesPerMember: 20,
   membershipsPerUser: 500,
   notesPerUser: LIMITS.notesPerUser,
 };
@@ -121,9 +124,24 @@ export class RecordService {
       case 'invite': {
         const body = record.body as RecordBodies['invite'];
         const { spaceId } = body;
-        if (this.store.countByTerm(`invite-space:${spaceId}`) >= q.invitesPerSpace)
-          return `at most ${q.invitesPerSpace} invites per space`;
+        const known = this.store.get(record.key) as SignedRecord<'invite'> | undefined;
+        if (!known) {
+          if (this.store.countByTerm(`invite-space:${spaceId}`) >= q.invitesPerSpace)
+            return `at most ${q.invitesPerSpace} invites per space`;
+          // A member invites by name, where the space allows it, and may not use up the space's room.
+          const space = this.lookup(recordKey.space(spaceId)) as SignedRecord<'space'> | undefined;
+          if (space && !canManageSpace(space.body, userIdFromKey(record.author))) {
+            const made = this.store
+              .findByTerm(`invite-space:${spaceId}`, q.invitesPerSpace)
+              .filter((r) => r.author === record.author).length;
+            if (made >= q.invitesPerMember)
+              return `at most ${q.invitesPerMember} invites per member`;
+          }
+        }
+        // An invitation that was withdrawn or lapsed and is revived waits again.
+        const wasWaiting = known !== undefined && this.outstanding(known.body);
         return this.outstanding(body) &&
+          !wasWaiting &&
           this.outstandingInvites(spaceId, record.key) >= q.privateInvitesPerSpace
           ? `at most ${q.privateInvitesPerSpace} invitations waiting per space`
           : undefined;
@@ -219,7 +237,8 @@ export class RecordService {
       (record.body as RecordBodies['note']).deleted
     )
       return { accepted: false, current, reason: 'no such note' };
-    if (grows) {
+    // A new invitation counts; so does one that was withdrawn or lapsed and is brought back.
+    if (grows || record.kind === 'invite') {
       const over = this.overQuota(record, opts.fresh);
       if (over) return { accepted: false, current, reason: `quota reached: ${over}` };
     }
