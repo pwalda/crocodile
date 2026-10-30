@@ -24,8 +24,8 @@ interface OwnedSession {
   state: SessionState;
   memberServer: Map<string, string>;
   penalties: Map<string, number>;
-  /** User ids that have said the host is unreachable (one vote a person). */
-  reports: Set<string>;
+  /** Devices that have said the host is unreachable, with their user (one vote a person). */
+  reports: Map<string, string>;
   /** Host adopted from a hint whose member has not re-joined yet. */
   pendingHostUntil: number;
   timer?: ReturnType<typeof setTimeout>;
@@ -189,8 +189,9 @@ export class SessionService {
     let record = await this.findDevice(peer);
     // Waiting is capped, like the wait for news of a device: made-up devices must not hold
     // up the server.
-    if (patient && !record && this.deviceWaiters < DEVICE_WAITERS_MAX) {
+    if (patient && !record && this.deviceWaiters < DEVICE_WAITERS_MAX && !this.waiting.has(peer)) {
       this.deviceWaiters += 1;
+      this.waiting.add(peer);
       try {
         for (let i = 0; !record && i < DEVICE_LOOKUPS; i++) {
           await new Promise((r) => setTimeout(r, DEVICE_LOOKUP_WAIT_MS));
@@ -198,6 +199,7 @@ export class SessionService {
         }
       } finally {
         this.deviceWaiters -= 1;
+        this.waiting.delete(peer);
       }
     }
     const removed = record?.body.revoked === true;
@@ -321,6 +323,9 @@ export class SessionService {
   async join(client: ClientHandle, sessionId: string, caps: HostCaps): Promise<SessionState> {
     await this.checkAccess(client.userId, sessionId);
     caps = await this.vouchOrDrop(client.peer, sessionId, caps, true);
+    // It may have gone (or been replaced) while the record was looked up; nothing would remove it later.
+    if (!this.hub.presence.localOf(client.userId).includes(client))
+      throw new RpcFailure('unavailable', 'the connection closed');
     const leaveKey = `${sessionId}|${client.peer}`;
     clearTimeout(this.pendingLeaves.get(leaveKey));
     this.pendingLeaves.delete(leaveKey);
@@ -449,6 +454,8 @@ export class SessionService {
   private opChains = new Map<string, Promise<void>>();
   private hostingWaiters = 0;
   private deviceWaiters = 0;
+  /** Devices whose record is being waited for: one wait each, so one cannot use up the rest. */
+  private waiting = new Set<string>();
 
   handleRemoteOp(fromServer: string, frame: FedSessionOp) {
     const reply = (res: { ok: unknown } | { err: unknown }) =>
@@ -606,7 +613,7 @@ export class SessionService {
           },
           memberServer: new Map(),
           penalties: new Map(),
-          reports: new Set(),
+          reports: new Map(),
           pendingHostUntil: 0,
         };
         this.owned.set(sessionId, s);
@@ -658,10 +665,10 @@ export class SessionService {
         if (!member || op.epoch !== s.state.epoch || !host) return {};
         const hostUser = peerIds.user(host);
         if (userId === hostUser) return {};
-        s.reports.add(userId);
+        s.reports.set(peer, userId);
         const others = new Set(s.state.members.map((m) => m.userId));
         others.delete(hostUser);
-        if (s.reports.size >= Math.max(1, Math.ceil(others.size / 2))) {
+        if (new Set(s.reports.values()).size >= Math.max(1, Math.ceil(others.size / 2))) {
           s.penalties.set(host, now + HOST_PENALTY_MS);
           this.hub.log.info('host reported unreachable; failing over', {
             sessionId,
@@ -678,9 +685,7 @@ export class SessionService {
     const before = s.state.members.length;
     s.state.members = s.state.members.filter((m) => m.peer !== peer);
     s.memberServer.delete(peer);
-    // The person's vote stays while any of their devices does.
-    if (!s.state.members.some((m) => m.userId === peerIds.user(peer)))
-      s.reports.delete(peerIds.user(peer));
+    s.reports.delete(peer);
     if (s.state.members.length === before) return;
     if (s.state.members.length === 0) {
       this.dropOwned(s.state.id, true);

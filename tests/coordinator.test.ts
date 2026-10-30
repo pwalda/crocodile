@@ -1011,6 +1011,72 @@ describe('sessions and host election', () => {
       expect(member.caps.platform).toBe('web');
     });
 
+    it('does not add a device to the room that went while its record was looked up', async () => {
+      const { c, alice, sessionId } = await setup();
+      const gone = await anotherDevice(c, alice);
+      const slow = vi
+        .spyOn(
+          c.sessions as unknown as { lookupDevice(p: string): Promise<unknown> },
+          'lookupDevice',
+        )
+        .mockImplementationOnce(async () => {
+          await new Promise((r) => setTimeout(r, 300));
+          return { device: { body: { platform: 'bot' } }, removed: false };
+        });
+      const joining = gone.conn
+        .request('session.join', { sessionId, caps: caps() })
+        .catch(() => {});
+      await new Promise((r) => setTimeout(r, 50));
+      gone.conn.close();
+      await joining;
+      await new Promise((r) => setTimeout(r, 400));
+      slow.mockRestore();
+      expect(c.sessions.inSession(gone.conn.peer, sessionId)).toBe(false);
+      expect(c.sessions.ownedState(sessionId)?.members ?? []).toEqual([]);
+    });
+
+    it('gives a device one wait at a time for a record, so one cannot use up the others', async () => {
+      const { c, alice, sessionId } = await setup();
+      const bare = await connectUser(c, alice.identity, 'alice', randomDeviceId(), false);
+      cleanup.push(() => bare.conn.close());
+      const first = bare.conn.request('session.join', { sessionId, caps: caps() }).catch(() => {});
+      await new Promise((r) => setTimeout(r, 50));
+      const start = Date.now();
+      await expect(bare.conn.request('session.join', { sessionId, caps: caps() })).rejects.toThrow(
+        /device/,
+      );
+      expect(Date.now() - start).toBeLessThan(250);
+      await first;
+    });
+
+    it('does not count the vote of a device that has left, though the person has another', async () => {
+      const { c, alice, bob, carol, spaceId, code, sessionId } = await setup();
+      const dave = await user(c);
+      const erin = await user(c);
+      await joinSpace(dave, spaceId, code);
+      await joinSpace(erin, spaceId, code);
+      const { state } = await alice.conn.request('session.join', {
+        sessionId,
+        caps: caps({ nat: 'open' }),
+      });
+      for (const u of [bob, carol, dave, erin])
+        await u.conn.request('session.join', { sessionId, caps: caps() });
+      const report = (u: TestUser) =>
+        u.conn.request('session.report', {
+          sessionId,
+          epoch: state.epoch,
+          issue: 'host_unreachable',
+        });
+      const laptop = await anotherDevice(c, bob);
+      await laptop.conn.request('session.join', { sessionId, caps: caps() });
+      await report(laptop);
+      await laptop.conn.request('session.leave', { sessionId });
+      // Bob's other device is still there, but the one that saw the host fail is not.
+      await report(carol);
+      await new Promise((r) => setTimeout(r, 150));
+      expect(c.sessions.ownedState(sessionId)!.host).toBe(alice.conn.peer);
+    });
+
     it('does not start a second look-up while one is running', async () => {
       const { c, alice, sessionId } = await setup();
       await alice.conn.request('session.join', { sessionId, caps: caps() });
