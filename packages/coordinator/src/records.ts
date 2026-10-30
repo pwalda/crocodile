@@ -1,4 +1,4 @@
-import { userIdFromKey, validateRecord } from '@crocodile/crypto';
+import { canManageSpace, userIdFromKey, validateRecord } from '@crocodile/crypto';
 import {
   LIMITS,
   NOTE_TTL_MS,
@@ -31,6 +31,12 @@ export interface RecordQuotas {
   spacesPerUser: number;
   /** Invites per space (the app reuses a valid invite rather than making new ones). */
   invitesPerSpace: number;
+  /** Invitations to named people not yet accepted, withdrawn or out of time. */
+  privateInvitesPerSpace: number;
+  /** Invite records one member (not an owner or admin) may have made in a space, withdrawn ones too. */
+  invitesPerMember: number;
+  /** Invitations a member (not an owner or admin) may have waiting in a space. */
+  privateInvitesPerMember: number;
   /** Spaces a user is an active member of. */
   membershipsPerUser: number;
   /** Unread notes for one user. */
@@ -44,6 +50,9 @@ export const defaultRecordQuotas: RecordQuotas = {
   devicesPerUser: 100,
   spacesPerUser: 100,
   invitesPerSpace: 1000,
+  privateInvitesPerSpace: 100,
+  invitesPerMember: 50,
+  privateInvitesPerMember: 10,
   membershipsPerUser: 500,
   notesPerUser: LIMITS.notesPerUser,
 };
@@ -116,9 +125,43 @@ export class RecordService {
           : undefined;
       }
       case 'invite': {
-        const { spaceId } = record.body as RecordBodies['invite'];
-        return this.store.countByTerm(`invite-space:${spaceId}`) >= q.invitesPerSpace
-          ? `at most ${q.invitesPerSpace} invites per space`
+        const body = record.body as RecordBodies['invite'];
+        const { spaceId } = body;
+        const known = this.store.get(record.key) as SignedRecord<'invite'> | undefined;
+        if (!known) {
+          if (this.store.countByTerm(`invite-space:${spaceId}`) >= q.invitesPerSpace)
+            return `at most ${q.invitesPerSpace} invites per space`;
+        }
+        // An invitation that was withdrawn or lapsed and is revived waits again.
+        const wasWaiting = known !== undefined && this.outstanding(known.body);
+        const waits = this.outstanding(body) && !wasWaiting;
+        // A member invites by name, where the space allows it, and may not use up the space's room.
+        const space = this.lookup(recordKey.space(spaceId)) as SignedRecord<'space'> | undefined;
+        const member =
+          !!space && !canManageSpace(space.body, userIdFromKey(record.author))
+            ? record.author
+            : null;
+        if (!waits && !(member && !known)) return undefined;
+        // One pass over the space's invites for all that is counted.
+        const now = Date.now();
+        let made = 0;
+        let waiting = 0;
+        let waitingOfMember = 0;
+        for (const r of this.store.findByTerm(`invite-space:${spaceId}`, q.invitesPerSpace)) {
+          if (r.key === record.key) continue;
+          if (r.author === member) made++;
+          if (!this.waitingFor(r, now)) continue;
+          waiting++;
+          if (r.author === member) waitingOfMember++;
+        }
+        if (member && !known && made >= q.invitesPerMember)
+          return `at most ${q.invitesPerMember} invites per member`;
+        if (!waits) return undefined;
+        if (waiting >= q.privateInvitesPerSpace)
+          return `at most ${q.privateInvitesPerSpace} invitations waiting per space`;
+        // A member's share of that: the room is not theirs to use up.
+        return member && waitingOfMember >= q.privateInvitesPerMember
+          ? `at most ${q.privateInvitesPerMember} invitations waiting per member`
           : undefined;
       }
       case 'member': {
@@ -137,6 +180,23 @@ export class RecordService {
       default:
         return undefined;
     }
+  }
+
+  /** An invitation to a named person that can still be accepted (or has yet to be seen to be). */
+  private outstanding(body: RecordBodies['invite'], now = Date.now()) {
+    return (
+      body.for !== undefined && !body.revoked && (body.expiresAt === null || body.expiresAt > now)
+    );
+  }
+
+  /** Whether an invite record is an invitation to a named person still waiting to be taken up. */
+  private waitingFor(r: SignedRecord, now: number) {
+    const body = r.body as RecordBodies['invite'];
+    if (!this.outstanding(body, now)) return false;
+    // One who has joined no longer waits.
+    const joined = this.store.get(recordKey.member(body.spaceId, body.for!)) as
+      SignedRecord<'member'> | undefined;
+    return !joined || joined.body.left === true;
   }
 
   onAccepted(fn: RecordListener) {
@@ -190,7 +250,8 @@ export class RecordService {
       (record.body as RecordBodies['note']).deleted
     )
       return { accepted: false, current, reason: 'no such note' };
-    if (grows) {
+    // A new invitation counts; so does one that was withdrawn or lapsed and is brought back.
+    if (grows || record.kind === 'invite') {
       const over = this.overQuota(record, opts.fresh);
       if (over) return { accepted: false, current, reason: `quota reached: ${over}` };
     }

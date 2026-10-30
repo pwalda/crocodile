@@ -22,6 +22,7 @@ export type View =
 export type ModalState =
   | { kind: 'add-space' }
   | { kind: 'invite'; spaceId: string }
+  | { kind: 'invite-person'; userId: string }
   | { kind: 'create-channel'; spaceId: string }
   | { kind: 'space-settings'; spaceId: string }
   | { kind: 'settings'; tab?: string }

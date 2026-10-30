@@ -182,6 +182,11 @@ export const SpaceBody = z.object({
   /** Members who may change the space (not delete it, nor change who the admins are). */
   admins: z.array(id).max(100),
   bans: z.array(id).max(10_000),
+  /**
+   * Who may invite a named person: only the owner and admins (the default), or members too.
+   * The one open invite is always made by the owner or an admin.
+   */
+  invitePolicy: z.enum(['admins', 'members']).optional(),
   channels: z.array(Channel).max(LIMITS.channelsPerSpace),
   deleted: z.boolean().optional(),
   /**
@@ -205,6 +210,8 @@ export const InviteBody = z.object({
   /** Epoch ms, or null for never. */
   expiresAt: z.number().int().nullable(),
   revoked: z.boolean().optional(),
+  /** A private invite: only this user can join with it. Without it, anyone holding the code can. */
+  for: id.optional(),
 });
 export type InviteBody = z.infer<typeof InviteBody>;
 

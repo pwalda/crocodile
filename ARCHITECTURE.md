@@ -83,7 +83,7 @@ Metadata lives in signed records (`packages/protocol/src/records.ts`):
 | profile | `profile:<userId>`          | the user (name, avatar, bio, X25519 key)                            |
 | friends | `friends:<userId>`          | the user; sealed, readable only by the user's devices (see below)   |
 | space   | `space:<spaceId>`           | the owner, or an admin the owner signed for (see below)             |
-| invite  | `invite:<code>`             | the space owner or an admin                                         |
+| invite  | `invite:<code>`             | the space owner or an admin (a member, for one named person)        |
 | member  | `member:<spaceId>:<userId>` | the user, referencing a valid invite                                |
 | device  | `device:<userId>:<device>`  | the user (name, platform, current prekeys, revoked flag)            |
 | note    | `note:<userId>:<noteId>`    | anyone, once, with a one-time key; only the recipient may delete it |
@@ -107,6 +107,22 @@ the member records of a space only to the space's owner and its members (not
 to someone who left or was banned), whether asked by key, by list or by
 subscription. Servers still replicate invites and memberships among
 themselves, and the one that stores an invite can read it.
+
+**Invitations to one person.** An invite may name a user (`for`); only that
+user can join with it, whoever holds the code, so reading it from a member
+record gives nobody else a way in. A person is sent one as a message, which
+reaches a stranger as a request they can ignore, and it lapses (a week by
+default, 30 days at most). The space record's `invitePolicy`, which only the
+owner sets (it is signed with the admin list, so an admin's version cannot change it), says who may send these: the owner and admins (the default), or
+members too; the invite link for anyone stays with the owner and admins
+either way. A member's invitation stops working when they leave or the space
+stops allowing it (a server that is told of it after that refuses it
+for good); its maker can always withdraw it. Only the servers that
+take an invite check that its maker is a member (a client cannot read the
+member list before it has joined), as they do for its expiry. A space holds
+at most 100 invitations still waiting (10 from any one member, who may make
+50 invite records in all), and the server that stores an invitation can see
+whom it names.
 
 **Friends without telling the servers.** A friendship exists when both people
 list each other; listing someone who doesn't list you back is a request. No

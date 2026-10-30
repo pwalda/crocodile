@@ -182,6 +182,57 @@ export function InviteModal({ spaceId }: { spaceId: string }) {
   );
 }
 
+/** Pick a space to invite one person to: an invitation only they can use, sent as a message. */
+export function InvitePersonModal({ userId }: { userId: string }) {
+  useCroc((s) => s.spaces);
+  const profile = useCroc((s) => s.profiles[userId]);
+  const [busy, setBusy] = useState<string | null>(null);
+  const client = getClient();
+  const choices = client.spacesToInviteTo(userId);
+  const name = profile?.username ?? 'this person';
+  return (
+    <Modal
+      title={`Invite ${name} to a space`}
+      subtitle="They get an invitation only they can use, for a week."
+      onClose={closeModal}
+    >
+      {choices.length === 0 && (
+        <p className="rounded-xl bg-field px-3 py-2 text-sm text-muted">
+          There is no space you can invite {name} to.
+        </p>
+      )}
+      {choices.map((s) => (
+        <button
+          key={s.id}
+          disabled={busy !== null}
+          className="flex w-full items-center gap-3 rounded-xl px-2 py-2 text-left hover:bg-hover disabled:opacity-50"
+          onClick={async () => {
+            setBusy(s.id);
+            try {
+              await client.inviteToSpace(s.id, userId);
+              closeModal();
+              navigate({ kind: 'dm', userId });
+            } catch (e) {
+              client.reportError((e as Error).message);
+              setBusy(null);
+            }
+          }}
+        >
+          {s.icon ? (
+            <img src={s.icon} alt="" className="h-9 w-9 rounded-xl object-cover" />
+          ) : (
+            <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-accent-soft text-sm font-bold text-accent">
+              {initials(s.name)}
+            </span>
+          )}
+          <span className="flex-1 truncate font-semibold">{s.name}</span>
+          <span className="text-xs text-muted">{busy === s.id ? 'Sending…' : 'Invite'}</span>
+        </button>
+      ))}
+    </Modal>
+  );
+}
+
 export function CreateChannelModal({ spaceId }: { spaceId: string }) {
   const [kind, setKind] = useState<ChannelKind>('text');
   const [name, setName] = useState('');
@@ -257,6 +308,9 @@ export function SpaceSettingsModal({ spaceId }: { spaceId: string }) {
   const me = useCroc((s) => s.me?.userId);
   const [name, setName] = useState(space?.name ?? '');
   const [icon, setIcon] = useState(space?.icon);
+  // Null until the switch is touched: what is saved is what was chosen here, never a stale guess.
+  const [chosenInvite, setChosenInvite] = useState<boolean | null>(null);
+  const membersInvite = chosenInvite ?? space?.invitePolicy === 'members';
   const client = getClient();
   if (!space) return null;
   const isOwner = space.owner === me;
@@ -267,6 +321,8 @@ export function SpaceSettingsModal({ spaceId }: { spaceId: string }) {
       ...b,
       name: name.trim() || b.name,
       ...(icon ? { icon } : {}),
+      // Only what was changed here: a change somebody else made meanwhile stays.
+      ...(chosenInvite !== null ? { invitePolicy: chosenInvite ? 'members' : 'admins' } : {}),
     }));
     closeModal();
   };
@@ -303,6 +359,22 @@ export function SpaceSettingsModal({ spaceId }: { spaceId: string }) {
           <Input value={name} maxLength={64} onChange={(e) => setName(e.target.value)} />
         </div>
       </div>
+      {isOwner && (
+        <div className="mt-6 flex items-center gap-3">
+          <div className="flex-1">
+            <Label>Members can invite people</Label>
+            <p className="text-xs text-muted">
+              Otherwise only the owner and admins can invite someone by name. The invite link for
+              everyone always stays with them.
+            </p>
+          </div>
+          <Toggle
+            checked={membersInvite}
+            label="Members can invite people"
+            onChange={setChosenInvite}
+          />
+        </div>
+      )}
       <div className="mt-6">
         <Label>Channels</Label>
         {space.channels.map((c) => (

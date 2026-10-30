@@ -28,6 +28,8 @@ import {
   signRecord,
   signSpaceAuthority,
   spaceAuthorityValid,
+  mayInviteByName,
+  signedInvitePolicy,
   spaceIdFor,
   userTag,
   verifyChatMessage,
@@ -199,6 +201,8 @@ export interface SpaceView {
   bans: string[];
   /** Members the owner lets change the space. */
   admins: string[];
+  /** Who may invite a named person: the owner and admins, or members too. */
+  invitePolicy: 'admins' | 'members';
 }
 
 /** A session as the UI sees it: user ids (devices collapsed). */
@@ -278,6 +282,10 @@ export interface InvitePreview {
   joined: boolean;
   /** Revoked or past its time: joining with it would fail. */
   expired: boolean;
+  /** Made for one person. */
+  private: boolean;
+  /** Made for somebody else: joining with it would fail. */
+  forOther: boolean;
 }
 
 /** One member device's network type, as the coordinator's election sees it. */
@@ -424,6 +432,9 @@ const MAIL_REQUEST_BYTES = 512 * 1024;
 const FRIEND_NOTE_RETRY_MS = 5000;
 /** And how often while connected, whoever it is owed to. */
 const FRIEND_NOTE_SWEEP_MS = 10 * 60_000;
+const DAY_MS = 24 * 3600_000;
+/** How long an invite lasts unless asked otherwise, and an invitation to a named person can be accepted. */
+const INVITE_MS = 7 * DAY_MS;
 /** A member list the server could not check is asked for again this many times, a little later each time. */
 const MEMBER_LIST_RETRIES = 3;
 const MEMBER_LIST_RETRY_MS = 2000;
@@ -1438,6 +1449,7 @@ export class CrocodileClient extends Emitter<ClientEvents> {
           members: [...members],
           bans: body.bans,
           admins: spaceAuthorityValid(id, body) ? body.admins : [],
+          invitePolicy: body.invitePolicy ?? 'admins',
         };
       }
       patch.spaces = spaces;
@@ -1989,6 +2001,7 @@ export class CrocodileClient extends Emitter<ClientEvents> {
       const admins = [...new Set(body.admins)].filter((u) => u !== me);
       const unchanged =
         !!r.body.authority &&
+        signedInvitePolicy(r.body.invitePolicy) === signedInvitePolicy(body.invitePolicy) &&
         admins.length === r.body.admins.length &&
         admins.every((u, i) => u === r.body.admins[i]);
       body = {
@@ -2001,13 +2014,15 @@ export class CrocodileClient extends Emitter<ClientEvents> {
               spaceId,
               admins,
               Math.max(Date.now(), (r.body.authority?.at ?? 0) + 1),
+              body.invitePolicy,
             ),
       };
     } else {
       // What only the owner decides stays as the owner left it.
-      const { owner, nonce, admins, authority } = r.body;
-      body = { ...body, owner, nonce, admins, authority, deleted: r.body.deleted };
+      const { owner, nonce, admins, authority, invitePolicy } = r.body;
+      body = { ...body, owner, nonce, admins, authority, invitePolicy, deleted: r.body.deleted };
       if (body.deleted === undefined) delete body.deleted;
+      if (body.invitePolicy === undefined) delete body.invitePolicy;
       body.bans = body.bans.filter((u) => u !== owner && !admins.includes(u));
     }
     await this.putRecord(signRecord(this.identity!, 'space', key, body, this.nextVersion(key)));
@@ -2067,12 +2082,13 @@ export class CrocodileClient extends Emitter<ClientEvents> {
    */
   async shareInvite(spaceId: string): Promise<string> {
     const me = this.identity!.publicKey;
-    const minExpiry = Date.now() + 24 * 3600_000;
+    const minExpiry = Date.now() + DAY_MS;
     const reusable = (this.records.list('invite:') as SignedRecord<'invite'>[])
       .filter(
         (r) =>
           r.author === me &&
           r.body.spaceId === spaceId &&
+          r.body.for === undefined &&
           !r.body.revoked &&
           (r.body.expiresAt === null || r.body.expiresAt > minExpiry),
       )
@@ -2080,10 +2096,11 @@ export class CrocodileClient extends Emitter<ClientEvents> {
     return reusable ? reusable.body.code : this.createInvite(spaceId);
   }
 
-  /** Creates an invite code others can use to join. */
+  /** Creates an invite code others can use to join, or one only `forUser` can. */
   async createInvite(
     spaceId: string,
-    expiresInMs: number | null = 7 * 24 * 3600_000,
+    expiresInMs: number | null = INVITE_MS,
+    forUser?: string,
   ): Promise<string> {
     const code = randomId(5);
     await this.putRecord(
@@ -2091,9 +2108,78 @@ export class CrocodileClient extends Emitter<ClientEvents> {
         spaceId,
         code,
         expiresAt: expiresInMs === null ? null : Date.now() + expiresInMs,
+        ...(forUser ? { for: forUser } : {}),
       }),
     );
     return code;
+  }
+
+  /** The spaces we could invite this person to by name: ours to invite to, and they are neither in nor banned. */
+  spacesToInviteTo(userId: string): SpaceView[] {
+    if (userId === this.userId) return [];
+    return Object.values(this.state.spaces).filter(
+      (s) => this.canInviteTo(s.id) && !s.members.includes(userId) && !s.bans.includes(userId),
+    );
+  }
+
+  /** Whether we may invite a named person to a space: its owner and admins, and members where it allows. */
+  canInviteTo(spaceId: string): boolean {
+    const space = this.records.get(recordKey.space(spaceId)) as SignedRecord<'space'> | undefined;
+    if (!space || space.body.deleted) return false;
+    return mayInviteByName(space.body, this.userId) && !!this.state.spaces[spaceId];
+  }
+
+  /**
+   * Invites one person to a space: an invitation only they can use, sent to
+   * them as a message. It reaches a stranger as a request they can ignore.
+   */
+  async inviteToSpace(spaceId: string, userId: string): Promise<void> {
+    if (userId === this.userId) throw new Error('You are already in this space.');
+    if (!this.canInviteTo(spaceId)) throw new Error("You can't invite people to this space.");
+    const space = this.records.get(recordKey.space(spaceId)) as SignedRecord<'space'>;
+    if (this.state.spaces[spaceId]?.members.includes(userId))
+      throw new Error('They are in this space already.');
+    if (space.body.bans.includes(userId)) throw new Error("They can't be invited to this space.");
+    // One we made for them that still has time: send that again, not another. Any that is
+    // about to lapse is withdrawn for the new one, so that they do not pile up against the space.
+    const me = this.identity!.publicKey;
+    const live = (this.records.list('invite:') as SignedRecord<'invite'>[])
+      .filter(
+        (r) =>
+          r.author === me &&
+          r.body.spaceId === spaceId &&
+          r.body.for === userId &&
+          !r.body.revoked &&
+          (r.body.expiresAt === null || r.body.expiresAt > Date.now()),
+      )
+      .sort((a, b) => b.version - a.version);
+    const waiting = live.find(
+      (r) => r.body.expiresAt === null || r.body.expiresAt > Date.now() + DAY_MS,
+    );
+    const code = waiting?.body.code ?? (await this.createInvite(spaceId, INVITE_MS, userId));
+    try {
+      await this.sendMessage(await this.openDm(userId), `croc://join/${code}`);
+    } catch (err) {
+      // Not sent, so not waiting for anyone: do not leave it counting against the space.
+      if (!waiting) await this.revokeInvite(code).catch(() => {});
+      throw err;
+    }
+  }
+
+  /** Withdraws an invite we made, or any in a space we manage. */
+  async revokeInvite(code: string) {
+    const key = recordKey.invite(code);
+    const r = this.records.get(key) as SignedRecord<'invite'> | undefined;
+    if (!r) throw new Error('unknown invite');
+    await this.putRecord(
+      signRecord(
+        this.identity!,
+        'invite',
+        key,
+        { ...r.body, revoked: true },
+        this.nextVersion(key),
+      ),
+    );
   }
 
   /**
@@ -2111,7 +2197,8 @@ export class CrocodileClient extends Emitter<ClientEvents> {
     // space's owner (or an admin), so a server can't point it elsewhere.
     // Checked like any record, but kept only in memory: we haven't joined.
     const spaceKey = recordKey.space(claimed.body.spaceId);
-    if (!this.records.get(spaceKey)) {
+    // A space we are in is kept up to date; any other is asked for each time, as it may have changed.
+    if (!this.state.spaces[claimed.body.spaceId] || !this.records.get(spaceKey)) {
       const got = await this.link!.request('records.get', { keys: [spaceKey] });
       this.records.ingestAll(got.records, false);
     }
@@ -2121,8 +2208,15 @@ export class CrocodileClient extends Emitter<ClientEvents> {
     const { spaceId } = invite.body;
     const space = this.records.get(recordKey.space(spaceId)) as SignedRecord<'space'> | undefined;
     if (!space || space.body.deleted) return null;
+    // Made by someone the space no longer lets make it: a member's invitation after the owner has
+    // taken that right back. (That the maker is a member is for the server to tell, on joining.)
+    const maker = userIdFromKey(invite.author);
+    const makerMayInvite =
+      canManageSpace(space.body, maker) ||
+      (invite.body.for !== undefined && mayInviteByName(space.body, maker));
     const expired =
       !!invite.body.revoked ||
+      !makerMayInvite ||
       (invite.body.expiresAt !== null && invite.body.expiresAt < Date.now());
     return {
       code,
@@ -2131,6 +2225,8 @@ export class CrocodileClient extends Emitter<ClientEvents> {
       ...(space.body.icon ? { icon: space.body.icon } : {}),
       joined: !!this.state.spaces[spaceId],
       expired,
+      private: invite.body.for !== undefined,
+      forOther: invite.body.for !== undefined && invite.body.for !== this.userId,
     };
   }
 
@@ -2140,6 +2236,13 @@ export class CrocodileClient extends Emitter<ClientEvents> {
     const res = await this.link!.request('records.get', { keys: [recordKey.invite(code)] });
     const invite = res.records[0] as SignedRecord<'invite'> | undefined;
     if (!invite) throw new Error('That invite does not exist (yet). Check the code and try again.');
+    if (invite.body.for !== undefined && invite.body.for !== this.userId)
+      throw new Error('That invitation is for somebody else.');
+    if (
+      invite.body.revoked ||
+      (invite.body.expiresAt !== null && invite.body.expiresAt < Date.now())
+    )
+      throw new Error('That invite has expired or was revoked.');
     const { spaceId } = invite.body;
     const space = await this.link!.request('records.get', { keys: [recordKey.space(spaceId)] });
     this.records.ingestAll([...space.records, invite]);

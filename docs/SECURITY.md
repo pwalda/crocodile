@@ -193,6 +193,17 @@ picture size.
   the latest. This is not a boundary against servers, which
   replicate invites and memberships among themselves and can read the ones
   they store.
+- Invitations to a named person (`for`): only that user can join with one, so
+  the code in their member record is no use to anyone else. The servers that
+  store an invitation see whom it is for. Whether a member who made one was a
+  member is checked by the server that takes it, as for expiry; clients cannot
+  check it (they may not read a space's member list before joining). A server
+  that lies about this can make a client show an invitation card that joining
+  would then refuse.
+- Invites are never deleted, and a space takes at most 1000 invite records in
+  all (50 from any one member). A space that invites very many people by name
+  over its life can reach that; the owner or an admin can then no longer make
+  new ones in that space.
 - Linked devices share the account seed; per-device signing keys certified by
   the identity (so a removed device can no longer sign) are planned.
 - Sender keys rather than MLS: good forward secrecy and 30-minute healing,

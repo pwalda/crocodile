@@ -1,4 +1,4 @@
-import { userIdFromKey, validateRecord } from '@crocodile/crypto';
+import { canManageSpace, userIdFromKey, validateRecord } from '@crocodile/crypto';
 import {
   FedRequestParams,
   recordKey,
@@ -205,11 +205,14 @@ export class Distribution {
    * Fetch what a group of records needs to pass validation, all at once: a
    * batch of hundreds waits for one round of lookups, not one per record.
    */
-  private async ensureDependencies(records: SignedRecord[]) {
+  private async ensureDependencies(records: SignedRecord[], fresh = false) {
     const inBatch = new Set(records.map((r) => r.key));
     const need = (k: string) => !inBatch.has(k) && !this.lookup(k);
     const keys = new Set<string>();
     const invites = new Map<string, Set<string>>();
+    // The space a join is checked against, as it is now: what we kept of it may be from before a
+    // ban or a change of who may invite.
+    const spaces = new Set<string>();
     for (const record of records) {
       let authorId: string;
       try {
@@ -221,12 +224,14 @@ export class Distribution {
       // An invite reaches the owners of its space before those of its code.
       const body = record.body as { spaceId?: string; inviteCode?: string };
       if (record.kind === 'member' && body.inviteCode && body.spaceId) {
+        if (fresh) spaces.add(`space:${body.spaceId}`);
         const key = `invite:${body.inviteCode}`;
         if (!need(key)) continue;
         const set = invites.get(body.spaceId) ?? new Set();
         invites.set(body.spaceId, set.add(key));
       }
     }
+    if (spaces.size) await this.get([...spaces]).catch(() => {});
     if (keys.size) await this.get([...keys]).catch(() => {});
     // Invites the code's own owners didn't have: ask the space's.
     await Promise.all(
@@ -240,6 +245,46 @@ export class Distribution {
           .catch(() => {});
       }),
     );
+    // An invitation to a named person made by a member is checked against whether the maker is
+    // in the space, when it is made and when it is taken up: that record is on the space's
+    // owners, not necessarily on the servers of whoever is writing.
+    const makers = new Set<string>();
+    const maker = (spaceId: string, author: string) => {
+      try {
+        const userId = userIdFromKey(author);
+        const space = this.lookup(`space:${spaceId}`) as SignedRecord<'space'> | undefined;
+        // The owner and admins need no membership to be told apart.
+        if (space && canManageSpace(space.body, userId)) return;
+        const key = `member:${spaceId}:${userId}`;
+        if (need(key)) makers.add(key);
+      } catch {
+        // An unreadable author: the check will say so.
+      }
+    };
+    for (const record of records) {
+      if (!fresh) break;
+      const body = record.body as { spaceId?: string; inviteCode?: string; for?: string };
+      if (record.kind === 'invite' && body.for !== undefined && body.spaceId)
+        maker(body.spaceId, record.author);
+      if (record.kind !== 'member' || !body.inviteCode || !body.spaceId) continue;
+      const invite = this.lookup(`invite:${body.inviteCode}`) as SignedRecord<'invite'> | undefined;
+      if (invite?.body.for !== undefined) maker(body.spaceId, invite.author);
+    }
+    // A membership is taken on trust only with the invite it was made with, which may itself
+    // need its own maker's: a few rounds, each asking for what the last one found out.
+    let wanted = makers;
+    for (let round = 0; round < 3 && wanted.size; round++) {
+      const got = await this.get([...wanted]).catch(() => [] as SignedRecord[]);
+      const codes = new Set<string>();
+      for (const r of got) {
+        const code = (r.body as { inviteCode?: string }).inviteCode;
+        if (r.kind === 'member' && code && need(`invite:${code}`)) codes.add(`invite:${code}`);
+      }
+      // Nothing more to go on: the maker's membership is not to be found, and asking again will not.
+      if (!codes.size) break;
+      await this.get([...codes]).catch(() => {});
+      wanted = new Set([...wanted].filter(need));
+    }
   }
 
   // -------------------------------------------------------------------------
@@ -277,7 +322,7 @@ export class Distribution {
     opts: { fresh: boolean; origin: string | null },
   ): Promise<PutResult> {
     if (SignedRecordEnvelope.safeParse(input).success)
-      await this.ensureDependencies([input as SignedRecord]);
+      await this.ensureDependencies([input as SignedRecord], opts.fresh);
     const res = this.hub.records.put(input, opts);
     if (res.accepted && opts.fresh) await this.storeOnOtherShards(input as SignedRecord);
     return res;

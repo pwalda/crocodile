@@ -1357,6 +1357,212 @@ describe('record quotas', () => {
     expect((await put(alice, invite())).reason).toMatch(/at most 2 invites per space/);
   });
 
+  it('lets only the person an invitation names join with it, and members invite where the space says so', async () => {
+    const c = await server();
+    const alice = await user(c);
+    const bob = await user(c);
+    const eve = await user(c);
+    const { spaceId, code } = await createSpace(alice);
+    const private_ = (who: TestUser, to: TestUser) => {
+      const k = randomId(6);
+      return signRecord(who.identity, 'invite', recordKey.invite(k), {
+        spaceId,
+        code: k,
+        expiresAt: Date.now() + 3600_000,
+        for: to.identity.userId,
+      });
+    };
+    const mine = private_(alice, bob);
+    expectAccepted(await put(alice, mine));
+    const joinWith = (who: TestUser, k: string) =>
+      who.conn.request('records.put', {
+        record: signRecord(who.identity, 'member', recordKey.member(spaceId, who.identity.userId), {
+          spaceId,
+          userId: who.identity.userId,
+          inviteCode: k,
+        }),
+      });
+    expect((await joinWith(eve, (mine.body as { code: string }).code)).reason).toMatch(
+      /for somebody else/,
+    );
+    expectAccepted(await joinWith(bob, (mine.body as { code: string }).code));
+    // A member invites only where the space allows it.
+    await joinSpace(eve, spaceId, code);
+    expect((await put(eve, private_(eve, alice))).accepted).toBe(false);
+    const space = (await alice.conn.request('records.get', { keys: [recordKey.space(spaceId)] }))
+      .records[0] as SignedRecord<'space'>;
+    expectAccepted(
+      await put(
+        alice,
+        signRecord(
+          alice.identity,
+          'space',
+          space.key,
+          { ...space.body, invitePolicy: 'members' },
+          space.version + 1,
+        ),
+      ),
+    );
+    expectAccepted(await put(eve, private_(eve, alice)));
+    // Not the open invite, and not without being in the space.
+    const open = randomId(6);
+    expect(
+      (
+        await put(
+          eve,
+          signRecord(eve.identity, 'invite', recordKey.invite(open), {
+            spaceId,
+            code: open,
+            expiresAt: null,
+          }),
+        )
+      ).accepted,
+    ).toBe(false);
+  });
+
+  it('limits the invitations waiting for named people; accepting or withdrawing frees a place', async () => {
+    const c = await server({ quotas: { privateInvitesPerSpace: 2 } });
+    const alice = await user(c);
+    const { spaceId } = await createSpace(alice);
+    const people = await Promise.all([user(c), user(c), user(c), user(c)]);
+    const invite = (to: TestUser, extra = {}) => {
+      const code = randomId(6);
+      return signRecord(alice.identity, 'invite', recordKey.invite(code), {
+        spaceId,
+        code,
+        expiresAt: Date.now() + 3600_000,
+        for: to.identity.userId,
+        ...extra,
+      });
+    };
+    const send = (record: SignedRecord) => put(alice, record);
+    const first = invite(people[0]!);
+    const second = invite(people[1]!);
+    expectAccepted(await send(first));
+    expectAccepted(await send(second));
+    expect((await send(invite(people[2]!))).reason).toMatch(/at most 2 invitations waiting/);
+    // The open invite and a changed record of one already counted are not held back.
+    expectAccepted(await send({ ...first, version: first.version }));
+    const open = randomId(6);
+    expectAccepted(
+      await send(
+        signRecord(alice.identity, 'invite', recordKey.invite(open), {
+          spaceId,
+          code: open,
+          expiresAt: null,
+        }),
+      ),
+    );
+    // Withdrawn, then accepted: a place each time.
+    expectAccepted(
+      await send(
+        signRecord(
+          alice.identity,
+          'invite',
+          first.key,
+          { ...first.body, revoked: true },
+          first.version + 1,
+        ),
+      ),
+    );
+    expectAccepted(await send(invite(people[2]!)));
+    expect((await send(invite(people[3]!))).reason).toMatch(/at most 2 invitations waiting/);
+    await joinSpace(people[1]!, spaceId, (second.body as { code: string }).code);
+    expectAccepted(await send(invite(people[3]!)));
+    // Bringing back one that was withdrawn counts as a new one waiting, not as a change.
+    expectAccepted(await send(invite(people[0]!, { revoked: true })));
+    const withdrawn = invite(people[0]!, { revoked: true });
+    expectAccepted(await send(withdrawn));
+    expect(
+      (
+        await send(
+          signRecord(
+            alice.identity,
+            'invite',
+            withdrawn.key,
+            { ...withdrawn.body, revoked: undefined },
+            withdrawn.version + 1,
+          ),
+        )
+      ).reason,
+    ).toMatch(/at most 2 invitations waiting/);
+  });
+
+  it('keeps a member who may invite from using up the invites of a space', async () => {
+    const c = await server({ quotas: { invitesPerMember: 2 } });
+    const alice = await user(c);
+    const bob = await user(c);
+    const { spaceId, code } = await createSpace(alice);
+    await joinSpace(bob, spaceId, code);
+    const space = (await alice.conn.request('records.get', { keys: [recordKey.space(spaceId)] }))
+      .records[0] as SignedRecord<'space'>;
+    expectAccepted(
+      await put(
+        alice,
+        signRecord(
+          alice.identity,
+          'space',
+          space.key,
+          { ...space.body, invitePolicy: 'members' },
+          space.version + 1,
+        ),
+      ),
+    );
+    const named = (who: TestUser) => {
+      const k = randomId(6);
+      return signRecord(who.identity, 'invite', recordKey.invite(k), {
+        spaceId,
+        code: k,
+        expiresAt: Date.now() + 3600_000,
+        revoked: true,
+        for: createIdentity().userId,
+      });
+    };
+    expectAccepted(await put(bob, named(bob)));
+    expectAccepted(await put(bob, named(bob)));
+    expect((await put(bob, named(bob))).reason).toMatch(/at most 2 invites per member/);
+    // The owner is not held to it.
+    expectAccepted(await put(alice, named(alice)));
+    expectAccepted(await put(alice, named(alice)));
+    expectAccepted(await put(alice, named(alice)));
+  });
+
+  it("keeps a member's waiting invitations to a share of the space's", async () => {
+    const c = await server({ quotas: { privateInvitesPerMember: 2 } });
+    const alice = await user(c);
+    const bob = await user(c);
+    const { spaceId, code } = await createSpace(alice);
+    await joinSpace(bob, spaceId, code);
+    const space = (await alice.conn.request('records.get', { keys: [recordKey.space(spaceId)] }))
+      .records[0] as SignedRecord<'space'>;
+    expectAccepted(
+      await put(
+        alice,
+        signRecord(
+          alice.identity,
+          'space',
+          space.key,
+          { ...space.body, invitePolicy: 'members' },
+          space.version + 1,
+        ),
+      ),
+    );
+    const named = (who: TestUser) => {
+      const k = randomId(6);
+      return signRecord(who.identity, 'invite', recordKey.invite(k), {
+        spaceId,
+        code: k,
+        expiresAt: Date.now() + 3600_000,
+        for: createIdentity().userId,
+      });
+    };
+    expectAccepted(await put(bob, named(bob)));
+    expectAccepted(await put(bob, named(bob)));
+    expect((await put(bob, named(bob))).reason).toMatch(/at most 2 invitations waiting per member/);
+    // The owner still has the room.
+    expectAccepted(await put(alice, named(alice)));
+  });
+
   it('limits active memberships; leaving frees a place', async () => {
     const c = await server({ quotas: { membershipsPerUser: 1 } });
     // Owners are members of their own space, so each owner gets one space here.
