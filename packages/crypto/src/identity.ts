@@ -310,7 +310,7 @@ export function verifySessionOp(
 ): boolean {
   if (!keyMatchesUserId(key, peer.split('.')[0]!)) return false;
   const { sig, ...rest } = proof;
-  if (!sessionOpShapeOk(op, rest)) return false;
+  if (!SessionOpProof.safeParse(proof).success || !sessionOpShapeOk(op, rest)) return false;
   try {
     return verifyPayload(
       key,

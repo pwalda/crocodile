@@ -105,4 +105,17 @@ describe('session operation proofs', () => {
       }).success,
     ).toBe(false);
   });
+
+  it('bound the epoch of a hint', () => {
+    for (const epoch of [-1, 1e300])
+      expect(
+        FedFrameSchema.safeParse({
+          t: 'session_op',
+          opId: 'x',
+          sessionId,
+          peer,
+          op: { op: 'join', caps, hint: { epoch, host: null, backup: null } },
+        }).success,
+      ).toBe(false);
+  });
 });

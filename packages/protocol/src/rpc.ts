@@ -12,7 +12,7 @@ import {
 import { DeviceId } from './records';
 import type { PublicServerInfo } from './directory';
 import { SealedBox } from './relay';
-import { MailProof, SessionOpProof } from './federation';
+import { MailProof, SessionEpoch, SessionOpProof } from './federation';
 
 /** Public identity of a coordination server. */
 export const ServerInfo = z.object({
@@ -296,7 +296,7 @@ export const RpcParams = {
   }),
   'session.report': z.object({
     sessionId: SessionId,
-    epoch: z.number().int().safe().min(0),
+    epoch: SessionEpoch,
     issue: z.enum(['host_unreachable']),
     proof: SessionOpProof.optional(),
   }),

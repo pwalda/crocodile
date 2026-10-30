@@ -246,10 +246,16 @@ export const SessionOpProof = z.object({
 });
 export type SessionOpProof = z.infer<typeof SessionOpProof>;
 
+/** A session's epoch (it counts up from 0 with each change of host). */
+export const SessionEpoch = z.number().int().safe().min(0);
+
+const SignedSessionOpSchema = z.union([
+  z.object({ op: z.enum(['join', 'update']), caps: HostCaps }),
+  z.object({ op: z.literal('report'), epoch: SessionEpoch, issue: z.literal('host_unreachable') }),
+]);
+
 /** What a device signs of an operation (the hint that a server adds to a join is not part of it, yet). */
-export type SignedSessionOp =
-  | { op: 'join' | 'update'; caps: HostCaps }
-  | { op: 'report'; epoch: number; issue: 'host_unreachable' };
+export type SignedSessionOp = z.infer<typeof SignedSessionOpSchema>;
 
 /**
  * Whether a proof has what its operation needs and nothing else: a join is the start of
@@ -264,7 +270,11 @@ export function sessionOpShapeOk(op: SignedSessionOp, proof: Omit<SessionOpProof
   return false;
 }
 
-/** What a SessionOpProof signs: where, who, for which server, when, and what was asked. */
+/**
+ * What a SessionOpProof signs: where, who, for which server, when, and what was asked. The
+ * operation is taken as a receiver has it once parsed, so that whoever builds the bytes gets
+ * the same; what is not an operation (or claims that are not claims) makes this throw.
+ */
 export function sessionOpPayload(
   sessionId: string,
   peer: string,
@@ -278,11 +288,7 @@ export function sessionOpPayload(
     at: proof.at,
     since: proof.since ?? null,
     n: proof.n ?? null,
-    op:
-      op.op === 'report'
-        ? { op: op.op, epoch: op.epoch, issue: op.issue }
-        : // The claims as a receiver has them once parsed, whoever builds the bytes.
-          { op: op.op, caps: HostCaps.parse(op.caps) },
+    op: SignedSessionOpSchema.parse(op),
   };
 }
 
@@ -400,15 +406,13 @@ const SessionOpSchema = z.discriminatedUnion('op', [
   z.object({
     op: z.literal('join'),
     caps: HostCaps,
-    hint: z
-      .object({ epoch: z.number().int(), host: id.nullable(), backup: id.nullable() })
-      .optional(),
+    hint: z.object({ epoch: SessionEpoch, host: id.nullable(), backup: id.nullable() }).optional(),
   }),
   z.object({ op: z.literal('update'), caps: HostCaps }),
   z.object({ op: z.literal('leave') }),
   z.object({
     op: z.literal('report'),
-    epoch: z.number().int().safe().min(0),
+    epoch: SessionEpoch,
     issue: z.literal('host_unreachable'),
   }),
 ]);

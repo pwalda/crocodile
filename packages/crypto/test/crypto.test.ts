@@ -1376,12 +1376,13 @@ describe('session operations', () => {
     expect(verifySessionOp(alice.publicKey, sessionId, peer, report3, good)).toBe(true);
   });
 
-  it('signs what a report accuses of', () => {
+  it('signs what a report accuses of, and no other accusation than the ones there are', () => {
     const p = { ...context, since: 5 };
+    expect(sessionOpPayload(sessionId, peer, report3, p).op).toMatchObject({
+      issue: 'host_unreachable',
+    });
     const other = { ...report3, issue: 'other' } as unknown as typeof report3;
-    expect(sessionOpPayload(sessionId, peer, other, p)).not.toEqual(
-      sessionOpPayload(sessionId, peer, report3, p),
-    );
+    expect(() => sessionOpPayload(sessionId, peer, other, p)).toThrow();
   });
 
   it('signs the claims as the receiver will have them', () => {
@@ -1413,5 +1414,31 @@ describe('session operations', () => {
     const proof = signSessionOp(alice, sessionId, peer, join, context);
     const bad = { op: 'join', caps: { ...caps, platform: 'toaster' } } as unknown as typeof join;
     expect(verifySessionOp(alice.publicKey, sessionId, peer, bad, proof)).toBe(false);
+  });
+
+  it('holds a report to what the schema allows, when signing and when checking', () => {
+    for (const epoch of [-1, 1.5, 1e300])
+      expect(() =>
+        signSessionOp(alice, sessionId, peer, { ...report3, epoch }, { ...context, since: 5 }),
+      ).toThrow();
+    expect(() =>
+      signSessionOp(
+        alice,
+        sessionId,
+        peer,
+        { ...report3, issue: 'other' } as unknown as typeof report3,
+        { ...context, since: 5 },
+      ),
+    ).toThrow();
+    // A signature that is right for its bytes, over a proof outside the bounds.
+    const out = { server: '', at: 1, since: 5 };
+    const sig = sign(alice, SIG_DOMAIN.sessionOp, {
+      sessionId,
+      peer,
+      ...out,
+      n: null,
+      op: report3,
+    });
+    expect(verifySessionOp(alice.publicKey, sessionId, peer, report3, { ...out, sig })).toBe(false);
   });
 });
