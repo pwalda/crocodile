@@ -197,9 +197,7 @@ export function shardOfTerm(term: string): string | undefined {
 export function dependenciesOf(record: SignedRecord, authorId: string): string[] {
   const deps = record.kind === 'note' ? [] : [`profile:${authorId}`];
   const body = record.body as { spaceId?: string; inviteCode?: string };
-  if (record.kind === 'invite') {
-    deps.push(`space:${body.spaceId}`);
-  }
+  if (record.kind === 'invite') deps.push(`space:${body.spaceId}`);
   if (record.kind === 'member') {
     deps.push(`space:${body.spaceId}`);
     if (body.inviteCode) deps.push(`invite:${body.inviteCode}`);

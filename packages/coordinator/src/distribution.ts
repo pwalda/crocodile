@@ -1,4 +1,4 @@
-import { userIdFromKey, validateRecord } from '@crocodile/crypto';
+import { canManageSpace, userIdFromKey, validateRecord } from '@crocodile/crypto';
 import {
   FedRequestParams,
   recordKey,
@@ -245,21 +245,30 @@ export class Distribution {
           .catch(() => {});
       }),
     );
-    // A join with an invitation to a named person is checked against whether its maker is in
-    // the space: that record is on the space's owners, not necessarily on the joiner's.
+    // An invitation to a named person made by a member is checked against whether the maker is
+    // in the space, when it is made and when it is taken up: that record is on the space's
+    // owners, not necessarily on the servers of whoever is writing.
     const makers = new Set<string>();
-    for (const record of records) {
-      if (!fresh) break;
-      const body = record.body as { spaceId?: string; inviteCode?: string };
-      if (record.kind !== 'member' || !body.inviteCode || !body.spaceId) continue;
-      const invite = this.lookup(`invite:${body.inviteCode}`) as SignedRecord<'invite'> | undefined;
-      if (invite?.body.for === undefined) continue;
+    const maker = (spaceId: string, author: string) => {
       try {
-        const key = `member:${body.spaceId}:${userIdFromKey(invite.author)}`;
+        const userId = userIdFromKey(author);
+        const space = this.lookup(`space:${spaceId}`) as SignedRecord<'space'> | undefined;
+        // The owner and admins need no membership to be told apart.
+        if (space && canManageSpace(space.body, userId)) return;
+        const key = `member:${spaceId}:${userId}`;
         if (need(key)) makers.add(key);
       } catch {
         // An unreadable author: the check will say so.
       }
+    };
+    for (const record of records) {
+      if (!fresh) break;
+      const body = record.body as { spaceId?: string; inviteCode?: string; for?: string };
+      if (record.kind === 'invite' && body.for !== undefined && body.spaceId)
+        maker(body.spaceId, record.author);
+      if (record.kind !== 'member' || !body.inviteCode || !body.spaceId) continue;
+      const invite = this.lookup(`invite:${body.inviteCode}`) as SignedRecord<'invite'> | undefined;
+      if (invite?.body.for !== undefined) maker(body.spaceId, invite.author);
     }
     // A membership is taken on trust only with the invite it was made with, which may itself
     // need its own maker's: a few rounds, each asking for what the last one found out.

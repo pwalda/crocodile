@@ -116,8 +116,8 @@ default, 30 days at most). The space record's `invitePolicy`, which only the
 owner sets (it is signed with the admin list, so an admin's version cannot change it), says who may send these: the owner and admins (the default), or
 members too; the invite link for anyone stays with the owner and admins
 either way. A member's invitation stops working when they leave or the space
-stops allowing it (it works again if the owner allows it again before it
-lapses); its maker can always withdraw it. Only the servers that
+stops allowing it (a server that is told of it after that refuses it
+for good); its maker can always withdraw it. Only the servers that
 take an invite check that its maker is a member (a client cannot read the
 member list before it has joined), as they do for its expiry. A space holds
 at most 100 invitations still waiting (10 from any one member, who may make

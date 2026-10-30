@@ -1699,7 +1699,7 @@ describe('leaving', () => {
       await waitFor(() => bob.state.spaces[spaceId], 5000, 'bob in');
       expect(bob.canInviteTo(spaceId)).toBe(false);
       await expect(bob.inviteToSpace(spaceId, carol.userId)).rejects.toThrow(/can't invite/);
-      await alice.setInvitePolicy(spaceId, 'members');
+      await alice.updateSpace(spaceId, (b) => ({ ...b, invitePolicy: 'members' }));
       await waitFor(() => bob.state.spaces[spaceId]?.invitePolicy === 'members', 5000, 'policy');
       expect(bob.canInviteTo(spaceId)).toBe(true);
       await bob.openChannel(await bob.openDm(carol.userId));
@@ -1710,7 +1710,7 @@ describe('leaving', () => {
       await carol.joinWithInvite(codeIn(sent())!);
       expect(carol.state.spaces[spaceId]).toBeDefined();
       // The owner can take it back: what a member made then stops working.
-      await alice.setInvitePolicy(spaceId, 'admins');
+      await alice.updateSpace(spaceId, (b) => ({ ...b, invitePolicy: 'admins' }));
       await waitFor(() => bob.state.spaces[spaceId]?.invitePolicy === 'admins', 5000, 'policy');
       expect(bob.canInviteTo(spaceId)).toBe(false);
     });
@@ -1718,7 +1718,7 @@ describe('leaving', () => {
     it('stops working when the space takes the right to invite from members', async () => {
       const { alice, bob, carol, spaceId } = await trio();
       await bob.joinWithInvite(await alice.createInvite(spaceId));
-      await alice.setInvitePolicy(spaceId, 'members');
+      await alice.updateSpace(spaceId, (b) => ({ ...b, invitePolicy: 'members' }));
       await waitFor(() => bob.state.spaces[spaceId]?.invitePolicy === 'members', 5000, 'policy');
       await bob.openChannel(await bob.openDm(carol.userId));
       await bob.inviteToSpace(spaceId, carol.userId);
@@ -1727,7 +1727,7 @@ describe('leaving', () => {
       await waitFor(() => codeIn(sent()), 5000, 'the invitation is sent');
       const code = codeIn(sent())!;
       expect(await carol.previewInvite(code)).toMatchObject({ expired: false });
-      await alice.setInvitePolicy(spaceId, 'admins');
+      await alice.updateSpace(spaceId, (b) => ({ ...b, invitePolicy: 'admins' }));
       // The card says so, and the server turns joining away.
       let expired: boolean | undefined;
       for (let i = 0; i < 100 && !expired; i++) {

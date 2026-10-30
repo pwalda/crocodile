@@ -209,13 +209,8 @@ describe('sharded records', () => {
         expiresAt: Date.now() + 3600_000,
         for: guest.identity.userId,
       });
-      // Bob's membership reaches the owners of the space a moment after he joins.
-      let taken = false;
-      for (const start = Date.now(); !taken && Date.now() - start < 8000;) {
-        taken = (await bob.conn.request('records.put', { record: invite })).accepted;
-        if (!taken) await new Promise((done) => setTimeout(done, 100));
-      }
-      expect(taken).toBe(true);
+      // Straight after he joined: whoever takes it finds out for itself that he is a member.
+      await put(bob, invite);
       // The invitation reaches the owners of its code a moment after those of its space, so a
       // join that cannot find it yet is tried again; any other refusal is the answer.
       const join = signRecord(

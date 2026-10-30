@@ -2164,7 +2164,6 @@ export class CrocodileClient extends Emitter<ClientEvents> {
       if (!waiting) await this.revokeInvite(code).catch(() => {});
       throw err;
     }
-    if (!waiting) for (const old of live) await this.revokeInvite(old.body.code).catch(() => {});
   }
 
   /** Withdraws an invite we made, or any in a space we manage. */
@@ -2181,11 +2180,6 @@ export class CrocodileClient extends Emitter<ClientEvents> {
         this.nextVersion(key),
       ),
     );
-  }
-
-  /** Who may invite a named person to a space: the owner and admins, or members too. */
-  setInvitePolicy(spaceId: string, invitePolicy: 'admins' | 'members') {
-    return this.updateSpace(spaceId, (b) => ({ ...b, invitePolicy }));
   }
 
   /**
