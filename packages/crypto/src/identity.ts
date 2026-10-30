@@ -3,11 +3,15 @@ import {
   fromB32,
   fromB64u,
   mailProofPayload,
+  sessionOpPayload,
+  SessionOpProof,
+  sessionOpShapeOk,
   SIG_DOMAIN,
   toB32,
   toB64u,
   utf8,
   type MailProof,
+  type SignedSessionOp,
 } from '@crocodile/protocol';
 import {
   ed25519,
@@ -262,4 +266,64 @@ export function verifyMailProof(
   if (!proof || Math.abs(now - proof.at) > maxAgeMs) return false;
   if (!keyMatchesUserId(proof.key, peer.split('.')[0]!)) return false;
   return verifyPayload(proof.key, SIG_DOMAIN.mail, mailProofPayload(req, proof.at), proof.sig);
+}
+
+// ---------------------------------------------------------------------------
+// Session operations: a device's signature on its own join, update or report
+// (SessionOpProof), so that a server other than its own cannot speak for it.
+// ---------------------------------------------------------------------------
+
+const ProofClaims = SessionOpProof.omit({ sig: true });
+
+export function signSessionOp(
+  identity: Pick<Identity, 'signSecret'>,
+  sessionId: string,
+  peer: string,
+  op: SignedSessionOp,
+  context: { server: string; since?: number; n?: number; at?: number },
+): SessionOpProof {
+  const { server, since, n, at = Date.now() } = context;
+  const proof = {
+    server,
+    at,
+    ...(since === undefined ? {} : { since }),
+    ...(n === undefined ? {} : { n }),
+  };
+  if (!sessionOpShapeOk(op, proof)) throw new Error(`a ${op.op} does not carry that`);
+  ProofClaims.parse(proof);
+  return {
+    ...proof,
+    sig: sign(identity, SIG_DOMAIN.sessionOp, sessionOpPayload(sessionId, peer, op, proof)),
+  };
+}
+
+/**
+ * Whether `proof` is a signature on this operation by the account of `peer`'s user, with
+ * `key` as its key (none at all is not one), carrying what its kind of operation needs (a join names no earlier join,
+ * an update names its join and counts, a report names its join). Whether it is for this server,
+ * recent, and the next in line is for the receiver to settle (it has the state for that).
+ */
+export function verifySessionOp(
+  key: string,
+  sessionId: string,
+  peer: string,
+  op: SignedSessionOp,
+  proof: SessionOpProof | undefined,
+): boolean {
+  if (!keyMatchesUserId(key, peer.split('.')[0]!)) return false;
+  const checked = SessionOpProof.safeParse(proof);
+  if (!checked.success) return false;
+  const { sig, ...rest } = checked.data;
+  try {
+    if (!sessionOpShapeOk(op, rest)) return false;
+    return verifyPayload(
+      key,
+      SIG_DOMAIN.sessionOp,
+      sessionOpPayload(sessionId, peer, op, rest),
+      sig,
+    );
+  } catch {
+    // Claims that are not claims.
+    return false;
+  }
 }

@@ -56,4 +56,6 @@ export const SIG_DOMAIN = {
   mail: 'croc/v1/mail',
   /** A space owner's signature on its admin list. */
   spaceAdmins: 'croc/v1/space-admins',
+  /** A device's own join, update or report in a session. */
+  sessionOp: 'croc/v1/session-op',
 } as const;

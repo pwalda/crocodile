@@ -12,7 +12,7 @@ import {
 import { DeviceId } from './records';
 import type { PublicServerInfo } from './directory';
 import { SealedBox } from './relay';
-import { MailProof } from './federation';
+import { MailProof, SessionEpoch, SessionOpProof } from './federation';
 
 /** Public identity of a coordination server. */
 export const ServerInfo = z.object({
@@ -283,13 +283,22 @@ export const RpcParams = {
     status: z.enum(['online', 'idle', 'dnd', 'invisible']),
     text: z.string().max(128).optional(),
   }),
-  'session.join': z.object({ sessionId: SessionId, caps: HostCaps }),
+  'session.join': z.object({
+    sessionId: SessionId,
+    caps: HostCaps,
+    proof: SessionOpProof.optional(),
+  }),
   'session.leave': z.object({ sessionId: SessionId }),
-  'session.update': z.object({ sessionId: SessionId, caps: HostCaps }),
+  'session.update': z.object({
+    sessionId: SessionId,
+    caps: HostCaps,
+    proof: SessionOpProof.optional(),
+  }),
   'session.report': z.object({
     sessionId: SessionId,
-    epoch: z.number().int(),
+    epoch: SessionEpoch,
     issue: z.enum(['host_unreachable']),
+    proof: SessionOpProof.optional(),
   }),
   'voice.watch': z.object({ spaceIds: z.array(userId).max(200) }),
   'signal.send': z.object({ to: PeerId, sessionId: SessionId, data: SignalData }),

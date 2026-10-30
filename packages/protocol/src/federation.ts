@@ -223,16 +223,83 @@ export interface FedRoute {
   d: unknown;
 }
 
-export type SessionOp =
-  | {
-      op: 'join';
-      caps: HostCaps;
-      /** Last state the member's server saw; lets a new owner keep the same host. */
-      hint?: { epoch: number; host: string | null; backup: string | null };
-    }
-  | { op: 'update'; caps: HostCaps }
-  | { op: 'leave' }
-  | { op: 'report'; epoch: number; issue: 'host_unreachable' };
+/**
+ * A device's signature on its own join, update or report in a session, so that a server
+ * other than the one the device is connected to cannot speak for it. The key to check it
+ * with is the account's, which the receiver has from the device's record (or the sign-in).
+ * `server` is the id of the server the device is connected to, exactly as that server gives it in
+ * its hello (compared as it is, never normalised), `at` the device's clock. An update or
+ * a report names the join it belongs to by that join's `at` (`since`); an update also counts
+ * up (`n`), so that an older one is not taken for a newer.
+ */
+export const SessionOpProof = z.object({
+  server: z.string().min(1).max(200),
+  at: z.number().int().safe().min(0),
+  since: z.number().int().safe().min(0).optional(),
+  n: z
+    .number()
+    .int()
+    .min(0)
+    .max(2 ** 31 - 1)
+    .optional(),
+  sig: z.string().min(1).max(200),
+});
+export type SessionOpProof = z.infer<typeof SessionOpProof>;
+
+/** A session's epoch (it counts up from 0 with each change of host). */
+export const SessionEpoch = z.number().int().safe().min(0);
+
+// The parts of an operation a device signs; the wire form below adds to them (a hint) or takes
+// from them (a leave is not signed), so that the two cannot come apart.
+const JoinOp = z.object({ op: z.literal('join'), caps: HostCaps });
+const UpdateOp = z.object({ op: z.literal('update'), caps: HostCaps });
+const ReportOp = z.object({
+  op: z.literal('report'),
+  epoch: SessionEpoch,
+  issue: z.literal('host_unreachable'),
+});
+const SignedSessionOpSchema = z.union([JoinOp, UpdateOp, ReportOp]);
+
+/** What a device signs of an operation (the hint that a server adds to a join is not part of it, yet). */
+export type SignedSessionOp = z.infer<typeof SignedSessionOpSchema>;
+
+/**
+ * Whether a proof has what its operation needs and nothing else: a join is the start of
+ * what the others name (`since`) and counts nothing; an update names its join and counts;
+ * a report names its join.
+ */
+export function sessionOpShapeOk(op: SignedSessionOp, proof: Omit<SessionOpProof, 'sig'>) {
+  if (op.op === 'join') return proof.since === undefined && proof.n === undefined;
+  if (op.op === 'update') return proof.since !== undefined && proof.n !== undefined;
+  if (op.op === 'report') return proof.since !== undefined && proof.n === undefined;
+  // Nothing else is signed (a leave from the member's own server is not).
+  return false;
+}
+
+/**
+ * What a SessionOpProof signs: where, who, for which server, when, and what was asked. The
+ * operation is taken as a receiver has it once parsed, so that whoever builds the bytes gets
+ * the same; what is not an operation (or claims that are not claims) makes this throw.
+ */
+export function sessionOpPayload(
+  sessionId: string,
+  peer: string,
+  op: SignedSessionOp,
+  proof: Omit<SessionOpProof, 'sig'>,
+) {
+  return {
+    sessionId,
+    peer,
+    server: proof.server,
+    at: proof.at,
+    since: proof.since ?? null,
+    n: proof.n ?? null,
+    op: SignedSessionOpSchema.parse(op),
+  };
+}
+
+/** What a member asks of a session; a join may come with the server's hint. */
+export type SessionOp = z.infer<typeof SessionOpSchema>;
 
 /** A session operation forwarded to the server that owns the session. */
 export interface FedSessionOp {
@@ -242,6 +309,8 @@ export interface FedSessionOp {
   /** Peer id of the member. */
   peer: string;
   op: SessionOp;
+  /** The device's signature on the operation; a leave from the member's own server needs none. */
+  proof?: SessionOpProof;
 }
 
 export interface FedSessionOpResult {
@@ -332,20 +401,16 @@ const VoiceOccupancySchema = z.object({
 });
 
 const SessionOpSchema = z.discriminatedUnion('op', [
-  z.object({
-    op: z.literal('join'),
-    caps: HostCaps,
+  JoinOp.extend({
+    // The last state the member's server saw, so that a new owner can keep the same host.
+    // An epoch that is no epoch is not a reason to drop the join (the owner leaves such a hint out).
     hint: z
       .object({ epoch: z.number().int(), host: id.nullable(), backup: id.nullable() })
       .optional(),
   }),
-  z.object({ op: z.literal('update'), caps: HostCaps }),
+  UpdateOp,
   z.object({ op: z.literal('leave') }),
-  z.object({
-    op: z.literal('report'),
-    epoch: z.number().int(),
-    issue: z.literal('host_unreachable'),
-  }),
+  ReportOp,
 ]);
 
 const errorBody = z.object({ code: str(64), message: str(2000) }).optional();
@@ -425,6 +490,7 @@ export const FedFrameSchema = z.discriminatedUnion('t', [
     sessionId: SessionId,
     peer: PeerId,
     op: SessionOpSchema,
+    proof: SessionOpProof.optional(),
   }),
   z.object({
     t: z.literal('session_op_res'),
