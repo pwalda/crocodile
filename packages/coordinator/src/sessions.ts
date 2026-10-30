@@ -33,8 +33,8 @@ interface OwnedSession {
 
 /** The owner did not answer in time: it may have done what it was asked all the same. */
 export class OwnerSilent extends RpcFailure {
-  constructor() {
-    super('unavailable', 'session owner did not respond');
+  constructor(message = 'session owner did not respond') {
+    super('unavailable', message);
   }
 }
 
@@ -261,7 +261,8 @@ export class SessionService {
     try {
       // The cheap refusals first: a device made up for somebody who may not be here costs no wait.
       await this.checkAccess(peerIds.user(peer), sessionId).catch((err) => {
-        throw new Refused(err instanceof RpcFailure ? err.message : 'not allowed');
+        // Told not to by the records is final; failing to find out is not.
+        throw err instanceof RpcFailure ? new Refused(err.message) : err;
       });
       if (!(await this.connectedTo(server, peer)))
         return {
@@ -912,7 +913,7 @@ export class SessionService {
       if (p.server === serverId) {
         clearTimeout(p.timer);
         this.pendingOps.delete(opId);
-        p.reject(new RpcFailure('unavailable', 'session owner went away'));
+        p.reject(new OwnerSilent('session owner went away'));
       }
     }
     // Members of the lost server get a grace period to reconnect through

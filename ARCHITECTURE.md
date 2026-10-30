@@ -293,7 +293,9 @@ CPU cores, battery, RTT.
 
 A device joins only if it has a record on its account that hasn't been
 removed, and the kind of device (desktop, web, ...) is read from that record
-rather than from what the device says. The owner looks again about once a
+rather than from what the device says. (The record is signed by the account, so this
+stops a device that a server or another member makes up, not one that the account's
+own keys register.) The owner looks again about once a
 minute and drops devices that have since been removed. The rest of
 `HostCaps` is reported by the device and cannot be checked.
 

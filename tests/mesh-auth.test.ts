@@ -475,6 +475,24 @@ describe('events and session operations from other servers', () => {
       expect(state().epoch).toBeLessThan(5);
     });
 
+    it('does not call a failure to find out whether a device may join a refusal', async () => {
+      const net = await conversation();
+      await joined(net);
+      const sessions = net.victim.sessions as unknown as {
+        checkAccess(...a: unknown[]): Promise<void>;
+        admit(...a: unknown[]): Promise<{ code?: string }>;
+      };
+      const check = vi
+        .spyOn(sessions, 'checkAccess')
+        .mockRejectedValueOnce(new Error('shard owners unreachable'));
+      const answer = await sessions.admit(net.rogue.info.id, net.alice.conn.peer, net.sessionId, {
+        op: 'join',
+        caps: caps(),
+      });
+      check.mockRestore();
+      expect(answer.code).toBe('unavailable');
+    });
+
     it('keeps the epoch of a hint that names no host', async () => {
       const net = await conversation();
       const state = await joined(net);
