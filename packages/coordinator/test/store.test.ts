@@ -6,7 +6,8 @@ import { createIdentity, signRecord, spaceIdFor } from '@crocodile/crypto';
 import { recordKey } from '@crocodile/protocol';
 import { MemoryStore, SqliteStore, type Store } from '../src';
 import { INDEX_VERSION } from '../src/store';
-import { elect, rendezvousOwner } from '../src';
+import { elect, hostScore, rendezvousOwner } from '../src';
+import { fnv1a } from '../src/election';
 
 const stores: [string, () => Store][] = [
   ['sqlite', () => new SqliteStore(':memory:')],
@@ -170,6 +171,7 @@ describe('election', () => {
 
   it('prefers reachable, well-provisioned desktops and never elects web/mobile', () => {
     const r = elect({
+      sessionId: 's1',
       members: [
         member('a', 'symmetric'),
         member('b', 'open'),
@@ -192,8 +194,12 @@ describe('election', () => {
       member('b', 'open'),
       member('c', 'cone', { onBattery: true }),
     ];
-    expect(elect({ members, host: 'a', backup: 'b', penalties: new Map(), now: 0 }).host).toBe('a');
+    expect(
+      elect({ sessionId: 's1', members, host: 'a', backup: 'b', penalties: new Map(), now: 0 })
+        .host,
+    ).toBe('a');
     const failover = elect({
+      sessionId: 's1',
       members,
       host: 'a',
       backup: 'b',
@@ -206,11 +212,25 @@ describe('election', () => {
   it('a host behind a symmetric NAT hands over to a member others can reach', () => {
     // The caller was elected alone; the person they call is on an open network.
     const members = [member('caller', 'symmetric'), member('callee', 'open')];
-    const r = elect({ members, host: 'caller', backup: null, penalties: new Map(), now: 0 });
+    const r = elect({
+      sessionId: 's1',
+      members,
+      host: 'caller',
+      backup: null,
+      penalties: new Map(),
+      now: 0,
+    });
     expect(r).toEqual({ host: 'callee', backup: 'caller' });
     // ...and keeps it: no flapping back.
     expect(
-      elect({ members, host: 'callee', backup: 'caller', penalties: new Map(), now: 0 }).host,
+      elect({
+        sessionId: 's1',
+        members,
+        host: 'callee',
+        backup: 'caller',
+        penalties: new Map(),
+        now: 0,
+      }).host,
     ).toBe('callee');
     // A member whose network check couldn't finish is still a better bet.
     const untested = [
@@ -221,17 +241,38 @@ describe('election', () => {
       },
     ];
     expect(
-      elect({ members: untested, host: 'caller', backup: null, penalties: new Map(), now: 0 }).host,
+      elect({
+        sessionId: 's1',
+        members: untested,
+        host: 'caller',
+        backup: null,
+        penalties: new Map(),
+        now: 0,
+      }).host,
     ).toBe('callee');
     // Two symmetric NATs: nobody better, the current host stays.
     const both = [member('caller', 'symmetric'), member('callee', 'symmetric')];
     expect(
-      elect({ members: both, host: 'caller', backup: null, penalties: new Map(), now: 0 }).host,
+      elect({
+        sessionId: 's1',
+        members: both,
+        host: 'caller',
+        backup: null,
+        penalties: new Map(),
+        now: 0,
+      }).host,
     ).toBe('caller');
     // A cone or open host stays even when a slightly better member joins.
     const fine = [member('a', 'cone'), member('b', 'open')];
     expect(
-      elect({ members: fine, host: 'a', backup: null, penalties: new Map(), now: 0 }).host,
+      elect({
+        sessionId: 's1',
+        members: fine,
+        host: 'a',
+        backup: null,
+        penalties: new Map(),
+        now: 0,
+      }).host,
     ).toBe('a');
   });
 
@@ -251,5 +292,56 @@ describe('election', () => {
     const counts = new Map<string, number>();
     for (const o of before) counts.set(o, (counts.get(o) ?? 0) + 1);
     for (const n of counts.values()) expect(n).toBeGreaterThan(60);
+  });
+
+  it('gains nothing from claiming more than a good connection has', () => {
+    const honest = member('honest', 'open', { uplinkKbps: 2000, cpuCores: 4, rttMs: 40 });
+    const liar = member('liar', 'open', { uplinkKbps: 10_000_000, cpuCores: 1024, rttMs: 0 });
+    expect(hostScore(liar, 0)).toBe(hostScore(honest, 0));
+    // A poor connection still counts for less.
+    expect(hostScore(member('slow', 'open', { uplinkKbps: 100 }), 0)).toBeLessThan(
+      hostScore(honest, 0),
+    );
+  });
+
+  it('breaks ties by a hash of the session and the device, not by the name of the device', () => {
+    const members = [member('aaaa', 'cone'), member('bbbb', 'cone')];
+    const pick = (sessionId: string) =>
+      elect({ sessionId, members, host: null, backup: null, penalties: new Map(), now: 0 }).host;
+    // The same everywhere, and not always the name that sorts first.
+    const picked = new Set<string | null>();
+    for (let i = 0; i < 40; i++) {
+      const sid = `session-${i}`;
+      expect(pick(sid)).toBe(pick(sid));
+      picked.add(pick(sid));
+    }
+    expect(picked).toEqual(new Set(['aaaa', 'bbbb']));
+    const wins = (sid: string, a: string, b: string) => fnv1a(`${sid}|${a}`) > fnv1a(`${sid}|${b}`);
+    const sid = Array.from({ length: 200 }, (_, i) => `x${i}`).find((x) =>
+      wins(x, 'bbbb', 'aaaa'),
+    )!;
+    expect(pick(sid)).toBe('bbbb');
+  });
+
+  it('counts a person once, however many devices they have, and picks another person as backup', () => {
+    const device = (user: string, n: number, nat: 'open' | 'cone') => ({
+      ...member(`${user}.d${n}`, nat),
+      userId: user,
+    });
+    const members = [
+      ...[1, 2, 3, 4, 5].map((n) => device('liar', n, 'open')),
+      device('honest', 1, 'cone'),
+    ];
+    const r = elect({
+      sessionId: 's1',
+      members,
+      host: null,
+      backup: null,
+      penalties: new Map(),
+      now: 0,
+    });
+    expect(r.host).toMatch(/^liar\./);
+    // Not another device of the host's person.
+    expect(r.backup).toBe('honest.d1');
   });
 });

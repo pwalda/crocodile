@@ -7,6 +7,14 @@ import type { SessionMember } from '@crocodile/protocol';
  * tenure bonus plus "keep the current host while it is healthy" avoid
  * flapping when a slightly better peer joins.
  *
+ * What a member says about its machine cannot be checked, so what it can gain by
+ * saying more is capped: the best score a claim can reach is one an honest desktop
+ * with a good connection reaches too (uplink counts up to a fixed share, cores and
+ * round-trip time not at all). Ties go by a hash of the session and the device, which
+ * nobody can choose, not by the device's name. Each person is one candidate (their best
+ * device), so having many devices gives no more chances, and a backup is a different
+ * person where there is one.
+ *
  * One exception to keeping the host: a host behind a symmetric NAT gives way
  * to the best member whose NAT isn't symmetric (open, cone, or not fully
  * tested). Whoever starts a call or opens a channel first is elected while
@@ -14,6 +22,8 @@ import type { SessionMember } from '@crocodile/protocol';
  * host at all, while it can always reach them.
  */
 const NAT_SCORE = { open: 40, cone: 25, unknown: 10, symmetric: 0 } as const;
+/** The most uplink can add: reached at about 1.5 Mbps, so nobody gains by claiming more. */
+const UPLINK_SCORE_MAX = 20;
 
 export function isHostEligible(m: SessionMember): boolean {
   return m.caps.canHost && (m.caps.platform === 'desktop' || m.caps.platform === 'bot');
@@ -23,16 +33,16 @@ export function hostScore(m: SessionMember, now: number): number {
   if (!isHostEligible(m)) return Number.NEGATIVE_INFINITY;
   const c = m.caps;
   let score = NAT_SCORE[c.nat];
-  if (c.uplinkKbps !== undefined) score += Math.min(30, Math.log2(1 + c.uplinkKbps / 500) * 10);
+  if (c.uplinkKbps !== undefined)
+    score += Math.min(UPLINK_SCORE_MAX, Math.log2(1 + c.uplinkKbps / 500) * 10);
   else score += 10;
-  score += Math.min(10, (c.cpuCores ?? 4) * 1.25);
   if (c.onBattery) score -= 15;
-  if (c.rttMs !== undefined) score -= Math.min(15, c.rttMs / 20);
   score += Math.min(5, (now - m.joinedAt) / 60_000);
   return score;
 }
 
 export interface ElectionInput {
+  sessionId: string;
   members: SessionMember[];
   host: string | null;
   backup: string | null;
@@ -41,15 +51,23 @@ export interface ElectionInput {
   now: number;
 }
 
-export function elect({ members, host, backup, penalties, now }: ElectionInput): {
+export function elect({ sessionId, members, host, backup, penalties, now }: ElectionInput): {
   host: string | null;
   backup: string | null;
 } {
   const available = (m: SessionMember) => isHostEligible(m) && (penalties.get(m.peer) ?? 0) <= now;
   const byId = new Map(members.map((m) => [m.peer, m]));
-  const ranked = members
-    .filter(available)
-    .sort((a, b) => hostScore(b, now) - hostScore(a, now) || a.peer.localeCompare(b.peer));
+  // Best first; ties by a hash nobody can choose.
+  const better = (a: SessionMember, b: SessionMember) =>
+    hostScore(b, now) - hostScore(a, now) ||
+    fnv1a(`${sessionId}|${b.peer}`) - fnv1a(`${sessionId}|${a.peer}`) ||
+    a.peer.localeCompare(b.peer);
+  // One candidate a person: their best device.
+  const onePerPerson = (list: SessionMember[]) => {
+    const seen = new Set<string>();
+    return list.sort(better).filter((m) => !seen.has(m.userId) && !!seen.add(m.userId));
+  };
+  const ranked = onePerPerson(members.filter(available));
 
   let nextHost: string | null = null;
   const current = host ? byId.get(host) : undefined;
@@ -70,16 +88,16 @@ export function elect({ members, host, backup, penalties, now }: ElectionInput):
   // through the relay, and nobody can without a host.
   if (!nextHost) {
     if (current && isHostEligible(current)) nextHost = current.peer;
-    else
-      nextHost =
-        members
-          .filter(isHostEligible)
-          .sort((a, b) => hostScore(b, now) - hostScore(a, now) || a.peer.localeCompare(b.peer))[0]
-          ?.peer ?? null;
+    else nextHost = onePerPerson(members.filter(isHostEligible))[0]?.peer ?? null;
   }
 
   // Keep the backup stable unless a clearly better candidate appears.
-  const candidates = ranked.filter((m) => m.peer !== nextHost);
+  // (Another person where there is one: a person's other device is no stand-in for them.)
+  const hostUser = nextHost ? byId.get(nextHost)?.userId : undefined;
+  const others = ranked.filter((m) => m.peer !== nextHost);
+  const candidates = others.some((m) => m.userId !== hostUser)
+    ? others.filter((m) => m.userId !== hostUser)
+    : others;
   let nextBackup: string | null = candidates[0]?.peer ?? null;
   const currentBackup = backup && backup !== nextHost ? byId.get(backup) : undefined;
   if (currentBackup && available(currentBackup) && candidates[0]) {

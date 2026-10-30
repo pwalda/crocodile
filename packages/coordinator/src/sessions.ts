@@ -766,6 +766,7 @@ export class SessionService {
     if (st.host && !hostIsMember && s.pendingHostUntil > now) {
       // The adopted host has not re-joined yet; keep it during the grace period.
       const others = elect({
+        sessionId: st.id,
         members: st.members,
         host: null,
         backup: st.backup,
@@ -775,6 +776,7 @@ export class SessionService {
       result = { host: st.host, backup: others.host === st.host ? others.backup : others.host };
     } else {
       result = elect({
+        sessionId: st.id,
         members: st.members,
         host: st.host,
         backup: st.backup,
