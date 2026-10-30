@@ -123,7 +123,7 @@ describe('records', () => {
     // and friends prefixes, then put a fresh invite and a fresh friends record;
     // only the non-invite one should arrive.
     await eve.conn.request('records.subscribe', { prefixes: ['invite:', 'friends:'] });
-    const code2 = randomId(6);
+    const code2 = randomId(16);
     expectAccepted(
       await alice.conn.request('records.put', {
         record: signRecord(alice.identity, 'invite', recordKey.invite(code2), {
@@ -1345,7 +1345,7 @@ describe('record quotas', () => {
     const s = space(alice);
     expectAccepted(await put(alice, s.record));
     const invite = () => {
-      const code = randomId(6);
+      const code = randomId(16);
       return signRecord(alice.identity, 'invite', recordKey.invite(code), {
         spaceId: s.spaceId,
         code,
@@ -1405,7 +1405,7 @@ describe('record quotas', () => {
     );
     expectAccepted(await put(eve, private_(eve, alice)));
     // Not the open invite, and not without being in the space.
-    const open = randomId(6);
+    const open = randomId(16);
     expect(
       (
         await put(
@@ -1443,7 +1443,7 @@ describe('record quotas', () => {
     expect((await send(invite(people[2]!))).reason).toMatch(/at most 2 invitations waiting/);
     // The open invite and a changed record of one already counted are not held back.
     expectAccepted(await send({ ...first, version: first.version }));
-    const open = randomId(6);
+    const open = randomId(16);
     expectAccepted(
       await send(
         signRecord(alice.identity, 'invite', recordKey.invite(open), {

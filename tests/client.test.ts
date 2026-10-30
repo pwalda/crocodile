@@ -1711,10 +1711,13 @@ describe('leaving', () => {
           (await bob.link!.request('records.get', { keys: [`space:${spaceId}`] })).records,
         ),
       ).not.toContain(link);
-      // A link with a day left, or less, is the one that is shared until it is replaced.
-      await alice.createInvite(spaceId, 3600_000);
+      // A link is the one that is shared until it is about to run out, then a new one.
+      await alice.createInvite(spaceId, 3 * 3600_000);
       const short = alice.openInviteOf(spaceId)!.body.code;
       expect(await alice.shareInvite(spaceId)).toBe(short);
+      await alice.createInvite(spaceId, 1800_000);
+      const dying = alice.openInviteOf(spaceId)!.body.code;
+      expect(await alice.shareInvite(spaceId)).not.toBe(dying);
     });
 
     it('is not left behind when it could not be named', async () => {

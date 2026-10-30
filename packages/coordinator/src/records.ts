@@ -49,7 +49,7 @@ const NOTE_COPIES_MAX = 2;
 export const defaultRecordQuotas: RecordQuotas = {
   devicesPerUser: 100,
   spacesPerUser: 100,
-  invitesPerSpace: 1000,
+  invitesPerSpace: 5000,
   privateInvitesPerSpace: 100,
   invitesPerMember: 50,
   privateInvitesPerMember: 10,

@@ -204,7 +204,7 @@ picture size.
   one the space names, and that it has not ended; a client may show a card for
   a link that has since been replaced until it asks again, and a server that
   has not yet heard of a replacement still takes a join with the old link.
-- Invites are never deleted, and a space takes at most 1000 invite records in
+- Invites are never deleted, and a space takes at most 5000 invite records in
   all (50 from any one member). A space that invites very many people by name
   over its life can reach that; the owner or an admin can then no longer make
   new ones in that space.

@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Check, Copy, Hash, Volume2 } from 'lucide-react';
 import { INVITE_MAX_MS } from '@crocodile/crypto';
 import type { ChannelKind } from '@crocodile/protocol';
@@ -156,6 +156,12 @@ export function InviteModal({ spaceId }: { spaceId: string }) {
   const [copied, setCopied] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [confirm, setConfirm] = useState<'new' | 'off' | null>(null);
+  // The link can run out, or its record arrive, while the window is open: read it again now and then.
+  const [, setTick] = useState(0);
+  useEffect(() => {
+    const timer = setInterval(() => setTick((n) => n + 1), 5000);
+    return () => clearInterval(timer);
+  }, []);
   // What the space has on (it is read again whenever the space changes).
   const link =
     space?.publicInvite !== undefined ? client.openLinkOf(spaceId) : { state: 'none' as const };

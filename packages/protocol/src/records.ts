@@ -215,7 +215,7 @@ export type SpaceBody = z.infer<typeof SpaceBody>;
 
 export const InviteBody = z.object({
   spaceId: id,
-  code: z.string().regex(/^[a-z2-7]{8,16}$/),
+  code: z.string().regex(/^[a-z2-7]{8,32}$/),
   /** Epoch ms, or null for never. */
   expiresAt: z.number().int().nullable(),
   revoked: z.boolean().optional(),

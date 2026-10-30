@@ -86,14 +86,14 @@ export async function createSpace(user: TestUser, name = 'Swamp') {
   const spaceId = spaceIdFor(user.identity.publicKey, nonce);
   const text = randomId();
   const voice = randomId();
-  const code = randomId(10);
+  const code = randomId(16);
   const space = signRecord(user.identity, 'space', recordKey.space(spaceId), {
     name,
     owner: user.identity.userId,
     nonce,
     admins: [],
     bans: [],
-    publicInvite: inviteCommitment(code),
+    publicInvite: inviteCommitment(spaceId, code),
     channels: [
       { id: text, name: 'general', kind: 'text' },
       { id: voice, name: 'Lounge', kind: 'voice' },

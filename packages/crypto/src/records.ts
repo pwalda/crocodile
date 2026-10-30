@@ -54,12 +54,18 @@ export function signRecord<K extends RecordKind>(
   return { ...unsigned, sig: sign(identity, SIG_DOMAIN.record, signedPart(unsigned)) };
 }
 
-/** Space ids bind the owner key, so any server can check ownership without history. */
-/** What a space names its open invite by: not the code itself, which only those given it hold. */
-export function inviteCommitment(code: string): string {
-  return toB32(sha256(utf8.encode(`croc/v1/open-invite\n${code}`))).slice(0, 26);
+/**
+ * What a space names its open invite by: not the code itself, which only those given it hold.
+ * Tied to the space, so one hash does not serve for every space.
+ */
+export function inviteCommitment(spaceId: string, code: string): string {
+  return toB32(sha256(utf8.encode(`croc/v1/open-invite\n${spaceId}\n${code}`))).slice(0, 26);
 }
 
+/** Characters in the code of an open link (128 bits): too many to guess from the hash. */
+export const OPEN_CODE_LENGTH = 26;
+
+/** Space ids bind the owner key, so any server can check ownership without history. */
 export function spaceIdFor(ownerPublicKey: string, nonce: string): string {
   return toB32(sha256(utf8.encode(`croc/v1/space\n${ownerPublicKey}\n${nonce}`))).slice(
     0,
@@ -179,15 +185,16 @@ export function validateRecord(input: unknown, ctx: ValidationContext): Validati
           body.expiresAt > ctx.now + INVITE_MAX_MS + INVITE_CLOCK_SLACK_MS
         )
           return reject('an invitation to a person needs an end, within 30 days');
-      } else if (
+      } else if (ctx.fresh && !body.revoked) {
         // The open invite too, when it is made (those already made, without an end, stay as they
         // were, and so does their withdrawal).
-        ctx.fresh &&
-        !body.revoked &&
-        (body.expiresAt === null ||
-          body.expiresAt > ctx.now + INVITE_MAX_MS + INVITE_CLOCK_SLACK_MS)
-      ) {
-        return reject('an invite needs an end, within 30 days');
+        if (
+          body.expiresAt === null ||
+          body.expiresAt > ctx.now + INVITE_MAX_MS + INVITE_CLOCK_SLACK_MS
+        )
+          return reject('an invite needs an end, within 30 days');
+        if (body.code.length < OPEN_CODE_LENGTH)
+          return reject('the code of an open link is too short');
       }
       // The owner and current admins make and revoke invites. (A removed
       // admin's invites stop working anyway; see 'member' below.)
@@ -241,12 +248,15 @@ export function validateRecord(input: unknown, ctx: ValidationContext): Validati
         // The open invite is the one the space names; a newer one has replaced the rest.
         if (
           invite.body.for === undefined &&
-          space.body.publicInvite !== inviteCommitment(invite.body.code)
+          space.body.publicInvite !== inviteCommitment(body.spaceId, invite.body.code)
         )
           return reject('this link has been replaced or turned off');
         // Nor is one that never ends the open link, however the space came to name it.
-        if (invite.body.for === undefined && invite.body.expiresAt === null)
-          return reject('this link has no end; make a new one');
+        if (
+          invite.body.for === undefined &&
+          (invite.body.expiresAt === null || invite.body.code.length < OPEN_CODE_LENGTH)
+        )
+          return reject('this link is out of date; make a new one');
         // An invite from someone who may no longer make it stops working: an admin who was
         // removed, or, for a named person, a member where the space no longer allows that.
         const maker = userIdFromKey(invite.author);

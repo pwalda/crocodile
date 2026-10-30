@@ -178,14 +178,14 @@ describe('records', () => {
   it('binds spaces to their owner and gates membership on invites', () => {
     const nonce = randomId();
     const spaceId = spaceIdFor(alice.publicKey, nonce);
-    const code = randomId(5);
+    const code = randomId(16);
     const space = signRecord(alice, 'space', recordKey.space(spaceId), {
       name: 'Swamp',
       owner: alice.userId,
       nonce,
       admins: [],
       bans: [],
-      publicInvite: inviteCommitment(code),
+      publicInvite: inviteCommitment(spaceId, code),
       channels: [{ id: randomId(), name: 'general', kind: 'text' }],
     });
     expect(validateRecord(space, ctx([])).ok).toBe(true);
@@ -514,7 +514,7 @@ describe('records', () => {
     });
 
     it("lets admins make invites, which stop working when they're no longer admins", () => {
-      const code = randomId(5);
+      const code = randomId(16);
       const invite = signRecord(bob, 'invite', recordKey.invite(code), {
         spaceId,
         code,
@@ -526,7 +526,7 @@ describe('records', () => {
         bob,
         'space',
         key,
-        { ...withBob.body, publicInvite: inviteCommitment(code) },
+        { ...withBob.body, publicInvite: inviteCommitment(spaceId, code) },
         now - 900,
       );
       const join = signRecord(carol, 'member', recordKey.member(spaceId, carol.userId), {
@@ -542,7 +542,7 @@ describe('records', () => {
         {
           ...base,
           admins: [],
-          publicInvite: inviteCommitment(code),
+          publicInvite: inviteCommitment(spaceId, code),
           authority: signSpaceAuthority(alice, spaceId, [], now - 500),
         },
         now - 500,
@@ -560,14 +560,14 @@ describe('records', () => {
     });
 
     describe('the open invite', () => {
-      const code = randomId(5);
-      const other = randomId(5);
+      const code = randomId(16);
+      const other = randomId(16);
       const week = 7 * 24 * 3600_000;
       const named = signRecord(
         alice,
         'space',
         key,
-        { ...base, admins: [], publicInvite: inviteCommitment(code) },
+        { ...base, admins: [], publicInvite: inviteCommitment(spaceId, code) },
         now - 800,
       );
       const open = (c: string, expiresAt: number | null, who = alice) =>
@@ -595,11 +595,27 @@ describe('records', () => {
         expect(validateRecord(join(other), ctx([named, b], false)).ok).toBe(true);
       });
 
-      it('is never one that has no end, however the space came to name it', () => {
+      it('is never one with no end or a short code, however the space came to name it', () => {
         const legacy = open(code, null);
         expect(validateRecord(join(code), ctx([named, legacy]))).toMatchObject({
           ok: false,
-          reason: 'this link has no end; make a new one',
+          reason: 'this link is out of date; make a new one',
+        });
+        const shortCode = randomId(5);
+        const shortNamed = signRecord(
+          alice,
+          'space',
+          key,
+          { ...base, admins: [], publicInvite: inviteCommitment(spaceId, shortCode) },
+          now - 790,
+        );
+        expect(
+          validateRecord(join(shortCode), ctx([shortNamed, open(shortCode, now + week)])),
+        ).toMatchObject({ ok: false, reason: 'this link is out of date; make a new one' });
+        // Nor can one be made.
+        expect(validateRecord(open(shortCode, now + week), ctx([shortNamed]))).toMatchObject({
+          ok: false,
+          reason: 'the code of an open link is too short',
         });
       });
 

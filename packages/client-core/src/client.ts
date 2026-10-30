@@ -31,6 +31,7 @@ import {
   mayInviteByName,
   INVITE_MAX_MS,
   inviteCommitment,
+  OPEN_CODE_LENGTH,
   signedInvitePolicy,
   spaceIdFor,
   userTag,
@@ -437,8 +438,9 @@ const FRIEND_NOTE_RETRY_MS = 5000;
 /** And how often while connected, whoever it is owed to. */
 const FRIEND_NOTE_SWEEP_MS = 10 * 60_000;
 const DAY_MS = 24 * 3600_000;
-/** Bytes of randomness in the code of an open link: 80 bits. */
-const OPEN_CODE_BYTES = 10;
+/** Bytes of randomness in the code of an open link: 128 bits. */
+const OPEN_CODE_BYTES = 16;
+const HOUR_MS = 3600_000;
 /** How long an invite lasts unless asked otherwise, and an invitation to a named person can be accepted. */
 const INVITE_MS = 7 * DAY_MS;
 /** A member list the server could not check is asked for again this many times, a little later each time. */
@@ -1899,7 +1901,7 @@ export class CrocodileClient extends Emitter<ClientEvents> {
       nonce,
       admins: [],
       bans: [],
-      publicInvite: inviteCommitment(code),
+      publicInvite: inviteCommitment(spaceId, code),
       channels: [
         { id: randomId(), name: 'general', kind: 'text' },
         { id: randomId(), name: 'General', kind: 'voice' },
@@ -1919,7 +1921,14 @@ export class CrocodileClient extends Emitter<ClientEvents> {
         code,
         expiresAt: Date.now() + INVITE_MS,
       }),
-    ).catch((err) => this.log('first link not made', { err: String(err) }));
+    ).catch(async (err) => {
+      // Do not leave the space naming a link that is not there.
+      this.log('first link not made', { err: String(err) });
+      await this.updateSpace(spaceId, (b) => {
+        const { publicInvite: _, ...rest } = b;
+        return rest;
+      }).catch(() => {});
+    });
     await this.afterSpaceJoined(spaceId);
     return spaceId;
   }
@@ -2107,12 +2116,15 @@ export class CrocodileClient extends Emitter<ClientEvents> {
       (r) =>
         r.body.spaceId === spaceId &&
         r.body.for === undefined &&
-        inviteCommitment(r.body.code) === named,
+        inviteCommitment(spaceId, r.body.code) === named,
     );
     if (!invite) return { state: 'elsewhere' };
+    // (One that never ends is not a link any more: servers turn joins with it away.)
     const good =
       !invite.body.revoked &&
-      (invite.body.expiresAt === null || invite.body.expiresAt > Date.now());
+      invite.body.expiresAt !== null &&
+      invite.body.expiresAt > Date.now() &&
+      invite.body.code.length >= OPEN_CODE_LENGTH;
     return { state: good ? 'good' : 'ended', invite };
   }
 
@@ -2123,12 +2135,14 @@ export class CrocodileClient extends Emitter<ClientEvents> {
   }
 
   /**
-   * The link to share: the one the space has on, or a new one if it has none or it has run out.
-   * Not when one was made on another device that we cannot see: a new one would end it.
+   * The link to share: the one the space has on, or a new one if it has none, it has run out or
+   * it is about to. Not when one was made on another device that we cannot see: a new one would
+   * end it.
    */
   async shareInvite(spaceId: string): Promise<string> {
     const link = this.openLinkOf(spaceId);
-    if (link.state === 'good') return link.invite.body.code;
+    if (link.state === 'good' && link.invite.body.expiresAt! > Date.now() + HOUR_MS)
+      return link.invite.body.code;
     if (link.state === 'elsewhere')
       throw new Error(
         'The link for this space was made on another device. Make a new link to replace it.',
@@ -2164,12 +2178,15 @@ export class CrocodileClient extends Emitter<ClientEvents> {
     const previous = this.openLinkOf(spaceId);
     await this.putRecord(invite);
     try {
-      await this.updateSpace(spaceId, (b) => ({ ...b, publicInvite: inviteCommitment(code) }));
+      await this.updateSpace(spaceId, (b) => ({
+        ...b,
+        publicInvite: inviteCommitment(spaceId, code),
+      }));
     } catch (err) {
       // Not named, so not a link: do not leave it counting against the space. (Unless it was
       // named after all and only the answer was lost.)
       const now = this.records.get(recordKey.space(spaceId)) as SignedRecord<'space'> | undefined;
-      if (now?.body.publicInvite !== inviteCommitment(code))
+      if (now?.body.publicInvite !== inviteCommitment(spaceId, code))
         await this.revokeInvite(code).catch(() => {});
       throw err;
     }
@@ -2292,7 +2309,9 @@ export class CrocodileClient extends Emitter<ClientEvents> {
       !!invite.body.revoked ||
       !makerMayInvite ||
       // The link anyone can use is the one the space has on, no older one.
-      (invite.body.for === undefined && space.body.publicInvite !== inviteCommitment(code)) ||
+      (invite.body.for === undefined &&
+        (invite.body.expiresAt === null ||
+          space.body.publicInvite !== inviteCommitment(spaceId, code))) ||
       (invite.body.expiresAt !== null && invite.body.expiresAt < Date.now());
     return {
       code,
@@ -2327,7 +2346,7 @@ export class CrocodileClient extends Emitter<ClientEvents> {
     if (
       named &&
       invite.body.for === undefined &&
-      named.body.publicInvite !== inviteCommitment(code)
+      named.body.publicInvite !== inviteCommitment(spaceId, code)
     )
       throw new Error('That link has been replaced or turned off. Ask for a new one.');
     this.records.ingestAll([...space.records, invite]);

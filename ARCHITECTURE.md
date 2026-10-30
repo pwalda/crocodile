@@ -110,16 +110,19 @@ themselves, and the one that stores an invite can read it.
 
 **The open link.** A space has at most one invite anyone can join with. The
 space record names it (`publicInvite`, set by the owner or an admin) by a
-hash of its code, since that record is readable by anyone who knows the
-space and the code must stay with those given the link (it has 80 bits, so
-the hash cannot be turned back); a new link replaces it, and so ends the old
-one, and turning it off removes the name. A new space starts with one that
-lasts a week. A device that did not make the link cannot show it (the space
-names it only by the hash), and says so; making a new one replaces it. It ends within 30 days. A server taking a join checks that the invite
-used is the one the space names now; memberships already made are not
-affected when the link changes. Invites made before this setting existed are
-not the open link of any space, so none of them works until an owner or admin
-makes a new link.
+hash of its code and the space, since that record is readable by anyone who
+knows the space and the code must stay with those given the link (it has 128
+bits, so the hash cannot be turned back); a new link replaces it, and so ends
+the old one, and turning it off removes the name. A new space starts with one
+that lasts a week. A device that did not make the link cannot show it (the
+space names it only by the hash), and says so; making a new one replaces it.
+A link ends within 30 days (a server lets it run a day over, for a clock
+that is off) and cannot be made without an end. A server taking a join checks
+that the invite used is the one the space names now, has an end and has a
+code of the full length; memberships already made are not affected when the
+link changes. Invites made before this setting existed are not the open link
+of any space, so none of them works until an owner or admin makes a new
+link.
 
 **Invitations to one person.** An invite may name a user (`for`); only that
 user can join with it, whoever holds the code, so reading it from a member
