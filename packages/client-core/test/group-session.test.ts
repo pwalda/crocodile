@@ -228,7 +228,7 @@ describe('group session', () => {
     expect(joins).toBe(3);
   });
 
-  it('goes on joining again for as long as the owner cannot be reached, and leaves the room when refused for good', async () => {
+  it('goes on joining again for as long as the owner cannot be reached, and leaves the room when refused again and again', async () => {
     vi.useFakeTimers();
     try {
       let joins = 0;
@@ -248,11 +248,13 @@ describe('group session', () => {
       await vi.advanceTimersByTimeAsync(10 * 60_000);
       await done;
       expect(joins).toBe(10);
-      // Refused for good: no more tries, and the room is left.
+      // Refused again and again: no more tries, and the room is left. (Asked twice, it is one loop.)
+      const before = joins;
       refuse = true;
       void s.rejoin();
-      await vi.advanceTimersByTimeAsync(60_000);
-      expect(joins).toBe(11);
+      void s.rejoin();
+      await vi.advanceTimersByTimeAsync(10 * 60_000);
+      expect(joins - before).toBe(8);
       expect(s.status).toBe('left');
     } finally {
       vi.useRealTimers();

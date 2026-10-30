@@ -184,6 +184,8 @@ const HISTORY_CHUNK_BYTES = 32 * 1024;
 /** Joined again, when taken out of the room: tries this far apart, twice as far each time up to the most. */
 const REJOIN_RETRY_MS = 1_000;
 const REJOIN_RETRY_MAX_MS = 30_000;
+/** Refused this many times running, it is taken that it is not allowed in (a server behind on records says the same for a while). */
+const REJOIN_REFUSALS = 8;
 /** An update or report that finds we are not in the room starts a join no more often than this. */
 const JOIN_LOST_RETRY_MS = 5_000;
 const PENDING_TTL_MS = 15_000;
@@ -337,16 +339,26 @@ export class GroupSession extends Emitter<GroupSessionEvents> {
 
   /**
    * Taken out of the room by the server (it did not hear from us in time): joins again, for as
-   * long as the owner cannot be reached (the server does not ask for this one). Refused for good
-   * (no longer allowed in): the room is left instead.
+   * long as the owner cannot be reached (the server does not ask for this one). Refused again and
+   * again (no longer allowed in): the room is left instead. One at a time: asked again while it
+   * goes on, it is the same.
    */
-  async rejoin() {
+  rejoin(): Promise<void> {
+    return (this.rejoining ??= this.rejoinLoop().finally(() => {
+      this.rejoining = undefined;
+    }));
+  }
+  private rejoining?: Promise<void>;
+
+  private async rejoinLoop() {
+    let refused = 0;
     for (let attempt = 0; !this.left; attempt++) {
       try {
         await this.join({ fresh: true });
         return;
       } catch (err) {
-        if ((err as { code?: string }).code === 'forbidden') return this.leave();
+        if ((err as { code?: string }).code === 'forbidden' && ++refused >= REJOIN_REFUSALS)
+          return this.leave();
         await new Promise((r) =>
           setTimeout(r, Math.min(REJOIN_RETRY_MS * 2 ** attempt, REJOIN_RETRY_MAX_MS)),
         );
