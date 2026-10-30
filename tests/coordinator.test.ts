@@ -1118,8 +1118,11 @@ describe('sessions and host election', () => {
       it('dates the floor of its joins by the server they are for', async () => {
         const { c, alice, sessionId } = await setup();
         await alice.conn.request('session.join', { sessionId, caps: caps() });
-        const floors = (alice.conn.constructor as unknown as { joinedAt: Map<string, number> })
-          .joinedAt;
+        const floors = (
+          alice.conn.constructor as unknown as {
+            joinedAt: Map<string, { at: number; seen: number }>;
+          }
+        ).joinedAt;
         expect([...floors.keys()]).toContain(`${c.info.id}|${alice.conn.peer}|${sessionId}`);
       });
 
@@ -1185,8 +1188,11 @@ describe('sessions and host election', () => {
       it('keeps the floor of its joins when the clock of the device is far ahead of the server', async () => {
         const { c, alice, sessionId } = await setup();
         const connection = alice.conn as unknown as { clockOffset: number };
-        const floors = (alice.conn.constructor as unknown as { joinedAt: Map<string, number> })
-          .joinedAt;
+        const floors = (
+          alice.conn.constructor as unknown as {
+            joinedAt: Map<string, { at: number; seen: number }>;
+          }
+        ).joinedAt;
         // The server is twenty minutes behind the clock of the device.
         connection.clockOffset = -20 * 60_000;
         await expect(
@@ -1195,16 +1201,30 @@ describe('sessions and host election', () => {
         expect(floors.has(`${c.info.id}|${alice.conn.peer}|${sessionId}`)).toBe(true);
       });
 
-      it('does not forget the floor of its joins on one server when it joins on another', async () => {
+      it('clears the floors of its joins by when it saw them, not by the clock of the server they are for', async () => {
         const { alice, sessionId } = await setup();
-        const floors = (alice.conn.constructor as unknown as { joinedAt: Map<string, number> })
-          .joinedAt;
-        // A join on another server, long ago by the clock of that server.
-        const other = `another-server|${alice.conn.peer}|${sessionId}`;
-        floors.set(other, Date.now() - 20 * 60_000);
+        const floors = (
+          alice.conn.constructor as unknown as {
+            joinedAt: Map<string, { at: number; seen: number }>;
+          }
+        ).joinedAt;
+        // A join on another server a minute ago, dated twenty minutes back by the clock of that server;
+        // and one that was last seen half an hour ago.
+        const recent = `another-server|${alice.conn.peer}|${sessionId}`;
+        const old = `a-third-server|${alice.conn.peer}|${sessionId}`;
+        floors.set(recent, { at: Date.now() - 20 * 60_000, seen: Date.now() - 60_000 });
+        floors.set(old, { at: Date.now(), seen: Date.now() - 30 * 60_000 });
         await alice.conn.request('session.join', { sessionId, caps: caps() });
-        expect(floors.has(other)).toBe(true);
-        floors.delete(other);
+        expect(floors.has(recent)).toBe(true);
+        expect(floors.has(old)).toBe(false);
+        floors.delete(recent);
+      });
+
+      it('dates a join in whole milliseconds even if the offset it was given is not', async () => {
+        const { c, alice, sessionId } = await setup();
+        (alice.conn as unknown as { clockOffset: number }).clockOffset = 0.5;
+        await alice.conn.request('session.join', { sessionId, caps: caps() });
+        expect(c.sessions.inSession(alice.conn.peer, sessionId)).toBe(true);
       });
 
       it('keeps what a device said of itself when the owner did not answer an update', async () => {

@@ -37,6 +37,19 @@ export class RpcCallError extends Error {
   }
 }
 
+/**
+ * How far a server's clock is ahead of ours, from the time in its hello: whole milliseconds, and
+ * no more than half an hour either way (a server further off than that is not believed, and its
+ * joins will not be taken, which is what its clock deserves).
+ */
+export function clockOffsetFrom(serverTime: number, now = Date.now()): number {
+  if (!Number.isFinite(serverTime)) return 0;
+  return Math.round(
+    Math.max(-CLOCK_OFFSET_MAX_MS, Math.min(CLOCK_OFFSET_MAX_MS, serverTime - now)),
+  );
+}
+const CLOCK_OFFSET_MAX_MS = 30 * 60_000;
+
 export type ConnectionEvents = ServerEvents & {
   close: { code: number; reason: string };
 };
@@ -89,7 +102,7 @@ export class CoordinatorConnection extends Emitter<ConnectionEvents> {
    * The time of the last join signed for each room, across connections to the same server: it
    * only goes up. (Per server: the time of another is of no concern to this one.)
    */
-  private static joinedAt = new Map<string, number>();
+  private static joinedAt = new Map<string, { at: number; seen: number }>();
 
   private constructor(
     private readonly ws: WebSocket,
@@ -148,7 +161,7 @@ export class CoordinatorConnection extends Emitter<ConnectionEvents> {
         }
         if (frame.t === 'hello' && !hello) {
           hello = frame;
-          clockOffset = Number.isFinite(frame.time) ? frame.time - Date.now() : 0;
+          clockOffset = clockOffsetFrom(frame.time);
           const ok = verifyPayload(
             frame.server.key,
             SIG_DOMAIN.serverHello,
@@ -297,13 +310,12 @@ export class CoordinatorConnection extends Emitter<ConnectionEvents> {
       const key = `${this.server.id}|${this.peer}|${sessionId}`;
       // Each join is later than the last, whatever the clock does: it is what the others name.
       const joined = CoordinatorConnection.joinedAt;
-      const at = Math.max(Date.now() + this.clockOffset, (joined.get(key) ?? 0) + 1);
-      joined.set(key, at);
-      // Of no use once it is too old for a join to be taken after it anyway.
-      // (Only this server's: the times of another are by another clock.)
-      const mine = `${this.server.id}|`;
-      for (const [k, v] of joined)
-        if (k.startsWith(mine) && v < Date.now() + this.clockOffset - 15 * 60_000) joined.delete(k);
+      const now = Date.now();
+      const at = Math.round(Math.max(now + this.clockOffset, (joined.get(key)?.at ?? 0) + 1));
+      joined.set(key, { at, seen: now });
+      // Of no use once it is too old for a join to be taken after it anyway (by our own clock, which
+      // is the only one all of them were seen by).
+      for (const [k, v] of joined) if (v.seen < now - 15 * 60_000) joined.delete(k);
       proof = signSessionOp(
         this.signer,
         sessionId,

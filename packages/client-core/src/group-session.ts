@@ -377,7 +377,9 @@ export class GroupSession extends Emitter<GroupSessionEvents> {
     if (code !== 'conflict' && code !== 'not_found') return;
     // Not on top of a join that is on its way, nor again and again.
     const now = Date.now();
-    if (this.left || this.joining || now - this.joinLostAt < JOIN_LOST_RETRY_MS) return;
+    // (Only for a room we are in: one that was never joined is not joined by an update.)
+    if (!this.state || this.left || this.joining) return;
+    if (now - this.joinLostAt < JOIN_LOST_RETRY_MS) return;
     this.joinLostAt = now;
     void this.join().catch(() => {});
   }

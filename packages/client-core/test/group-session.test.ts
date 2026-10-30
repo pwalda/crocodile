@@ -228,6 +228,22 @@ describe('group session', () => {
     expect(joins).toBe(3);
   });
 
+  it('does not join a room it was never in because an update finds it is not', async () => {
+    const sent: string[] = [];
+    const { s } = session(
+      async () => grant(60_000),
+      async (type) => {
+        sent.push(type);
+        if (type === 'session.update')
+          throw Object.assign(new Error('not in session'), { code: 'not_found' });
+        return {};
+      },
+    );
+    await s.updateCaps();
+    await wait(50);
+    expect(sent).toEqual(['session.update']);
+  });
+
   it('joins the session first when asked for a relay before it has', async () => {
     const { s, joins } = joinFirst();
     await s.useServerRelay();
