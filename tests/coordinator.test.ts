@@ -1035,6 +1035,24 @@ describe('sessions and host election', () => {
       expect(c.sessions.ownedState(sessionId)?.members ?? []).toEqual([]);
     });
 
+    it('lets a join said twice while its record is looked up go through both times', async () => {
+      const { c, alice, sessionId } = await setup();
+      const slow = vi
+        .spyOn(
+          c.sessions as unknown as { lookupDevice(p: string): Promise<unknown> },
+          'lookupDevice',
+        )
+        .mockImplementation(async () => {
+          await new Promise((r) => setTimeout(r, 200));
+          return { device: { body: { platform: 'bot' } }, removed: false };
+        });
+      const join = () => alice.conn.request('session.join', { sessionId, caps: caps() });
+      const results = await Promise.all([join(), join()]);
+      slow.mockRestore();
+      expect(results).toHaveLength(2);
+      expect(c.sessions.inSession(alice.conn.peer, sessionId)).toBe(true);
+    });
+
     it('does not add a device to the room that left while its record was looked up', async () => {
       const { c, alice, sessionId } = await setup();
       const slow = vi

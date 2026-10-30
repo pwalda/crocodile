@@ -246,8 +246,9 @@ export class SessionService {
 
   /**
    * Whether a server may add this device: it is connected to it, and it has a record on its
-   * account (returned). Both are waited for briefly, outside the room's queue and within the
-   * same cap on those waiting, so that devices made up in numbers cannot hold the room up.
+   * account (returned). Both are waited for briefly, outside the room's queue and within a cap
+   * on those waiting (one for each wait), so that devices made up in numbers cannot hold the
+   * room up.
    */
   private async admit(
     server: string,
@@ -348,10 +349,10 @@ export class SessionService {
       if (this.joining.get(joinKey) === token) this.joining.delete(joinKey);
       throw err;
     }
-    // It may have left meanwhile (or joined again).
-    if (this.joining.get(joinKey) !== token)
-      throw new RpcFailure('not_found', 'left before it joined');
-    this.joining.delete(joinKey);
+    // It may have left meanwhile. (Joined again is no matter: both go on, and a join said twice
+    // is the same join.)
+    if (!this.joining.has(joinKey)) throw new RpcFailure('not_found', 'left before it joined');
+    if (this.joining.get(joinKey) === token) this.joining.delete(joinKey);
     // It may have gone (or been replaced) while the record was looked up; nothing would remove it later.
     if (!this.hub.presence.localOf(client.userId).includes(client))
       throw new RpcFailure('unavailable', 'the connection closed');
