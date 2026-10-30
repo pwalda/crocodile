@@ -1680,10 +1680,10 @@ describe('leaving', () => {
       expect(carol.state.spaces[spaceId]).toBeDefined();
     });
 
-    it('is looked for before a new one is made: an admin who has not seen it does not replace it', async () => {
+    it('is not replaced by an admin who cannot see it: they are told, and can turn it off', async () => {
       const { alice, carol, spaceId } = await trio();
       const link = await alice.shareInvite(spaceId);
-      // Carol came in with an invitation of her own, so she has never seen the open link's record.
+      // Carol came in with an invitation of her own, so she holds no record of the open link.
       const own = await alice.createInvite(spaceId, 7 * 24 * 3600_000, carol.userId);
       await carol.joinWithInvite(own);
       await alice.updateSpace(spaceId, (b) => ({ ...b, admins: [carol.userId] }));
@@ -1692,10 +1692,29 @@ describe('leaving', () => {
         5000,
         'carol is an admin',
       );
-      expect(carol.records.get(`invite:${link}`)).toBeUndefined();
-      expect(await carol.shareInvite(spaceId)).toBe(link);
+      expect(carol.openLinkOf(spaceId)).toEqual({ state: 'elsewhere' });
+      await expect(carol.shareInvite(spaceId)).rejects.toThrow(/another device/);
+      // Nothing was replaced.
+      expect(alice.openInviteOf(spaceId)?.body.code).toBe(link);
       await carol.stopOpenInvite(spaceId);
-      expect(alice.openInviteOf(spaceId)?.body.code).not.toBe(link);
+      await waitFor(() => alice.state.spaces[spaceId]?.publicInvite === undefined, 5000, 'off');
+      expect(alice.openLinkOf(spaceId)).toEqual({ state: 'none' });
+    });
+
+    it("does not put the link's code in the space, only what the code makes", async () => {
+      const { alice, bob, spaceId } = await trio();
+      const link = await alice.shareInvite(spaceId);
+      const named = alice.state.spaces[spaceId]!.publicInvite!;
+      expect(named).not.toContain(link);
+      expect(
+        JSON.stringify(
+          (await bob.link!.request('records.get', { keys: [`space:${spaceId}`] })).records,
+        ),
+      ).not.toContain(link);
+      // A link with a day left, or less, is the one that is shared until it is replaced.
+      await alice.createInvite(spaceId, 3600_000);
+      const short = alice.openInviteOf(spaceId)!.body.code;
+      expect(await alice.shareInvite(spaceId)).toBe(short);
     });
 
     it('is not left behind when it could not be named', async () => {

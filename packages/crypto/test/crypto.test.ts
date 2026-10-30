@@ -57,6 +57,7 @@ import {
   signRecord,
   signSdp,
   signSpaceAuthority,
+  inviteCommitment,
   spaceIdFor,
   validateRecord,
   verifyChatMessage,
@@ -184,7 +185,7 @@ describe('records', () => {
       nonce,
       admins: [],
       bans: [],
-      publicInvite: code,
+      publicInvite: inviteCommitment(code),
       channels: [{ id: randomId(), name: 'general', kind: 'text' }],
     });
     expect(validateRecord(space, ctx([])).ok).toBe(true);
@@ -525,7 +526,7 @@ describe('records', () => {
         bob,
         'space',
         key,
-        { ...withBob.body, publicInvite: code },
+        { ...withBob.body, publicInvite: inviteCommitment(code) },
         now - 900,
       );
       const join = signRecord(carol, 'member', recordKey.member(spaceId, carol.userId), {
@@ -541,7 +542,7 @@ describe('records', () => {
         {
           ...base,
           admins: [],
-          publicInvite: code,
+          publicInvite: inviteCommitment(code),
           authority: signSpaceAuthority(alice, spaceId, [], now - 500),
         },
         now - 500,
@@ -566,7 +567,7 @@ describe('records', () => {
         alice,
         'space',
         key,
-        { ...base, admins: [], publicInvite: code },
+        { ...base, admins: [], publicInvite: inviteCommitment(code) },
         now - 800,
       );
       const open = (c: string, expiresAt: number | null, who = alice) =>

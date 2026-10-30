@@ -29,7 +29,7 @@ export interface RecordQuotas {
   devicesPerUser: number;
   /** Spaces a user owns, deleted ones included. */
   spacesPerUser: number;
-  /** Invites per space (the app reuses a valid invite rather than making new ones). */
+  /** Invite records per space, withdrawn and ended ones too (they are never deleted). */
   invitesPerSpace: number;
   /** Invitations to named people not yet accepted, withdrawn or out of time. */
   privateInvitesPerSpace: number;

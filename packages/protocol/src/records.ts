@@ -188,12 +188,13 @@ export const SpaceBody = z.object({
    */
   invitePolicy: z.enum(['admins', 'members']).optional(),
   /**
-   * The one invite anyone holding it can join with, if the space has one on. Making a new one
-   * replaces it, and so ends the old one; the owner and admins set it.
+   * The one invite anyone holding it can join with, if the space has one on, named by a hash of
+   * its code (the space record is readable by anyone who knows the space, the code is not).
+   * Making a new one replaces it, and so ends the old one; the owner and admins set it.
    */
   publicInvite: z
     .string()
-    .regex(/^[a-z2-7]{8,16}$/)
+    .regex(/^[a-z2-7]{26}$/)
     .optional(),
   channels: z.array(Channel).max(LIMITS.channelsPerSpace),
   deleted: z.boolean().optional(),

@@ -55,6 +55,11 @@ export function signRecord<K extends RecordKind>(
 }
 
 /** Space ids bind the owner key, so any server can check ownership without history. */
+/** What a space names its open invite by: not the code itself, which only those given it hold. */
+export function inviteCommitment(code: string): string {
+  return toB32(sha256(utf8.encode(`croc/v1/open-invite\n${code}`))).slice(0, 26);
+}
+
 export function spaceIdFor(ownerPublicKey: string, nonce: string): string {
   return toB32(sha256(utf8.encode(`croc/v1/space\n${ownerPublicKey}\n${nonce}`))).slice(
     0,
@@ -234,7 +239,10 @@ export function validateRecord(input: unknown, ctx: ValidationContext): Validati
       if (ctx.fresh) {
         if (invite.body.revoked) return reject('invite was revoked');
         // The open invite is the one the space names; a newer one has replaced the rest.
-        if (invite.body.for === undefined && space.body.publicInvite !== invite.body.code)
+        if (
+          invite.body.for === undefined &&
+          space.body.publicInvite !== inviteCommitment(invite.body.code)
+        )
           return reject('this link has been replaced or turned off');
         // Nor is one that never ends the open link, however the space came to name it.
         if (invite.body.for === undefined && invite.body.expiresAt === null)

@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useState } from 'react';
 import { Check, Copy, Hash, Volume2 } from 'lucide-react';
 import { INVITE_MAX_MS } from '@crocodile/crypto';
 import type { ChannelKind } from '@crocodile/protocol';
@@ -156,20 +156,11 @@ export function InviteModal({ spaceId }: { spaceId: string }) {
   const [copied, setCopied] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [confirm, setConfirm] = useState<'new' | 'off' | null>(null);
-  const open = client.openInviteOf(spaceId);
-  const code = open?.body.code ?? null;
-  // The link on offer is the one the space has on, looked for before one is made; with none, one is
-  // made when the window opens.
-  const [offered, setOffered] = useState(false);
-  const started = useRef(false);
-  useEffect(() => {
-    if (started.current) return;
-    started.current = true;
-    client
-      .shareInvite(spaceId)
-      .catch((e: Error) => setError(e.message))
-      .finally(() => setOffered(true));
-  }, [client, spaceId]);
+  // What the space has on (it is read again whenever the space changes).
+  const link =
+    space?.publicInvite !== undefined ? client.openLinkOf(spaceId) : { state: 'none' as const };
+  const invite = 'invite' in link ? link.invite : undefined;
+  const code = link.state === 'good' ? invite!.body.code : null;
   const run = async (what: () => Promise<unknown>) => {
     setBusy(true);
     setError(null);
@@ -183,35 +174,45 @@ export function InviteModal({ spaceId }: { spaceId: string }) {
       setBusy(false);
     }
   };
-  const link = code ? `croc://join/${code}` : '';
-  const expiresAt = open?.body.expiresAt ?? undefined;
+  const url = code ? `croc://join/${code}` : '';
+  const expiresAt = link.state === 'good' ? (invite!.body.expiresAt ?? undefined) : undefined;
   const days = expiresAt ? Math.max(1, Math.round((expiresAt - Date.now()) / DAY_MS)) : undefined;
+  const on = link.state !== 'none';
+  const explain =
+    link.state === 'good'
+      ? 'Anyone with this link can join'
+      : link.state === 'ended'
+        ? 'The link has run out'
+        : link.state === 'elsewhere'
+          ? 'A link was made on another device, which this one cannot show'
+          : 'No link is on';
   return (
     <Modal
       title={`Invite friends to ${space?.name ?? 'this space'}`}
       subtitle={
         days === undefined
-          ? 'Anyone with the link can join.'
-          : `Anyone with this link can join for the next ${days === 1 ? 'day' : `${days} days`}.`
+          ? `${explain}.`
+          : `${explain} for the next ${days === 1 ? 'day' : `${days} days`}.`
       }
       onClose={closeModal}
     >
       <Label>Invite link</Label>
       <div className="flex items-center gap-2 rounded-xl bg-field p-1 pl-3">
         <span className="selectable flex-1 truncate font-mono text-sm">
-          {error ?? (link || (offered ? 'No link is on.' : 'Creating invite…'))}
+          {url || 'Nobody can join with a link right now.'}
         </span>
         <Button
           disabled={!code}
           className={cx(copied && 'bg-online')}
           onClick={async () => {
-            await copyText(link);
+            await copyText(url);
             setCopied(true);
           }}
         >
           {copied ? <Check size={16} /> : <Copy size={16} />} {copied ? 'Copied' : 'Copy'}
         </Button>
       </div>
+      {error && <p className="mt-2 text-xs text-danger">{error}</p>}
       {code && (
         <p className="mt-3 text-xs text-muted">
           Friends can also paste just the code: <b className="selectable text-text">{code}</b>
@@ -240,7 +241,7 @@ export function InviteModal({ spaceId }: { spaceId: string }) {
           />
         </div>
         <div className="flex gap-2">
-          {code && (
+          {on && (
             <Button variant="ghost" disabled={busy} onClick={() => setConfirm('off')}>
               Turn off…
             </Button>
@@ -249,12 +250,12 @@ export function InviteModal({ spaceId }: { spaceId: string }) {
             variant="ghost"
             disabled={busy}
             onClick={() =>
-              code
+              link.state === 'good' || link.state === 'elsewhere'
                 ? setConfirm('new')
                 : void run(() => client.createInvite(spaceId, LINK_LIFETIMES[lifetime]))
             }
           >
-            {code ? 'New link…' : 'Make a link'}
+            {link.state === 'good' || link.state === 'elsewhere' ? 'New link…' : 'Make a link'}
           </Button>
         </div>
       </div>
@@ -262,7 +263,7 @@ export function InviteModal({ spaceId }: { spaceId: string }) {
         <div className="mt-4 rounded-2xl border border-line bg-island-2 p-4">
           <p className="text-sm text-text">
             {confirm === 'new'
-              ? 'The link above stops working and a new one takes its place. Anyone who has not joined yet will need the new one.'
+              ? 'The current link stops working and a new one takes its place. Anyone who has not joined yet will need the new one.'
               : 'The link stops working. Nobody can join with a link until you make a new one.'}
           </p>
           <div className="mt-3 flex flex-wrap justify-end gap-2">
