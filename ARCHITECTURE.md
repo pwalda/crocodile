@@ -289,7 +289,7 @@ stays gone for 20 s.
 
 Members report `HostCaps` when joining: whether they can and may host (desktop
 only, user setting), NAT type (detected by comparing the mappings the server's two STUN ports report), uplink,
-CPU cores, battery, RTT.
+battery (and CPU cores and RTT, which the election no longer reads).
 
 A device joins only if it has a record on its account that hasn't been
 removed, and the kind of device (desktop, web, ...) is read from that record
@@ -309,7 +309,14 @@ minute and drops devices that have since been removed. The rest of
   is elected while alone, and others often can't reach a symmetric-NAT host
   while it can reach them. A device whose UDP is blocked reports itself as
   symmetric.
-- The backup is the best other candidate, kept stable unless clearly beaten.
+- The backup is the best other candidate, kept stable unless clearly beaten, and
+  another person where there is one.
+- What a device says about its machine cannot be checked, so what saying more
+  gains is capped: uplink counts up to a fixed share (reached at about 1.5 Mbps)
+  and cores and round-trip time do not count, so the best a claim can reach is
+  what an honest desktop with a good connection reaches. Each person is one
+  candidate (their best device), and ties go by a hash of the session and the
+  device, the same on every server, not by the device's name.
 
 Failover triggers:
 
