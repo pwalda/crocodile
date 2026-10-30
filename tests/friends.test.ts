@@ -163,7 +163,7 @@ describe('friends', () => {
     const alice = await signUp(makeClient(net, coord), 'alice');
     // Bob's account exists, but no app of his has signed in yet.
     const identity = createIdentity();
-    const raw = await connectUser(coord, identity, 'bob');
+    const raw = await connectUser(coord, identity, 'bob', undefined, false);
     raw.conn.close();
     await waitFor(() => coord.presence.localOf(identity.userId).length === 0, 5000, 'offline');
     await alice.addFriend(identity.userId);

@@ -1,6 +1,7 @@
 import { Coordinator, type CoordinatorConfig } from '@crocodile/coordinator';
 import {
   createIdentity,
+  createPrekey,
   inviteCommitment,
   randomDeviceId,
   randomId,
@@ -8,7 +9,13 @@ import {
   spaceIdFor,
   type Identity,
 } from '@crocodile/crypto';
-import { recordKey, type HostCaps, type SignedRecord } from '@crocodile/protocol';
+import {
+  peerIds,
+  recordKey,
+  type HostCaps,
+  type Platform,
+  type SignedRecord,
+} from '@crocodile/protocol';
 import { CoordinatorConnection } from '@crocodile/client-core';
 
 export async function startCoordinator(overrides: Partial<CoordinatorConfig> = {}) {
@@ -50,6 +57,8 @@ export async function connectUser(
   identity = createIdentity(),
   username = `user${randomId(2)}`,
   deviceId = randomDeviceId(),
+  /** What the device's record says it is; `false` leaves the device without a record. */
+  device: Platform | false = 'bot',
 ): Promise<TestUser> {
   const conn = await CoordinatorConnection.connect({
     url: server.url,
@@ -78,7 +87,34 @@ export async function connectUser(
   });
   const res = await conn.request('records.put', { record: profile });
   if (!res.accepted) throw new Error(`profile rejected: ${res.reason}`);
+  // A real client publishes its device record as soon as it is connected.
+  if (device) await registerDevice({ identity, conn }, device);
   return { identity, conn, events };
+}
+
+/** Publishes the record of the device a connection signed in as (`revoked` withdraws it for good). */
+export async function registerDevice(
+  user: Pick<TestUser, 'identity' | 'conn'>,
+  platform: Platform = 'bot',
+  revoked = false,
+  version?: number,
+) {
+  const { identity } = user;
+  const deviceId = peerIds.device(user.conn.peer);
+  const key = recordKey.device(identity.userId, deviceId);
+  const body = {
+    userId: identity.userId,
+    deviceId,
+    name: 'test',
+    platform,
+    prekey: createPrekey().bundle,
+    ...(revoked ? { revoked: true } : {}),
+  };
+  expectAccepted(
+    await user.conn.request('records.put', {
+      record: signRecord(identity, 'device', key, body, version),
+    }),
+  );
 }
 
 export async function createSpace(user: TestUser, name = 'Swamp') {

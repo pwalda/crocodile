@@ -105,8 +105,10 @@ by name goes to `name:<name>`.
 - **Sessions** are owned by one live server chosen by rendezvous hashing, as
   before; members' servers reach it over a direct link. The owner admits a
   member only if the sending server has said that member's device is
-  connected to it, checks again that the member may be in the session, and
-  believes a host hint only if the host it names may be too; afterwards it
+  connected to it, checks again that the member may be in the session and that
+  the device has a record on the member's account that has not been removed,
+  and believes a host hint only if the host and backup it names may be in the
+  session and are such devices too; afterwards it
   takes operations on that member only from the server it joined from. A client event
   routed to us is delivered only if it comes from a server that could be
   sending it: a signal from the server the sending device is connected to, a

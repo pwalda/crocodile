@@ -32,6 +32,8 @@ import {
 } from '@crocodile/protocol';
 import { CoordinatorConnection } from '@crocodile/client-core';
 import { Coordinator, lanAddress, rendezvousOwner } from '@crocodile/coordinator';
+import { DEVICE_REMOVED, OwnerSilent } from '../packages/coordinator/src/sessions';
+import { RpcFailure } from '../packages/coordinator/src/util';
 import {
   caps,
   connectUser,
@@ -39,6 +41,7 @@ import {
   expectAccepted,
   joinSpace,
   lastSession,
+  registerDevice,
   startCoordinator,
   waitFor,
   type TestUser,
@@ -858,6 +861,417 @@ describe('sessions and host election', () => {
     expect(lastSession(bob, sessionId)!.host).toBe(alice.conn.peer);
   });
 
+  describe('devices and votes', () => {
+    /** The same account on another device, with a record of its own. */
+    async function anotherDevice(c: Coordinator, u: TestUser, platform: 'bot' | 'web' = 'bot') {
+      const d = await connectUser(c, u.identity, 'again', randomDeviceId(), platform);
+      cleanup.push(() => d.conn.close());
+      return d;
+    }
+
+    it('lets a device join only if it has a record', async () => {
+      const { c, alice, sessionId } = await setup();
+      const bare = await connectUser(c, alice.identity, 'alice', randomDeviceId(), false);
+      cleanup.push(() => bare.conn.close());
+      // Not found is not the same as removed: the answer may come once the record has.
+      await expect(
+        bare.conn.request('session.join', { sessionId, caps: caps({ nat: 'open' }) }),
+      ).rejects.toMatchObject({ code: 'unavailable', message: expect.stringMatching(/device/) });
+      // Its record is all it needs.
+      await registerDevice(bare);
+      const { state } = await bare.conn.request('session.join', { sessionId, caps: caps() });
+      expect(state.host).toBe(bare.conn.peer);
+    });
+
+    it('refuses a revoked device, and takes one out of the room when it is revoked', async () => {
+      const { c, alice, bob, sessionId } = await setup();
+      await alice.conn.request('session.join', { sessionId, caps: caps({ nat: 'open' }) });
+      const second = await anotherDevice(c, bob);
+      await bob.conn.request('session.join', { sessionId, caps: caps() });
+      await second.conn.request('session.join', { sessionId, caps: caps() });
+      const members = () => c.sessions.ownedState(sessionId)!.members.map((m) => m.peer);
+      expect(members()).toContain(second.conn.peer);
+
+      await registerDevice(second, 'bot', true, Date.now() + 1000);
+      // Not asked again at once, but within the minute.
+      await c.sessions.recheckDevices();
+      expect(members()).not.toContain(second.conn.peer);
+      expect(members()).toContain(bob.conn.peer);
+      // Its own server forgets it too, so it can no longer signal the room or ask for a relay.
+      expect(c.sessions.inSession(second.conn.peer, sessionId)).toBe(false);
+      await expect(
+        second.conn.request('session.join', { sessionId, caps: caps() }),
+      ).rejects.toThrow(/device/);
+      await expect(
+        second.conn.request('session.update', { sessionId, caps: caps() }),
+      ).rejects.toThrow();
+    });
+
+    it('does not count a device as in the room when the owner refuses its join', async () => {
+      const { c, alice, sessionId } = await setup();
+      const apply = vi
+        .spyOn(c.sessions as unknown as { apply(): unknown }, 'apply')
+        .mockImplementationOnce(() => {
+          throw new Error('session is full');
+        });
+      await expect(
+        alice.conn.request('session.join', { sessionId, caps: caps() }),
+      ).rejects.toThrow();
+      apply.mockRestore();
+      expect(c.sessions.inSession(alice.conn.peer, sessionId)).toBe(false);
+    });
+
+    it('keeps a device in the room when the owner did not answer its join, as it may have taken it', async () => {
+      const { c, alice, sessionId } = await setup();
+      const submit = vi
+        .spyOn(c.sessions as unknown as { submit(): unknown }, 'submit')
+        .mockRejectedValueOnce(new OwnerSilent());
+      await expect(
+        alice.conn.request('session.join', { sessionId, caps: caps() }),
+      ).rejects.toThrow();
+      submit.mockRestore();
+      // Left in, so that its leave (or its server's) still reaches the owner.
+      expect(c.sessions.inSession(alice.conn.peer, sessionId)).toBe(true);
+    });
+
+    it('does not wait for the record of a device when too many are already waited for', async () => {
+      const { c, alice, sessionId } = await setup();
+      const bare = await connectUser(c, alice.identity, 'alice', randomDeviceId(), false);
+      cleanup.push(() => bare.conn.close());
+      const internals = c.sessions as unknown as { waiting: Map<string, unknown> };
+      for (let i = 0; i < 1000; i++) internals.waiting.set(`full${i}`, Promise.resolve(null));
+      const start = Date.now();
+      await expect(bare.conn.request('session.join', { sessionId, caps: caps() })).rejects.toThrow(
+        /device/,
+      );
+      internals.waiting.clear();
+      expect(Date.now() - start).toBeLessThan(250);
+    });
+
+    it('lets go of a member the owner refuses after the owner changed, instead of trying for ever', async () => {
+      const { c, alice, sessionId } = await setup();
+      await alice.conn.request('session.join', { sessionId, caps: caps() });
+      const internals = c.sessions as unknown as {
+        lastOwner: Map<string, string>;
+        submit(): unknown;
+        rebalance(): void;
+        rebalanceTimer?: unknown;
+      };
+      internals.lastOwner.set(sessionId, 'someone-else');
+      const submit = vi
+        .spyOn(internals, 'submit')
+        .mockRejectedValueOnce(new RpcFailure('forbidden', DEVICE_REMOVED));
+      internals.rebalance();
+      await waitFor(() => !c.sessions.inSession(alice.conn.peer, sessionId), 3000, 'to let go');
+      submit.mockRestore();
+      expect(internals.rebalanceTimer).toBeUndefined();
+    });
+
+    it('does not keep a device in the room when the owner answers that it cannot tell', async () => {
+      const { c, alice, sessionId } = await setup();
+      const submit = vi
+        .spyOn(c.sessions as unknown as { submit(): unknown }, 'submit')
+        .mockRejectedValueOnce(new RpcFailure('unavailable', 'no record of that device'));
+      await expect(
+        alice.conn.request('session.join', { sessionId, caps: caps() }),
+      ).rejects.toThrow();
+      submit.mockRestore();
+      expect(c.sessions.inSession(alice.conn.peer, sessionId)).toBe(false);
+    });
+
+    it('keeps trying a member after the owner changed when it says the member may not be there, as it may be behind', async () => {
+      const { c, alice, sessionId } = await setup();
+      await alice.conn.request('session.join', { sessionId, caps: caps() });
+      const internals = c.sessions as unknown as {
+        lastOwner: Map<string, string>;
+        submit(): unknown;
+        rebalance(): void;
+        rebalanceTimer?: unknown;
+      };
+      internals.lastOwner.set(sessionId, 'someone-else');
+      const submit = vi
+        .spyOn(internals, 'submit')
+        .mockRejectedValueOnce(new RpcFailure('forbidden', 'not a member of this space'));
+      internals.rebalance();
+      await waitFor(() => internals.rebalanceTimer, 3000, 'a new try');
+      submit.mockRestore();
+      expect(c.sessions.inSession(alice.conn.peer, sessionId)).toBe(true);
+    });
+
+    it('lets a join finish when a later one of the same device finishes before it', async () => {
+      const { c, alice, sessionId } = await setup();
+      let calls = 0;
+      const slow = vi
+        .spyOn(
+          c.sessions as unknown as { lookupDevice(p: string): Promise<unknown> },
+          'lookupDevice',
+        )
+        .mockImplementation(async () => {
+          // The first is slower than the second.
+          await new Promise((r) => setTimeout(r, calls++ === 0 ? 300 : 50));
+          return { device: { body: { platform: 'bot' } }, removed: false };
+        });
+      const join = () => alice.conn.request('session.join', { sessionId, caps: caps() });
+      const first = join();
+      await new Promise((r) => setTimeout(r, 20));
+      await join();
+      await first;
+      slow.mockRestore();
+      expect(c.sessions.inSession(alice.conn.peer, sessionId)).toBe(true);
+    });
+
+    it('keeps trying a member after the owner changed when the owner could not tell', async () => {
+      const { c, alice, sessionId } = await setup();
+      await alice.conn.request('session.join', { sessionId, caps: caps() });
+      const internals = c.sessions as unknown as {
+        lastOwner: Map<string, string>;
+        submit(): unknown;
+        rebalance(): void;
+        rebalanceTimer?: unknown;
+      };
+      internals.lastOwner.set(sessionId, 'someone-else');
+      const submit = vi
+        .spyOn(internals, 'submit')
+        .mockRejectedValueOnce(new RpcFailure('unavailable', 'no record of that device'));
+      internals.rebalance();
+      await waitFor(() => internals.rebalanceTimer, 3000, 'a new try');
+      submit.mockRestore();
+      expect(c.sessions.inSession(alice.conn.peer, sessionId)).toBe(true);
+    });
+
+    it('keeps the kind of device the join found when it updates, without looking it up', async () => {
+      const { c, bob, sessionId } = await setup();
+      const page = await connectUser(c, bob.identity, 'page', randomDeviceId(), 'web');
+      cleanup.push(() => page.conn.close());
+      await page.conn.request('session.join', { sessionId, caps: caps({ platform: 'desktop' }) });
+      const find = vi.spyOn(c.sessions as unknown as { findDevice(): unknown }, 'findDevice');
+      await page.conn.request('session.update', { sessionId, caps: caps({ platform: 'desktop' }) });
+      expect(find).not.toHaveBeenCalled();
+      find.mockRestore();
+      const member = c.sessions.ownedState(sessionId)!.members[0]!;
+      expect(member.caps.platform).toBe('web');
+    });
+
+    it('does not add a device to the room that went while its record was looked up', async () => {
+      const { c, alice, sessionId } = await setup();
+      const gone = await anotherDevice(c, alice);
+      const slow = vi
+        .spyOn(
+          c.sessions as unknown as { lookupDevice(p: string): Promise<unknown> },
+          'lookupDevice',
+        )
+        .mockImplementationOnce(async () => {
+          await new Promise((r) => setTimeout(r, 300));
+          return { device: { body: { platform: 'bot' } }, removed: false };
+        });
+      const joining = gone.conn
+        .request('session.join', { sessionId, caps: caps() })
+        .catch(() => {});
+      await new Promise((r) => setTimeout(r, 50));
+      gone.conn.close();
+      await joining;
+      await new Promise((r) => setTimeout(r, 400));
+      slow.mockRestore();
+      expect(c.sessions.inSession(gone.conn.peer, sessionId)).toBe(false);
+      expect(c.sessions.ownedState(sessionId)?.members ?? []).toEqual([]);
+    });
+
+    it('lets a join said twice while its record is looked up go through both times', async () => {
+      const { c, alice, sessionId } = await setup();
+      const slow = vi
+        .spyOn(
+          c.sessions as unknown as { lookupDevice(p: string): Promise<unknown> },
+          'lookupDevice',
+        )
+        .mockImplementation(async () => {
+          await new Promise((r) => setTimeout(r, 200));
+          return { device: { body: { platform: 'bot' } }, removed: false };
+        });
+      const join = () => alice.conn.request('session.join', { sessionId, caps: caps() });
+      const results = await Promise.all([join(), join()]);
+      slow.mockRestore();
+      expect(results).toHaveLength(2);
+      expect(c.sessions.inSession(alice.conn.peer, sessionId)).toBe(true);
+    });
+
+    it('does not add a device to the room that left while its record was looked up', async () => {
+      const { c, alice, sessionId } = await setup();
+      const slow = vi
+        .spyOn(
+          c.sessions as unknown as { lookupDevice(p: string): Promise<unknown> },
+          'lookupDevice',
+        )
+        .mockImplementationOnce(async () => {
+          await new Promise((r) => setTimeout(r, 300));
+          return { device: { body: { platform: 'bot' } }, removed: false };
+        });
+      const joining = alice.conn.request('session.join', { sessionId, caps: caps() }).then(
+        () => 'joined',
+        () => 'refused',
+      );
+      await new Promise((r) => setTimeout(r, 50));
+      await alice.conn.request('session.leave', { sessionId });
+      expect(await joining).toBe('refused');
+      slow.mockRestore();
+      expect(c.sessions.inSession(alice.conn.peer, sessionId)).toBe(false);
+      expect(c.sessions.ownedState(sessionId)?.members ?? []).toEqual([]);
+    });
+
+    it('lets a device joining two rooms at once wait for its record once, and join both', async () => {
+      const { c, alice, bob, spaceId, voiceChannel } = await setup();
+      const bare = await connectUser(c, alice.identity, 'alice', randomDeviceId(), false);
+      cleanup.push(() => bare.conn.close());
+      const voice = sessionIds.voice(spaceId, voiceChannel);
+      const dm = sessionIds.dm(alice.identity.userId, bob.identity.userId);
+      const joins = [voice, dm].map((sessionId) =>
+        bare.conn.request('session.join', { sessionId, caps: caps() }),
+      );
+      // Its record arrives while they wait.
+      await new Promise((r) => setTimeout(r, 350));
+      await registerDevice(bare);
+      await Promise.all(joins);
+      expect(c.sessions.inSession(bare.conn.peer, voice)).toBe(true);
+      expect(c.sessions.inSession(bare.conn.peer, dm)).toBe(true);
+    });
+
+    it('does not count the vote of a device that has left, though the person has another', async () => {
+      const { c, alice, bob, carol, spaceId, code, sessionId } = await setup();
+      const dave = await user(c);
+      const erin = await user(c);
+      await joinSpace(dave, spaceId, code);
+      await joinSpace(erin, spaceId, code);
+      const { state } = await alice.conn.request('session.join', {
+        sessionId,
+        caps: caps({ nat: 'open' }),
+      });
+      for (const u of [bob, carol, dave, erin])
+        await u.conn.request('session.join', { sessionId, caps: caps() });
+      const report = (u: TestUser) =>
+        u.conn.request('session.report', {
+          sessionId,
+          epoch: state.epoch,
+          issue: 'host_unreachable',
+        });
+      const laptop = await anotherDevice(c, bob);
+      await laptop.conn.request('session.join', { sessionId, caps: caps() });
+      await report(laptop);
+      await laptop.conn.request('session.leave', { sessionId });
+      // Bob's other device is still there, but the one that saw the host fail is not.
+      await report(carol);
+      await new Promise((r) => setTimeout(r, 150));
+      expect(c.sessions.ownedState(sessionId)!.host).toBe(alice.conn.peer);
+    });
+
+    it('does not start a second look-up while one is running', async () => {
+      const { c, alice, sessionId } = await setup();
+      await alice.conn.request('session.join', { sessionId, caps: caps() });
+      const get = vi.spyOn(c.dist, 'get');
+      await Promise.all([c.sessions.recheckDevices(), c.sessions.recheckDevices()]);
+      expect(get).toHaveBeenCalledTimes(1);
+      get.mockRestore();
+    });
+
+    it('takes a revoked host out and elects another', async () => {
+      const { c, alice, bob, sessionId } = await setup();
+      const { state } = await alice.conn.request('session.join', {
+        sessionId,
+        caps: caps({ nat: 'open' }),
+      });
+      await bob.conn.request('session.join', { sessionId, caps: caps() });
+      expect(state.host).toBe(alice.conn.peer);
+      await registerDevice(alice, 'bot', true, Date.now() + 1000);
+      await c.sessions.recheckDevices();
+      const now = c.sessions.ownedState(sessionId)!;
+      expect(now.host).toBe(bob.conn.peer);
+      expect(now.epoch).toBe(state.epoch + 1);
+    });
+
+    it("takes the platform from the device's record, not from what it says", async () => {
+      const { c, alice, bob, sessionId } = await setup();
+      // A web page that says it is a desktop.
+      const page = await connectUser(c, bob.identity, 'page', randomDeviceId(), 'web');
+      cleanup.push(() => page.conn.close());
+      const first = await page.conn.request('session.join', {
+        sessionId,
+        caps: caps({ platform: 'desktop', nat: 'open', canHost: true }),
+      });
+      expect(first.state.host).toBeNull();
+      expect(first.state.members[0]!.caps.platform).toBe('web');
+      const { state } = await alice.conn.request('session.join', { sessionId, caps: caps() });
+      expect(state.host).toBe(alice.conn.peer);
+      // And an update cannot change it back.
+      await page.conn.request('session.update', {
+        sessionId,
+        caps: caps({ platform: 'desktop', nat: 'open' }),
+      });
+      expect(c.sessions.ownedState(sessionId)!.host).toBe(alice.conn.peer);
+    });
+
+    it('counts a report from a person once, however many devices they report from', async () => {
+      const { c, alice, bob, carol, spaceId, code, sessionId } = await setup();
+      const dave = await user(c);
+      const erin = await user(c);
+      await joinSpace(dave, spaceId, code);
+      await joinSpace(erin, spaceId, code);
+      const { state } = await alice.conn.request('session.join', {
+        sessionId,
+        caps: caps({ nat: 'open' }),
+      });
+      for (const u of [bob, carol, dave, erin])
+        await u.conn.request('session.join', { sessionId, caps: caps() });
+      const report = (u: TestUser) =>
+        u.conn.request('session.report', {
+          sessionId,
+          epoch: state.epoch,
+          issue: 'host_unreachable',
+        });
+      // Bob has four more devices, all in the room, and all say the host is gone.
+      for (let i = 0; i < 4; i++) {
+        const d = await anotherDevice(c, bob);
+        await d.conn.request('session.join', { sessionId, caps: caps() });
+        await report(d);
+      }
+      await report(bob);
+      await new Promise((r) => setTimeout(r, 100));
+      const owned = () => c.sessions.ownedState(sessionId)!;
+      // One of four other people.
+      expect(owned().host).toBe(alice.conn.peer);
+      expect(owned().epoch).toBe(state.epoch);
+      // Two of four is half.
+      await report(carol);
+      await waitFor(() => owned().host !== alice.conn.peer, 3000, 'failover');
+    });
+
+    it("does not let the host's own devices vote against it", async () => {
+      const { c, alice, bob, sessionId } = await setup();
+      const { state } = await alice.conn.request('session.join', {
+        sessionId,
+        caps: caps({ nat: 'open' }),
+      });
+      await bob.conn.request('session.join', { sessionId, caps: caps() });
+      const mine = await anotherDevice(c, alice);
+      await mine.conn.request('session.join', { sessionId, caps: caps() });
+      await mine.conn.request('session.report', {
+        sessionId,
+        epoch: state.epoch,
+        issue: 'host_unreachable',
+      });
+      await new Promise((r) => setTimeout(r, 100));
+      expect(c.sessions.ownedState(sessionId)!.host).toBe(alice.conn.peer);
+      // The one other person still can.
+      await bob.conn.request('session.report', {
+        sessionId,
+        epoch: state.epoch,
+        issue: 'host_unreachable',
+      });
+      await waitFor(
+        () => c.sessions.ownedState(sessionId)!.host !== alice.conn.peer,
+        3000,
+        'failover',
+      );
+    });
+  });
+
   it('routes signalling only between session members and rejects outsiders', async () => {
     const { c, alice, bob, sessionId } = await setup();
     const outsider = await user(c);
@@ -1322,7 +1736,9 @@ describe('record quotas', () => {
 
   it('limits devices per account and invites per space', async () => {
     const c = await server({ quotas: { devicesPerUser: 2, invitesPerSpace: 2 } });
-    const alice = await user(c);
+    // Without a record of its own, so that the two allowed are the two made below.
+    const alice = await connectUser(c, createIdentity(), undefined, undefined, false);
+    cleanup.push(() => alice.conn.close());
     const device = () => {
       const deviceId = randomDeviceId();
       return signRecord(

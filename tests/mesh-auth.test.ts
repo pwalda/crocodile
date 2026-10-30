@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { randomBytes } from 'node:crypto';
 import {
   createChannelKeys,
@@ -17,7 +17,15 @@ import {
   type FedPresence,
 } from '@crocodile/protocol';
 import { Coordinator, rendezvousOwner } from '@crocodile/coordinator';
-import { caps, connectUser, meshLinkTo, startCoordinator, waitFor } from './helpers';
+import { RpcFailure } from '../packages/coordinator/src/util';
+import {
+  caps,
+  connectUser,
+  meshLinkTo,
+  registerDevice,
+  startCoordinator,
+  waitFor,
+} from './helpers';
 
 const cleanup: (() => Promise<void> | void)[] = [];
 afterEach(async () => {
@@ -432,6 +440,167 @@ describe('events and session operations from other servers', () => {
       await settled(net);
       expect(state().members.map((m) => m.userId)).not.toContain(mallory);
       expect(state().epoch).toBeLessThan(5);
+    });
+
+    it('does not let a server join a device that has no record', async () => {
+      const net = await conversation();
+      const state = await joined(net);
+      // The rogue server says Alice has another device on it; she has never made one.
+      const peer = peerIds.make(net.alice.identity.userId, 'abcdefgh');
+      net.toVictim.send(
+        presenceFrom(net.rogue, Date.now(), [entry(net.alice.identity.userId, ['abcdefgh'])]),
+      );
+      op(net, peer, { op: 'join', caps: caps({ nat: 'open' }) });
+      await settled(net);
+      // The record is looked for for a moment before the join is given up on.
+      await new Promise((r) => setTimeout(r, 1500));
+      expect(state().members.map((m) => m.peer)).not.toContain(peer);
+    });
+
+    it('does not take a host or backup that is a device with no record', async () => {
+      const net = await conversation();
+      const state = await joined(net);
+      // Alice's real device, claimed by the rogue server, names a device she never made as host.
+      const device = peerIds.device(net.alice.conn.peer);
+      net.toVictim.send(
+        presenceFrom(net.rogue, Date.now(), [entry(net.alice.identity.userId, [device])]),
+      );
+      const ghost = peerIds.make(net.alice.identity.userId, 'abcdefgh');
+      op(net, net.alice.conn.peer, {
+        op: 'join',
+        caps: caps(),
+        hint: { epoch: 1000, host: ghost, backup: null },
+      });
+      await settled(net);
+      expect(state().host).not.toBe(ghost);
+      expect(state().epoch).toBeLessThan(5);
+    });
+
+    it('answers a join to a room that is not there with what the check said, not forbidden', async () => {
+      const net = await conversation();
+      await joined(net);
+      const sessions = net.victim.sessions as unknown as {
+        checkAccess(...a: unknown[]): Promise<void>;
+        admit(...a: unknown[]): Promise<{ code?: string }>;
+      };
+      const check = vi
+        .spyOn(sessions, 'checkAccess')
+        .mockRejectedValueOnce(new RpcFailure('not_found', 'no such voice channel'));
+      const answer = await sessions.admit(net.rogue.info.id, net.alice.conn.peer, net.sessionId, {
+        op: 'join',
+        caps: caps(),
+      });
+      check.mockRestore();
+      expect(answer.code).toBe('not_found');
+    });
+
+    it('does not call a failure to find out whether a device may join a refusal', async () => {
+      const net = await conversation();
+      await joined(net);
+      const sessions = net.victim.sessions as unknown as {
+        checkAccess(...a: unknown[]): Promise<void>;
+        admit(...a: unknown[]): Promise<{ code?: string }>;
+      };
+      const check = vi
+        .spyOn(sessions, 'checkAccess')
+        .mockRejectedValueOnce(new Error('shard owners unreachable'));
+      const answer = await sessions.admit(net.rogue.info.id, net.alice.conn.peer, net.sessionId, {
+        op: 'join',
+        caps: caps(),
+      });
+      check.mockRestore();
+      expect(answer.code).toBe('unavailable');
+    });
+
+    it('keeps the epoch of a hint that names no host', async () => {
+      const net = await conversation();
+      const state = await joined(net);
+      const device = peerIds.device(net.alice.conn.peer);
+      net.toVictim.send(
+        presenceFrom(net.rogue, Date.now(), [entry(net.alice.identity.userId, [device])]),
+      );
+      op(net, net.alice.conn.peer, {
+        op: 'join',
+        caps: caps(),
+        hint: { epoch: 1000, host: null, backup: null },
+      });
+      await waitFor(() => state().epoch >= 1000, 5000, 'the epoch to be kept');
+    });
+
+    it('keeps the host a hint names when only the backup it names is not a device that exists', async () => {
+      const net = await conversation();
+      const state = await joined(net);
+      const device = peerIds.device(net.alice.conn.peer);
+      net.toVictim.send(
+        presenceFrom(net.rogue, Date.now(), [entry(net.alice.identity.userId, [device])]),
+      );
+      const ghost = peerIds.make(net.alice.identity.userId, 'abcdefgh');
+      op(net, net.alice.conn.peer, {
+        op: 'join',
+        caps: caps(),
+        hint: { epoch: 1000, host: net.bob.conn.peer, backup: ghost },
+      });
+      await waitFor(() => state().epoch >= 1000, 5000, 'the hint');
+      expect(state().host).toBe(net.bob.conn.peer);
+      expect(state().backup).not.toBe(ghost);
+    });
+
+    it("takes a device's operations in the order they were sent, also while its join is looked into", async () => {
+      const net = await conversation();
+      const state = await joined(net);
+      // Another device of Alice's, with a record, that the rogue server says is on it.
+      const second = await connectUser(net.victim, net.alice.identity, 'alice');
+      cleanup.push(() => second.conn.close());
+      const device = peerIds.device(second.conn.peer);
+      net.toVictim.send(
+        presenceFrom(net.rogue, Date.now(), [entry(net.alice.identity.userId, [device])]),
+      );
+      const sessions = net.victim.sessions as unknown as {
+        admit(...a: unknown[]): Promise<unknown>;
+      };
+      const real = sessions.admit.bind(sessions);
+      const admit = vi.spyOn(sessions, 'admit').mockImplementation(async (...a) => {
+        await new Promise((r) => setTimeout(r, 400));
+        return real(...a);
+      });
+      op(net, second.conn.peer, { op: 'join', caps: caps() });
+      op(net, second.conn.peer, { op: 'leave' });
+      await settled(net);
+      await new Promise((r) => setTimeout(r, 1200));
+      admit.mockRestore();
+      expect(state().members.map((m) => m.peer)).not.toContain(second.conn.peer);
+    });
+
+    it('looks into an update only if it comes from the server the member joined from', async () => {
+      const net = await conversation();
+      await joined(net);
+      const find = vi.spyOn(
+        net.victim.sessions as unknown as { findDevice(): unknown },
+        'findDevice',
+      );
+      // The rogue server updates a device of Bob's, and one that does not exist.
+      op(net, net.bob.conn.peer, { op: 'update', caps: caps({ nat: 'open' }) });
+      op(net, peerIds.make(net.alice.identity.userId, 'abcdefgh'), {
+        op: 'update',
+        caps: caps({ nat: 'open' }),
+      });
+      await settled(net);
+      expect(find).not.toHaveBeenCalled();
+      find.mockRestore();
+    });
+
+    it('takes out of a room a device on another server that has been removed', async () => {
+      const net = await conversation();
+      const state = await joined(net);
+      expect(state().members).toHaveLength(2);
+      await registerDevice(net.bob, 'bot', true, Date.now() + 1000);
+      // The record has to reach the owner's server first.
+      const until = Date.now() + 5000;
+      while (state().members.length > 1 && Date.now() < until) {
+        await net.victim.sessions.recheckDevices();
+        await new Promise((r) => setTimeout(r, 50));
+      }
+      expect(state().members[0]!.peer).toBe(net.alice.conn.peer);
     });
 
     it('does not take a host from a member who was never there', async () => {
