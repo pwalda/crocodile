@@ -106,8 +106,8 @@ describe('session operation proofs', () => {
     ).toBe(false);
   });
 
-  it('bound the epoch of a hint', () => {
-    for (const epoch of [-1, 1e300])
+  it('keep a join whose hint has no epoch worth the name, for the owner to leave the hint out', () => {
+    for (const epoch of [-1, 2 ** 40])
       expect(
         FedFrameSchema.safeParse({
           t: 'session_op',
@@ -116,6 +116,6 @@ describe('session operation proofs', () => {
           peer,
           op: { op: 'join', caps, hint: { epoch, host: null, backup: null } },
         }).success,
-      ).toBe(false);
+      ).toBe(true);
   });
 });

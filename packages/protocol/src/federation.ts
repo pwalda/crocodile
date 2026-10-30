@@ -249,10 +249,16 @@ export type SessionOpProof = z.infer<typeof SessionOpProof>;
 /** A session's epoch (it counts up from 0 with each change of host). */
 export const SessionEpoch = z.number().int().safe().min(0);
 
-const SignedSessionOpSchema = z.union([
-  z.object({ op: z.enum(['join', 'update']), caps: HostCaps }),
-  z.object({ op: z.literal('report'), epoch: SessionEpoch, issue: z.literal('host_unreachable') }),
-]);
+// The parts of an operation a device signs; the wire form below adds to them (a hint) or takes
+// from them (a leave is not signed), so that the two cannot come apart.
+const JoinOp = z.object({ op: z.literal('join'), caps: HostCaps });
+const UpdateOp = z.object({ op: z.literal('update'), caps: HostCaps });
+const ReportOp = z.object({
+  op: z.literal('report'),
+  epoch: SessionEpoch,
+  issue: z.literal('host_unreachable'),
+});
+const SignedSessionOpSchema = z.union([JoinOp, UpdateOp, ReportOp]);
 
 /** What a device signs of an operation (the hint that a server adds to a join is not part of it, yet). */
 export type SignedSessionOp = z.infer<typeof SignedSessionOpSchema>;
@@ -403,18 +409,15 @@ const VoiceOccupancySchema = z.object({
 });
 
 const SessionOpSchema = z.discriminatedUnion('op', [
-  z.object({
-    op: z.literal('join'),
-    caps: HostCaps,
-    hint: z.object({ epoch: SessionEpoch, host: id.nullable(), backup: id.nullable() }).optional(),
+  JoinOp.extend({
+    // An epoch that is no epoch is not a reason to drop the join (the owner leaves such a hint out).
+    hint: z
+      .object({ epoch: z.number().int(), host: id.nullable(), backup: id.nullable() })
+      .optional(),
   }),
-  z.object({ op: z.literal('update'), caps: HostCaps }),
+  UpdateOp,
   z.object({ op: z.literal('leave') }),
-  z.object({
-    op: z.literal('report'),
-    epoch: SessionEpoch,
-    issue: z.literal('host_unreachable'),
-  }),
+  ReportOp,
 ]);
 
 const errorBody = z.object({ code: str(64), message: str(2000) }).optional();

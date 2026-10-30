@@ -273,6 +273,8 @@ export function verifyMailProof(
 // (SessionOpProof), so that a server other than its own cannot speak for it.
 // ---------------------------------------------------------------------------
 
+const ProofClaims = SessionOpProof.omit({ sig: true });
+
 export function signSessionOp(
   identity: Pick<Identity, 'signSecret'>,
   sessionId: string,
@@ -288,7 +290,7 @@ export function signSessionOp(
     ...(n === undefined ? {} : { n }),
   };
   if (!sessionOpShapeOk(op, proof)) throw new Error(`a ${op.op} does not carry that`);
-  SessionOpProof.omit({ sig: true }).parse(proof);
+  ProofClaims.parse(proof);
   return {
     ...proof,
     sig: sign(identity, SIG_DOMAIN.sessionOp, sessionOpPayload(sessionId, peer, op, proof)),
@@ -297,7 +299,7 @@ export function signSessionOp(
 
 /**
  * Whether `proof` is a signature on this operation by the account of `peer`'s user, with
- * `key` as its key, carrying what its kind of operation needs (a join names no earlier join,
+ * `key` as its key (none at all is not one), carrying what its kind of operation needs (a join names no earlier join,
  * an update names its join and counts, a report names its join). Whether it is for this server,
  * recent, and the next in line is for the receiver to settle (it has the state for that).
  */
@@ -306,11 +308,13 @@ export function verifySessionOp(
   sessionId: string,
   peer: string,
   op: SignedSessionOp,
-  proof: SessionOpProof,
+  proof: SessionOpProof | undefined,
 ): boolean {
   if (!keyMatchesUserId(key, peer.split('.')[0]!)) return false;
-  const { sig, ...rest } = proof;
-  if (!SessionOpProof.safeParse(proof).success || !sessionOpShapeOk(op, rest)) return false;
+  const checked = SessionOpProof.safeParse(proof);
+  if (!checked.success) return false;
+  const { sig, ...rest } = checked.data;
+  if (!sessionOpShapeOk(op, rest)) return false;
   try {
     return verifyPayload(
       key,
