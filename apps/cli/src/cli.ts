@@ -201,6 +201,25 @@ async function start(
     version: VERSION,
     stun: () => ref.client?.stunUrls ?? [],
   });
+  try {
+    return await startClient(io, opts, { platform, kv, files, ref });
+  } catch (err) {
+    kv.close();
+    throw err;
+  }
+}
+
+async function startClient(
+  io: Io,
+  opts: { server?: string; directory?: string; verbose?: boolean },
+  parts: {
+    platform: ReturnType<typeof createCliPlatform>['platform'];
+    kv: JsonFileStore;
+    files: CliFileStore;
+    ref: { client?: CrocodileClient };
+  },
+): Promise<Ctx> {
+  const { platform, kv, files, ref } = parts;
   const directories = (opts.directory ?? io.env.CROCODILE_DIRECTORIES ?? DEFAULT_DIRECTORIES)
     .split(',')
     .map((s) => s.trim())
@@ -220,7 +239,7 @@ async function start(
     files,
     async close() {
       await client.shutdown().catch(() => {});
-      kv.flush();
+      kv.close();
     },
   };
 }
