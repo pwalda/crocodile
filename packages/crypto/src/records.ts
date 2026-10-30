@@ -306,8 +306,7 @@ export function validateRecord(input: unknown, ctx: ValidationContext): Validati
         if (body.inviteCode)
           return reject('a membership uses a ticket or an invite code, not both');
         const problem = ticketProblem(body.spaceId, space.body, body);
-        // (A space record older than the one that lists the maker is no reason to refuse for good.)
-        if (problem) return reject(problem, problem === TICKET_MAKER_UNKNOWN);
+        if (problem) return reject(problem.reason, problem.retryable);
         if (ctx.fresh) {
           const tid = body.ticket.invite.body.code;
           const invite = ctx.get(`invite:${tid}`) as SignedRecord<'invite'> | undefined;
@@ -478,9 +477,6 @@ export function mayInviteByName(space: SpaceBody, userId: string): boolean {
   return canManageSpace(space, userId) || space.invitePolicy === 'members';
 }
 
-/** Said of a ticket whose maker the space we hold does not (yet) know; a newer space record may. */
-export const TICKET_MAKER_UNKNOWN = 'invite was made by someone who could not invite';
-
 /** May have made a ticket that still admits those it let in: the owner, an admin, or a former one. */
 export function mayHaveIssuedTicket(space: SpaceBody, userId: string): boolean {
   return (
@@ -497,19 +493,23 @@ export function ticketProblem(
   spaceId: string,
   space: SpaceBody,
   member: RecordBodies['member'],
-): string | undefined {
+): { reason: string; retryable?: boolean } | undefined {
   const t = member.ticket;
-  if (!t) return 'no ticket';
+  if (!t) return { reason: 'no ticket' };
   const { invite } = t;
-  if (invite.key !== recordKey.invite(invite.body.code)) return 'ticket does not match its invite';
-  if (invite.body.spaceId !== spaceId) return 'invite is for another space';
-  if (invite.body.tpub === undefined || invite.body.for !== undefined) return 'not a ticket';
+  if (invite.key !== recordKey.invite(invite.body.code))
+    return { reason: 'ticket does not match its invite' };
+  if (invite.body.spaceId !== spaceId) return { reason: 'invite is for another space' };
+  if (invite.body.tpub === undefined || invite.body.for !== undefined)
+    return { reason: 'not a ticket' };
   if (invite.body.code !== ticketIdOf(invite.body.tpub))
-    return 'invite name does not match its key';
-  if (invite.body.revoked) return 'invite was revoked';
+    return { reason: 'invite name does not match its key' };
+  if (invite.body.revoked) return { reason: 'invite was revoked' };
   if (!verifyPayload(invite.author, SIG_DOMAIN.record, signedPart(invite), invite.sig))
-    return 'bad signature on the ticket';
-  if (!mayHaveIssuedTicket(space, userIdFromKey(invite.author))) return TICKET_MAKER_UNKNOWN;
+    return { reason: 'bad signature on the ticket' };
+  if (!mayHaveIssuedTicket(space, userIdFromKey(invite.author)))
+    // (The space we hold may be older than the one that lists the maker: try again later.)
+    return { reason: 'invite was made by someone who could not invite', retryable: true };
   if (
     !verifyPayload(
       invite.body.tpub,
@@ -518,7 +518,7 @@ export function ticketProblem(
       t.proof,
     )
   )
-    return 'the ticket was not used by this user';
+    return { reason: 'the ticket was not used by this user' };
   return undefined;
 }
 
@@ -538,7 +538,6 @@ export function isSpaceMember(lookup: RecordLookup, spaceId: string, userId: str
   let bySpace = ticketChecked.get(member);
   if (!bySpace) ticketChecked.set(member, (bySpace = new WeakMap()));
   let ok = bySpace.get(space);
-  if (ok === undefined)
-    bySpace.set(space, (ok = ticketProblem(spaceId, space.body, member.body) === undefined));
+  if (ok === undefined) bySpace.set(space, (ok = !ticketProblem(spaceId, space.body, member.body)));
   return ok;
 }

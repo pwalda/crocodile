@@ -12,6 +12,7 @@ import type { Coordinator } from './coordinator';
 import { fnv1a } from './election';
 import {
   dependenciesOf,
+  inviteCodeOfMember,
   homeShardOf,
   shardOfKey,
   shardOfPrefix,
@@ -222,10 +223,11 @@ export class Distribution {
       }
       for (const k of dependenciesOf(record, authorId)) if (need(k)) keys.add(k);
       // An invite reaches the owners of its space before those of its code.
-      const body = record.body as { spaceId?: string; inviteCode?: string };
-      if (record.kind === 'member' && body.inviteCode && body.spaceId) {
+      const body = record.body as { spaceId?: string };
+      const code = record.kind === 'member' ? inviteCodeOfMember(record.body) : undefined;
+      if (code && body.spaceId) {
         if (fresh) spaces.add(`space:${body.spaceId}`);
-        const key = `invite:${body.inviteCode}`;
+        const key = `invite:${code}`;
         if (!need(key)) continue;
         const set = invites.get(body.spaceId) ?? new Set();
         invites.set(body.spaceId, set.add(key));
@@ -277,8 +279,8 @@ export class Distribution {
       const got = await this.get([...wanted]).catch(() => [] as SignedRecord[]);
       const codes = new Set<string>();
       for (const r of got) {
-        const code = (r.body as { inviteCode?: string }).inviteCode;
-        if (r.kind === 'member' && code && need(`invite:${code}`)) codes.add(`invite:${code}`);
+        const code = r.kind === 'member' ? inviteCodeOfMember(r.body) : undefined;
+        if (code && need(`invite:${code}`)) codes.add(`invite:${code}`);
       }
       // Nothing more to go on: the maker's membership is not to be found, and asking again will not.
       if (!codes.size) break;
