@@ -443,7 +443,7 @@ const FRIEND_NOTE_SWEEP_MS = 10 * 60_000;
 const DAY_MS = 24 * 3600_000;
 const HOUR_MS = 3600_000;
 /** Secrets of links this device made that it keeps to show again. */
-const TICKETS_KEPT = 50;
+const TICKETS_KEPT = 500;
 /** How long an invite lasts unless asked otherwise, and an invitation to a named person can be accepted. */
 const INVITE_MS = 7 * DAY_MS;
 /** A member list the server could not check is asked for again this many times, a little later each time. */
@@ -2188,11 +2188,35 @@ export class CrocodileClient extends Emitter<ClientEvents> {
   /** Keeps the secret of a link we made, to show it again; it is only ever on this device. */
   private async keepTicket(ticket: { tid: string; secret: string }) {
     this.tickets.set(ticket.tid, ticket.secret);
-    // The latest few: older links have run out long ago.
+    this.dropEndedTickets(ticket.tid);
     while (this.tickets.size > TICKETS_KEPT) this.tickets.delete(this.tickets.keys().next().value!);
-    await this.platform.kv.set('invite-tickets', Object.fromEntries(this.tickets));
+    await this.saveTickets();
   }
   private tickets = new Map<string, string>();
+  private ticketsSaved: Promise<void> = Promise.resolve();
+
+  /** Writes what is kept as it is when its turn comes, one write at a time. */
+  private saveTickets() {
+    return (this.ticketsSaved = this.ticketsSaved
+      .then(() => this.platform.kv.set('invite-tickets', Object.fromEntries(this.tickets)))
+      .catch((err) => this.log('link secrets not saved', { err: String(err) })));
+  }
+
+  /** Those of links that have ended are no use. (An invite we hold no record of is kept.) */
+  private dropEndedTickets(except?: string) {
+    const before = this.tickets.size;
+    for (const tid of [...this.tickets.keys()]) {
+      const r = this.records.get(recordKey.invite(tid)) as SignedRecord<'invite'> | undefined;
+      if (tid !== except && r && (r.body.revoked || (r.body.expiresAt ?? Infinity) < Date.now()))
+        this.tickets.delete(tid);
+    }
+    return this.tickets.size !== before;
+  }
+
+  /** Forgets the secret of a link that was not made after all. */
+  private forgetTicket(tid: string) {
+    if (this.tickets.delete(tid)) void this.saveTickets();
+  }
 
   /**
    * The link to share: the one the space has on, or a new one if it has none, it has run out or
@@ -2246,15 +2270,20 @@ export class CrocodileClient extends Emitter<ClientEvents> {
     // The invite first, then the space naming it: until then the old link goes on working.
     const previous = this.openLinkOf(spaceId);
     await this.keepTicket(ticket);
-    await this.putRecord(invite);
+    await this.putRecord(invite).catch((err) => {
+      this.forgetTicket(ticket.tid);
+      throw err;
+    });
     try {
       await this.updateSpace(spaceId, (b) => ({ ...b, publicInvite: ticket.tid }));
     } catch (err) {
       // Not named, so not a link: do not leave it counting against the space. (Unless it was
       // named after all and only the answer was lost.)
       const now = this.records.get(recordKey.space(spaceId)) as SignedRecord<'space'> | undefined;
-      if (now?.body.publicInvite !== ticket.tid)
+      if (now?.body.publicInvite !== ticket.tid) {
         await this.revokeInvite(ticket.tid).catch(() => {});
+        this.forgetTicket(ticket.tid);
+      }
       throw err;
     }
     if ('invite' in previous && previous.invite && previous.state !== 'ended')
@@ -2340,6 +2369,7 @@ export class CrocodileClient extends Emitter<ClientEvents> {
         this.nextVersion(key),
       ),
     );
+    if (this.dropEndedTickets()) void this.saveTickets();
   }
 
   /**

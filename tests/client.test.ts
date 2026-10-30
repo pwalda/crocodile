@@ -1840,6 +1840,40 @@ describe('leaving', () => {
       expect(bob.state.spaces[spaceId]!.members).toContain(bob.userId);
     });
 
+    it('keeps the secret of its link across a restart, drops it when the link ends, and forgets it on signing out', async () => {
+      const coord = await server();
+      const net = new FakeRelayNetwork();
+      const alice = await signUp(makeClient(net, coord), 'alice');
+      const kv = alice.platform.kv as MemoryKeyValueStore;
+      const spaceId = await alice.createSpace('Swamp');
+      const first = await alice.shareInvite(spaceId);
+      const kept = async () =>
+        Object.keys((await kv.get<Record<string, string>>('invite-tickets')) ?? {});
+      expect(await kept()).toEqual([ticketFromSecret(first)!.tid]);
+      // The app is closed and opened again: the link can still be shown.
+      await alice.shutdown();
+      const again = new CrocodileClient(
+        { ...alice.platform, kv },
+        {
+          directories: [],
+          preferredServers: [coord.url],
+          transportFactory: net.transportFactory(),
+        },
+      );
+      cleanup.push(() => again.shutdown());
+      await again.init();
+      await waitFor(() => again.state.spaces[spaceId], 8000, 'the space is back');
+      expect(await again.shareInvite(spaceId)).toBe(first);
+      // A new link ends that one, and its secret is of no use any more.
+      const second = await again.createInvite(spaceId);
+      await again.createInvite(spaceId);
+      expect(await kept()).not.toContain(ticketFromSecret(first)!.tid);
+      expect(await kept()).not.toContain(ticketFromSecret(second)!.tid);
+      expect(await kept()).toHaveLength(1);
+      await again.signOut();
+      expect(await kept()).toEqual([]);
+    });
+
     it('cannot show a link made on another device, and replaces it with a new one', async () => {
       const { alice, bob, spaceId } = await trio();
       const link = await alice.shareInvite(spaceId);

@@ -500,20 +500,37 @@ export function ticketProblem(
 ): { reason: string; retryable?: boolean } | undefined {
   const t = member.ticket;
   if (!t) return { reason: 'no ticket' };
-  const { invite } = t;
-  if (invite.key !== recordKey.invite(invite.body.code))
-    return { reason: 'ticket does not match its invite' };
-  if (invite.body.spaceId !== spaceId) return { reason: 'invite is for another space' };
-  if (invite.body.tpub === undefined || invite.body.for !== undefined)
-    return { reason: 'not a ticket' };
-  if (invite.body.code !== ticketIdOf(invite.body.tpub))
-    return { reason: 'invite name does not match its key' };
-  if (invite.body.revoked) return { reason: 'invite was revoked' };
-  if (!verifyPayload(invite.author, SIG_DOMAIN.record, signedPart(invite), invite.sig))
-    return { reason: 'bad signature on the ticket' };
-  if (!mayHaveIssuedTicket(space, userIdFromKey(invite.author)))
+  const broken = ticketIntact(spaceId, member);
+  if (broken) return { reason: broken };
+  // Whether its maker may have made it is for the space to say, and it can change.
+  if (!mayHaveIssuedTicket(space, userIdFromKey(t.invite.author)))
     // (The space we hold may be older than the one that lists the maker: try again later.)
     return { reason: 'invite was made by someone who could not invite', retryable: true };
+  return undefined;
+}
+
+// What does not depend on the space (the signatures) is checked once for each membership.
+const ticketSigned = new WeakMap<object, string | null>();
+
+function ticketIntact(spaceId: string, member: RecordBodies['member']): string | undefined {
+  const cached = ticketSigned.get(member);
+  if (cached !== undefined) return cached ?? undefined;
+  const reason = ticketBroken(spaceId, member);
+  ticketSigned.set(member, reason ?? null);
+  return reason;
+}
+
+function ticketBroken(spaceId: string, member: RecordBodies['member']): string | undefined {
+  const t = member.ticket!;
+  const { invite } = t;
+  if (invite.key !== recordKey.invite(invite.body.code)) return 'ticket does not match its invite';
+  if (invite.body.spaceId !== spaceId) return 'invite is for another space';
+  if (invite.body.tpub === undefined || invite.body.for !== undefined) return 'not a ticket';
+  if (invite.body.code !== ticketIdOf(invite.body.tpub))
+    return 'invite name does not match its key';
+  if (invite.body.revoked) return 'invite was revoked';
+  if (!verifyPayload(invite.author, SIG_DOMAIN.record, signedPart(invite), invite.sig))
+    return 'bad signature on the ticket';
   if (
     !verifyPayload(
       invite.body.tpub,
@@ -522,12 +539,9 @@ export function ticketProblem(
       t.proof,
     )
   )
-    return { reason: 'the ticket was not used by this user' };
+    return 'the ticket was not used by this user';
   return undefined;
 }
-
-// A ticket is checked once for each member record against each space record it is met with.
-const ticketChecked = new WeakMap<object, WeakMap<object, boolean>>();
 
 /** True if the user currently belongs to the space (owner or active, non-banned member). */
 export function isSpaceMember(lookup: RecordLookup, spaceId: string, userId: string): boolean {
@@ -539,9 +553,5 @@ export function isSpaceMember(lookup: RecordLookup, spaceId: string, userId: str
   if (!member || member.body.left) return false;
   if (!member.body.ticket) return true;
   // Who may have made the ticket is the space's to say now, whatever it said when this was taken.
-  let bySpace = ticketChecked.get(member);
-  if (!bySpace) ticketChecked.set(member, (bySpace = new WeakMap()));
-  let ok = bySpace.get(space);
-  if (ok === undefined) bySpace.set(space, (ok = !ticketProblem(spaceId, space.body, member.body)));
-  return ok;
+  return !ticketProblem(spaceId, space.body, member.body);
 }
