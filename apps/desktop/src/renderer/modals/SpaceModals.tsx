@@ -187,7 +187,7 @@ export function InviteModal({ spaceId }: { spaceId: string }) {
     link.state === 'good'
       ? 'Anyone with this link can join'
       : link.state === 'ended'
-        ? 'The link has run out'
+        ? 'The link has ended'
         : link.state === 'elsewhere'
           ? 'A link is on, but this device cannot show it (it was made on another device)'
           : 'No link is on';

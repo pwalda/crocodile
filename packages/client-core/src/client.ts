@@ -444,6 +444,8 @@ const DAY_MS = 24 * 3600_000;
 const HOUR_MS = 3600_000;
 /** Secrets of links this device made that it keeps to show again. */
 const TICKETS_KEPT = 500;
+/** How often the record of a link we made is asked for while we do not hold it. */
+const INVITE_ASK_MS = 10_000;
 /** How long an invite lasts unless asked otherwise, and an invitation to a named person can be accepted. */
 const INVITE_MS = 7 * DAY_MS;
 /** A member list the server could not check is asked for again this many times, a little later each time. */
@@ -2172,7 +2174,8 @@ export class CrocodileClient extends Emitter<ClientEvents> {
       );
     if (!invite || invite.body.spaceId !== spaceId || invite.body.for !== undefined) {
       // A link we made whose record we do not hold yet (it is not on this device's copy): ask for it.
-      if (!invite && this.tickets.has(named)) this.fetchWanted([recordKey.invite(named)]);
+      if (!invite && this.tickets.has(named) && this.mayAskForInvite(named))
+        this.fetchWanted([recordKey.invite(named)]);
       return { state: 'elsewhere' };
     }
     // (One that never ends is not a link any more: servers turn joins with it away.)
@@ -2187,6 +2190,31 @@ export class CrocodileClient extends Emitter<ClientEvents> {
     if (invite.body.tpub === undefined) return { state: 'good', invite, token: invite.body.code };
     const secret = this.tickets.get(invite.body.code);
     return secret ? { state: 'good', invite, token: secret } : { state: 'elsewhere', invite };
+  }
+
+  // Asked for at most this often, however often the state of the link is looked at.
+  private invitesAsked = new Map<string, number>();
+  private mayAskForInvite(tid: string) {
+    const last = this.invitesAsked.get(tid) ?? 0;
+    if (Date.now() - last < INVITE_ASK_MS) return false;
+    this.invitesAsked.set(tid, Date.now());
+    return true;
+  }
+
+  /**
+   * The state of the space's link, after asking for the record of a link we made if we do not hold
+   * it (this device's copy of the records may be behind), so that what is decided on it is right.
+   */
+  private async openLinkNow(spaceId: string) {
+    const link = this.openLinkOf(spaceId);
+    if (link.state !== 'elsewhere' || link.invite || !this.link) return link;
+    const space = this.records.get(recordKey.space(spaceId)) as SignedRecord<'space'> | undefined;
+    const named = space?.body.publicInvite;
+    if (!named || !this.tickets.has(named)) return link;
+    this.records.ingestAll(
+      await fetchRecords(this.link, [recordKey.invite(named)]).catch(() => []),
+    );
+    return this.openLinkOf(spaceId);
   }
 
   /** The record of the space's open link, if it is on, good, and we hold it. */
@@ -2248,7 +2276,7 @@ export class CrocodileClient extends Emitter<ClientEvents> {
     // (Seeing what there is and making one if there is none are one step: another sharing at the
     // same time must see the link this one makes, not make its own.)
     return this.oneLinkChangeAtATime(async () => {
-      const link = this.openLinkOf(spaceId);
+      const link = await this.openLinkNow(spaceId);
       if (link.state === 'good' && link.invite.body.expiresAt! > Date.now() + HOUR_MS)
         return link.token;
       if (link.state === 'elsewhere')
@@ -2305,7 +2333,7 @@ export class CrocodileClient extends Emitter<ClientEvents> {
       expiresAt: Date.now() + expiresInMs,
     });
     // The invite first, then the space naming it: until then the old link goes on working.
-    const previous = this.openLinkOf(spaceId);
+    const previous = await this.openLinkNow(spaceId);
     await this.keepTicket(ticket);
     await this.putRecord(invite).catch((err) => {
       this.forgetTicket(ticket.tid);

@@ -1968,6 +1968,15 @@ describe('leaving', () => {
       expect(alice.openLinkOf(spaceId).state).toBe('elsewhere');
       await waitFor(() => alice.openLinkOf(spaceId).state === 'good', 5000, 'the record to come');
       expect(await alice.shareInvite(spaceId)).toBe(link);
+      // Sharing does not take a link made here for one made elsewhere because the record is
+      // not there at that moment, and looking at the state does not ask again and again.
+      (alice.records as unknown as { map: Map<string, unknown> }).map.delete(`invite:${tid}`);
+      expect(await alice.shareInvite(spaceId)).toBe(link);
+      const asked = vi.spyOn(alice.link!, 'request');
+      (alice.records as unknown as { map: Map<string, unknown> }).map.delete(`invite:${tid}`);
+      for (let i = 0; i < 20; i++) alice.openLinkOf(spaceId);
+      await new Promise((r) => setTimeout(r, 100));
+      expect(asked.mock.calls.filter((c) => c[0] === 'records.get')).toHaveLength(0);
     });
 
     it('cannot show a link made on another device, and replaces it with a new one', async () => {
