@@ -428,7 +428,6 @@ export class SessionService {
     // It answered, if it was asked to sign again (the wait starts again if what it sent is not taken).
     const renewal = this.renewing.get(joinKey);
     clearTimeout(renewal?.timer);
-    this.renewing.delete(joinKey);
     const wait = this.joining.get(joinKey) ?? { pending: 0, leaves: 0 };
     this.joining.set(joinKey, wait);
     wait.pending += 1;
@@ -460,13 +459,17 @@ export class SessionService {
     const hint = this.lastKnown.get(sessionId);
     try {
       // What was signed goes on as it was; the owner sets the kind of device from the record itself.
-      return (await this.submit(
+      const state = (await this.submit(
         sessionId,
         client.peer,
         { op: 'join', caps, ...(hint ? { hint } : {}) },
         proof,
         device,
       )) as SessionState;
+      // Taken by the owner: nothing more to ask of it.
+      clearTimeout(this.renewing.get(joinKey)?.timer);
+      this.renewing.delete(joinKey);
+      return state;
     } catch (err) {
       // Refused: the client is told so, and must not be treated as in the room (or as having
       // said what was refused) meanwhile. Not if another join of it has since taken its place.
@@ -768,8 +771,9 @@ export class SessionService {
     const signed = s?.signed.get(peer);
     if (!s || !member || !signed || s.memberServer.get(peer) !== fromServer) return {};
     this.checkProof(signed.key, sessionId, peer, fromServer, op, frame.proof);
-    // One of an earlier join of the device, or an older update than one taken: of no account now.
-    if (proof.since !== signed.since) return {};
+    // One of an earlier join of the device is told so (it may have to join again); an older update than one taken is of no account.
+    if (proof.since !== signed.since)
+      throw new RpcFailure('conflict', 'that is not the join the device has in the session');
     if (op.op === 'update') {
       if (proof.n === undefined || proof.n <= signed.n) return {};
       signed.n = proof.n;
@@ -1201,10 +1205,14 @@ export class SessionService {
       return;
     }
     const key = `${sessionId}|${peer}`;
-    if (this.renewing.has(key)) return;
+    // (Said again by another join of the device, which is also asked for: the later wait stands.)
+    clearTimeout(this.renewing.get(key)?.timer);
     const timer = setTimeout(() => {
-      if (this.renewing.get(key)?.timer === timer)
-        this.askToRenew(sessionId, peer, renewal.deadline);
+      if (this.renewing.get(key)?.timer !== timer) return;
+      if (Date.now() >= renewal.deadline) {
+        this.renewing.delete(key);
+        this.dropUnrenewed(sessionId, peer, client);
+      } else this.askToRenew(sessionId, peer, renewal.deadline);
     }, this.renewRetryMs);
     timer.unref?.();
     this.renewing.set(key, { timer, deadline: renewal.deadline });

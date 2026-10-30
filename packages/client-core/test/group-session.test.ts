@@ -164,6 +164,32 @@ describe('group session', () => {
     expect(joins()).toBe(2);
   });
 
+  it('joins again when the server says an update or a report is not for the join it has', async () => {
+    const sent: string[] = [];
+    let said = false;
+    const { s } = session(
+      async () => grant(60_000),
+      async (type) => {
+        sent.push(type);
+        if (type === 'session.update' && !said) {
+          said = true;
+          throw Object.assign(new Error('that is not the join'), { code: 'conflict' });
+        }
+        return type === 'session.join'
+          ? { state: state('bbbbbbbbbbbbbbbbbbbbbbbbbb.dev1', 1) }
+          : {};
+      },
+    );
+    await s.join();
+    await s.updateCaps();
+    await wait(50);
+    expect(sent.filter((t) => t === 'session.join')).toHaveLength(2);
+    // Not for any other kind of failure.
+    await s.updateCaps();
+    await wait(50);
+    expect(sent.filter((t) => t === 'session.join')).toHaveLength(2);
+  });
+
   it('joins the session first when asked for a relay before it has', async () => {
     const { s, joins } = joinFirst();
     await s.useServerRelay();

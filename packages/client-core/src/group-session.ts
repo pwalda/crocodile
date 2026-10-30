@@ -345,7 +345,16 @@ export class GroupSession extends Emitter<GroupSessionEvents> {
     await this.ctx
       .link()
       .request('session.update', { sessionId: this.sessionId, caps })
-      .catch(() => {});
+      .catch((err) => this.joinLost(err));
+  }
+
+  /**
+   * An update or a report that the server says is not for the join it has (or that we are not in it):
+   * a join that was taken whose answer never came, or the other way round. Joining again sets it right.
+   */
+  private joinLost(err: unknown) {
+    const code = (err as { code?: string }).code;
+    if (code === 'conflict' || code === 'not_found') void this.renew();
   }
 
   async leave() {
@@ -531,7 +540,7 @@ export class GroupSession extends Emitter<GroupSessionEvents> {
       void this.ctx
         .link()
         .request('session.report', { sessionId: this.sessionId, epoch, issue: 'host_unreachable' })
-        .catch(() => {});
+        .catch((err) => this.joinLost(err));
     }
     clearTimeout(this.retryTimer);
     // Every ten seconds at first, then less often: the same host may be named for a long time.
@@ -760,7 +769,7 @@ export class GroupSession extends Emitter<GroupSessionEvents> {
             epoch: entry.epoch,
             issue: 'host_unreachable',
           })
-          .catch(() => {});
+          .catch((err) => this.joinLost(err));
       }
       if (
         this.failures >= 2 &&

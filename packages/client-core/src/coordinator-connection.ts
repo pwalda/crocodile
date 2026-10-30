@@ -98,6 +98,8 @@ export class CoordinatorConnection extends Emitter<ConnectionEvents> {
     readonly operator?: OperatorInfo,
     /** What signs what we ask of a session (the account's key). */
     private readonly signer?: Pick<Identity, 'signSecret'>,
+    /** How far the server's clock is ahead of ours: a join is dated by the server's clock, which is the one it is checked by. */
+    private readonly clockOffset = 0,
   ) {
     super();
     ws.onmessage = (ev) => this.onMessage(ev.data);
@@ -109,6 +111,8 @@ export class CoordinatorConnection extends Emitter<ConnectionEvents> {
     return new Promise((resolve, reject) => {
       const ws = new WS(wsUrl(opts.url));
       let hello: ServerHello | undefined;
+      /** How far the server's clock is ahead of ours, from the time in its hello. */
+      let clockOffset = 0;
       let channel: SecureChannel | undefined;
       const fail = (err: Error) => {
         clearTimeout(timer);
@@ -139,6 +143,7 @@ export class CoordinatorConnection extends Emitter<ConnectionEvents> {
         }
         if (frame.t === 'hello' && !hello) {
           hello = frame;
+          clockOffset = Number.isFinite(frame.time) ? frame.time - Date.now() : 0;
           const ok = verifyPayload(
             frame.server.key,
             SIG_DOMAIN.serverHello,
@@ -213,6 +218,7 @@ export class CoordinatorConnection extends Emitter<ConnectionEvents> {
               frame.peer,
               OperatorInfo.safeParse(hello.operator).data,
               opts.identity,
+              clockOffset,
             ),
           );
         } else if (frame.t === 'error') {
@@ -282,7 +288,7 @@ export class CoordinatorConnection extends Emitter<ConnectionEvents> {
       const key = `${this.peer}|${sessionId}`;
       // Each join is later than the last, whatever the clock does: it is what the others name.
       const joined = CoordinatorConnection.joinedAt;
-      const at = Math.max(Date.now(), (joined.get(key) ?? 0) + 1);
+      const at = Math.max(Date.now() + this.clockOffset, (joined.get(key) ?? 0) + 1);
       joined.set(key, at);
       // Of no use once it is too old for a join to be taken after it anyway.
       for (const [k, v] of joined) if (v < Date.now() - 15 * 60_000) joined.delete(k);
@@ -314,7 +320,9 @@ export class CoordinatorConnection extends Emitter<ConnectionEvents> {
       return joining;
     }
     // Not in the room as far as we know: the server says so.
-    if (!room || room.since === undefined) return this.send(method, params, timeoutMs);
+    // No join of ours has been taken (one that is on its way failed, or its answer never came): we are not in it.
+    if (!room || room.since === undefined)
+      return Promise.reject(new RpcCallError('not_found', 'not in session'));
     if (method === 'session.update') {
       const p = params as RpcParamsOf<'session.update'>;
       proof = signSessionOp(

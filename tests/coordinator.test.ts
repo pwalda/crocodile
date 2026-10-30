@@ -1069,6 +1069,52 @@ describe('sessions and host election', () => {
         expect(member.caps.nat).toBe('open');
       });
 
+      it('tells a device that an update is not for the join it has, and still ignores an older count', async () => {
+        const { c, alice, sessionId } = await setup();
+        await alice.conn.request('session.join', { sessionId, caps: caps({ nat: 'cone' }) });
+        const since = (
+          c.sessions as unknown as {
+            owned: Map<string, { signed: Map<string, { since: number }> }>;
+          }
+        ).owned
+          .get(sessionId)!
+          .signed.get(alice.conn.peer)!.since;
+        const update = (over: { since: number; n: number }) =>
+          alice.conn.request('session.update', {
+            sessionId,
+            caps: caps({ nat: 'open' }),
+            proof: signSessionOp(
+              alice.identity,
+              sessionId,
+              alice.conn.peer,
+              { op: 'update', caps: caps({ nat: 'open' }) },
+              { server: c.info.id, ...over },
+            ),
+          });
+        await expect(update({ since: since + 1, n: 1 })).rejects.toThrow(/not the join/);
+        await update({ since, n: 5 });
+        // An older count than one taken is of no account, and not an error.
+        await update({ since, n: 3 });
+      });
+
+      it('names the server clock in a join, so that a device whose clock is off can join', async () => {
+        const { c, alice, sessionId } = await setup();
+        const join = () => {
+          const now = Date.now();
+          // The device's own clock is ten minutes slow while it signs (and no longer).
+          const slow = vi.spyOn(Date, 'now').mockReturnValue(now - 10 * 60_000);
+          const sent = alice.conn.request('session.join', { sessionId, caps: caps() });
+          slow.mockRestore();
+          return sent;
+        };
+        const connection = alice.conn as unknown as { clockOffset: number };
+        await expect(join()).rejects.toThrow(NOT_RECENT);
+        // What it learnt from the server's hello is that the server is that far ahead.
+        connection.clockOffset = 10 * 60_000;
+        await join();
+        expect(c.sessions.inSession(alice.conn.peer, sessionId)).toBe(true);
+      });
+
       it('lets a device that left join again', async () => {
         const { c, alice, sessionId } = await setup();
         await alice.conn.request('session.join', { sessionId, caps: caps() });
@@ -1214,6 +1260,63 @@ describe('sessions and host election', () => {
       await waitFor(() => !c.sessions.inSession(alice.conn.peer, sessionId), 4000, 'to be let go');
       await waitFor(() => alice.events.some((e) => e.ev === 'session_closed'), 3000, 'to be told');
       submit.mockRestore();
+      expect(internals.renewing.size).toBe(0);
+    });
+
+    it('goes on waiting for the owner to take a new join while it is on its way', async () => {
+      const { c, alice, sessionId } = await setup();
+      await alice.conn.request('session.join', { sessionId, caps: caps() });
+      answerRenewals(alice, caps());
+      const internals = c.sessions as unknown as {
+        lastOwner: Map<string, string>;
+        submit(): unknown;
+        rebalance(): void;
+        renewing: Map<string, unknown>;
+      };
+      internals.lastOwner.set(sessionId, 'someone-else');
+      const real = (c.sessions as unknown as { submit: (...a: unknown[]) => unknown }).submit.bind(
+        c.sessions,
+      );
+      const submit = vi
+        .spyOn(internals, 'submit')
+        .mockImplementationOnce(async (...a: unknown[]) => {
+          await new Promise((r) => setTimeout(r, 400));
+          return real(...a);
+        });
+      internals.rebalance();
+      await waitFor(() => alice.events.some((e) => e.ev === 'session_renew'), 3000, 'to be asked');
+      await new Promise((r) => setTimeout(r, 200));
+      // The join has arrived and is not taken yet: the device is still the one being waited for.
+      expect(internals.renewing.size).toBe(1);
+      await waitFor(() => internals.renewing.size === 0, 3000, 'the join to be taken');
+      submit.mockRestore();
+      expect(c.sessions.inSession(alice.conn.peer, sessionId)).toBe(true);
+    });
+
+    it('does not ask again for a join once the time it had has gone, but takes the device out', async () => {
+      const { c, alice, sessionId } = await setup();
+      await alice.conn.request('session.join', { sessionId, caps: caps() });
+      answerRenewals(alice, caps());
+      const internals = c.sessions as unknown as {
+        lastOwner: Map<string, string>;
+        submit(): unknown;
+        rebalance(): void;
+        renewing: Map<string, unknown>;
+        renewTimeoutMs: number;
+        renewRetryMs: number;
+      };
+      internals.renewTimeoutMs = 300;
+      internals.renewRetryMs = 500;
+      internals.lastOwner.set(sessionId, 'someone-else');
+      // Not taken at once; the next try would come after the time it has.
+      const submit = vi
+        .spyOn(internals, 'submit')
+        .mockRejectedValue(new RpcFailure('unavailable', 'the owner cannot be reached'));
+      internals.rebalance();
+      await waitFor(() => !c.sessions.inSession(alice.conn.peer, sessionId), 4000, 'to be let go');
+      await waitFor(() => alice.events.some((e) => e.ev === 'session_closed'), 3000, 'to be told');
+      submit.mockRestore();
+      expect(alice.events.filter((e) => e.ev === 'session_renew')).toHaveLength(1);
       expect(internals.renewing.size).toBe(0);
     });
 
