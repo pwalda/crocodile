@@ -5,6 +5,9 @@ import {
   NOTE_TTL_MS,
   recordKey,
   SIG_DOMAIN,
+  sessionOpPayload,
+  type HostCaps,
+  type SessionOpProof,
   type SignedRecord,
   utf8,
 } from '@crocodile/protocol';
@@ -42,6 +45,8 @@ import {
   userIdFromKey,
   createChatMessage,
   createIdentity,
+  signSessionOp,
+  verifySessionOp,
   createSenderKey,
   decodeRecoveryKey,
   encodeRecoveryKey,
@@ -1227,5 +1232,140 @@ describe('notes', () => {
       ok: false,
       reason: 'note expired',
     });
+  });
+});
+
+describe('session operations', () => {
+  const alice = createIdentity();
+  const mallory = createIdentity();
+  const sessionId = 'voice:abcdefgh:ijklmnop';
+  const peer = `${alice.userId}.abcdefghij`;
+  const caps: HostCaps = { canHost: true, platform: 'desktop', nat: 'open', uplinkKbps: 5000 };
+  const join = { op: 'join', caps } as const;
+  const context = { server: 'server-one', at: 1_700_000_000_000 };
+  const ok = (
+    key: string,
+    id: string,
+    who: string,
+    op: Parameters<typeof verifySessionOp>[3],
+    p: SessionOpProof,
+  ) => verifySessionOp(key, id, who, op, p);
+
+  it('accepts what the device signed, for the account of its peer id', () => {
+    const proof = signSessionOp(alice, sessionId, peer, join, context);
+    expect(ok(alice.publicKey, sessionId, peer, join, proof)).toBe(true);
+    const update = signSessionOp(
+      alice,
+      sessionId,
+      peer,
+      { op: 'update', caps },
+      { ...context, since: 5, n: 1 },
+    );
+    expect(ok(alice.publicKey, sessionId, peer, { op: 'update', caps }, update)).toBe(true);
+    const report = signSessionOp(
+      alice,
+      sessionId,
+      peer,
+      { op: 'report', epoch: 3 },
+      { ...context, since: 5 },
+    );
+    expect(ok(alice.publicKey, sessionId, peer, { op: 'report', epoch: 3 }, report)).toBe(true);
+  });
+
+  it('is for the account whose id the peer carries, whoever holds a key', () => {
+    // Another account signing for Alice's device.
+    const forged = signSessionOp(mallory, sessionId, peer, join, context);
+    expect(ok(mallory.publicKey, sessionId, peer, join, forged)).toBe(false);
+    expect(ok(alice.publicKey, sessionId, peer, join, forged)).toBe(false);
+    // Alice's key does not vouch for another account's device.
+    const other = `${mallory.userId}.abcdefghij`;
+    const mine = signSessionOp(alice, sessionId, other, join, context);
+    expect(ok(alice.publicKey, sessionId, other, join, mine)).toBe(false);
+  });
+
+  it('covers where, who, for which server, when and what was asked', () => {
+    const proof = signSessionOp(
+      alice,
+      sessionId,
+      peer,
+      { op: 'update', caps },
+      { ...context, since: 5, n: 1 },
+    );
+    const update = { op: 'update', caps } as const;
+    const check = (
+      id: string,
+      who: string,
+      op: typeof update | { op: 'join'; caps: HostCaps },
+      p: SessionOpProof,
+    ) => ok(alice.publicKey, id, who, op, p);
+    expect(check(sessionId, peer, update, proof)).toBe(true);
+    // Another room, another of Alice's devices, another operation.
+    expect(check('voice:abcdefgh:qrstuvwx', peer, update, proof)).toBe(false);
+    expect(check(sessionId, `${alice.userId}.zzzzzzzzzz`, update, proof)).toBe(false);
+    expect(check(sessionId, peer, { op: 'join', caps }, proof)).toBe(false);
+    // Another server (the point: a server cannot use what was signed for another), time, join or count.
+    expect(check(sessionId, peer, update, { ...proof, server: 'server-two' })).toBe(false);
+    expect(check(sessionId, peer, update, { ...proof, at: proof.at + 1 })).toBe(false);
+    expect(check(sessionId, peer, update, { ...proof, since: 6 })).toBe(false);
+    expect(check(sessionId, peer, update, { ...proof, n: 2 })).toBe(false);
+    expect(check(sessionId, peer, update, { ...proof, n: undefined })).toBe(false);
+    // What it says about the device.
+    expect(
+      check(sessionId, peer, { op: 'update', caps: { ...caps, uplinkKbps: 9000 } }, proof),
+    ).toBe(false);
+    expect(check(sessionId, peer, { op: 'update', caps: { ...caps, nat: 'cone' } }, proof)).toBe(
+      false,
+    );
+  });
+
+  it('keeps a report to its epoch', () => {
+    const proof = signSessionOp(
+      alice,
+      sessionId,
+      peer,
+      { op: 'report', epoch: 3 },
+      { ...context, since: 5 },
+    );
+    expect(ok(alice.publicKey, sessionId, peer, { op: 'report', epoch: 4 }, proof)).toBe(false);
+    expect(
+      ok(
+        alice.publicKey,
+        sessionId,
+        peer,
+        { op: 'report', epoch: 3 },
+        { ...proof, since: undefined },
+      ),
+    ).toBe(false);
+  });
+
+  it('does not take what was signed for something else', () => {
+    // The mailbox signs a similar payload in another domain.
+    const proof = signSessionOp(alice, sessionId, peer, join, context);
+    expect(
+      verifyPayload(
+        alice.publicKey,
+        SIG_DOMAIN.mail,
+        sessionOpPayload(sessionId, peer, join, context),
+        proof.sig,
+      ),
+    ).toBe(false);
+    expect(ok(alice.publicKey, sessionId, peer, join, { ...proof, sig: 'x'.repeat(86) })).toBe(
+      false,
+    );
+    expect(ok('not a key', sessionId, peer, join, proof)).toBe(false);
+  });
+
+  it('means the same with the optional claims left out or undefined', () => {
+    const bare: HostCaps = { canHost: false, platform: 'web', nat: 'unknown' };
+    const proof = signSessionOp(alice, sessionId, peer, { op: 'join', caps: bare }, context);
+    expect(
+      ok(
+        alice.publicKey,
+        sessionId,
+        peer,
+        { op: 'join', caps: { ...bare, uplinkKbps: undefined } },
+        proof,
+      ),
+    ).toBe(true);
   });
 });

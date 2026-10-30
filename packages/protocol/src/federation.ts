@@ -223,6 +223,51 @@ export interface FedRoute {
   d: unknown;
 }
 
+/** How far the time on a session operation may be from the receiver's clock (as for mailbox proofs). */
+export const SESSION_OP_SKEW_MS = 5 * 60_000;
+
+/**
+ * A device's signature on its own join, update or report in a session, so that a server
+ * other than the one the device is connected to cannot speak for it. The key to check it
+ * with is the account's, which the receiver has from the device's record (or the sign-in).
+ * `server` is the server the device is connected to, `at` the device's clock. An update or
+ * a report names the join it belongs to by that join's `at` (`since`); an update also counts
+ * up (`n`), so that an older one is not taken for a newer.
+ */
+export const SessionOpProof = z.object({
+  server: z.string().max(200),
+  at: z.number().int(),
+  since: z.number().int().optional(),
+  n: z.number().int().min(0).optional(),
+  sig: z.string().max(200),
+});
+export type SessionOpProof = z.infer<typeof SessionOpProof>;
+
+/** What a device signs of an operation (a server may add to the rest, a hint for one). */
+export type SignedSessionOp =
+  { op: 'join' | 'update'; caps: HostCaps } | { op: 'report'; epoch: number };
+
+/** What a SessionOpProof signs: where, who, for which server, when, and what was asked. */
+export function sessionOpPayload(
+  sessionId: string,
+  peer: string,
+  op: SignedSessionOp,
+  proof: Omit<SessionOpProof, 'sig'>,
+) {
+  return {
+    sessionId,
+    peer,
+    server: proof.server,
+    at: proof.at,
+    since: proof.since ?? null,
+    n: proof.n ?? null,
+    op:
+      op.op === 'report'
+        ? { op: op.op, epoch: op.epoch, issue: 'host_unreachable' }
+        : { op: op.op, caps: op.caps },
+  };
+}
+
 export type SessionOp =
   | {
       op: 'join';
@@ -242,6 +287,8 @@ export interface FedSessionOp {
   /** Peer id of the member. */
   peer: string;
   op: SessionOp;
+  /** The device's signature on the operation; a leave from the member's own server needs none. */
+  proof?: SessionOpProof;
 }
 
 export interface FedSessionOpResult {
@@ -425,6 +472,7 @@ export const FedFrameSchema = z.discriminatedUnion('t', [
     sessionId: SessionId,
     peer: PeerId,
     op: SessionOpSchema,
+    proof: SessionOpProof.optional(),
   }),
   z.object({
     t: z.literal('session_op_res'),
