@@ -7,6 +7,9 @@ import { newFileId } from '@crocodile/crypto';
 import {
   FileExports,
   FileStore,
+  markFromOutside,
+  askBeforeOpening,
+  kindOf,
   RISKY_EXTENSIONS,
   safeFileName,
 } from '../apps/desktop/src/main/file-store';
@@ -160,5 +163,136 @@ describe('saving files', () => {
       'auxiliary.md',
     ])
       expect(safeFileName(name)).toBe(name);
+  });
+});
+
+describe('files received from other people', () => {
+  const deps = (platform: NodeJS.Platform) => {
+    const calls: string[][] = [];
+    return {
+      calls,
+      deps: {
+        platform,
+        now: () => 1_700_000_000_000,
+        writeStream: async (p: string, text: string) => void calls.push(['stream', p, text]),
+        setQuarantine: async (p: string, v: string) => void calls.push(['quarantine', p, v]),
+      },
+    };
+  };
+
+  it('are marked as downloaded on Windows (Mark-of-the-Web)', async () => {
+    const { calls, deps: d } = deps('win32');
+    expect(await markFromOutside('C:\\Users\\me\\Downloads\\report.docx', d)).toBe('marked');
+    expect(calls).toEqual([
+      [
+        'stream',
+        'C:\\Users\\me\\Downloads\\report.docx:Zone.Identifier',
+        '[ZoneTransfer]\r\nZoneId=3\r\nHostUrl=about:internet\r\n',
+      ],
+    ]);
+  });
+
+  it('are quarantined on macOS', async () => {
+    const { calls, deps: d } = deps('darwin');
+    expect(await markFromOutside('/Users/me/Downloads/app.zip', d)).toBe('marked');
+    expect(calls).toEqual([
+      ['quarantine', '/Users/me/Downloads/app.zip', '0083;6553f100;Crocodile;'],
+    ]);
+  });
+
+  it('are left as they are where there is no such mark, or the drive cannot carry it', async () => {
+    const linux = deps('linux');
+    expect(await markFromOutside('/home/me/x.pdf', linux.deps)).toBe('none');
+    expect(linux.calls).toEqual([]);
+    const fat = deps('win32');
+    fat.deps.writeStream = async () => {
+      throw new Error('EINVAL');
+    };
+    expect(await markFromOutside('E:\\x.pdf', fat.deps)).toBe('failed');
+  });
+
+  it('are marked when finished, whether saved or opened, but not when abandoned', async () => {
+    const dir = tempDir();
+    const marked: string[] = [];
+    const x = new FileExports(async (p) => void marked.push(p));
+    const saved = join(dir, 'a.pdf');
+    const t1 = await x.begin(saved, false);
+    await x.chunk(t1, new Uint8Array([1]));
+    expect(marked).toEqual([]);
+    expect(await x.end(t1)).toBe(saved);
+    const opened = await x.tempPath('b.pdf');
+    const t2 = await x.begin(opened, true);
+    await x.end(t2);
+    const t3 = await x.begin(join(dir, 'c.pdf'), false);
+    await x.abort(t3);
+    expect(marked).toEqual([saved, opened]);
+    x.cleanup();
+  });
+
+  it('are still saved when the mark cannot be written', async () => {
+    const dir = tempDir();
+    const x = new FileExports(async () => {
+      throw new Error('no xattr here');
+    });
+    const t = await x.begin(join(dir, 'a.pdf'), false);
+    await expect(x.end(t)).resolves.toBe(join(dir, 'a.pdf'));
+  });
+
+  it('open without asking only if they are a kind known to be safe', () => {
+    for (const name of [
+      'photo.PNG',
+      'song.mp3',
+      'clip.mp4',
+      'notes.txt',
+      'paper.pdf',
+      'sheet.xlsx',
+    ])
+      expect(askBeforeOpening(name, false), name).toBeNull();
+    // Programs, macro documents, web pages, documents that carry links, archives, kinds not heard of, and no kind at all.
+    for (const name of [
+      'a.exe',
+      'a.docm',
+      'a.html',
+      'a.svg',
+      'a.rtf',
+      'a.odt',
+      'a.zip',
+      'a.7z',
+      'a.iso',
+      'a.xyz',
+      'README',
+      'a.pdf.exe',
+      'a.exe.',
+      'a.exe ',
+      '.pdf',
+    ])
+      expect(askBeforeOpening(name, false), name).toBeTruthy();
+  });
+
+  it('say whether a kind runs code, is not known, or just could not be marked', () => {
+    expect(kindOf('a.exe')).toBe('runs-code');
+    expect(kindOf('a.xyz')).toBe('unknown');
+    expect(kindOf('a.pdf')).toBe('safe');
+    expect(askBeforeOpening('a.exe', false)).toMatch(/can run code/);
+    expect(askBeforeOpening('a.xyz', false)).toMatch(/doesn't know this kind/);
+    expect(askBeforeOpening('a.pdf', true)).toMatch(/could not mark/);
+  });
+
+  it('are asked about even if safe when the system mark could not be put on them', async () => {
+    const dir = tempDir();
+    const x = new FileExports(async (p) => (p.endsWith('bad.pdf') ? 'failed' : 'marked'));
+    const bad = join(dir, 'bad.pdf');
+    await x.end(await x.begin(bad, false));
+    const good = join(dir, 'good.pdf');
+    await x.end(await x.begin(good, false));
+    expect(x.markFailed(good)).toBe(false);
+    expect(x.markFailed(bad)).toBe(true);
+    expect(x.markFailed(bad)).toBe(false);
+    const throws = new FileExports(async () => {
+      throw new Error('no');
+    });
+    const p = join(dir, 'c.pdf');
+    await throws.end(await throws.begin(p, false));
+    expect(throws.markFailed(p)).toBe(true);
   });
 });

@@ -1,7 +1,9 @@
 import { mkdirSync, rmSync } from 'node:fs';
-import { mkdtemp, open, readdir, rm, stat, type FileHandle } from 'node:fs/promises';
+import { mkdtemp, open, readdir, rm, stat, writeFile, type FileHandle } from 'node:fs/promises';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { extname, join } from 'node:path';
 import { FILE_BLOCK_SIZE, FILE_TAG_SIZE } from '@crocodile/protocol';
 
 /**
@@ -96,6 +98,17 @@ export class FileExports {
   private seq = 0;
   private tempRoot?: string;
 
+  /** Files whose mark could not be set, until they are asked about. */
+  private unmarked = new Set<string>();
+
+  /** `mark` flags a finished file as coming from outside (see markFromOutside). */
+  constructor(private readonly mark: (path: string) => Promise<unknown> = markFromOutside) {}
+
+  /** Whether the system's mark could not be put on this finished file (asked once). */
+  markFailed(path: string): boolean {
+    return this.unmarked.delete(path);
+  }
+
   async begin(path: string, temp: boolean) {
     const handle = await open(path, 'w');
     const token = `x${++this.seq}`;
@@ -122,6 +135,9 @@ export class FileExports {
     if (!x) throw new Error('not saving');
     this.open.delete(token);
     await x.handle.close();
+    // Before it is opened or shown, so the system treats it as it does a download.
+    const marked = await this.mark(x.path).catch(() => 'failed');
+    if (marked === 'failed') this.unmarked.add(x.path);
     return x.path;
   }
 
@@ -138,7 +154,91 @@ export class FileExports {
   }
 }
 
-/** Kinds of files that can run code when opened (web pages included): the app asks first. */
+/**
+ * Flags a file that came from another person the way a browser flags a
+ * download, so the system applies its own checks when it is opened: Windows
+ * Mark-of-the-Web (an alternate stream, ZoneId 3: SmartScreen, Protected View
+ * for Office files) and the macOS quarantine attribute (Gatekeeper). A drive
+ * that can't carry the mark (FAT) is reported as 'failed' (the app then asks
+ * before opening the file); Linux has no such thing ('none').
+ */
+export async function markFromOutside(
+  path: string,
+  deps: {
+    platform: NodeJS.Platform;
+    now: () => number;
+    writeStream: (path: string, text: string) => Promise<void>;
+    setQuarantine: (path: string, value: string) => Promise<void>;
+  } = {
+    platform: process.platform,
+    now: Date.now,
+    writeStream: (p, text) => writeFile(p, text),
+    setQuarantine: async (p, value) => {
+      await promisify(execFile)('/usr/bin/xattr', ['-w', 'com.apple.quarantine', value, p], {
+        timeout: 5000,
+      });
+    },
+  },
+): Promise<'marked' | 'failed' | 'none'> {
+  try {
+    if (deps.platform === 'win32') {
+      await deps.writeStream(
+        `${path}:Zone.Identifier`,
+        '[ZoneTransfer]\r\nZoneId=3\r\nHostUrl=about:internet\r\n',
+      );
+      return 'marked';
+    }
+    if (deps.platform === 'darwin') {
+      const seconds = Math.floor(deps.now() / 1000).toString(16);
+      await deps.setQuarantine(path, `0083;${seconds};Crocodile;`);
+      return 'marked';
+    }
+  } catch {
+    // No stream or attribute to be had on this drive: the file is still saved, and the caller asks before opening it.
+    return 'failed';
+  }
+  return 'none';
+}
+
+/**
+ * Kinds of files the app opens without asking: pictures, sound, video, plain
+ * text and documents. Everything else (programs, scripts, archives, web
+ * pages, and kinds this list has never heard of) is asked about first.
+ * Office files are here without their macro-enabled twins (and RTF and the
+ * OpenDocument kinds, which can carry links and macros, are left out); the
+ * system's own protection for downloads (see markFromOutside) covers the rest.
+ */
+export const SAFE_EXTENSIONS = new Set(
+  (
+    'png jpg jpeg gif webp avif bmp ico heic heif tif tiff ' +
+    'mp3 m4a oga ogg opus wav flac aac mid midi ' +
+    'mp4 m4v mov webm mkv avi mpg mpeg ' +
+    'txt md log csv tsv json pdf ' +
+    'docx xlsx pptx'
+  ).split(' '),
+);
+
+/** What opening a file of this name is like: a known-safe kind, one that runs code, or one not known. */
+export function kindOf(name: string): 'safe' | 'runs-code' | 'unknown' {
+  const ext = extname(safeFileName(name)).slice(1).toLowerCase();
+  return SAFE_EXTENSIONS.has(ext) ? 'safe' : RISKY_EXTENSIONS.has(ext) ? 'runs-code' : 'unknown';
+}
+
+/**
+ * What to say before opening a file, or null to open it. A known-safe kind is
+ * asked about too when the system's mark could not be put on it.
+ */
+export function askBeforeOpening(name: string, markFailed: boolean): string | null {
+  const kind = kindOf(name);
+  if (kind === 'safe' && !markFailed) return null;
+  const trust = 'Only open it if you trust the person who sent it and expected it.';
+  if (kind === 'runs-code') return `This kind of file can run code on your computer. ${trust}`;
+  if (kind === 'unknown')
+    return `Crocodile doesn't know this kind of file, and some can run code on your computer. ${trust}`;
+  return `Your system could not mark this file as coming from outside, so it won't check it as it does a download. ${trust}`;
+}
+
+/** Kinds of files that can run code when opened (web pages included): the app says so when it asks. */
 export const RISKY_EXTENSIONS = new Set(
   (
     'exe com scr bat cmd msi msix msp ps1 psm1 vbs vbe js jse wsf wsh hta cpl lnk url reg ' +

@@ -59,7 +59,8 @@ hosts a group. This document explains how the pieces fit and why.
   so ids are self-certifying: a server cannot substitute someone's key.
 - The seed is the account. It is shown once as a **recovery key**
   (base32 + checksum) and kept encrypted with a key from the OS keychain
-  (Electron `safeStorage`), like all local data.
+  (Electron `safeStorage`), like all local data, where the computer has a
+  keychain (the app warns when it has none).
 - **Devices.** Each install has a device id and publishes a signed `device`
   record with a name and a **prekey bundle** (X25519 + ML-KEM-768) that
   rotates weekly. The peer id used in sessions is `<userId>.<deviceId>`, so
@@ -436,7 +437,9 @@ effort. Everything below is automatic.
   padded (Padmé) to hide their exact length and encrypted with the text chain.
   A device gives a text channel id to the space it joined first.
 - **At rest.** Identity, prekeys and message history are encrypted in local
-  storage with a key protected by the OS keychain.
+  storage with a key protected by the OS keychain (stored unprotected, with a
+  warning in the app, where there is none; moved into the keychain once one is
+  available).
 - **Transport.** DTLS-SRTP and SCTP-over-DTLS underneath, as in all WebRTC;
   SDP is identity-signed so nobody can splice into the connection.
 

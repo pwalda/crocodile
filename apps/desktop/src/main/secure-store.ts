@@ -6,7 +6,16 @@ export interface Keychain {
   isEncryptionAvailable(): boolean;
   encryptString(value: string): Buffer;
   decryptString(encrypted: Buffer): string;
+  /** Linux only: 'basic_text' (a key anyone can read) or 'unknown' mean no real keyring. */
+  getSelectedStorageBackend?(): string;
 }
+
+/**
+ * How well secrets are kept here: 'keychain' (the system's), 'weak' (an
+ * encryption whose key is not secret, as on Linux with no keyring running) or
+ * 'none' (stored as they are).
+ */
+export type Protection = 'keychain' | 'weak' | 'none';
 
 /** Thrown when a value is stored but the keychain can't open it right now. */
 export const KEYCHAIN_LOCKED = 'KEYCHAIN_LOCKED';
@@ -25,6 +34,45 @@ export class SecureStore {
     private readonly path: string,
     private readonly keychain: Keychain,
   ) {}
+
+  protection(): Protection {
+    try {
+      if (!this.keychain.isEncryptionAvailable()) return 'none';
+      const backend = this.keychain.getSelectedStorageBackend?.();
+      return backend === 'basic_text' || backend === 'unknown' ? 'weak' : 'keychain';
+    } catch {
+      return 'none';
+    }
+  }
+
+  /**
+   * Moves what was stored as it is into the keychain, once there is one (the
+   * keyring was not running at first, or the app was installed before it).
+   * Not into a weak one: that key is public, and a real keyring that shows up
+   * later could not open what it protected. Returns how many it moved.
+   */
+  upgrade(): number {
+    if (this.protection() !== 'keychain') return 0;
+    const data = this.read();
+    let moved = 0;
+    for (const [key, stored] of Object.entries(data)) {
+      if (!stored.startsWith('raw:')) continue;
+      try {
+        data[key] = `enc:${this.keychain.encryptString(stored.slice(4)).toString('base64')}`;
+        moved++;
+      } catch {
+        // Left as it was; tried again next time.
+      }
+    }
+    if (!moved) return 0;
+    try {
+      this.write(data);
+    } catch {
+      // A folder that can't be written to just now: tried again next time.
+      return 0;
+    }
+    return moved;
+  }
 
   get(key: string): string | undefined {
     const stored = this.read()[key];
@@ -59,7 +107,11 @@ export class SecureStore {
   private read(): Record<string, string> {
     if (!existsSync(this.path)) return {};
     try {
-      return JSON.parse(readFileSync(this.path, 'utf8')) as Record<string, string>;
+      const parsed = JSON.parse(readFileSync(this.path, 'utf8')) as Record<string, unknown>;
+      // Only text values; anything else in a damaged file is not a secret of ours.
+      return Object.fromEntries(
+        Object.entries(parsed).filter((e): e is [string, string] => typeof e[1] === 'string'),
+      );
     } catch {
       return {};
     }

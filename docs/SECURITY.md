@@ -2,12 +2,12 @@
 
 ## What we protect
 
-| Asset                            | Who can read it                                                                               |
-| -------------------------------- | --------------------------------------------------------------------------------------------- |
-| Voice                            | Only the members of the call.                                                                 |
-| Text messages (channels and DMs) | Only the members of the space or DM, now and later (via peer-to-peer history sync).           |
-| Files                            | Only the members of the space or DM it was posted in, fetched straight from another member.   |
-| Your identity key                | Only your linked devices (encrypted with the OS keychain) and whoever holds the recovery key. |
+| Asset                            | Who can read it                                                                                                   |
+| -------------------------------- | ----------------------------------------------------------------------------------------------------------------- |
+| Voice                            | Only the members of the call.                                                                                     |
+| Text messages (channels and DMs) | Only the members of the space or DM, now and later (via peer-to-peer history sync).                               |
+| Files                            | Only the members of the space or DM it was posted in, fetched straight from another member.                       |
+| Your identity key                | Only your linked devices (encrypted with the OS keychain, where there is one) and whoever holds the recovery key. |
 
 ## What servers see
 
@@ -153,7 +153,13 @@ picture size.
   mismatch means stop, and the link on that server shouldn't be retried.
 - Every signature is domain-separated (`SIG_DOMAIN` in `protocol/constants.ts`).
 - Local data (identity, prekeys, history) is encrypted at rest with a key
-  kept in the OS keychain (Electron `safeStorage`). The desktop window is
+  kept in the OS keychain (Electron `safeStorage`) when the computer has one.
+  Without one (on Linux, no keyring running) the keys are stored as they are,
+  or lightly encrypted with a key that is not secret, so anything running as
+  the user can read them: the app shows a warning for as long as that holds,
+  and moves what it stored into the keychain once one is available (not into a
+  weak one, whose key is public and which a real keyring later could not open).
+  The desktop window is
   confined to the app's own pages, so a file dropped or opened into it cannot
   navigate the window elsewhere and read the identity seed over the IPC bridge.
   A drop anywhere but the chat does nothing, and the main process serves a
@@ -233,9 +239,13 @@ picture size.
   lost.
 - Files are checked for integrity, not for safety: the app never opens one by
   itself, sanitises the names it suggests (no folders, and no reserved or
-  trailing-dot names that would hide the real extension), and warns before
-  opening programs and scripts (a wide list of executable types), but a file a
-  member sends can still be harmful.
+  trailing-dot names that would hide the real extension), marks a saved or
+  opened file as coming from outside (Mark-of-the-Web on Windows, the
+  quarantine attribute on macOS, so the system's own checks apply; Linux has
+  no such mark, and a drive that can't carry it is left unmarked), and asks
+  before opening anything but pictures, sound, video, plain text, PDFs and
+  Word, Excel and PowerPoint files without macros, and also asks when the mark could not be put on a file. A file a member sends can still
+  be harmful.
 
 Please report vulnerabilities privately through
 [GitHub's private reporting](https://github.com/pwalda/crocodile/security/advisories/new)
