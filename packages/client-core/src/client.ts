@@ -618,6 +618,8 @@ export class CrocodileClient extends Emitter<ClientEvents> {
     await this.files?.load();
     this.store.set({ settings, dms, dmRequests, deviceId: this.deviceId });
     await this.records.load();
+    // (The secrets of links that ran out while the app was closed.)
+    if (this.dropEndedTickets()) void this.saveTickets();
     const seed = await this.platform.kv.get<string>('identity-seed');
     if (!seed) {
       this.store.set({ phase: 'onboarding' });
@@ -811,8 +813,10 @@ export class CrocodileClient extends Emitter<ClientEvents> {
     await this.platform.kv.delete('friend-list');
     await this.platform.kv.delete('dms');
     await this.platform.kv.delete('dm-requests');
-    await this.platform.kv.delete('invite-tickets');
+    // (What is waiting to be written is written empty, and then the key goes.)
     this.tickets.clear();
+    await this.ticketsSaved;
+    await this.platform.kv.delete('invite-tickets');
     this.outbox = new Outbox(this.platform.kv);
     clearTimeout(this.mailTimer);
     clearInterval(this.prekeyTimer);
@@ -1942,6 +1946,7 @@ export class CrocodileClient extends Emitter<ClientEvents> {
     ).catch(async (err) => {
       // Do not leave the space naming a link that is not there.
       this.log('first link not made', { err: String(err) });
+      this.forgetTicket(ticket.tid);
       await this.updateSpace(spaceId, (b) => {
         const { publicInvite: _, ...rest } = b;
         return rest;
@@ -2163,7 +2168,7 @@ export class CrocodileClient extends Emitter<ClientEvents> {
           r.body.spaceId === spaceId &&
           r.body.for === undefined &&
           r.body.tpub === undefined &&
-          inviteCommitment(spaceId, r.body.code) === named,
+          namedBy(spaceId, r.body.code, false) === named,
       );
     if (!invite || invite.body.spaceId !== spaceId || invite.body.for !== undefined)
       return { state: 'elsewhere' };
@@ -2189,7 +2194,16 @@ export class CrocodileClient extends Emitter<ClientEvents> {
   private async keepTicket(ticket: { tid: string; secret: string }) {
     this.tickets.set(ticket.tid, ticket.secret);
     this.dropEndedTickets(ticket.tid);
-    while (this.tickets.size > TICKETS_KEPT) this.tickets.delete(this.tickets.keys().next().value!);
+    // Only as a last resort, and then not the link a space has on.
+    if (this.tickets.size > TICKETS_KEPT) {
+      const on = new Set(
+        (this.records.list('space:') as SignedRecord<'space'>[]).map((r) => r.body.publicInvite),
+      );
+      for (const tid of [...this.tickets.keys()]) {
+        if (this.tickets.size <= TICKETS_KEPT) break;
+        if (tid !== ticket.tid && !on.has(tid)) this.tickets.delete(tid);
+      }
+    }
     await this.saveTickets();
   }
   private tickets = new Map<string, string>();
@@ -2259,6 +2273,18 @@ export class CrocodileClient extends Emitter<ClientEvents> {
       );
       return code;
     }
+    return this.oneLinkChangeAtATime(() => this.makeOpenLink(spaceId, expiresInMs));
+  }
+
+  // Changes of the open link go one after the other, each seeing what the last made.
+  private linkWork: Promise<unknown> = Promise.resolve();
+  private oneLinkChangeAtATime<T>(work: () => Promise<T>): Promise<T> {
+    const run = this.linkWork.then(work, work);
+    this.linkWork = run.catch(() => {});
+    return run;
+  }
+
+  private async makeOpenLink(spaceId: string, expiresInMs: number): Promise<string> {
     // The open link is a ticket: its secret is only in the link, and in this device to show it again.
     const ticket = newTicket();
     const invite = signRecord(this.identity!, 'invite', recordKey.invite(ticket.tid), {
@@ -2292,7 +2318,11 @@ export class CrocodileClient extends Emitter<ClientEvents> {
   }
 
   /** Turns the space's open link off: the link stops working. People already in stay. */
-  async stopOpenInvite(spaceId: string) {
+  stopOpenInvite(spaceId: string) {
+    return this.oneLinkChangeAtATime(() => this.stopLink(spaceId));
+  }
+
+  private async stopLink(spaceId: string) {
     const previous = this.openLinkOf(spaceId);
     if (previous.state === 'none') return;
     await this.updateSpace(spaceId, (b) => {
@@ -2417,7 +2447,7 @@ export class CrocodileClient extends Emitter<ClientEvents> {
       (invite.body.for === undefined &&
         (invite.body.expiresAt === null ||
           code.length < OPEN_CODE_LENGTH ||
-          space.body.publicInvite !== (ticket ? code : inviteCommitment(spaceId, code)))) ||
+          space.body.publicInvite !== namedBy(spaceId, code, !!ticket))) ||
       (invite.body.expiresAt !== null && invite.body.expiresAt < Date.now());
     return {
       code: token,
@@ -2464,7 +2494,7 @@ export class CrocodileClient extends Emitter<ClientEvents> {
     if (
       named &&
       invite.body.for === undefined &&
-      named.body.publicInvite !== (ticket ? code : inviteCommitment(spaceId, code))
+      named.body.publicInvite !== namedBy(spaceId, code, !!ticket)
     )
       throw new Error('That link has been replaced or turned off. Ask for a new one.');
     this.records.ingestAll([...space.records, invite]);
@@ -4016,6 +4046,14 @@ function fitName(name: string) {
     out += ch;
   }
   return out + ext;
+}
+
+/**
+ * What a space names its open link by: a link that is a ticket by its own name, an older one by a
+ * hash of its code (the code being a secret).
+ */
+function namedBy(spaceId: string, code: string, isTicket: boolean): string {
+  return isTicket ? code : inviteCommitment(spaceId, code);
 }
 
 /** The code in an invite link or code as pasted ("croc://join/abc…", "ABC…"). */

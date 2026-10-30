@@ -513,6 +513,8 @@ export function ticketProblem(
 const ticketSigned = new WeakMap<object, string | null>();
 
 function ticketIntact(spaceId: string, member: RecordBodies['member']): string | undefined {
+  // (What is checked is the membership as it names its space; asked about another, it is not that.)
+  if (spaceId !== member.spaceId) return 'invite is for another space';
   const cached = ticketSigned.get(member);
   if (cached !== undefined) return cached ?? undefined;
   const reason = ticketBroken(spaceId, member);

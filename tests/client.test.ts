@@ -1874,6 +1874,73 @@ describe('leaving', () => {
       expect(await kept()).toEqual([]);
     });
 
+    it('is one link even when two are made at once', async () => {
+      const { alice, bob, spaceId } = await trio();
+      await Promise.all([alice.createInvite(spaceId), alice.createInvite(spaceId)]);
+      const live = (alice.records.list('invite:') as SignedRecord<'invite'>[]).filter(
+        (r) => r.body.spaceId === spaceId && r.body.for === undefined && !r.body.revoked,
+      );
+      expect(live).toHaveLength(1);
+      expect(live[0]!.body.code).toBe(alice.state.spaces[spaceId]!.publicInvite);
+      await bob.joinWithInvite(await alice.shareInvite(spaceId));
+    });
+
+    it('does not keep the secret of a first link that could not be made, or of one that ran out while the app was closed', async () => {
+      const coord = await server();
+      const net = new FakeRelayNetwork();
+      const alice = await signUp(makeClient(net, coord), 'alice');
+      const kv = alice.platform.kv as MemoryKeyValueStore;
+      const kept = async () =>
+        Object.keys((await kv.get<Record<string, string>>('invite-tickets')) ?? {});
+      const put = (alice as unknown as { putRecord(r: SignedRecord): Promise<unknown> }).putRecord;
+      const spy = vi
+        .spyOn(alice as unknown as { putRecord(r: SignedRecord): Promise<unknown> }, 'putRecord')
+        .mockImplementation(async function (this: unknown, r: SignedRecord) {
+          if (r.kind === 'invite') throw new Error('offline');
+          return put.call(alice, r);
+        });
+      await alice.createSpace('Swamp');
+      spy.mockRestore();
+      expect(await kept()).toEqual([]);
+      // A short link, and the app closed while it runs out.
+      const spaceId = await alice.createSpace('Marsh');
+      await alice.createInvite(spaceId, 300);
+      expect(await kept()).toHaveLength(1);
+      await new Promise((r) => setTimeout(r, 500));
+      await alice.shutdown();
+      const again = new CrocodileClient(
+        { ...alice.platform, kv },
+        {
+          directories: [],
+          preferredServers: [coord.url],
+          transportFactory: net.transportFactory(),
+        },
+      );
+      cleanup.push(() => again.shutdown());
+      await again.init();
+      // (Written a moment after it starts.)
+      await new Promise((r) => setTimeout(r, 300));
+      expect(await kept()).toEqual([]);
+    });
+
+    it('does not write the secrets back after signing out', async () => {
+      const coord = await server();
+      const net = new FakeRelayNetwork();
+      const alice = await signUp(makeClient(net, coord), 'alice');
+      const kv = alice.platform.kv as MemoryKeyValueStore;
+      await alice.createSpace('Swamp');
+      const set = kv.set.bind(kv);
+      // A write of the secrets that is slow to finish.
+      vi.spyOn(kv, 'set').mockImplementation(async (key: string, value: unknown) => {
+        if (key === 'invite-tickets') await new Promise((r) => setTimeout(r, 200));
+        return set(key, value);
+      });
+      void (alice as unknown as { saveTickets(): Promise<void> }).saveTickets();
+      await alice.signOut();
+      await new Promise((r) => setTimeout(r, 400));
+      expect(await kv.get('invite-tickets')).toBeUndefined();
+    });
+
     it('cannot show a link made on another device, and replaces it with a new one', async () => {
       const { alice, bob, spaceId } = await trio();
       const link = await alice.shareInvite(spaceId);
