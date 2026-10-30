@@ -500,26 +500,30 @@ export function ticketProblem(
 ): { reason: string; retryable?: boolean } | undefined {
   const t = member.ticket;
   if (!t) return { reason: 'no ticket' };
-  const broken = ticketIntact(spaceId, member);
-  if (broken) return { reason: broken };
+  const intact = ticketIntact(spaceId, member);
+  if (intact.reason) return { reason: intact.reason };
   // Whether its maker may have made it is for the space to say, and it can change.
-  if (!mayHaveIssuedTicket(space, userIdFromKey(t.invite.author)))
+  if (!mayHaveIssuedTicket(space, intact.maker))
     // (The space we hold may be older than the one that lists the maker: try again later.)
     return { reason: 'invite was made by someone who could not invite', retryable: true };
   return undefined;
 }
 
-// What does not depend on the space (the signatures) is checked once for each membership.
-const ticketSigned = new WeakMap<object, string | null>();
+// What does not depend on the space (the signatures, and who signed) is found once for each membership.
+const ticketSigned = new WeakMap<object, { reason?: string; maker: string }>();
 
-function ticketIntact(spaceId: string, member: RecordBodies['member']): string | undefined {
+function ticketIntact(spaceId: string, member: RecordBodies['member']) {
   // (What is checked is the membership as it names its space; asked about another, it is not that.)
-  if (spaceId !== member.spaceId) return 'invite is for another space';
-  const cached = ticketSigned.get(member);
-  if (cached !== undefined) return cached ?? undefined;
-  const reason = ticketBroken(spaceId, member);
-  ticketSigned.set(member, reason ?? null);
-  return reason;
+  if (spaceId !== member.spaceId) return { reason: 'invite is for another space', maker: '' };
+  let found = ticketSigned.get(member);
+  if (!found) {
+    found = {
+      reason: ticketBroken(spaceId, member),
+      maker: userIdFromKey(member.ticket!.invite.author),
+    };
+    ticketSigned.set(member, found);
+  }
+  return found;
 }
 
 function ticketBroken(spaceId: string, member: RecordBodies['member']): string | undefined {

@@ -618,8 +618,8 @@ export class CrocodileClient extends Emitter<ClientEvents> {
     await this.files?.load();
     this.store.set({ settings, dms, dmRequests, deviceId: this.deviceId });
     await this.records.load();
-    // (The secrets of links that ran out while the app was closed.)
-    if (this.dropEndedTickets()) void this.saveTickets();
+    // (The secrets of links that ran out while the app was closed, or were never made.)
+    if (this.dropEndedTickets(undefined, true)) void this.saveTickets();
     const seed = await this.platform.kv.get<string>('identity-seed');
     if (!seed) {
       this.store.set({ phase: 'onboarding' });
@@ -2178,7 +2178,9 @@ export class CrocodileClient extends Emitter<ClientEvents> {
       invite.body.expiresAt !== null &&
       invite.body.expiresAt > Date.now() &&
       invite.body.code.length >= OPEN_CODE_LENGTH;
-    if (!good) return { state: 'ended', invite };
+    // (And its maker may still make one: an admin taken off the list ends the links they made.)
+    const makerMay = canManageSpace(space!.body, userIdFromKey(invite.author));
+    if (!good || !makerMay) return { state: 'ended', invite };
     if (invite.body.tpub === undefined) return { state: 'good', invite, token: invite.body.code };
     const secret = this.tickets.get(invite.body.code);
     return secret ? { state: 'good', invite, token: secret } : { state: 'elsewhere', invite };
@@ -2192,6 +2194,8 @@ export class CrocodileClient extends Emitter<ClientEvents> {
 
   /** Keeps the secret of a link we made, to show it again; it is only ever on this device. */
   private async keepTicket(ticket: { tid: string; secret: string }) {
+    // (Not once the account is being erased: nothing is left on this device to keep it for.)
+    if (!this.link) return;
     this.tickets.set(ticket.tid, ticket.secret);
     this.dropEndedTickets(ticket.tid);
     // Only as a last resort, and then not the link a space has on.
@@ -2217,11 +2221,20 @@ export class CrocodileClient extends Emitter<ClientEvents> {
   }
 
   /** Those of links that have ended are no use. (An invite we hold no record of is kept.) */
-  private dropEndedTickets(except?: string) {
+  private dropEndedTickets(except?: string, unmade = false) {
     const before = this.tickets.size;
+    // `unmade`: those for no invite we hold, that no space names, are of a link never made.
+    const named = new Set(
+      (this.records.list('space:') as SignedRecord<'space'>[]).map((r) => r.body.publicInvite),
+    );
     for (const tid of [...this.tickets.keys()]) {
       const r = this.records.get(recordKey.invite(tid)) as SignedRecord<'invite'> | undefined;
-      if (tid !== except && r && (r.body.revoked || (r.body.expiresAt ?? Infinity) < Date.now()))
+      if (tid === except) continue;
+      if (
+        r
+          ? r.body.revoked || (r.body.expiresAt ?? Infinity) < Date.now()
+          : unmade && !named.has(tid)
+      )
         this.tickets.delete(tid);
     }
     return this.tickets.size !== before;
@@ -2237,15 +2250,19 @@ export class CrocodileClient extends Emitter<ClientEvents> {
    * it is about to. Not when one was made on another device that we cannot see: a new one would
    * end it.
    */
-  async shareInvite(spaceId: string): Promise<string> {
-    const link = this.openLinkOf(spaceId);
-    if (link.state === 'good' && link.invite.body.expiresAt! > Date.now() + HOUR_MS)
-      return link.token;
-    if (link.state === 'elsewhere')
-      throw new Error(
-        'The link for this space was made on another device. Make a new link to replace it.',
-      );
-    return this.createInvite(spaceId);
+  shareInvite(spaceId: string): Promise<string> {
+    // (Seeing what there is and making one if there is none are one step: another sharing at the
+    // same time must see the link this one makes, not make its own.)
+    return this.oneLinkChangeAtATime(async () => {
+      const link = this.openLinkOf(spaceId);
+      if (link.state === 'good' && link.invite.body.expiresAt! > Date.now() + HOUR_MS)
+        return link.token;
+      if (link.state === 'elsewhere')
+        throw new Error(
+          'The link for this space was made on another device. Make a new link to replace it.',
+        );
+      return this.makeOpenLink(spaceId, INVITE_MS);
+    });
   }
 
   /**

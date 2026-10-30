@@ -20,6 +20,7 @@ import {
   linkNonce,
   sealLink,
   sign,
+  newTicket,
   signRecord,
   ticketFromSecret,
 } from '@crocodile/crypto';
@@ -1833,6 +1834,8 @@ describe('leaving', () => {
       );
       const space = alice.records.get(`space:${spaceId}`) as SignedRecord<'space'>;
       expect(space.body.formerAdmins).toEqual([carol.userId]);
+      // The link she made is not one she can hand out any more.
+      await waitFor(() => carol.openLinkOf(spaceId).state === 'ended', 5000, 'her link has ended');
       expect(alice.state.spaces[spaceId]!.members).toContain(bob.userId);
       // And the owner can go on changing the space.
       await alice.updateSpace(spaceId, (b) => ({ ...b, name: 'Marsh' }));
@@ -1850,8 +1853,14 @@ describe('leaving', () => {
       const kept = async () =>
         Object.keys((await kv.get<Record<string, string>>('invite-tickets')) ?? {});
       expect(await kept()).toEqual([ticketFromSecret(first)!.tid]);
-      // The app is closed and opened again: the link can still be shown.
+      // The app is closed and opened again: the link can still be shown. (A secret left by a
+      // link that was never made is not kept.)
       await alice.shutdown();
+      const stray = newTicket();
+      await kv.set('invite-tickets', {
+        ...(await kv.get<Record<string, string>>('invite-tickets')),
+        [stray.tid]: stray.secret,
+      });
       const again = new CrocodileClient(
         { ...alice.platform, kv },
         {
@@ -1864,6 +1873,8 @@ describe('leaving', () => {
       await again.init();
       await waitFor(() => again.state.spaces[spaceId], 8000, 'the space is back');
       expect(await again.shareInvite(spaceId)).toBe(first);
+      await new Promise((r) => setTimeout(r, 300));
+      expect(await kept()).toEqual([ticketFromSecret(first)!.tid]);
       // A new link ends that one, and its secret is of no use any more.
       const second = await again.createInvite(spaceId);
       await again.createInvite(spaceId);
@@ -1883,6 +1894,18 @@ describe('leaving', () => {
       expect(live).toHaveLength(1);
       expect(live[0]!.body.code).toBe(alice.state.spaces[spaceId]!.publicInvite);
       await bob.joinWithInvite(await alice.shareInvite(spaceId));
+    });
+
+    it('gives everyone sharing at once the same link', async () => {
+      const { alice, bob, carol, spaceId } = await trio();
+      await alice.stopOpenInvite(spaceId);
+      const [one, two] = await Promise.all([
+        alice.shareInvite(spaceId),
+        alice.shareInvite(spaceId),
+      ]);
+      expect(two).toBe(one);
+      await bob.joinWithInvite(one);
+      await carol.joinWithInvite(two);
     });
 
     it('does not keep the secret of a first link that could not be made, or of one that ran out while the app was closed', async () => {
@@ -1937,6 +1960,10 @@ describe('leaving', () => {
       });
       void (alice as unknown as { saveTickets(): Promise<void> }).saveTickets();
       await alice.signOut();
+      // A link being made as the account goes does not leave its secret behind either.
+      await (
+        alice as unknown as { keepTicket(t: { tid: string; secret: string }): Promise<void> }
+      ).keepTicket({ tid: 'abcdefgh', secret: 'secret' });
       await new Promise((r) => setTimeout(r, 400));
       expect(await kv.get('invite-tickets')).toBeUndefined();
     });

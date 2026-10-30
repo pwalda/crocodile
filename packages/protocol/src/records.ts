@@ -193,8 +193,10 @@ export const SpaceBody = z.object({
    */
   invitePolicy: z.enum(['admins', 'members']).optional(),
   /**
-   * The one invite anyone holding it can join with, if the space has one on, named by a hash of
-   * its code (the space record is readable by anyone who knows the space, the code is not).
+   * The one invite anyone holding the link can join with, if the space has one on. A link that
+   * is a ticket is named by the name of its invite (a hash of its public key; the secret in the
+   * link is not in any record); an older one by a hash of its code. The space record is readable
+   * by anyone who knows the space, so it holds nothing that is a way in.
    * Making a new one replaces it, and so ends the old one; the owner and admins set it.
    */
   publicInvite: z
