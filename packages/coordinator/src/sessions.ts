@@ -38,7 +38,14 @@ export class OwnerSilent extends RpcFailure {
   }
 }
 
-class Refused extends Error {}
+class Refused extends Error {
+  constructor(
+    readonly code: RpcFailure['code'],
+    message: string,
+  ) {
+    super(message);
+  }
+}
 
 type Hint = { epoch: number; host: string | null; backup: string | null };
 
@@ -256,14 +263,13 @@ export class SessionService {
     sessionId: string,
     op: FedSessionOp['op'],
   ): Promise<
-    | { refused: string; code: 'forbidden' | 'unavailable' }
-    | { device: SignedRecord<'device'>; hint?: Hint }
+    { refused: string; code: RpcFailure['code'] } | { device: SignedRecord<'device'>; hint?: Hint }
   > {
     try {
       // The cheap refusals first: a device made up for somebody who may not be here costs no wait.
       await this.checkAccess(peerIds.user(peer), sessionId).catch((err) => {
         // Told not to by the records is final; failing to find out is not.
-        throw err instanceof RpcFailure ? new Refused(err.message) : err;
+        throw err instanceof RpcFailure ? new Refused(err.code, err.message) : err;
       });
       if (!(await this.connectedTo(server, peer)))
         return {
@@ -279,7 +285,7 @@ export class SessionService {
       const hint = op.op === 'join' && op.hint ? await this.hintAllowed(sessionId, op.hint) : null;
       return { device, ...(hint ? { hint } : {}) };
     } catch (err) {
-      if (err instanceof Refused) return { refused: err.message, code: 'forbidden' };
+      if (err instanceof Refused) return { refused: err.message, code: err.code };
       return { refused: 'could not look up that device', code: 'unavailable' };
     }
   }

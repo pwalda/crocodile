@@ -17,6 +17,7 @@ import {
   type FedPresence,
 } from '@crocodile/protocol';
 import { Coordinator, rendezvousOwner } from '@crocodile/coordinator';
+import { RpcFailure } from '../packages/coordinator/src/util';
 import {
   caps,
   connectUser,
@@ -473,6 +474,24 @@ describe('events and session operations from other servers', () => {
       await settled(net);
       expect(state().host).not.toBe(ghost);
       expect(state().epoch).toBeLessThan(5);
+    });
+
+    it('answers a join to a room that is not there with what the check said, not forbidden', async () => {
+      const net = await conversation();
+      await joined(net);
+      const sessions = net.victim.sessions as unknown as {
+        checkAccess(...a: unknown[]): Promise<void>;
+        admit(...a: unknown[]): Promise<{ code?: string }>;
+      };
+      const check = vi
+        .spyOn(sessions, 'checkAccess')
+        .mockRejectedValueOnce(new RpcFailure('not_found', 'no such voice channel'));
+      const answer = await sessions.admit(net.rogue.info.id, net.alice.conn.peer, net.sessionId, {
+        op: 'join',
+        caps: caps(),
+      });
+      check.mockRestore();
+      expect(answer.code).toBe('not_found');
     });
 
     it('does not call a failure to find out whether a device may join a refusal', async () => {
