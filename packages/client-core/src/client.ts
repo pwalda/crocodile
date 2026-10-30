@@ -2412,6 +2412,7 @@ export class CrocodileClient extends Emitter<ClientEvents> {
         isAllowedPeer: (sid, p) => this.isAllowedPeer(sid, p),
         isMemberPeer: (sid, p) => this.isMemberPeer(sid, p),
         refreshPeer: (sid, p) => this.refreshPeer(sid, p),
+        hasDevice: (p) => this.hasDevice(p),
         relay: {
           allowed: () => this.state.settings.allowServerRelay,
           request: async (sid) =>
@@ -2814,6 +2815,12 @@ export class CrocodileClient extends Emitter<ClientEvents> {
     }
     if (scope.kind === 'dm') return scope.users.includes(userId);
     return isSpaceMember(this.records, scope.spaceId, userId);
+  }
+
+  hasDevice(peer: string): boolean {
+    const device = this.records.get(recordKey.device(peerIds.user(peer), peerIds.device(peer))) as
+      SignedRecord<'device'> | undefined;
+    return !!device && !device.body.revoked;
   }
 
   /**

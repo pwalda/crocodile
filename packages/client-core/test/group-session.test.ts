@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { createIdentity } from '@crocodile/crypto';
 import { GroupKeyring } from '../src/keyring';
-import type { RelayGrant, SessionState } from '@crocodile/protocol';
+import type { RelayGrant, SealedBox, SessionState } from '@crocodile/protocol';
 import { Emitter } from '../src/emitter';
 import {
   GroupSession,
@@ -14,16 +14,42 @@ import type { RelayLinkEvents } from '../src/relay-link';
 /** A connection that never gets anywhere: the session decides what happens to it. */
 class StuckTransport extends Emitter<RelayLinkEvents> implements RelayTransport {
   closed = false;
-  readonly isOpen = false;
+  readonly isOpen: boolean = false;
   async connect() {
     this.emit('progress', { step: 'offer' });
   }
   async handleSignal() {}
-  send() {
+  send(_msg?: unknown) {
     return false;
   }
   close() {
     this.closed = true;
+  }
+}
+
+/** A box that opens to its text for anyone: `epk` carries who sent it, `ct` what it holds. */
+const box = (from: string, to: string, text: string): SealedBox => ({
+  v: 3,
+  to,
+  pk: 0,
+  epk: from,
+  kem: '',
+  ct: text,
+  from: '',
+  fromDevice: 'aaaaaaaa',
+  sig: '',
+});
+
+/** A connection that is up: it keeps what the session sends over it. */
+class OpenTransport extends StuckTransport {
+  override readonly isOpen = true;
+  constructor(private readonly sent: string[]) {
+    super();
+  }
+  override send(msg: unknown) {
+    const m = msg as { d?: { k?: string; box?: SealedBox } };
+    if (m.d?.k === 'sealed') this.sent.push(JSON.parse(m.d.box!.ct).type);
+    return true;
   }
 }
 
@@ -53,6 +79,7 @@ function session(
     relay: { allowed: () => true, request: relayRequest },
     isMemberPeer: () => true,
     isAllowedPeer: () => true,
+    hasDevice: () => true,
     refreshPeer: async () => {},
     log: () => {},
   } as unknown as SessionContext;
@@ -274,6 +301,7 @@ describe('group session', () => {
         relay: { allowed: () => false, request: async () => grant(1000) },
         // Bob belongs but we have blocked him.
         isMemberPeer: () => true,
+        hasDevice: () => true,
         isAllowedPeer: (_: string, peer: string) => peer !== bob,
         refreshPeer: async () => {},
         log: () => {},
@@ -319,6 +347,7 @@ describe('group session', () => {
       iceServers: () => [],
       relay: { allowed: () => false, request: async () => grant(1000) },
       isMemberPeer: () => true,
+      hasDevice: () => true,
       isAllowedPeer: () => false,
       refreshPeer: async () => {},
       log: () => {},
@@ -335,6 +364,107 @@ describe('group session', () => {
     expect(s.status).toBe('reconnecting');
     // The server knows nothing of blocks, so it is not told.
     expect(requests).not.toContain('session.report');
+  });
+
+  it('asks for history again when a live message could not be opened by the key that came after it', async () => {
+    const self = 'aaaaaaaaaaaaaaaaaaaaaaaaaa.deviceaa';
+    const bob = 'bbbbbbbbbbbbbbbbbbbbbbbbbb.devicebb';
+    const host = 'cccccccccccccccccccccccccc.devicecc';
+    const sent: string[] = [];
+    let transport: OpenTransport | undefined;
+    const enc = new TextEncoder();
+    const ctx = {
+      identity: createIdentity(),
+      peer: self,
+      link: () => ({ request: async () => ({}) }),
+      platform: {},
+      iceServers: () => [],
+      relay: { allowed: () => false, request: async () => grant(1000) },
+      isMemberPeer: () => true,
+      isAllowedPeer: () => true,
+      hasDevice: () => true,
+      refreshPeer: async () => {},
+      historyChannels: () => ['ch'],
+      syncCursor: async () => 0,
+      outbox: { pending: () => [], acked: () => {} },
+      acceptMessage: async () => true,
+      admits: () => true,
+      seal: async (to: string, plaintext: Uint8Array) =>
+        box(self, to, new TextDecoder().decode(plaintext)),
+      open: (b: SealedBox) => ({ from: b.epk, plaintext: enc.encode(b.ct) }),
+      log: () => {},
+    } as unknown as SessionContext;
+    const s = new GroupSession('dm:a:b', ctx, () => (transport = new OpenTransport(sent)));
+    sessions.push(s);
+    s.applyState(state(host, 1));
+    await wait(20);
+    const peer = (id: string) => ({ id, muted: false, deafened: false });
+    transport!.emit('message', {
+      t: 'hello',
+      you: self,
+      host,
+      peers: [peer(host), peer(bob)],
+      slots: 0,
+    });
+    await wait(20);
+    const asked = () => sent.filter((t) => t === 'history_req').length;
+    expect(asked()).toBe(2);
+
+    // Bob sends before his key reaches us; the key then comes, a step further on.
+    const theirs = new GroupKeyring({ autoRatchet: false });
+    const env = theirs.encrypt(enc.encode(JSON.stringify({ type: 'typing', ch: 'ch' })));
+    transport!.emit('message', { t: 'msg', from: bob, direct: false, d: { k: 'group', ...env } });
+    await wait(10);
+    const key = {
+      type: 'sender_key',
+      sessionId: 'dm:a:b',
+      to: self,
+      at: Date.now(),
+      ...theirs.exportMine(),
+    };
+    transport!.emit('message', {
+      t: 'msg',
+      from: bob,
+      direct: true,
+      d: { k: 'sealed', box: box(bob, self, JSON.stringify(key)) },
+    });
+    await wait(50);
+    expect(asked()).toBeGreaterThan(2);
+  });
+
+  it('does not connect to a host that has no device record, and tells the server', async () => {
+    const host = 'cccccccccccccccccccccccccc.devicecc';
+    const transports: StuckTransport[] = [];
+    const requests: string[] = [];
+    const ctx = {
+      identity: createIdentity(),
+      peer: me,
+      link: () => ({
+        request: async (m: string) => {
+          requests.push(m);
+          return {};
+        },
+      }),
+      platform: {},
+      iceServers: () => [],
+      relay: { allowed: () => false, request: async () => grant(1000) },
+      isMemberPeer: () => true,
+      isAllowedPeer: () => true,
+      hasDevice: () => false,
+      refreshPeer: async () => {},
+      log: () => {},
+    } as unknown as SessionContext;
+    const s = new GroupSession('dm:a:b', ctx, () => {
+      const t = new StuckTransport();
+      transports.push(t);
+      return t;
+    });
+    sessions.push(s);
+    s.applyState(state(host, 1));
+    await wait(20);
+    expect(transports).toHaveLength(0);
+    expect(s.status).toBe('reconnecting');
+    expect(requests).toContain('session.report');
   });
 
   it('stops hearing a peer at once when their key is only in its grace period', () => {
