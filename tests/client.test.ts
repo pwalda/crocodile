@@ -1619,6 +1619,31 @@ describe('leaving', () => {
     spy.mockRestore();
   });
 
+  it('asks again for the members of a space it has just joined, when only itself came back', async () => {
+    const coord = await server();
+    const net = new FakeRelayNetwork();
+    const alice = await signUp(makeClient(net, coord), 'alice');
+    const bob = await signUp(makeClient(net, coord), 'bob');
+    const carol = await signUp(makeClient(net, coord), 'carol');
+    const spaceId = await alice.createSpace('Swamp');
+    const code = await alice.createInvite(spaceId);
+    await carol.joinWithInvite(code);
+    // The owners have not heard of bob's membership yet: for a moment the server finds that
+    // he may not read the list.
+    const conn = coord.presence.localOf(bob.userId)[0] as unknown as {
+      mayReadMembers(spaceId: string): Promise<boolean>;
+    };
+    const original = conn.mayReadMembers.bind(conn);
+    const until = Date.now() + 2500;
+    const spy = vi
+      .spyOn(conn, 'mayReadMembers')
+      .mockImplementation(async (id) => (Date.now() < until ? false : original(id)));
+    await bob.joinWithInvite(code);
+    expect(bob.state.spaces[spaceId]?.members ?? []).not.toContain(carol.userId);
+    await waitFor(() => bob.state.spaces[spaceId]?.members.includes(carol.userId), 8000, 'carol');
+    spy.mockRestore();
+  });
+
   it('a stopped link fails requests at once instead of waiting for a server', async () => {
     const link = new CoordinatorLink({
       identity: createIdentity(),

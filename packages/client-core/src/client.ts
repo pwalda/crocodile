@@ -427,6 +427,7 @@ const FRIEND_NOTE_SWEEP_MS = 10 * 60_000;
 /** A member list the server could not check is asked for again this many times, a little later each time. */
 const MEMBER_LIST_RETRIES = 3;
 const MEMBER_LIST_RETRY_MS = 2000;
+const MEMBER_LIST_ALONE_MS = 3500;
 /** A caller rings again every 2.5 s at most: this long without a ring, it has gone. */
 const RING_SILENCE_MS = 8000;
 /** Time for a hang-up to go out before the call's connection closes. */
@@ -1931,22 +1932,26 @@ export class CrocodileClient extends Emitter<ClientEvents> {
   /**
    * The members of a space. One the server cannot check just now does not hold up
    * the rest of coming up: it is tried again a few times, a little later each time.
+   * An answer with nobody but ourselves is asked for once more, after the server's own
+   * short memory of "not a member" has run out: the owners may not have heard of us yet.
    */
   private async loadMembers(link: CoordinatorLink, spaceId: string, attempt = 0) {
+    let retryIn = 0;
     try {
-      this.records.ingestAll(await fetchList(link, recordKey.memberPrefix(spaceId)));
+      const records = await fetchList(link, recordKey.memberPrefix(spaceId));
+      this.records.ingestAll(records);
+      const mine = recordKey.member(spaceId, this.userId);
+      if (attempt === 0 && records.every((r) => r.key === mine)) retryIn = MEMBER_LIST_ALONE_MS;
     } catch (err) {
       this.log('member list not loaded', { spaceId, err: String(err) });
-      if (attempt >= MEMBER_LIST_RETRIES) return;
-      const timer = setTimeout(
-        () => {
-          if (this.link === link && this.state.spaces[spaceId])
-            void this.loadMembers(link, spaceId, attempt + 1);
-        },
-        MEMBER_LIST_RETRY_MS * (attempt + 1),
-      );
-      timer.unref?.();
+      if (attempt < MEMBER_LIST_RETRIES) retryIn = MEMBER_LIST_RETRY_MS * (attempt + 1);
     }
+    if (!retryIn) return;
+    const timer = setTimeout(() => {
+      if (this.link === link && this.state.spaces[spaceId])
+        void this.loadMembers(link, spaceId, attempt + 1);
+    }, retryIn);
+    timer.unref?.();
   }
 
   private async afterSpaceJoined(spaceId: string) {
