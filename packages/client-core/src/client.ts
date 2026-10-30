@@ -199,6 +199,8 @@ export interface SpaceView {
   bans: string[];
   /** Members the owner lets change the space. */
   admins: string[];
+  /** Who may invite a named person: the owner and admins, or members too. */
+  invitePolicy: 'admins' | 'members';
 }
 
 /** A session as the UI sees it: user ids (devices collapsed). */
@@ -278,6 +280,10 @@ export interface InvitePreview {
   joined: boolean;
   /** Revoked or past its time: joining with it would fail. */
   expired: boolean;
+  /** Made for one person. */
+  private: boolean;
+  /** Made for somebody else: joining with it would fail. */
+  forOther: boolean;
 }
 
 /** One member device's network type, as the coordinator's election sees it. */
@@ -424,6 +430,8 @@ const MAIL_REQUEST_BYTES = 512 * 1024;
 const FRIEND_NOTE_RETRY_MS = 5000;
 /** And how often while connected, whoever it is owed to. */
 const FRIEND_NOTE_SWEEP_MS = 10 * 60_000;
+/** How long an invitation to a named person can be accepted. */
+const PRIVATE_INVITE_MS = 7 * 24 * 3600_000;
 /** A member list the server could not check is asked for again this many times, a little later each time. */
 const MEMBER_LIST_RETRIES = 3;
 const MEMBER_LIST_RETRY_MS = 2000;
@@ -1438,6 +1446,7 @@ export class CrocodileClient extends Emitter<ClientEvents> {
           members: [...members],
           bans: body.bans,
           admins: spaceAuthorityValid(id, body) ? body.admins : [],
+          invitePolicy: body.invitePolicy ?? 'admins',
         };
       }
       patch.spaces = spaces;
@@ -2073,6 +2082,7 @@ export class CrocodileClient extends Emitter<ClientEvents> {
         (r) =>
           r.author === me &&
           r.body.spaceId === spaceId &&
+          r.body.for === undefined &&
           !r.body.revoked &&
           (r.body.expiresAt === null || r.body.expiresAt > minExpiry),
       )
@@ -2080,10 +2090,11 @@ export class CrocodileClient extends Emitter<ClientEvents> {
     return reusable ? reusable.body.code : this.createInvite(spaceId);
   }
 
-  /** Creates an invite code others can use to join. */
+  /** Creates an invite code others can use to join, or one only `forUser` can. */
   async createInvite(
     spaceId: string,
     expiresInMs: number | null = 7 * 24 * 3600_000,
+    forUser?: string,
   ): Promise<string> {
     const code = randomId(5);
     await this.putRecord(
@@ -2091,9 +2102,58 @@ export class CrocodileClient extends Emitter<ClientEvents> {
         spaceId,
         code,
         expiresAt: expiresInMs === null ? null : Date.now() + expiresInMs,
+        ...(forUser ? { for: forUser } : {}),
       }),
     );
     return code;
+  }
+
+  /** Whether we may invite a named person to a space: its owner and admins, and members where it allows. */
+  canInviteTo(spaceId: string): boolean {
+    const space = this.records.get(recordKey.space(spaceId)) as SignedRecord<'space'> | undefined;
+    if (!space || space.body.deleted) return false;
+    return (
+      canManageSpace(space.body, this.userId) ||
+      (space.body.invitePolicy === 'members' && !!this.state.spaces[spaceId])
+    );
+  }
+
+  /**
+   * Invites one person to a space: an invitation only they can use, sent to
+   * them as a message. It reaches a stranger as a request they can ignore.
+   */
+  async inviteToSpace(spaceId: string, userId: string): Promise<void> {
+    if (userId === this.userId) throw new Error('You are already in this space.');
+    if (!this.canInviteTo(spaceId)) throw new Error("You can't invite people to this space.");
+    const code = await this.createInvite(spaceId, PRIVATE_INVITE_MS, userId);
+    try {
+      await this.sendMessage(await this.openDm(userId), `croc://join/${code}`);
+    } catch (err) {
+      // Not sent, so not waiting for anyone: do not leave it counting against the space.
+      await this.revokeInvite(code).catch(() => {});
+      throw err;
+    }
+  }
+
+  /** Withdraws an invite we made, or any in a space we manage. */
+  async revokeInvite(code: string) {
+    const key = recordKey.invite(code);
+    const r = this.records.get(key) as SignedRecord<'invite'> | undefined;
+    if (!r) throw new Error('unknown invite');
+    await this.putRecord(
+      signRecord(
+        this.identity!,
+        'invite',
+        key,
+        { ...r.body, revoked: true },
+        this.nextVersion(key),
+      ),
+    );
+  }
+
+  /** Who may invite a named person to a space: the owner and admins, or members too. */
+  setInvitePolicy(spaceId: string, invitePolicy: 'admins' | 'members') {
+    return this.updateSpace(spaceId, (b) => ({ ...b, invitePolicy }));
   }
 
   /**
@@ -2131,6 +2191,8 @@ export class CrocodileClient extends Emitter<ClientEvents> {
       ...(space.body.icon ? { icon: space.body.icon } : {}),
       joined: !!this.state.spaces[spaceId],
       expired,
+      private: invite.body.for !== undefined,
+      forOther: invite.body.for !== undefined && invite.body.for !== this.userId,
     };
   }
 
@@ -2140,6 +2202,8 @@ export class CrocodileClient extends Emitter<ClientEvents> {
     const res = await this.link!.request('records.get', { keys: [recordKey.invite(code)] });
     const invite = res.records[0] as SignedRecord<'invite'> | undefined;
     if (!invite) throw new Error('That invite does not exist (yet). Check the code and try again.');
+    if (invite.body.for !== undefined && invite.body.for !== this.userId)
+      throw new Error('That invitation is for somebody else.');
     const { spaceId } = invite.body;
     const space = await this.link!.request('records.get', { keys: [recordKey.space(spaceId)] });
     this.records.ingestAll([...space.records, invite]);

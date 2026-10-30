@@ -956,7 +956,7 @@ describe('space admins', () => {
     await waitFor(() => bob.state.spaces[spaceId]?.admins.length === 0, 8000, 'no longer admin');
     await expect(bob.addChannel(spaceId, 'again', 'text')).rejects.toThrow(/owner or an admin/);
     // His invite stopped working with his rights.
-    await expect(dave.joinWithInvite(bobsInvite)).rejects.toThrow(/no longer an admin/);
+    await expect(dave.joinWithInvite(bobsInvite)).rejects.toThrow(/may no longer invite/);
   });
 });
 
@@ -974,6 +974,8 @@ describe('invites in chat', () => {
       name: 'Pond',
       joined: false,
       expired: false,
+      private: false,
+      forOther: false,
     });
     // Only seen, not joined: the space stays out of Bob's list.
     expect(bob.state.spaces[spaceId]).toBeUndefined();
@@ -1642,6 +1644,66 @@ describe('leaving', () => {
     expect(bob.state.spaces[spaceId]?.members ?? []).not.toContain(carol.userId);
     await waitFor(() => bob.state.spaces[spaceId]?.members.includes(carol.userId), 8000, 'carol');
     spy.mockRestore();
+  });
+
+  describe('private invites', () => {
+    async function trio() {
+      const coord = await server();
+      const net = new FakeRelayNetwork();
+      const alice = await signUp(makeClient(net, coord), 'alice');
+      const bob = await signUp(makeClient(net, coord), 'bob');
+      const carol = await signUp(makeClient(net, coord), 'carol');
+      const spaceId = await alice.createSpace('Swamp');
+      const sentTo = (to: CrocodileClient) =>
+        (alice.state.messages[sessionIds.dm(alice.userId, to.userId)] ?? []).map((m) => m.body);
+      return { coord, alice, bob, carol, spaceId, sentTo };
+    }
+    const codeIn = (bodies: string[]) => /croc:\/\/join\/([a-z2-7]+)/.exec(bodies.join(' '))?.[1];
+
+    it('can be used by the person it names and nobody else', async () => {
+      const { alice, bob, carol, spaceId, sentTo } = await trio();
+      await alice.openChannel(await alice.openDm(bob.userId));
+      await alice.inviteToSpace(spaceId, bob.userId);
+      await waitFor(() => codeIn(sentTo(bob)), 5000, 'the invitation is sent');
+      const code = codeIn(sentTo(bob))!;
+      expect(code).toBeTruthy();
+      // They see what it is, and others see it is not theirs.
+      expect(await bob.previewInvite(code)).toMatchObject({ private: true, forOther: false });
+      expect(await carol.previewInvite(code)).toMatchObject({ private: true, forOther: true });
+      await expect(carol.joinWithInvite(code)).rejects.toThrow(/for somebody else/);
+      expect(carol.state.spaces[spaceId]).toBeUndefined();
+      await bob.joinWithInvite(code);
+      await waitFor(
+        () => alice.state.spaces[spaceId]?.members.includes(bob.userId),
+        5000,
+        'bob in',
+      );
+      // The link people share is never one of these.
+      expect(await alice.shareInvite(spaceId)).not.toBe(code);
+    });
+
+    it('is asked for by the owner and admins, and by members where the space says so', async () => {
+      const { alice, bob, carol, spaceId } = await trio();
+      const code = await alice.createInvite(spaceId);
+      await bob.joinWithInvite(code);
+      await waitFor(() => bob.state.spaces[spaceId], 5000, 'bob in');
+      expect(bob.canInviteTo(spaceId)).toBe(false);
+      await expect(bob.inviteToSpace(spaceId, carol.userId)).rejects.toThrow(/can't invite/);
+      await alice.setInvitePolicy(spaceId, 'members');
+      await waitFor(() => bob.state.spaces[spaceId]?.invitePolicy === 'members', 5000, 'policy');
+      expect(bob.canInviteTo(spaceId)).toBe(true);
+      await bob.openChannel(await bob.openDm(carol.userId));
+      await bob.inviteToSpace(spaceId, carol.userId);
+      const sent = () =>
+        (bob.state.messages[sessionIds.dm(bob.userId, carol.userId)] ?? []).map((m) => m.body);
+      await waitFor(() => codeIn(sent()), 5000, 'the invitation is sent');
+      await carol.joinWithInvite(codeIn(sent())!);
+      expect(carol.state.spaces[spaceId]).toBeDefined();
+      // The owner can take it back: what a member made then stops working.
+      await alice.setInvitePolicy(spaceId, 'admins');
+      await waitFor(() => bob.state.spaces[spaceId]?.invitePolicy === 'admins', 5000, 'policy');
+      expect(bob.canInviteTo(spaceId)).toBe(false);
+    });
   });
 
   it('a stopped link fails requests at once instead of waiting for a server', async () => {

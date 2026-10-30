@@ -31,6 +31,8 @@ export interface RecordQuotas {
   spacesPerUser: number;
   /** Invites per space (the app reuses a valid invite rather than making new ones). */
   invitesPerSpace: number;
+  /** Invitations to named people not yet accepted, withdrawn or out of time. */
+  privateInvitesPerSpace: number;
   /** Spaces a user is an active member of. */
   membershipsPerUser: number;
   /** Unread notes for one user. */
@@ -44,6 +46,7 @@ export const defaultRecordQuotas: RecordQuotas = {
   devicesPerUser: 100,
   spacesPerUser: 100,
   invitesPerSpace: 1000,
+  privateInvitesPerSpace: 100,
   membershipsPerUser: 500,
   notesPerUser: LIMITS.notesPerUser,
 };
@@ -116,9 +119,13 @@ export class RecordService {
           : undefined;
       }
       case 'invite': {
-        const { spaceId } = record.body as RecordBodies['invite'];
-        return this.store.countByTerm(`invite-space:${spaceId}`) >= q.invitesPerSpace
-          ? `at most ${q.invitesPerSpace} invites per space`
+        const body = record.body as RecordBodies['invite'];
+        const { spaceId } = body;
+        if (this.store.countByTerm(`invite-space:${spaceId}`) >= q.invitesPerSpace)
+          return `at most ${q.invitesPerSpace} invites per space`;
+        return this.outstanding(body) &&
+          this.outstandingInvites(spaceId, record.key) >= q.privateInvitesPerSpace
+          ? `at most ${q.privateInvitesPerSpace} invitations waiting per space`
           : undefined;
       }
       case 'member': {
@@ -137,6 +144,28 @@ export class RecordService {
       default:
         return undefined;
     }
+  }
+
+  /** An invitation to a named person that can still be accepted (or has yet to be seen to be). */
+  private outstanding(body: RecordBodies['invite'], now = Date.now()) {
+    return (
+      body.for !== undefined && !body.revoked && (body.expiresAt === null || body.expiresAt > now)
+    );
+  }
+
+  /** How many invitations to named people wait in a space, not counting the one under `except`. */
+  private outstandingInvites(spaceId: string, except: string) {
+    const now = Date.now();
+    let n = 0;
+    for (const r of this.store.findByTerm(`invite-space:${spaceId}`, this.quotas.invitesPerSpace)) {
+      const body = r.body as RecordBodies['invite'];
+      if (r.key === except || !this.outstanding(body, now)) continue;
+      // One who has joined no longer waits.
+      const joined = this.store.get(recordKey.member(spaceId, body.for!)) as
+        SignedRecord<'member'> | undefined;
+      if (!joined || joined.body.left) n++;
+    }
+    return n;
   }
 
   onAccepted(fn: RecordListener) {

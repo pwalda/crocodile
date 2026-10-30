@@ -301,6 +301,134 @@ describe('records', () => {
       });
     });
 
+    describe('private invites', () => {
+      const dave = createIdentity();
+      const eve = createIdentity();
+      const memberOf = (who: typeof bob, inviteCode?: string) =>
+        signRecord(who, 'member', recordKey.member(spaceId, who.userId), {
+          spaceId,
+          userId: who.userId,
+          ...(inviteCode ? { inviteCode } : {}),
+        });
+      const privateInvite = (who: typeof bob, to: string, extra = {}) => {
+        const code = randomId(5);
+        return signRecord(who, 'invite', recordKey.invite(code), {
+          spaceId,
+          code,
+          expiresAt: null,
+          for: to,
+          ...extra,
+        });
+      };
+      const members = signRecord(
+        alice,
+        'space',
+        key,
+        { ...base, admins: [], invitePolicy: 'members' as const },
+        now - 1500,
+      );
+      const admins = signRecord(
+        alice,
+        'space',
+        key,
+        { ...base, admins: [], invitePolicy: 'admins' as const },
+        now - 1500,
+      );
+      const bobIsIn = memberOf(bob, 'x'.repeat(8));
+      const fresh = (records: SignedRecord[]) => ({ ...ctx(records), fresh: true });
+
+      it('can be joined with by the named person alone', () => {
+        const invite = privateInvite(alice, dave.userId);
+        const code = invite.body.code;
+        expect(validateRecord(invite, ctx([admins])).ok).toBe(true);
+        expect(validateRecord(memberOf(dave, code), fresh([admins, invite])).ok).toBe(true);
+        // Anyone else, even holding the code, is refused, and no matter who checks.
+        expect(validateRecord(memberOf(eve, code), fresh([admins, invite]))).toMatchObject({
+          ok: false,
+          reason: 'invite is for somebody else',
+        });
+        expect(validateRecord(memberOf(eve, code), ctx([admins, invite]))).toMatchObject({
+          ok: false,
+          reason: 'invite is for somebody else',
+        });
+      });
+
+      it('names somebody else, and a person never changes', () => {
+        expect(validateRecord(privateInvite(alice, alice.userId), ctx([admins]))).toMatchObject({
+          ok: false,
+          reason: 'an invite is for somebody else',
+        });
+        expect(validateRecord(privateInvite(alice, 'abcdefgh'), ctx([admins]))).toMatchObject({
+          ok: false,
+          reason: 'bad invite recipient',
+        });
+        const invite = privateInvite(alice, dave.userId);
+        const redirected = signRecord(alice, 'invite', invite.key, {
+          ...invite.body,
+          for: eve.userId,
+        });
+        expect(validateRecord(redirected, ctx([admins, invite]))).toMatchObject({
+          ok: false,
+          reason: 'an invite cannot change who it is for',
+        });
+        const opened = signRecord(alice, 'invite', invite.key, { ...invite.body, for: undefined });
+        expect(validateRecord(opened, ctx([admins, invite]))).toMatchObject({ ok: false });
+      });
+
+      it('are made by members only where the space allows it', () => {
+        const byBob = privateInvite(bob, dave.userId);
+        // Where only the owner and admins invite, a member may not, and may not name a person either.
+        expect(validateRecord(byBob, fresh([admins, bobIsIn]))).toMatchObject({
+          ok: false,
+          reason: 'only the space owner or an admin may create invites',
+        });
+        expect(validateRecord(byBob, fresh([members, bobIsIn])).ok).toBe(true);
+        // Not a member: refused by the server that takes it, whatever the policy.
+        expect(validateRecord(byBob, fresh([members]))).toMatchObject({
+          ok: false,
+          reason: 'only a member of the space may invite',
+        });
+        // The open invite stays with the owner and admins.
+        const code = randomId(5);
+        const open = signRecord(bob, 'invite', recordKey.invite(code), {
+          spaceId,
+          code,
+          expiresAt: null,
+        });
+        expect(validateRecord(open, fresh([members, bobIsIn]))).toMatchObject({ ok: false });
+        // Only its maker, the owner or an admin changes a member's invite.
+        const revokeBy = (who: typeof bob) =>
+          signRecord(who, 'invite', byBob.key, { ...byBob.body, revoked: true });
+        const carolIn = memberOf(carol, 'x'.repeat(8));
+        expect(
+          validateRecord(revokeBy(carol), fresh([members, bobIsIn, carolIn, byBob])),
+        ).toMatchObject({
+          ok: false,
+        });
+        expect(validateRecord(revokeBy(bob), fresh([members, bobIsIn, byBob])).ok).toBe(true);
+        expect(validateRecord(revokeBy(alice), fresh([members, bobIsIn, byBob])).ok).toBe(true);
+      });
+
+      it('stop working when the space no longer lets the maker invite, or the maker leaves', () => {
+        const byBob = privateInvite(bob, dave.userId);
+        const join = memberOf(dave, byBob.body.code);
+        expect(validateRecord(join, fresh([members, bobIsIn, byBob])).ok).toBe(true);
+        expect(validateRecord(join, fresh([admins, bobIsIn, byBob]))).toMatchObject({
+          ok: false,
+          reason: 'invite was made by someone who may no longer invite',
+        });
+        const bobLeft = signRecord(bob, 'member', recordKey.member(spaceId, bob.userId), {
+          spaceId,
+          userId: bob.userId,
+          left: true,
+        });
+        expect(validateRecord(join, fresh([members, bobLeft, byBob]))).toMatchObject({
+          ok: false,
+          reason: 'invite was made by someone who may no longer invite',
+        });
+      });
+    });
+
     it("lets admins make invites, which stop working when they're no longer admins", () => {
       const code = randomId(5);
       const invite = signRecord(bob, 'invite', recordKey.invite(code), {
@@ -324,7 +452,7 @@ describe('records', () => {
       );
       expect(validateRecord(join, { ...ctx([without, invite]), fresh: true })).toMatchObject({
         ok: false,
-        reason: 'invite was made by someone who is no longer an admin',
+        reason: 'invite was made by someone who may no longer invite',
       });
       // Revoking it is the owner's (or a current admin's) to do, checked
       // with nothing but the space: no earlier invite needed.

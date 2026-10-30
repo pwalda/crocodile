@@ -163,13 +163,28 @@ export function validateRecord(input: unknown, ctx: ValidationContext): Validati
       if (parts.length !== 2 || body.code !== parts[1]) return reject('invite key mismatch');
       const space = ctx.get(`space:${body.spaceId}`) as SignedRecord<'space'> | undefined;
       if (!space) return reject('unknown space', true);
+      const before = existing?.body as RecordBodies['invite'] | undefined;
+      if (before && before.spaceId !== body.spaceId) return reject('invite code already used');
+      if (body.for !== undefined) {
+        if (!USER_ID.test(body.for)) return reject('bad invite recipient');
+        if (body.for === authorId) return reject('an invite is for somebody else');
+      }
       // The owner and current admins make and revoke invites. (A removed
       // admin's invites stop working anyway; see 'member' below.)
-      if (!canManageSpace(space.body, authorId))
-        return reject('only the space owner or an admin may create invites');
-      if (existing && (existing.body as RecordBodies['invite']).spaceId !== body.spaceId) {
-        return reject('invite code already used');
+      if (!canManageSpace(space.body, authorId)) {
+        // A named person may also be invited by a member, where the space allows it. Whether the
+        // author is one can be told only by those who hold the space's member list; the others
+        // take the word of the server that took the invite, as for an invite's expiry.
+        if (body.for === undefined || space.body.invitePolicy !== 'members')
+          return reject('only the space owner or an admin may create invites');
+        if (ctx.fresh && !isSpaceMember(ctx, body.spaceId, authorId))
+          return reject('only a member of the space may invite');
+        // An invite is changed by its maker or by the owner and admins.
+        if (existing && existing.author !== record.author)
+          return reject('only its maker, the owner or an admin may change an invite');
       }
+      // Who an invite is for does not change: a new invite is a new code.
+      if (before && before.for !== body.for) return reject('an invite cannot change who it is for');
       return { ok: true, authorId };
     }
     case 'member': {
@@ -190,11 +205,22 @@ export function validateRecord(input: unknown, ctx: ValidationContext): Validati
       const invite = ctx.get(`invite:${body.inviteCode}`) as SignedRecord<'invite'> | undefined;
       if (!invite) return reject('unknown invite', true);
       if (invite.body.spaceId !== body.spaceId) return reject('invite is for another space');
+      if (invite.body.for !== undefined && invite.body.for !== authorId)
+        return reject('invite is for somebody else');
       if (ctx.fresh) {
         if (invite.body.revoked) return reject('invite was revoked');
-        // An invite from someone no longer an admin stops working.
-        if (!canManageSpace(space.body, userIdFromKey(invite.author)))
-          return reject('invite was made by someone who is no longer an admin');
+        // An invite from someone who may no longer make it stops working: an admin who was
+        // removed, or, for a named person, a member where the space no longer allows that.
+        const maker = userIdFromKey(invite.author);
+        if (
+          !canManageSpace(space.body, maker) &&
+          !(
+            invite.body.for !== undefined &&
+            space.body.invitePolicy === 'members' &&
+            isSpaceMember(ctx, body.spaceId, maker)
+          )
+        )
+          return reject('invite was made by someone who may no longer invite');
         if (invite.body.expiresAt !== null && invite.body.expiresAt < ctx.now)
           return reject('invite expired');
       }
