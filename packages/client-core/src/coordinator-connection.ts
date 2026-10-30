@@ -78,10 +78,11 @@ export class CoordinatorConnection extends Emitter<ConnectionEvents> {
   >();
   private closed = false;
   /**
-   * What we have signed in each room on this connection: the time of the join (what later
-   * operations name) and how many updates followed, and the join, while it is on its way.
+   * What the server has taken from us in each room on this connection: the time of the join
+   * (what later operations name) and how many updates followed, and the latest join, while it is
+   * on its way. A join counts only once it is taken.
    */
-  private signing = new Map<string, { since: number; n: number; joining?: Promise<unknown> }>();
+  private signing = new Map<string, { since?: number; n: number; joining?: Promise<unknown> }>();
   /** The time of the last join signed for each room, across connections: it only goes up. */
   private static joinedAt = new Map<string, number>();
 
@@ -280,8 +281,11 @@ export class CoordinatorConnection extends Emitter<ConnectionEvents> {
       const p = params as RpcParamsOf<'session.join'>;
       const key = `${this.peer}|${sessionId}`;
       // Each join is later than the last, whatever the clock does: it is what the others name.
-      const at = Math.max(Date.now(), (CoordinatorConnection.joinedAt.get(key) ?? 0) + 1);
-      CoordinatorConnection.joinedAt.set(key, at);
+      const joined = CoordinatorConnection.joinedAt;
+      const at = Math.max(Date.now(), (joined.get(key) ?? 0) + 1);
+      joined.set(key, at);
+      // Of no use once it is too old for a join to be taken after it anyway.
+      for (const [k, v] of joined) if (v < Date.now() - 15 * 60_000) joined.delete(k);
       proof = signSessionOp(
         this.signer,
         sessionId,
@@ -290,11 +294,27 @@ export class CoordinatorConnection extends Emitter<ConnectionEvents> {
         { server: this.server.id, at },
       );
       const joining: Promise<unknown> = this.send(method, { ...p, proof }, timeoutMs);
-      this.signing.set(sessionId, { since: at, n: 0, joining });
+      const entry = {
+        ...this.signing.get(sessionId),
+        n: this.signing.get(sessionId)?.n ?? 0,
+        joining,
+      };
+      this.signing.set(sessionId, entry);
+      // Taken: later operations name this join (the latest of those taken, if they come back out of turn).
+      void joining.then(
+        () => {
+          const now = this.signing.get(sessionId);
+          if (now && (now.since === undefined || at > now.since)) {
+            now.since = at;
+            now.n = 0;
+          }
+        },
+        () => {},
+      );
       return joining;
     }
     // Not in the room as far as we know: the server says so.
-    if (!room) return this.send(method, params, timeoutMs);
+    if (!room || room.since === undefined) return this.send(method, params, timeoutMs);
     if (method === 'session.update') {
       const p = params as RpcParamsOf<'session.update'>;
       proof = signSessionOp(

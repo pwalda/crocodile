@@ -439,7 +439,7 @@ export class SessionService {
       await this.checkAccess(client.userId, sessionId);
       ({ caps: vouched, device } = await this.vouchOrDrop(client.peer, sessionId, caps, true));
     } catch (err) {
-      this.askAgain(renewal, sessionId, client.peer, err);
+      this.askAgain(renewal, sessionId, client, err);
       throw err;
     } finally {
       if (--wait.pending === 0 && this.joining.get(joinKey) === wait) this.joining.delete(joinKey);
@@ -482,7 +482,7 @@ export class SessionService {
         if (before && (!forbidden || keep)) current.set(client.peer, before);
         else void this.leave(client.peer, sessionId);
       }
-      if (!final) this.askAgain(renewal, sessionId, client.peer, err);
+      if (!final) this.askAgain(renewal, sessionId, client, err);
       throw err;
     }
   }
@@ -747,7 +747,10 @@ export class SessionService {
           s.state.members.some((m) => m.peer === peer)
         )
           return s.state;
-        throw new RpcFailure('forbidden', 'that join was already used');
+        throw new RpcFailure(
+          'forbidden',
+          'that join was already used (or the clock of this device went back)',
+        );
       }
       op = { ...op, caps: { ...op.caps, platform: admitted.device.body.platform } };
       if (op.hint) {
@@ -1143,9 +1146,15 @@ export class SessionService {
     }
   }
 
-  private askToRenew(sessionId: string, peer: string, deadline = Date.now() + this.renewTimeoutMs) {
+  private askToRenew(sessionId: string, peer: string, deadline?: number) {
     const key = `${sessionId}|${peer}`;
-    clearTimeout(this.renewing.get(key)?.timer);
+    const running = this.renewing.get(key);
+    clearTimeout(running?.timer);
+    // Asked again (the owner changed again): the time it has is not made longer by that.
+    deadline ??=
+      running && running.deadline > Date.now()
+        ? running.deadline
+        : Date.now() + this.renewTimeoutMs;
     const client = this.hub.presence.localOf(peerIds.user(peer)).find((c) => c.peer === peer);
     if (!client) {
       this.renewing.delete(key);
@@ -1155,15 +1164,22 @@ export class SessionService {
     const timer = setTimeout(
       () => {
         this.renewing.delete(key);
-        this.hub.log.warn('device did not sign a new join; taking it out', { sessionId, peer });
-        void this.leave(peer, sessionId);
-        client.send('session_closed', { sessionId, reason: 'did not sign a new join' });
+        this.dropUnrenewed(sessionId, peer, client);
       },
       Math.max(0, deadline - Date.now()),
     );
     timer.unref?.();
     this.renewing.set(key, { timer, deadline });
     client.send('session_renew', { sessionId });
+  }
+
+  private dropUnrenewed(sessionId: string, peer: string, client: Pick<ClientHandle, 'send'>) {
+    this.hub.log.warn('device did not give a new join that was taken; taking it out', {
+      sessionId,
+      peer,
+    });
+    void this.leave(peer, sessionId);
+    client.send('session_closed', { sessionId, reason: 'did not sign a new join' });
   }
 
   /**
@@ -1173,11 +1189,17 @@ export class SessionService {
   private askAgain(
     renewal: { deadline: number } | undefined,
     sessionId: string,
-    peer: string,
+    client: Pick<ClientHandle, 'peer' | 'send'>,
     err: unknown,
   ) {
-    if (!renewal || Date.now() >= renewal.deadline) return;
+    const peer = client.peer;
+    if (!renewal) return;
     if (err instanceof RpcFailure && err.message === DEVICE_REMOVED) return;
+    // The time it had has gone: whatever the new owner said, it is not in the room there.
+    if (Date.now() >= renewal.deadline) {
+      this.dropUnrenewed(sessionId, peer, client);
+      return;
+    }
     const key = `${sessionId}|${peer}`;
     if (this.renewing.has(key)) return;
     const timer = setTimeout(() => {

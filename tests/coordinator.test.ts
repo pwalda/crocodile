@@ -1053,6 +1053,22 @@ describe('sessions and host election', () => {
         expect(c.sessions.ownedState(sessionId)!.epoch).toBeGreaterThan(state.epoch);
       });
 
+      it('keeps naming the join the owner has when a later one of the device was not taken', async () => {
+        const { c, alice, sessionId } = await setup();
+        await alice.conn.request('session.join', { sessionId, caps: caps({ nat: 'cone' }) });
+        const check = vi
+          .spyOn(c.sessions as unknown as { checkAccess(): Promise<void> }, 'checkAccess')
+          .mockRejectedValueOnce(new RpcFailure('unavailable', 'could not look that up'));
+        await expect(
+          alice.conn.request('session.join', { sessionId, caps: caps({ nat: 'cone' }) }),
+        ).rejects.toThrow();
+        check.mockRestore();
+        // The owner still has the first join, and an update names it.
+        await alice.conn.request('session.update', { sessionId, caps: caps({ nat: 'open' }) });
+        const member = c.sessions.ownedState(sessionId)!.members[0]!;
+        expect(member.caps.nat).toBe('open');
+      });
+
       it('lets a device that left join again', async () => {
         const { c, alice, sessionId } = await setup();
         await alice.conn.request('session.join', { sessionId, caps: caps() });
@@ -1173,6 +1189,31 @@ describe('sessions and host election', () => {
       await waitFor(() => alice.events.some((e) => e.ev === 'session_renew'), 3000, 'to be asked');
       await waitFor(() => !c.sessions.inSession(alice.conn.peer, sessionId), 3000, 'to be let go');
       await waitFor(() => alice.events.some((e) => e.ev === 'session_closed'), 3000, 'to be told');
+      expect(internals.renewing.size).toBe(0);
+    });
+
+    it('takes a device out of the room when its new join is not taken until after the time it had', async () => {
+      const { c, alice, sessionId } = await setup();
+      await alice.conn.request('session.join', { sessionId, caps: caps() });
+      answerRenewals(alice, caps());
+      const internals = c.sessions as unknown as {
+        lastOwner: Map<string, string>;
+        submit(): unknown;
+        rebalance(): void;
+        renewing: Map<string, unknown>;
+        renewTimeoutMs: number;
+      };
+      internals.renewTimeoutMs = 300;
+      internals.lastOwner.set(sessionId, 'someone-else');
+      // The new owner answers, but late.
+      const submit = vi.spyOn(internals, 'submit').mockImplementationOnce(async () => {
+        await new Promise((r) => setTimeout(r, 600));
+        throw new OwnerSilent();
+      });
+      internals.rebalance();
+      await waitFor(() => !c.sessions.inSession(alice.conn.peer, sessionId), 4000, 'to be let go');
+      await waitFor(() => alice.events.some((e) => e.ev === 'session_closed'), 3000, 'to be told');
+      submit.mockRestore();
       expect(internals.renewing.size).toBe(0);
     });
 
