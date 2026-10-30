@@ -156,6 +156,17 @@ picture size.
   kept in the OS keychain (Electron `safeStorage`). The desktop window is
   confined to the app's own pages, so a file dropped or opened into it cannot
   navigate the window elsewhere and read the identity seed over the IPC bridge.
+  A drop anywhere but the chat does nothing, and the main process serves a
+  request from the UI only if it comes from the top frame of the app's own
+  page in the app's window (checked for every request), and grants the
+  microphone, camera and screen (the screen choice too) only to that page. A release build has
+  Electron's `RunAsNode` and `NODE_OPTIONS` switches off, refuses to start with a debugging port, pipe or inspector, starts its update script with a fixed environment, loads
+  only from its archive (whose hash is checked at start on macOS and Windows; on Linux anyone who can write to the install can change it anyway),
+  and ignores the `CROC_*` test and development settings (another profile,
+  directory list, renderer URL or pretend update), so other software on the
+  computer cannot start it as a different program or on a profile of its own.
+  Software running as the same user can still read the user's files and the
+  keychain entry the app uses; none of this changes that.
 
 ## Known gaps
 

@@ -12,7 +12,9 @@ import {
   shell,
   Tray,
   utilityProcess,
+  webContents,
   type UtilityProcess,
+  type WebContents,
 } from 'electron';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { basename, extname, join } from 'node:path';
@@ -23,6 +25,10 @@ import { configureGlobalPtt, stopGlobalPtt } from './global-ptt';
 import { FileExports, FileStore, RISKY_EXTENSIONS, safeFileName } from './file-store';
 import { SecureStore } from './secure-store';
 import { isAllowedNavigation } from './navigation';
+import { allowAsking, handle, useIpc } from './ipc-guard';
+import { grantToApp } from './permissions';
+import { testSetting, testSettingsOn } from './test-settings';
+import { mayAsk, openingSwitch, type Pages } from './trust';
 import { createUpdateEngine } from './update-engines';
 import { UpdateController } from './updates';
 import type {
@@ -38,9 +44,21 @@ import { setupScreenShare } from './screen-share';
 // A packaged app never loads a renderer from elsewhere, whatever the environment says.
 const isDev = !app.isPackaged && !!process.env.CROC_RENDERER_URL;
 const APP_PROTOCOL = 'croc';
+// A release does not start with a debugging port or inspector open to other programs.
+if (!testSettingsOn && openingSwitch(process.argv, process.platform)) {
+  app.exit(1);
+  process.exit(1);
+}
+useIpc(ipcMain);
+/** The one page that may ask the main process for anything. */
+const pages: Pages = {
+  appUrl: pathToFileURL(join(__dirname, '../renderer/index.html')).toString(),
+  devUrl: isDev ? process.env.CROC_RENDERER_URL : undefined,
+};
 
 // Separate profiles (e.g. two instances on one machine for testing).
-if (process.env.CROC_USER_DATA) app.setPath('userData', process.env.CROC_USER_DATA);
+const profile = testSetting('CROC_USER_DATA');
+if (profile) app.setPath('userData', profile);
 
 // WebRTC: expose real host candidates so peers on the same LAN (and this
 // machine's own relay) connect directly instead of through NAT hairpinning.
@@ -67,9 +85,9 @@ const resource = (...p: string[]) =>
 
 const secure = new SecureStore(join(userData(), 'secure.json'), safeStorage);
 
-ipcMain.handle('secure:get', (_e, key: string) => secure.get(key));
-ipcMain.handle('secure:set', (_e, key: string, value: string) => secure.set(key, value));
-ipcMain.handle('secure:delete', (_e, key: string) => secure.delete(key));
+handle('secure:get', (_e, key: string) => secure.get(key));
+handle('secure:set', (_e, key: string, value: string) => secure.set(key, value));
+handle('secure:delete', (_e, key: string) => secure.delete(key));
 
 // ---------------------------------------------------------------------------
 // Host relay utility process
@@ -98,7 +116,7 @@ function relayProcess(): UtilityProcess {
   return proc;
 }
 
-ipcMain.handle('relay:send', (_e, msg: RelayProcessIn) => {
+handle('relay:send', (_e, msg: RelayProcessIn) => {
   relayProcess().postMessage(msg);
 });
 
@@ -128,7 +146,7 @@ function coordSettings(): CoordinatorSettings {
 }
 
 function directories(): string[] {
-  const raw = process.env.CROC_DIRECTORIES_OVERRIDE ?? process.env.CROC_DIRECTORIES ?? '';
+  const raw = testSetting('CROC_DIRECTORIES_OVERRIDE') ?? process.env.CROC_DIRECTORIES ?? '';
   return raw
     .split(',')
     .map((s) => s.trim())
@@ -164,8 +182,8 @@ function applyCoordinator() {
   });
 }
 
-ipcMain.handle('coordinator:get', () => ({ settings: coordSettings(), status: coordStatus }));
-ipcMain.handle('coordinator:set', (_e, patch: Partial<CoordinatorSettings>) => {
+handle('coordinator:get', () => ({ settings: coordSettings(), status: coordStatus }));
+handle('coordinator:set', (_e, patch: Partial<CoordinatorSettings>) => {
   const next = { ...coordSettings(), ...patch };
   mkdirSync(userData(), { recursive: true });
   writeFileSync(coordSettingsPath(), JSON.stringify(next, null, 2));
@@ -180,16 +198,16 @@ ipcMain.handle('coordinator:set', (_e, patch: Partial<CoordinatorSettings>) => {
 const fileStore = new FileStore(join(userData(), 'files'));
 const exportsInProgress = new FileExports();
 
-ipcMain.handle('files:write', (_e, id: string, index: number, block: Uint8Array) =>
+handle('files:write', (_e, id: string, index: number, block: Uint8Array) =>
   fileStore.write(id, index, block),
 );
-ipcMain.handle('files:read', (_e, id: string, index: number, length: number) =>
+handle('files:read', (_e, id: string, index: number, length: number) =>
   fileStore.read(id, index, length),
 );
-ipcMain.handle('files:delete', (_e, id: string) => fileStore.delete(id));
-ipcMain.handle('files:usage', () => fileStore.usage());
+handle('files:delete', (_e, id: string) => fileStore.delete(id));
+handle('files:usage', () => fileStore.usage());
 
-ipcMain.handle('files:save-begin', async (_e, name: unknown) => {
+handle('files:save-begin', async (_e, name: unknown) => {
   const options = {
     defaultPath: join(app.getPath('downloads'), safeFileName(name)),
   };
@@ -199,15 +217,15 @@ ipcMain.handle('files:save-begin', async (_e, name: unknown) => {
   if (res.canceled || !res.filePath) return null;
   return exportsInProgress.begin(res.filePath, false);
 });
-ipcMain.handle('files:open-begin', async (_e, name: unknown) =>
+handle('files:open-begin', async (_e, name: unknown) =>
   exportsInProgress.begin(await exportsInProgress.tempPath(safeFileName(name)), true),
 );
-ipcMain.handle('files:chunk', (_e, token: string, data: Uint8Array) =>
+handle('files:chunk', (_e, token: string, data: Uint8Array) =>
   exportsInProgress.chunk(token, data),
 );
-ipcMain.handle('files:abort', (_e, token: string) => exportsInProgress.abort(token));
+handle('files:abort', (_e, token: string) => exportsInProgress.abort(token));
 /** Finish a save or open: `open` opens it, `reveal` shows it in its folder. */
-ipcMain.handle('files:end', async (_e, token: string, then: 'open' | 'reveal' | 'none') => {
+handle('files:end', async (_e, token: string, then: 'open' | 'reveal' | 'none') => {
   const path = await exportsInProgress.end(token);
   if (then === 'reveal') shell.showItemInFolder(path);
   if (then === 'open') {
@@ -237,29 +255,29 @@ ipcMain.handle('files:end', async (_e, token: string, then: 'open' | 'reveal' | 
 // Misc app services
 // ---------------------------------------------------------------------------
 
-ipcMain.handle('app:info', () => ({
+handle('app:info', () => ({
   version: app.getVersion(),
   platform: process.platform,
   directories: directories(),
   cpuCores: cpus().length,
 }));
 
-ipcMain.handle('app:open-external', (_e, url: string) => {
+handle('app:open-external', (_e, url: string) => {
   if (/^https?:\/\//i.test(url)) void shell.openExternal(url);
 });
 
-ipcMain.handle('app:copy-text', (_e, text: unknown) => {
+handle('app:copy-text', (_e, text: unknown) => {
   if (typeof text === 'string' && text.length <= 100_000) clipboard.writeText(text);
 });
 
-ipcMain.handle('app:badge', (_e, count: number) => {
+handle('app:badge', (_e, count: number) => {
   if (process.platform === 'darwin') app.dock?.setBadge(count > 0 ? String(count) : '');
   else app.setBadgeCount(count);
 });
 
-ipcMain.handle('ptt:configure', (e, code: string | null) => configureGlobalPtt(e.sender, code));
+handle('ptt:configure', (e, code: string | null) => configureGlobalPtt(e.sender, code));
 
-ipcMain.handle('app:take-deeplink', () => {
+handle('app:take-deeplink', () => {
   const link = pendingDeepLink;
   pendingDeepLink = null;
   return link;
@@ -333,10 +351,8 @@ function createWindow() {
     });
     if (template.length) Menu.buildFromTemplate(template).popup({ window: win! });
   });
-  const appUrl = pathToFileURL(join(__dirname, '../renderer/index.html')).toString();
   const guardNavigation = (e: { preventDefault(): void }, url: string) => {
-    if (!isAllowedNavigation(url, appUrl, isDev ? process.env.CROC_RENDERER_URL : undefined))
-      e.preventDefault();
+    if (!isAllowedNavigation(url, pages.appUrl, pages.devUrl)) e.preventDefault();
   };
   win.webContents.on('will-navigate', guardNavigation);
   win.webContents.on('will-frame-navigate', (e) => guardNavigation(e, e.url));
@@ -376,7 +392,18 @@ app.on('open-url', (e, url) => {
   handleDeepLink(url);
 });
 
+// Nothing in the window embeds another page.
+app.on('web-contents-created', (_e, contents) => {
+  contents.on('will-attach-webview', (e) => e.preventDefault());
+});
+
 app.whenReady().then(() => {
+  // One question for every way in: is it the app's own page, in the app's window?
+  const fromApp = (wc: WebContents | null | undefined, url: string | undefined, top: boolean) =>
+    mayAsk({ fromWindow: !!wc && wc === win?.webContents, url, topFrame: top }, pages);
+  allowAsking((e) =>
+    fromApp(e.sender, e.senderFrame?.url, !!e.senderFrame && e.senderFrame === e.sender.mainFrame),
+  );
   if (process.defaultApp && process.argv.length >= 2) {
     app.setAsDefaultProtocolClient(APP_PROTOCOL, process.execPath, [process.argv[1]!]);
   } else {
@@ -394,13 +421,14 @@ app.whenReady().then(() => {
     'clipboard-sanitized-write',
     'speaker-selection',
   ];
-  session.defaultSession.setPermissionRequestHandler((_wc, permission, callback) => {
-    callback(allowed.includes(permission));
-  });
-  session.defaultSession.setPermissionCheckHandler((_wc, permission) =>
-    allowed.includes(permission),
+  grantToApp(session.defaultSession, allowed, fromApp);
+  setupScreenShare((frame) =>
+    fromApp(
+      frame ? webContents.fromFrame(frame) : null,
+      frame?.url,
+      !!frame && frame === frame.top,
+    ),
   );
-  setupScreenShare();
 
   createWindow();
   createTray();
@@ -444,13 +472,13 @@ async function startUpdates() {
   }
 }
 
-const UPDATE_FIRST_CHECK_MS = Number(process.env.CROC_UPDATE_FIRST_CHECK_MS ?? 15_000);
+const UPDATE_FIRST_CHECK_MS = Number(testSetting('CROC_UPDATE_FIRST_CHECK_MS') ?? 15_000);
 const UPDATE_CHECK_EVERY_MS = 6 * 60 * 60_000;
 
-ipcMain.handle('updates:status', () => updates.status);
-ipcMain.handle('updates:check', () => updates.check());
-ipcMain.handle('updates:download', () => updates.download());
-ipcMain.handle('updates:install', () => updates.install());
+handle('updates:status', () => updates.status);
+handle('updates:check', () => updates.check());
+handle('updates:download', () => updates.download());
+handle('updates:install', () => updates.install());
 
 app.on('activate', showWindow);
 app.on('before-quit', () => {

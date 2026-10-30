@@ -75,6 +75,8 @@ jobs:
         working-directory: apps/desktop
         env:
           CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+          # The test driver needs the debugging port and the CROC_* settings, which a release has off.
+          CROC_TEST_BUILD: '1'
         run: pnpm exec electron-builder --config electron-builder.config.cjs --dir --publish never
       - name: Smoke test
         env:

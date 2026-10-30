@@ -4,6 +4,10 @@
 // (AZURE_SIGN_*). Otherwise macOS builds are ad-hoc signed so they run on
 // Apple Silicon, and Windows builds are unsigned (see docs/DISTRIBUTION.md).
 const signed = !!process.env.CSC_LINK;
+// Only the end-to-end test sets this: the build then answers to the test
+// driver (debugging port) and honours the CROC_* test settings. A release
+// never does, so neither works against it.
+const testBuild = process.env.CROC_TEST_BUILD === '1';
 
 /** Azure Artifact Signing for Windows; the login comes from AZURE_TENANT_ID etc. */
 function azureSigning() {
@@ -56,7 +60,19 @@ module.exports = {
   // Predictable names for scripts/install.sh and install.ps1.
   artifactName: 'Crocodile-${version}-${os}-${arch}.${ext}',
   // Lets the app know whether macOS auto-update can work (needs Developer ID).
-  extraMetadata: { crocSigned: signed },
+  extraMetadata: { crocSigned: signed, ...(testBuild ? { crocTestBuild: true } : {}) },
+  // Switches in the Electron binary itself. The ones turned off are how other
+  // software on the computer would run code as this app (and with its
+  // permissions and keychain entry): as a plain Node.js, through NODE_OPTIONS
+  // or through a debugging port. The app loads only from its signed archive,
+  // which is checked at start where the system supports it (macOS, Windows).
+  electronFuses: {
+    runAsNode: false,
+    enableNodeOptionsEnvironmentVariable: false,
+    enableNodeCliInspectArguments: testBuild,
+    enableEmbeddedAsarIntegrityValidation: true,
+    onlyLoadAppFromAsar: true,
+  },
 
   mac: {
     category: 'public.app-category.social-networking',

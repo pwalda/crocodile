@@ -2,6 +2,9 @@ import { createRoot } from 'react-dom/client';
 import './styles.css';
 import { App } from './App';
 import { bootClient } from './croc';
+import { refuseStrayDrops } from './lib/drops';
+
+refuseStrayDrops(document);
 
 const root = createRoot(document.getElementById('root')!);
 bootClient()
