@@ -1445,5 +1445,9 @@ describe('session operations', () => {
   it('says no, and does not throw, when there is no proof', () => {
     expect(verifySessionOp(alice.publicKey, sessionId, peer, join, undefined)).toBe(false);
     expect(verifySessionOp(alice.publicKey, sessionId, peer, join, null as never)).toBe(false);
+    const proof = signSessionOp(alice, sessionId, peer, join, context);
+    expect(verifySessionOp(alice.publicKey, sessionId, peer, undefined as never, proof)).toBe(
+      false,
+    );
   });
 });

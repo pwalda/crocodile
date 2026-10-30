@@ -314,8 +314,8 @@ export function verifySessionOp(
   const checked = SessionOpProof.safeParse(proof);
   if (!checked.success) return false;
   const { sig, ...rest } = checked.data;
-  if (!sessionOpShapeOk(op, rest)) return false;
   try {
+    if (!sessionOpShapeOk(op, rest)) return false;
     return verifyPayload(
       key,
       SIG_DOMAIN.sessionOp,

@@ -298,16 +298,8 @@ export function sessionOpPayload(
   };
 }
 
-export type SessionOp =
-  | {
-      op: 'join';
-      caps: HostCaps;
-      /** Last state the member's server saw; lets a new owner keep the same host. */
-      hint?: { epoch: number; host: string | null; backup: string | null };
-    }
-  | { op: 'update'; caps: HostCaps }
-  | { op: 'leave' }
-  | { op: 'report'; epoch: number; issue: 'host_unreachable' };
+/** What a member asks of a session; a join may come with the server's hint. */
+export type SessionOp = z.infer<typeof SessionOpSchema>;
 
 /** A session operation forwarded to the server that owns the session. */
 export interface FedSessionOp {
@@ -410,6 +402,7 @@ const VoiceOccupancySchema = z.object({
 
 const SessionOpSchema = z.discriminatedUnion('op', [
   JoinOp.extend({
+    // The last state the member's server saw, so that a new owner can keep the same host.
     // An epoch that is no epoch is not a reason to drop the join (the owner leaves such a hint out).
     hint: z
       .object({ epoch: z.number().int(), host: id.nullable(), backup: id.nullable() })
