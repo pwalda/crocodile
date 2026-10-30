@@ -1140,6 +1140,61 @@ describe('sessions and host election', () => {
         expect(internals.local.get(sessionId)!.get(alice.conn.peer)!.nat).toBe('cone');
       });
 
+      it('tells a device that the owner does not have it in the room when it updates or reports', async () => {
+        const { c, alice, sessionId } = await setup();
+        const { state } = await alice.conn.request('session.join', { sessionId, caps: caps() });
+        // The owner is new and has nothing of the room yet.
+        (c.sessions as unknown as { owned: Map<string, unknown> }).owned.delete(sessionId);
+        await expect(
+          alice.conn.request('session.update', { sessionId, caps: caps({ nat: 'open' }) }),
+        ).rejects.toThrow(/not in session/);
+        await expect(
+          alice.conn.request('session.report', {
+            sessionId,
+            epoch: state.epoch,
+            issue: 'host_unreachable',
+          }),
+        ).rejects.toThrow(/not in session/);
+      });
+
+      it('does not take the answer to a join from before it left the room for the join it has now', async () => {
+        const { alice, sessionId } = await setup();
+        const conn = alice.conn as unknown as { send(...a: unknown[]): Promise<unknown> };
+        let answer: (v: unknown) => void = () => {};
+        const send = vi
+          .spyOn(conn, 'send')
+          .mockImplementationOnce(() => new Promise((r) => (answer = r)));
+        // A join whose answer is slow, the device leaves, and a join that is refused.
+        const first = alice.conn.request('session.join', { sessionId, caps: caps() });
+        await alice.conn.request('session.leave', { sessionId });
+        send.mockImplementationOnce(() => Promise.reject(new Error('refused')));
+        await expect(
+          alice.conn.request('session.join', { sessionId, caps: caps() }),
+        ).rejects.toThrow('refused');
+        answer({ state: {} });
+        await first;
+        // No join of this room has been taken: it says so itself, without naming the old one.
+        send.mockClear();
+        await expect(
+          alice.conn.request('session.update', { sessionId, caps: caps({ nat: 'open' }) }),
+        ).rejects.toThrow(/not in session/);
+        expect(send.mock.calls.filter((a) => a[0] === 'session.update')).toEqual([]);
+        send.mockRestore();
+      });
+
+      it('keeps the floor of its joins when the clock of the device is far ahead of the server', async () => {
+        const { c, alice, sessionId } = await setup();
+        const connection = alice.conn as unknown as { clockOffset: number };
+        const floors = (alice.conn.constructor as unknown as { joinedAt: Map<string, number> })
+          .joinedAt;
+        // The server is twenty minutes behind the clock of the device.
+        connection.clockOffset = -20 * 60_000;
+        await expect(
+          alice.conn.request('session.join', { sessionId, caps: caps() }),
+        ).rejects.toThrow();
+        expect(floors.has(`${c.info.id}|${alice.conn.peer}|${sessionId}`)).toBe(true);
+      });
+
       it('lets a device that left join again', async () => {
         const { c, alice, sessionId } = await setup();
         await alice.conn.request('session.join', { sessionId, caps: caps() });

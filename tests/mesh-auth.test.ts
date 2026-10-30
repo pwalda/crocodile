@@ -809,6 +809,17 @@ describe('events and session operations from other servers', () => {
         await waitFor(() => serverOf(net) === net.rogue.info.id, 3000, 'the join');
       });
 
+      it('takes a join from a server whose clock is behind that of the one the device came from', async () => {
+        const net = await conversation();
+        await joined(net);
+        claimBob(net);
+        // Dated a minute before the join Bob's own server sent: another clock, not a replay.
+        op(net, net.bob.conn.peer, { op: 'join', caps: caps() }, net.bob.identity, {
+          at: Date.now() - 60_000,
+        });
+        await waitFor(() => serverOf(net) === net.rogue.info.id, 3000, 'the join');
+      });
+
       it('does not take the same join twice after the device has left, and takes a later one', async () => {
         const net = await conversation();
         await joined(net);

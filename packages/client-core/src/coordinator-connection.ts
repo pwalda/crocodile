@@ -82,6 +82,8 @@ export class CoordinatorConnection extends Emitter<ConnectionEvents> {
    * (what later operations name) and how many updates followed, and the latest join, while it is
    * on its way. A join counts only once it is taken.
    */
+  /** How many times we have left each room on this connection: an answer from before that is no news. */
+  private lineage = new Map<string, number>();
   private signing = new Map<string, { since?: number; n: number; joining?: Promise<unknown> }>();
   /**
    * The time of the last join signed for each room, across connections to the same server: it
@@ -247,9 +249,13 @@ export class CoordinatorConnection extends Emitter<ConnectionEvents> {
         timeoutMs,
       ) as Promise<RpcMethods[M]>;
     const sent = this.send(method, params, timeoutMs);
-    if (method === 'session.leave')
-      this.signing.delete((params as RpcParamsOf<'session.leave'>).sessionId);
+    if (method === 'session.leave') this.forget((params as RpcParamsOf<'session.leave'>).sessionId);
     return sent;
+  }
+
+  private forget(sessionId: string) {
+    this.signing.delete(sessionId);
+    this.lineage.set(sessionId, (this.lineage.get(sessionId) ?? 0) + 1);
   }
 
   private send<M extends RpcMethod>(
@@ -294,7 +300,8 @@ export class CoordinatorConnection extends Emitter<ConnectionEvents> {
       const at = Math.max(Date.now() + this.clockOffset, (joined.get(key) ?? 0) + 1);
       joined.set(key, at);
       // Of no use once it is too old for a join to be taken after it anyway.
-      for (const [k, v] of joined) if (v < Date.now() - 15 * 60_000) joined.delete(k);
+      for (const [k, v] of joined)
+        if (v < Date.now() + this.clockOffset - 15 * 60_000) joined.delete(k);
       proof = signSessionOp(
         this.signer,
         sessionId,
@@ -310,9 +317,12 @@ export class CoordinatorConnection extends Emitter<ConnectionEvents> {
       };
       this.signing.set(sessionId, entry);
       // Taken: later operations name this join (the latest of those taken, if they come back out of turn).
+      const lineage = this.lineage.get(sessionId) ?? 0;
       void joining.then(
         () => {
           const now = this.signing.get(sessionId);
+          // (Not an answer from before we left the room.)
+          if ((this.lineage.get(sessionId) ?? 0) !== lineage) return;
           if (now && (now.since === undefined || at > now.since)) {
             now.since = at;
             now.n = 0;
@@ -375,7 +385,7 @@ export class CoordinatorConnection extends Emitter<ConnectionEvents> {
     } else if (frame.t === 'ev') {
       // Out of a room by the server's doing: nothing we signed there stands.
       if (frame.ev === 'session_closed')
-        this.signing.delete((frame.d as ServerEvents['session_closed']).sessionId);
+        this.forget((frame.d as ServerEvents['session_closed']).sessionId);
       this.emit(frame.ev, frame.d as never);
     }
   }

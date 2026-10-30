@@ -181,6 +181,11 @@ export type GroupSessionEvents = {
  * be (werift's limit, which host relays use).
  */
 const HISTORY_CHUNK_BYTES = 32 * 1024;
+/** Joined again, when taken out of the room: this many tries, this far apart. */
+const REJOIN_TRIES = 6;
+const REJOIN_RETRY_MS = 1_000;
+/** An update or report that finds we are not in the room starts a join no more often than this. */
+const JOIN_LOST_RETRY_MS = 5_000;
 const PENDING_TTL_MS = 15_000;
 /** The least time between two asks for history because a live message could not be opened. */
 const MISSED_HISTORY_MS = 5_000;
@@ -331,6 +336,21 @@ export class GroupSession extends Emitter<GroupSessionEvents> {
   }
 
   /**
+   * Taken out of the room by the server: joins again, a few times if the owner cannot be reached
+   * at once (the server does not ask for this one).
+   */
+  async rejoin() {
+    for (let attempt = 0; attempt < REJOIN_TRIES && !this.left; attempt++) {
+      try {
+        await this.join({ fresh: true });
+        return;
+      } catch {
+        await new Promise((r) => setTimeout(r, REJOIN_RETRY_MS));
+      }
+    }
+  }
+
+  /**
    * The server that keeps the session changed, and asks for a new signed join (it asks again if
    * the new one is not taken, and takes us out if it hears nothing).
    */
@@ -354,8 +374,14 @@ export class GroupSession extends Emitter<GroupSessionEvents> {
    */
   private joinLost(err: unknown) {
     const code = (err as { code?: string }).code;
-    if (code === 'conflict' || code === 'not_found') void this.renew();
+    if (code !== 'conflict' && code !== 'not_found') return;
+    // Not on top of a join that is on its way, nor again and again.
+    const now = Date.now();
+    if (this.left || this.joining || now - this.joinLostAt < JOIN_LOST_RETRY_MS) return;
+    this.joinLostAt = now;
+    void this.join().catch(() => {});
   }
+  private joinLostAt = 0;
 
   async leave() {
     if (this.left) return;

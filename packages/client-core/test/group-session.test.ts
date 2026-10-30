@@ -190,6 +190,44 @@ describe('group session', () => {
     expect(sent.filter((t) => t === 'session.join')).toHaveLength(2);
   });
 
+  it('does not start a join for every update that finds it is not in the room', async () => {
+    const sent: string[] = [];
+    const { s } = session(
+      async () => grant(60_000),
+      async (type) => {
+        sent.push(type);
+        if (type === 'session.update')
+          throw Object.assign(new Error('not in session'), { code: 'not_found' });
+        return type === 'session.join'
+          ? { state: state('bbbbbbbbbbbbbbbbbbbbbbbbbb.dev1', 1) }
+          : {};
+      },
+    );
+    await s.join();
+    await s.updateCaps();
+    await s.updateCaps();
+    await s.updateCaps();
+    await wait(50);
+    expect(sent.filter((t) => t === 'session.join')).toHaveLength(2);
+  });
+
+  it('joins again, more than once if it must, when taken out of the room', async () => {
+    let joins = 0;
+    const { s } = session(
+      async () => grant(60_000),
+      async (type) => {
+        if (type !== 'session.join') return {};
+        if (++joins < 3) throw new Error('the owner cannot be reached');
+        return { state: state('bbbbbbbbbbbbbbbbbbbbbbbbbb.dev1', 1) };
+      },
+    );
+    await s.rejoin();
+    expect(joins).toBe(3);
+    await s.leave();
+    await s.rejoin();
+    expect(joins).toBe(3);
+  });
+
   it('joins the session first when asked for a relay before it has', async () => {
     const { s, joins } = joinFirst();
     await s.useServerRelay();

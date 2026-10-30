@@ -65,8 +65,8 @@ const HOST_PENALTY_MS = 60_000;
 const OP_TIMEOUT_MS = 8000;
 /** How far the time on a signed join may be from ours (as for mailbox proofs). */
 const SESSION_OP_SKEW_MS = 5 * 60_000;
-/** A device asked to sign a new join (the room's server changed) has this long to give one that is taken. */
-const RENEW_TIMEOUT_MS = 10_000;
+/** A device asked to sign a new join (the room's server changed) has this long to give one that is taken (the call goes on in the meantime). */
+const RENEW_TIMEOUT_MS = 30_000;
 /** A join of that kind that was not taken (the new owner may not be reachable yet) is asked for again this soon. */
 const RENEW_RETRY_MS = 1000;
 /** How often the record of which joins were taken is cleaned of those too old to be replayed. */
@@ -145,8 +145,8 @@ export class SessionService {
   private deviceRecheck: ReturnType<typeof setInterval>;
   private joinSweep: ReturnType<typeof setInterval>;
   /**
-   * The time (`at`) of the last join signed for each device in each room that we own, also after
-   * it has left: the same join is not taken twice. Only those that could still pass for recent are kept.
+   * The time (`at`) of the last join signed for each device in each room that we own, for each
+   * server it joined from, also after it has left: the same join is not taken twice. Only those that could still pass for recent are kept.
    */
   private joinedAt = new Map<string, number>();
   /** Devices asked to sign a new join, by room and device: what ends the wait, and when. */
@@ -770,7 +770,8 @@ export class SessionService {
       if (!admitted.device) throw new RpcFailure('internal', 'join was not admitted');
       const key = admitted.device.author;
       this.checkProof(key, sessionId, peer, fromServer, op, frame.proof);
-      const joinKey = `${sessionId}|${peer}`;
+      // Per sending server: what it can replay is what was signed for it, and the clocks of two servers differ.
+      const joinKey = `${sessionId}|${peer}|${fromServer}`;
       const last = this.joinedAt.get(joinKey);
       if (last !== undefined && proof.at <= last) {
         // The same join said twice, or one overtaken by a later: nothing to do for a member that
@@ -800,7 +801,9 @@ export class SessionService {
     const s = this.owned.get(sessionId);
     const member = s?.state.members.find((m) => m.peer === peer);
     const signed = s?.signed.get(peer);
-    if (!s || !member || !signed || s.memberServer.get(peer) !== fromServer) return {};
+    // (An update or a report of a device the owner does not have in the room: it is told, for it may have to join again.)
+    if (!s || !member || !signed || s.memberServer.get(peer) !== fromServer)
+      throw new RpcFailure('not_found', 'not in session');
     this.checkProof(signed.key, sessionId, peer, fromServer, op, frame.proof);
     // One of an earlier join of the device is told so (it may have to join again); an older update than one taken is of no account.
     if (proof.since !== signed.since)
@@ -1236,7 +1239,10 @@ export class SessionService {
     if (!renewal) return;
     if (err instanceof RpcFailure && err.message === DEVICE_REMOVED) return;
     // Gone meanwhile: nobody to ask.
-    if (!this.local.get(sessionId)?.has(peer)) return;
+    if (!this.local.get(sessionId)?.has(peer)) {
+      this.endRenewal(`${sessionId}|${peer}`);
+      return;
+    }
     // The time it had has gone: whatever the new owner said, it is not in the room there.
     if (Date.now() >= renewal.deadline) {
       this.dropUnrenewed(sessionId, peer, client);
