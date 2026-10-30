@@ -1,7 +1,18 @@
-import { closeSync, mkdirSync, openSync, readFileSync, renameSync, writeSync } from 'node:fs';
+import {
+  closeSync,
+  fsyncSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  renameSync,
+  unlinkSync,
+  writeSync,
+} from 'node:fs';
+import { randomBytes } from 'node:crypto';
 import { open, readdir, rm, stat, type FileHandle } from 'node:fs/promises';
 import { cpus } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
+import { lockProfile, removeLeftovers } from './profile-lock';
 import { RTCPeerConnection } from 'werift';
 import {
   MemoryMessageStore,
@@ -30,23 +41,35 @@ import {
 /**
  * Settings, keys and caches: one JSON file, readable only by this user
  * (there is no keychain to lean on, as the desktop app does). Writes are
- * batched and atomic.
+ * batched and atomic, and only one process at a time may hold the file (see
+ * profile-lock.ts): `close()` writes and gives it up.
  */
 export class JsonFileStore implements KeyValueStore {
   private data: Record<string, unknown>;
   private timer?: ReturnType<typeof setTimeout>;
+  private unlock?: () => void;
 
   constructor(private readonly path: string) {
+    // Before reading: what is read must be what nobody else is about to change.
+    this.unlock = lockProfile(`${path}.lock`);
+    try {
+      this.data = this.load();
+    } catch (err) {
+      this.unlock();
+      throw err;
+    }
+    removeLeftovers(path);
+  }
+
+  private load(): Record<string, unknown> {
+    const path = this.path;
     let text: string;
     try {
       text = readFileSync(path, 'utf8');
     } catch (err) {
       // Only a file that isn't there yet means a new profile: anything else
       // would be overwritten, keys and all, by the next save.
-      if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
-        this.data = {};
-        return;
-      }
+      if ((err as NodeJS.ErrnoException).code === 'ENOENT') return {};
       throw new Error(`Can't read ${path}: ${(err as Error).message}`, { cause: err });
     }
     let data: unknown;
@@ -59,7 +82,7 @@ export class JsonFileStore implements KeyValueStore {
       throw new Error(
         `${path} is damaged. It holds this computer's keys, so it was left as it is: restore it from a backup, or move it away to start again.`,
       );
-    this.data = data as Record<string, unknown>;
+    return data as Record<string, unknown>;
   }
 
   async get<T>(key: string) {
@@ -78,21 +101,69 @@ export class JsonFileStore implements KeyValueStore {
   }
 
   private schedule() {
-    this.timer ??= setTimeout(() => this.flush(), 200);
+    this.timer ??= setTimeout(() => this.saveLater(), 200);
+  }
+
+  /** A failed background save is tried again, not thrown from a timer; `close()` reports a lasting failure. */
+  private saveLater() {
+    try {
+      this.flush();
+    } catch {
+      this.timer = setTimeout(() => this.saveLater(), 1000);
+    }
   }
 
   /** Writes now (also called before exiting). */
   flush() {
     clearTimeout(this.timer);
     this.timer = undefined;
-    const tmp = `${this.path}.tmp`;
-    const fd = openSync(tmp, 'w', 0o600);
+    if (!this.unlock) return; // closed: the file belongs to whoever has it now
+    // A file of its own each time, created only if new, and on disk before it replaces the state.
+    const tmp = `${this.path}.${process.pid}.${randomBytes(4).toString('hex')}.tmp`;
+    const fd = openSync(tmp, 'wx', 0o600);
     try {
-      writeSync(fd, JSON.stringify(this.data));
+      try {
+        writeSync(fd, JSON.stringify(this.data));
+        fsyncSync(fd);
+      } finally {
+        closeSync(fd);
+      }
+      renameSync(tmp, this.path);
+    } catch (err) {
+      try {
+        unlinkSync(tmp);
+      } catch {
+        // Already gone.
+      }
+      throw err;
+    }
+    syncFolder(dirname(this.path));
+  }
+
+  /**
+   * Writes what is pending and gives the file up for the next process. If the
+   * write fails the file is kept (and so is what was to be saved, for another
+   * try); the lock goes when the process does.
+   */
+  close() {
+    this.flush();
+    this.unlock?.();
+    this.unlock = undefined;
+  }
+}
+
+/** Makes the rename itself survive a power cut (not possible on Windows). */
+function syncFolder(dir: string) {
+  if (process.platform === 'win32') return;
+  try {
+    const fd = openSync(dir, 'r');
+    try {
+      fsyncSync(fd);
     } finally {
       closeSync(fd);
     }
-    renameSync(tmp, this.path);
+  } catch {
+    // A file system that won't sync a folder: the file is written all the same.
   }
 }
 
@@ -211,6 +282,22 @@ export function createCliPlatform(opts: { dir: string; version: string; stun: ()
 } {
   mkdirSync(opts.dir, { recursive: true, mode: 0o700 });
   const kv = new JsonFileStore(join(opts.dir, 'state.json'));
+  try {
+    return buildPlatform(opts, kv);
+  } catch (err) {
+    try {
+      kv.close();
+    } catch {
+      // The setup failed first; that is the error to show.
+    }
+    throw err;
+  }
+}
+
+function buildPlatform(
+  opts: { version: string; stun: () => string[]; dir: string },
+  kv: JsonFileStore,
+) {
   const files = new CliFileStore(join(opts.dir, 'files'));
   const PC = RTCPeerConnection as unknown as typeof globalThis.RTCPeerConnection;
   const probeNetwork = createNetworkProber(PC, opts.stun);
