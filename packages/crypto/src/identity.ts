@@ -4,6 +4,7 @@ import {
   fromB64u,
   mailProofPayload,
   sessionOpPayload,
+  sessionOpShapeOk,
   SIG_DOMAIN,
   toB32,
   toB64u,
@@ -286,6 +287,7 @@ export function signSessionOp(
     ...(since === undefined ? {} : { since }),
     ...(n === undefined ? {} : { n }),
   };
+  if (!sessionOpShapeOk(op, proof)) throw new Error(`a ${op.op} does not carry that`);
   return {
     ...proof,
     sig: sign(identity, SIG_DOMAIN.sessionOp, sessionOpPayload(sessionId, peer, op, proof)),
@@ -294,8 +296,9 @@ export function signSessionOp(
 
 /**
  * Whether `proof` is a signature on this operation by the account of `peer`'s user, with
- * `key` as its key. Whether it is for this server, recent, and the next in line is for the
- * receiver to settle (it has the state for that).
+ * `key` as its key, carrying what its kind of operation needs (a join names no earlier join,
+ * an update names its join and counts, a report names its join). Whether it is for this server,
+ * recent, and the next in line is for the receiver to settle (it has the state for that).
  */
 export function verifySessionOp(
   key: string,
@@ -306,5 +309,6 @@ export function verifySessionOp(
 ): boolean {
   if (!keyMatchesUserId(key, peer.split('.')[0]!)) return false;
   const { sig, ...rest } = proof;
+  if (!sessionOpShapeOk(op, rest)) return false;
   return verifyPayload(key, SIG_DOMAIN.sessionOp, sessionOpPayload(sessionId, peer, op, rest), sig);
 }

@@ -1242,18 +1242,12 @@ describe('session operations', () => {
   const peer = `${alice.userId}.abcdefghij`;
   const caps: HostCaps = { canHost: true, platform: 'desktop', nat: 'open', uplinkKbps: 5000 };
   const join = { op: 'join', caps } as const;
+  const report3 = { op: 'report', epoch: 3, issue: 'host_unreachable' } as const;
   const context = { server: 'server-one', at: 1_700_000_000_000 };
-  const ok = (
-    key: string,
-    id: string,
-    who: string,
-    op: Parameters<typeof verifySessionOp>[3],
-    p: SessionOpProof,
-  ) => verifySessionOp(key, id, who, op, p);
 
   it('accepts what the device signed, for the account of its peer id', () => {
     const proof = signSessionOp(alice, sessionId, peer, join, context);
-    expect(ok(alice.publicKey, sessionId, peer, join, proof)).toBe(true);
+    expect(verifySessionOp(alice.publicKey, sessionId, peer, join, proof)).toBe(true);
     const update = signSessionOp(
       alice,
       sessionId,
@@ -1261,26 +1255,22 @@ describe('session operations', () => {
       { op: 'update', caps },
       { ...context, since: 5, n: 1 },
     );
-    expect(ok(alice.publicKey, sessionId, peer, { op: 'update', caps }, update)).toBe(true);
-    const report = signSessionOp(
-      alice,
-      sessionId,
-      peer,
-      { op: 'report', epoch: 3 },
-      { ...context, since: 5 },
+    expect(verifySessionOp(alice.publicKey, sessionId, peer, { op: 'update', caps }, update)).toBe(
+      true,
     );
-    expect(ok(alice.publicKey, sessionId, peer, { op: 'report', epoch: 3 }, report)).toBe(true);
+    const report = signSessionOp(alice, sessionId, peer, report3, { ...context, since: 5 });
+    expect(verifySessionOp(alice.publicKey, sessionId, peer, report3, report)).toBe(true);
   });
 
   it('is for the account whose id the peer carries, whoever holds a key', () => {
     // Another account signing for Alice's device.
     const forged = signSessionOp(mallory, sessionId, peer, join, context);
-    expect(ok(mallory.publicKey, sessionId, peer, join, forged)).toBe(false);
-    expect(ok(alice.publicKey, sessionId, peer, join, forged)).toBe(false);
+    expect(verifySessionOp(mallory.publicKey, sessionId, peer, join, forged)).toBe(false);
+    expect(verifySessionOp(alice.publicKey, sessionId, peer, join, forged)).toBe(false);
     // Alice's key does not vouch for another account's device.
     const other = `${mallory.userId}.abcdefghij`;
     const mine = signSessionOp(alice, sessionId, other, join, context);
-    expect(ok(alice.publicKey, sessionId, other, join, mine)).toBe(false);
+    expect(verifySessionOp(alice.publicKey, sessionId, other, join, mine)).toBe(false);
   });
 
   it('covers where, who, for which server, when and what was asked', () => {
@@ -1297,7 +1287,7 @@ describe('session operations', () => {
       who: string,
       op: typeof update | { op: 'join'; caps: HostCaps },
       p: SessionOpProof,
-    ) => ok(alice.publicKey, id, who, op, p);
+    ) => verifySessionOp(alice.publicKey, id, who, op, p);
     expect(check(sessionId, peer, update, proof)).toBe(true);
     // Another room, another of Alice's devices, another operation.
     expect(check('voice:abcdefgh:qrstuvwx', peer, update, proof)).toBe(false);
@@ -1319,22 +1309,12 @@ describe('session operations', () => {
   });
 
   it('keeps a report to its epoch', () => {
-    const proof = signSessionOp(
-      alice,
-      sessionId,
-      peer,
-      { op: 'report', epoch: 3 },
-      { ...context, since: 5 },
+    const proof = signSessionOp(alice, sessionId, peer, report3, { ...context, since: 5 });
+    expect(verifySessionOp(alice.publicKey, sessionId, peer, { ...report3, epoch: 4 }, proof)).toBe(
+      false,
     );
-    expect(ok(alice.publicKey, sessionId, peer, { op: 'report', epoch: 4 }, proof)).toBe(false);
     expect(
-      ok(
-        alice.publicKey,
-        sessionId,
-        peer,
-        { op: 'report', epoch: 3 },
-        { ...proof, since: undefined },
-      ),
+      verifySessionOp(alice.publicKey, sessionId, peer, report3, { ...proof, since: undefined }),
     ).toBe(false);
   });
 
@@ -1349,17 +1329,17 @@ describe('session operations', () => {
         proof.sig,
       ),
     ).toBe(false);
-    expect(ok(alice.publicKey, sessionId, peer, join, { ...proof, sig: 'x'.repeat(86) })).toBe(
-      false,
-    );
-    expect(ok('not a key', sessionId, peer, join, proof)).toBe(false);
+    expect(
+      verifySessionOp(alice.publicKey, sessionId, peer, join, { ...proof, sig: 'x'.repeat(86) }),
+    ).toBe(false);
+    expect(verifySessionOp('not a key', sessionId, peer, join, proof)).toBe(false);
   });
 
   it('means the same with the optional claims left out or undefined', () => {
     const bare: HostCaps = { canHost: false, platform: 'web', nat: 'unknown' };
     const proof = signSessionOp(alice, sessionId, peer, { op: 'join', caps: bare }, context);
     expect(
-      ok(
+      verifySessionOp(
         alice.publicKey,
         sessionId,
         peer,
@@ -1367,5 +1347,40 @@ describe('session operations', () => {
         proof,
       ),
     ).toBe(true);
+  });
+
+  it('needs what its kind of operation carries, and nothing else', () => {
+    const update = { op: 'update', caps } as const;
+    // The signer will not make one that does not.
+    expect(() => signSessionOp(alice, sessionId, peer, join, { ...context, since: 5 })).toThrow();
+    expect(() => signSessionOp(alice, sessionId, peer, update, { ...context, since: 5 })).toThrow();
+    expect(() => signSessionOp(alice, sessionId, peer, report3, context)).toThrow();
+    expect(() =>
+      signSessionOp(alice, sessionId, peer, report3, { ...context, since: 5, n: 1 }),
+    ).toThrow();
+    // And the receiver will not take one, even with a signature that is right for its bytes.
+    const bytes = (o: Parameters<typeof sessionOpPayload>[2], p: Omit<SessionOpProof, 'sig'>) => ({
+      ...p,
+      sig: sign(alice, SIG_DOMAIN.sessionOp, sessionOpPayload(sessionId, peer, o, p)),
+    });
+    for (const [o, p] of [
+      [join, { ...context, since: 5 }],
+      [join, { ...context, n: 1 }],
+      [update, { ...context, since: 5 }],
+      [update, { ...context, n: 1 }],
+      [report3, context],
+      [report3, { ...context, since: 5, n: 1 }],
+    ] as const)
+      expect(verifySessionOp(alice.publicKey, sessionId, peer, o, bytes(o, p))).toBe(false);
+    const good = bytes(report3, { ...context, since: 5 });
+    expect(verifySessionOp(alice.publicKey, sessionId, peer, report3, good)).toBe(true);
+  });
+
+  it('signs what a report accuses of', () => {
+    const p = { ...context, since: 5 };
+    const other = { ...report3, issue: 'other' } as unknown as typeof report3;
+    expect(sessionOpPayload(sessionId, peer, other, p)).not.toEqual(
+      sessionOpPayload(sessionId, peer, report3, p),
+    );
   });
 });

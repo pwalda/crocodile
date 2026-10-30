@@ -236,16 +236,33 @@ export const SESSION_OP_SKEW_MS = 5 * 60_000;
  */
 export const SessionOpProof = z.object({
   server: z.string().max(200),
-  at: z.number().int(),
-  since: z.number().int().optional(),
-  n: z.number().int().min(0).optional(),
+  at: z.number().int().safe().min(0),
+  since: z.number().int().safe().min(0).optional(),
+  n: z
+    .number()
+    .int()
+    .min(0)
+    .max(2 ** 31)
+    .optional(),
   sig: z.string().max(200),
 });
 export type SessionOpProof = z.infer<typeof SessionOpProof>;
 
-/** What a device signs of an operation (a server may add to the rest, a hint for one). */
+/** What a device signs of an operation (the hint that a server adds to a join is not part of it, yet). */
 export type SignedSessionOp =
-  { op: 'join' | 'update'; caps: HostCaps } | { op: 'report'; epoch: number };
+  | { op: 'join' | 'update'; caps: HostCaps }
+  | { op: 'report'; epoch: number; issue: 'host_unreachable' };
+
+/**
+ * Whether a proof has what its operation needs and nothing else: a join is the start of
+ * what the others name (`since`) and counts nothing; an update names its join and counts;
+ * a report names its join.
+ */
+export function sessionOpShapeOk(op: SignedSessionOp, proof: Omit<SessionOpProof, 'sig'>) {
+  if (op.op === 'join') return proof.since === undefined && proof.n === undefined;
+  if (op.op === 'update') return proof.since !== undefined && proof.n !== undefined;
+  return proof.since !== undefined && proof.n === undefined;
+}
 
 /** What a SessionOpProof signs: where, who, for which server, when, and what was asked. */
 export function sessionOpPayload(
@@ -263,7 +280,7 @@ export function sessionOpPayload(
     n: proof.n ?? null,
     op:
       op.op === 'report'
-        ? { op: op.op, epoch: op.epoch, issue: 'host_unreachable' }
+        ? { op: op.op, epoch: op.epoch, issue: op.issue }
         : { op: op.op, caps: op.caps },
   };
 }
