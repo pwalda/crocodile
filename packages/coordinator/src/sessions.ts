@@ -504,11 +504,13 @@ export class SessionService {
       // on the records) is not final for a device that was in the room, while it is asked again.
       const final = err instanceof RpcFailure && err.message === DEVICE_REMOVED;
       const forbidden = err instanceof RpcFailure && err.code === 'forbidden';
-      const keep = !final && !!renewal && Date.now() < renewal.deadline;
+      // (The time that stands now: the owner may have changed again, and the device been asked again.)
+      const deadline = this.renewing.get(joinKey)?.deadline ?? renewal?.deadline ?? 0;
+      const keep = !final && !!renewal && Date.now() < deadline;
       if (!silent && current?.get(client.peer) === vouched) {
         if (before && (!forbidden || keep)) current.set(client.peer, before);
         // (Out because the time it had has gone: it is told, so that it joins again.)
-        else if (renewal && before) this.dropUnrenewed(sessionId, client.peer);
+        else if (renewal && before) this.dropUnrenewed(sessionId, client.peer, !final);
         else void this.leave(client.peer, sessionId);
       }
       if (!final) this.askAgain(renewal, sessionId, client, err);
