@@ -344,4 +344,45 @@ describe('election', () => {
     // Not another device of the host's person.
     expect(r.backup).toBe('honest.d1');
   });
+
+  it("does not keep the host's own other device as backup because the others only slightly beat it", () => {
+    const user = (u: string, n: number, nat: 'open' | 'cone', extra = {}) => ({
+      ...member(`${u}.d${n}`, nat, extra),
+      userId: u,
+    });
+    // a2 was the backup; b1 beats it by less than the margin that moves a backup.
+    const members = [user('a', 1, 'open'), user('a', 2, 'cone'), user('b', 1, 'cone')];
+    const r = elect({
+      sessionId: 's1',
+      members,
+      host: 'a.d1',
+      backup: 'a.d2',
+      penalties: new Map(),
+      now: 0,
+    });
+    expect(r.host).toBe('a.d1');
+    expect(r.backup).toBe('b.d1');
+  });
+
+  it('finds a reachable device of a person whose best device is behind a symmetric NAT', () => {
+    const user = (u: string, n: number, nat: 'open' | 'cone' | 'symmetric', extra = {}) => ({
+      ...member(`${u}.d${n}`, nat, extra),
+      userId: u,
+    });
+    const members = [
+      user('host', 1, 'symmetric'),
+      // b's best device scores higher but cannot be reached; the other can.
+      user('b', 1, 'symmetric', { uplinkKbps: 100_000 }),
+      user('b', 2, 'cone', { onBattery: true }),
+    ];
+    const r = elect({
+      sessionId: 's1',
+      members,
+      host: 'host.d1',
+      backup: null,
+      penalties: new Map(),
+      now: 0,
+    });
+    expect(r.host).toBe('b.d2');
+  });
 });
