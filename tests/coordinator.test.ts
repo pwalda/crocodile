@@ -1505,7 +1505,9 @@ describe('sessions and host election', () => {
       check.mockRestore();
       expect(c.sessions.inSession(alice.conn.peer, sessionId)).toBe(false);
       expect(alice.events.filter((e) => e.ev === 'session_renew')).toHaveLength(1);
-      expect(alice.events.find((e) => e.ev === 'session_closed')!.d).not.toHaveProperty('again');
+      expect(alice.events.find((e) => e.ev === 'session_closed')!.d).toMatchObject({
+        again: false,
+      });
       expect(internals.renewing.size).toBe(0);
     });
 

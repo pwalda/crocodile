@@ -228,6 +228,31 @@ describe('group session', () => {
     expect(joins).toBe(3);
   });
 
+  it('does not join again because an update finds it is not in a room the server took it out of for good', async () => {
+    const sent: string[] = [];
+    const { s } = session(
+      async () => grant(60_000),
+      async (type) => {
+        sent.push(type);
+        if (type === 'session.update')
+          throw Object.assign(new Error('not in session'), { code: 'not_found' });
+        return type === 'session.join'
+          ? { state: state('bbbbbbbbbbbbbbbbbbbbbbbbbb.dev1', 1) }
+          : {};
+      },
+    );
+    await s.join();
+    s.removedByServer();
+    await s.updateCaps();
+    await wait(50);
+    expect(sent.filter((t) => t === 'session.join')).toHaveLength(1);
+    // Asked to join (opening the room again) it does, and is then looked after as before.
+    await s.join();
+    await s.updateCaps();
+    await wait(50);
+    expect(sent.filter((t) => t === 'session.join')).toHaveLength(3);
+  });
+
   it('does not join a room it was never in because an update finds it is not', async () => {
     const sent: string[] = [];
     const { s } = session(

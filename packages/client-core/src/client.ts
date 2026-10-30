@@ -953,7 +953,9 @@ export class CrocodileClient extends Emitter<ClientEvents> {
     link.on('session_renew', ({ sessionId }) => void this.sessions.get(sessionId)?.renew());
     // Taken out of the room because it did not give a new join in time: join it again.
     link.on('session_closed', ({ sessionId, again }) => {
-      if (again) void this.sessions.get(sessionId)?.rejoin();
+      const session = this.sessions.get(sessionId);
+      if (again) void session?.rejoin();
+      else session?.removedByServer();
     });
     link.on('signal', ({ from, sessionId, data }) =>
       this.sessions.get(sessionId)?.handleSignal(from, data),

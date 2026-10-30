@@ -334,12 +334,12 @@ export class CoordinatorConnection extends Emitter<ConnectionEvents> {
       const lineage = this.lineage.get(sessionId) ?? 0;
       void joining.then(
         () => {
-          const now = this.signing.get(sessionId);
+          const room = this.signing.get(sessionId);
           // (Not an answer from before we left the room.)
           if ((this.lineage.get(sessionId) ?? 0) !== lineage) return;
-          if (now && (now.since === undefined || at > now.since)) {
-            now.since = at;
-            now.n = 0;
+          if (room && (room.since === undefined || at > room.since)) {
+            room.since = at;
+            room.n = 0;
           }
         },
         () => {},

@@ -1233,16 +1233,17 @@ export class SessionService {
    * as opposed to having lost the right to be in it.
    */
   private dropUnrenewed(sessionId: string, peer: string, again = true) {
-    this.hub.log.warn('device did not give a new join that was taken; taking it out', {
-      sessionId,
-      peer,
-    });
+    const what = { sessionId, peer };
+    if (again)
+      this.hub.log.warn('device did not give a new join that was taken; taking it out', what);
+    else this.hub.log.info('device is no longer allowed in the room; taking it out', what);
+    this.endRenewal(`${sessionId}|${peer}`);
     void this.leave(peer, sessionId);
     const client = this.hub.presence.localOf(peerIds.user(peer)).find((c) => c.peer === peer);
     client?.send('session_closed', {
       sessionId,
       reason: again ? 'did not sign a new join' : 'no longer allowed in',
-      ...(again ? { again } : {}),
+      again,
     });
   }
 
