@@ -193,14 +193,24 @@ export function shardOfTerm(term: string): string | undefined {
   }
 }
 
+/** The invite a membership was made with: the code it names, or the ticket it carries. */
+export function inviteCodeOfMember(body: unknown): string | undefined {
+  const b = body as { inviteCode?: unknown; ticket?: { invite?: { body?: { code?: unknown } } } };
+  // (Nothing is looked up under a name that is not one: the record has not been checked yet.)
+  for (const code of [b?.inviteCode, b?.ticket?.invite?.body?.code])
+    if (typeof code === 'string' && /^[a-z2-7]{8,32}$/.test(code)) return code;
+  return undefined;
+}
+
 /** Records a record's checks look at, besides the record itself. */
 export function dependenciesOf(record: SignedRecord, authorId: string): string[] {
   const deps = record.kind === 'note' ? [] : [`profile:${authorId}`];
-  const body = record.body as { spaceId?: string; inviteCode?: string };
+  const body = record.body as { spaceId?: string };
   if (record.kind === 'invite') deps.push(`space:${body.spaceId}`);
   if (record.kind === 'member') {
     deps.push(`space:${body.spaceId}`);
-    if (body.inviteCode) deps.push(`invite:${body.inviteCode}`);
+    const code = inviteCodeOfMember(record.body);
+    if (code) deps.push(`invite:${code}`);
   }
   if (record.kind === 'note') deps.push(`profile:${record.key.split(':')[1]}`);
   // A profile's author is the profile itself: nothing to fetch for it.

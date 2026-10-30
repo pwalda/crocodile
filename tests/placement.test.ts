@@ -1,5 +1,11 @@
 import { describe, expect, it } from 'vitest';
-import { createIdentity, signRecord } from '@crocodile/crypto';
+import {
+  createIdentity,
+  newTicket,
+  signRecord,
+  signTicketUse,
+  spaceIdFor,
+} from '@crocodile/crypto';
 import { recordKey } from '@crocodile/protocol';
 import {
   HashRing,
@@ -79,5 +85,43 @@ describe('placement', () => {
       prekey: { id: 1, x25519: 'a'.repeat(43), mlkem: 'b'.repeat(1579), expiresAt: 0 },
     });
     expect(dependenciesOf(device, alice.userId)).toEqual([recordKey.profile(alice.userId)]);
+  });
+
+  it('counts the invite a membership was made with, whether it names a code or carries a ticket', () => {
+    const alice = createIdentity();
+    const bob = createIdentity();
+    const spaceId = spaceIdFor(alice.publicKey, 'nonce-nonce');
+    const ticket = newTicket();
+    const invite = signRecord(alice, 'invite', recordKey.invite(ticket.tid), {
+      spaceId,
+      code: ticket.tid,
+      tpub: ticket.tpub,
+      expiresAt: Date.now() + 3600_000,
+    });
+    const key = recordKey.member(spaceId, bob.userId);
+    const withTicket = signRecord(bob, 'member', key, {
+      spaceId,
+      userId: bob.userId,
+      ticket: { invite, proof: signTicketUse(ticket, spaceId, bob.userId) },
+    });
+    const withCode = signRecord(bob, 'member', key, {
+      spaceId,
+      userId: bob.userId,
+      inviteCode: 'abcdefgh',
+    });
+    const wanted = [recordKey.profile(bob.userId), recordKey.space(spaceId)];
+    expect(dependenciesOf(withTicket, bob.userId)).toEqual([
+      ...wanted,
+      recordKey.invite(ticket.tid),
+    ]);
+    expect(dependenciesOf(withCode, bob.userId)).toEqual([...wanted, recordKey.invite('abcdefgh')]);
+    // Nothing is looked up under what is not the name of an invite.
+    const odd = { ...withTicket, body: { ...withTicket.body, inviteCode: '' } };
+    expect(dependenciesOf(odd, bob.userId)).toEqual([...wanted, recordKey.invite(ticket.tid)]);
+    const long = {
+      ...withTicket,
+      body: { spaceId, userId: bob.userId, inviteCode: 'x'.repeat(500) },
+    };
+    expect(dependenciesOf(long, bob.userId)).toEqual(wanted);
   });
 });

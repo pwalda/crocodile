@@ -12,12 +12,14 @@ import {
   createPrekey,
   linkCommitment,
   linkNonce,
+  newTicket,
   randomDeviceId,
   randomId,
   sealAnonymous,
   sealToDevice,
   signMailProof,
   signRecord,
+  signTicketUse,
   spaceIdFor,
 } from '@crocodile/crypto';
 import {
@@ -223,6 +225,57 @@ describe('sharded records', () => {
       for (
         const start = Date.now();
         !res.accepted && /unknown invite/.test(res.reason ?? '') && Date.now() - start < 8000;
+      ) {
+        await new Promise((done) => setTimeout(done, 100));
+        res = await guest.conn.request('records.put', { record: join });
+      }
+      expectAccepted(res);
+    }
+  });
+
+  it('admits people to a space by a ticket whichever server they use, fetching the invite for them', async () => {
+    const servers = await network(6);
+    const alice = await user(servers[0]!, 'alice');
+    const { spaceId, space } = await createSpace(alice, 'Swamp');
+    const ticket = newTicket();
+    // The space names the link, and the link is a ticket.
+    await put(
+      alice,
+      signRecord(
+        alice.identity,
+        'space',
+        space.key,
+        { ...space.body, publicInvite: ticket.tid },
+        Date.now() + 1,
+      ),
+    );
+    const invite = signRecord(alice.identity, 'invite', recordKey.invite(ticket.tid), {
+      spaceId,
+      code: ticket.tid,
+      tpub: ticket.tpub,
+      expiresAt: Date.now() + 3600_000,
+    });
+    await put(alice, invite);
+    // The people joining are spread over the servers, so for some the owners of their records
+    // are not those of the invite. Each finds the invite out for itself.
+    for (let i = 0; i < 8; i++) {
+      const guest = await user(servers[i % servers.length]!);
+      const join = signRecord(
+        guest.identity,
+        'member',
+        recordKey.member(spaceId, guest.identity.userId),
+        {
+          spaceId,
+          userId: guest.identity.userId,
+          ticket: { invite, proof: signTicketUse(ticket, spaceId, guest.identity.userId) },
+        },
+      );
+      let res = await guest.conn.request('records.put', { record: join });
+      for (
+        const start = Date.now();
+        !res.accepted &&
+        /unknown (invite|space)/.test(res.reason ?? '') &&
+        Date.now() - start < 8000;
       ) {
         await new Promise((done) => setTimeout(done, 100));
         res = await guest.conn.request('records.put', { record: join });

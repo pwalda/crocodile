@@ -183,6 +183,11 @@ export const SpaceBody = z.object({
   admins: z.array(id).max(100),
   bans: z.array(id).max(10_000),
   /**
+   * Admins the owner has removed, kept (and only added to) so that those they let in stay: a
+   * link an admin made still admits a member after the admin is gone. Signed with the admin list.
+   */
+  formerAdmins: z.array(id).max(1000).optional(),
+  /**
    * Who may invite a named person: only the owner and admins (the default), or members too.
    * The one open invite is always made by the owner or an admin.
    */
@@ -221,14 +226,42 @@ export const InviteBody = z.object({
   revoked: z.boolean().optional(),
   /** A private invite: only this user can join with it. Without it, anyone holding the code can. */
   for: id.optional(),
+  /**
+   * The open link as a ticket: the public key of a secret that is only in the link, never in a
+   * record (the code is then the hash of this key). A member proves they hold the link by signing
+   * with that secret, which nobody who only saw the records can do.
+   */
+  tpub: pubKey.optional(),
 });
 export type InviteBody = z.infer<typeof InviteBody>;
+
+export const SignedRecordEnvelope = z.object({
+  v: z.literal(1),
+  kind: z.enum(RECORD_KINDS),
+  key: z.string().min(3).max(200),
+  author: pubKey,
+  version: z.number().int().positive(),
+  body: z.unknown(),
+  sig: z.string().regex(/^[A-Za-z0-9_-]{86}$/),
+});
+
+/** The invite record a ticket carries, as signed by its maker. */
+export const TicketInvite = SignedRecordEnvelope.extend({
+  kind: z.literal('invite'),
+  body: InviteBody,
+});
+export type TicketInvite = z.infer<typeof TicketInvite>;
 
 export const MemberBody = z.object({
   spaceId: id,
   userId: id,
   /** Invite used to join; the space owner and admins may omit it. */
   inviteCode: z.string().optional(),
+  /**
+   * Joined with an open link that is a ticket: the maker's signed invite, and the signature of
+   * this user by the secret in the link. (Instead of `inviteCode`, not with it.)
+   */
+  ticket: z.object({ invite: TicketInvite, proof: z.string().min(1).max(200) }).optional(),
   left: z.boolean().optional(),
 });
 export type MemberBody = z.infer<typeof MemberBody>;
@@ -265,16 +298,6 @@ export interface SignedRecord<K extends RecordKind = RecordKind> {
   body: RecordBodies[K];
   sig: string;
 }
-
-export const SignedRecordEnvelope = z.object({
-  v: z.literal(1),
-  kind: z.enum(RECORD_KINDS),
-  key: z.string().min(3).max(200),
-  author: pubKey,
-  version: z.number().int().positive(),
-  body: z.unknown(),
-  sig: z.string().regex(/^[A-Za-z0-9_-]{86}$/),
-});
 
 export const recordKey = {
   profile: (userId: string) => `profile:${userId}`,

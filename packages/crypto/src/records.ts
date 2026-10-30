@@ -2,7 +2,10 @@ import {
   RECORD_BODY_SCHEMAS,
   SIG_DOMAIN,
   SignedRecordEnvelope,
+  fromB32,
+  fromB64u,
   toB32,
+  toB64u,
   utf8,
   type RecordBodies,
   type RecordKind,
@@ -12,9 +15,10 @@ import {
   NOTE_TTL_MS,
   canonicalJson,
   peerIds,
+  recordKey,
   DELETED_PROFILE_NAME,
 } from '@crocodile/protocol';
-import { sha256, verifyPayload } from './primitives';
+import { ed25519, randomBytes, sha256, signPayload, verifyPayload } from './primitives';
 import { sign, userIdFromKey, USER_ID_LENGTH, type Identity } from './identity';
 
 export interface RecordLookup {
@@ -64,6 +68,57 @@ export function inviteCommitment(spaceId: string, code: string): string {
 
 /** Characters in the code of an open link (128 bits): too many to guess from the hash. */
 export const OPEN_CODE_LENGTH = 26;
+
+/**
+ * An open link as a ticket. `secret` is what the link carries (32 bytes, base32); it is never
+ * put in a record. `tpub` is its public key and `tid` (what the invite is called) is a hash of
+ * that, so the name of the invite does not give the secret away.
+ */
+export interface Ticket {
+  secret: string;
+  tpub: string;
+  tid: string;
+}
+
+/** Characters in the secret of a ticket link. */
+export const TICKET_SECRET_LENGTH = 52;
+
+export function ticketIdOf(tpub: string): string {
+  return toB32(sha256(fromB64u(tpub))).slice(0, USER_ID_LENGTH);
+}
+
+/** The ticket a link's secret stands for, or null if it is not one. */
+export function ticketFromSecret(secret: string): Ticket | null {
+  const clean = secret.trim().toLowerCase();
+  if (!/^[a-z2-7]+$/.test(clean) || clean.length !== TICKET_SECRET_LENGTH) return null;
+  const seed = fromB32(clean);
+  // (52 characters hold 260 bits: the 4 that are over must be 0, or one secret has many spellings.)
+  if (seed.length !== 32 || toB32(seed) !== clean) return null;
+  const tpub = toB64u(ed25519.getPublicKey(seed));
+  return { secret: clean, tpub, tid: ticketIdOf(tpub) };
+}
+
+export function newTicket(): Ticket {
+  return ticketFromSecret(toB32(randomBytes(32)).slice(0, TICKET_SECRET_LENGTH))!;
+}
+
+/** The part of a ticket's use that is signed: this user, in this space, with this invite. */
+function ticketUsePayload(spaceId: string, tid: string, userId: string) {
+  return { spaceId, tid, userId };
+}
+
+/** What a member record carries to show it holds the link: a signature by the link's secret. */
+export function signTicketUse(
+  ticket: Pick<Ticket, 'secret' | 'tid'>,
+  spaceId: string,
+  userId: string,
+): string {
+  return signPayload(
+    fromB32(ticket.secret),
+    SIG_DOMAIN.ticketUse,
+    ticketUsePayload(spaceId, ticket.tid, userId),
+  );
+}
 
 /** Space ids bind the owner key, so any server can check ownership without history. */
 export function spaceIdFor(ownerPublicKey: string, nonce: string): string {
@@ -155,6 +210,13 @@ export function validateRecord(input: unknown, ctx: ValidationContext): Validati
       // An edit made under an admin list the owner has since replaced.
       const before = (existing?.body as SpaceBody | undefined)?.authority?.at ?? 0;
       if (authority && authority.at < before) return reject('the admin list has changed');
+      // The list means something only under the owner's signature.
+      if (body.formerAdmins?.length && !authority)
+        return reject("former admins need the owner's signature on the admin list");
+      // Those let in by an admin stay, so the admins the owner has removed are only added to.
+      const kept = new Set(body.formerAdmins ?? []);
+      if ((existing?.body as SpaceBody | undefined)?.formerAdmins?.some((u) => !kept.has(u)))
+        return reject('former admins cannot be taken off the list');
       if (body.owner === authorId) {
         if (spaceIdFor(record.author, body.nonce) !== spaceId)
           return reject('space id does not match owner');
@@ -176,6 +238,13 @@ export function validateRecord(input: unknown, ctx: ValidationContext): Validati
       if (!space) return reject('unknown space', true);
       const before = existing?.body as RecordBodies['invite'] | undefined;
       if (before && before.spaceId !== body.spaceId) return reject('invite code already used');
+      if (body.tpub !== undefined) {
+        // A ticket is the open link: its name is the hash of its key, and it is not for a person.
+        if (body.for !== undefined) return reject('a ticket is for the open link');
+        if (body.code !== ticketIdOf(body.tpub))
+          return reject('invite name does not match its key');
+      }
+      if (before && before.tpub !== body.tpub) return reject('an invite cannot change its ticket');
       if (body.for !== undefined) {
         if (!USER_ID.test(body.for)) return reject('bad invite recipient');
         if (body.for === authorId) return reject('an invite is for somebody else');
@@ -236,11 +305,39 @@ export function validateRecord(input: unknown, ctx: ValidationContext): Validati
       if (space.body.owner === authorId) return { ok: true, authorId };
       if (ctx.fresh && space.body.bans.includes(authorId))
         return reject('you are banned from this space');
+      if (body.ticket) {
+        if (body.inviteCode)
+          return reject('a membership uses a ticket or an invite code, not both');
+        const problem = ticketProblem(body.spaceId, space.body, body);
+        // (Not for a write straight from its author: it is told, and can write again.)
+        if (problem) return reject(problem.reason, problem.retryable && !ctx.fresh);
+        if (ctx.fresh) {
+          const tid = body.ticket.invite.body.code;
+          const invite = ctx.get(`invite:${tid}`) as SignedRecord<'invite'> | undefined;
+          if (!invite) return reject('unknown invite', true);
+          if (
+            invite.body.tpub !== body.ticket.invite.body.tpub ||
+            invite.body.spaceId !== body.spaceId
+          )
+            return reject('ticket does not match its invite');
+          if (invite.body.revoked) return reject('invite was revoked');
+          if (space.body.publicInvite !== tid)
+            return reject('this link has been replaced or turned off');
+          if (invite.body.expiresAt === null)
+            return reject('this link is out of date; make a new one');
+          if (!canManageSpace(space.body, userIdFromKey(invite.author)))
+            return reject('invite was made by someone who may no longer invite');
+          if (invite.body.expiresAt < ctx.now) return reject('invite expired');
+        }
+        return { ok: true, authorId };
+      }
       // Re-signing an existing active membership (e.g. rejoin after leave) needs a valid invite too.
       if (!body.inviteCode) return reject('an invite is required');
       const invite = ctx.get(`invite:${body.inviteCode}`) as SignedRecord<'invite'> | undefined;
       if (!invite) return reject('unknown invite', true);
       if (invite.body.spaceId !== body.spaceId) return reject('invite is for another space');
+      // A ticket is used with its secret, never by naming it: its name is in the space record.
+      if (invite.body.tpub !== undefined) return reject('this invite is used with its ticket');
       if (invite.body.for !== undefined && invite.body.for !== authorId)
         return reject('invite is for somebody else');
       if (ctx.fresh) {
@@ -317,11 +414,19 @@ function authorityPayload(
   admins: string[],
   at: number,
   invitePolicy?: SpaceBody['invitePolicy'],
+  formerAdmins?: string[],
 ) {
   // Members being let invite is the owner's to say, so it is in what the owner signs. (The
   // default is left out, which keeps what was signed before the setting existed valid.)
   const policy = signedInvitePolicy(invitePolicy);
-  return { spaceId, admins, at, ...(policy ? { invitePolicy: policy } : {}) };
+  return {
+    spaceId,
+    admins,
+    at,
+    ...(policy ? { invitePolicy: policy } : {}),
+    // (Also left out when there are none, so that what was signed before there were any stays valid.)
+    ...(formerAdmins?.length ? { formerAdmins } : {}),
+  };
 }
 
 /** The part of a space's invite policy the owner signs: only the one that is not the default. */
@@ -336,11 +441,16 @@ export function signSpaceAuthority(
   admins: string[],
   at: number,
   invitePolicy?: SpaceBody['invitePolicy'],
+  formerAdmins?: string[],
 ): NonNullable<SpaceBody['authority']> {
   return {
     ownerKey: owner.publicKey,
     at,
-    sig: sign(owner, SIG_DOMAIN.spaceAdmins, authorityPayload(spaceId, admins, at, invitePolicy)),
+    sig: sign(
+      owner,
+      SIG_DOMAIN.spaceAdmins,
+      authorityPayload(spaceId, admins, at, invitePolicy, formerAdmins),
+    ),
   };
 }
 
@@ -354,7 +464,7 @@ export function spaceAuthorityValid(spaceId: string, body: SpaceBody): boolean {
     return verifyPayload(
       a.ownerKey,
       SIG_DOMAIN.spaceAdmins,
-      authorityPayload(spaceId, body.admins, a.at, body.invitePolicy),
+      authorityPayload(spaceId, body.admins, a.at, body.invitePolicy, body.formerAdmins),
       a.sig,
     );
   } catch {
@@ -371,6 +481,54 @@ export function mayInviteByName(space: SpaceBody, userId: string): boolean {
   return canManageSpace(space, userId) || space.invitePolicy === 'members';
 }
 
+/** May have made a ticket that still admits those it let in: the owner, an admin, or a former one. */
+export function mayHaveIssuedTicket(space: SpaceBody, userId: string): boolean {
+  return (
+    canManageSpace(space, userId) || (!!space.authority && !!space.formerAdmins?.includes(userId))
+  );
+}
+
+/**
+ * Why a member record's ticket does not admit its user to the space, if it does not. It needs no
+ * clock and no other record than the space; whether the link is still on is for those who take a
+ * join as it is made.
+ */
+export function ticketProblem(
+  spaceId: string,
+  space: SpaceBody,
+  member: RecordBodies['member'],
+): { reason: string; retryable?: boolean } | undefined {
+  const t = member.ticket;
+  if (!t) return { reason: 'no ticket' };
+  const { invite } = t;
+  if (invite.key !== recordKey.invite(invite.body.code))
+    return { reason: 'ticket does not match its invite' };
+  if (invite.body.spaceId !== spaceId) return { reason: 'invite is for another space' };
+  if (invite.body.tpub === undefined || invite.body.for !== undefined)
+    return { reason: 'not a ticket' };
+  if (invite.body.code !== ticketIdOf(invite.body.tpub))
+    return { reason: 'invite name does not match its key' };
+  if (invite.body.revoked) return { reason: 'invite was revoked' };
+  if (!verifyPayload(invite.author, SIG_DOMAIN.record, signedPart(invite), invite.sig))
+    return { reason: 'bad signature on the ticket' };
+  if (!mayHaveIssuedTicket(space, userIdFromKey(invite.author)))
+    // (The space we hold may be older than the one that lists the maker: try again later.)
+    return { reason: 'invite was made by someone who could not invite', retryable: true };
+  if (
+    !verifyPayload(
+      invite.body.tpub,
+      SIG_DOMAIN.ticketUse,
+      ticketUsePayload(spaceId, invite.body.code, member.userId),
+      t.proof,
+    )
+  )
+    return { reason: 'the ticket was not used by this user' };
+  return undefined;
+}
+
+// A ticket is checked once for each member record against each space record it is met with.
+const ticketChecked = new WeakMap<object, WeakMap<object, boolean>>();
+
 /** True if the user currently belongs to the space (owner or active, non-banned member). */
 export function isSpaceMember(lookup: RecordLookup, spaceId: string, userId: string): boolean {
   const space = lookup.get(`space:${spaceId}`) as SignedRecord<'space'> | undefined;
@@ -378,5 +536,12 @@ export function isSpaceMember(lookup: RecordLookup, spaceId: string, userId: str
   if (space.body.owner === userId) return true;
   if (space.body.bans.includes(userId)) return false;
   const member = lookup.get(`member:${spaceId}:${userId}`) as SignedRecord<'member'> | undefined;
-  return !!member && !member.body.left;
+  if (!member || member.body.left) return false;
+  if (!member.body.ticket) return true;
+  // Who may have made the ticket is the space's to say now, whatever it said when this was taken.
+  let bySpace = ticketChecked.get(member);
+  if (!bySpace) ticketChecked.set(member, (bySpace = new WeakMap()));
+  let ok = bySpace.get(space);
+  if (ok === undefined) bySpace.set(space, (ok = !ticketProblem(spaceId, space.body, member.body)));
+  return ok;
 }

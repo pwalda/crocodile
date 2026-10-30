@@ -9,6 +9,7 @@ import {
   type HostCaps,
   type SessionOpProof,
   type SignedRecord,
+  type SpaceBody,
   utf8,
 } from '@crocodile/protocol';
 import {
@@ -63,7 +64,11 @@ import {
   signSdp,
   signSpaceAuthority,
   inviteCommitment,
+  newTicket,
+  signTicketUse,
+  spaceAuthorityValid,
   spaceIdFor,
+  ticketFromSecret,
   validateRecord,
   verifyChatMessage,
   verifyPayload,
@@ -646,6 +651,357 @@ describe('records', () => {
         });
         expect(validateRecord(withdrawn, ctx([named])).ok).toBe(true);
       });
+    });
+  });
+});
+
+describe('open link tickets', () => {
+  const alice = createIdentity();
+  const bob = createIdentity();
+  const carol = createIdentity();
+  const dave = createIdentity();
+  const mallory = createIdentity();
+  const nonce = randomId();
+  const spaceId = spaceIdFor(alice.publicKey, nonce);
+  const key = recordKey.space(spaceId);
+  const now = Date.now();
+  const week = 7 * 24 * 3600_000;
+  const base = {
+    name: 'Swamp',
+    owner: alice.userId,
+    nonce,
+    bans: [] as string[],
+    channels: [{ id: randomId(), name: 'general', kind: 'text' as const }],
+  };
+  const ticket = newTicket();
+
+  const space = (over: Partial<SpaceBody> = {}, version = now - 1000) =>
+    signRecord(
+      alice,
+      'space',
+      key,
+      { ...base, admins: [], publicInvite: ticket.tid, ...over },
+      version,
+    );
+  const invite = (who = alice, over: Record<string, unknown> = {}, t = ticket) =>
+    signRecord(who, 'invite', recordKey.invite(t.tid), {
+      spaceId,
+      code: t.tid,
+      tpub: t.tpub,
+      expiresAt: now + week,
+      ...over,
+    });
+  const joinWith = (
+    who: typeof carol,
+    inv: SignedRecord<'invite'>,
+    t: { secret: string; tid: string } = ticket,
+    extra: Record<string, unknown> = {},
+  ) =>
+    signRecord(who, 'member', recordKey.member(spaceId, who.userId), {
+      spaceId,
+      userId: who.userId,
+      ticket: { invite: inv, proof: signTicketUse(t, spaceId, who.userId) },
+      ...extra,
+    });
+
+  it('stands for a secret that is only in the link', () => {
+    expect(ticket.secret).toHaveLength(52);
+    expect(ticket.tid).toMatch(/^[a-z2-7]{26}$/);
+    // The link gives the whole ticket back, in any case; the name gives nothing away.
+    expect(ticketFromSecret(ticket.secret.toUpperCase())).toEqual(ticket);
+    expect(ticket.tid).not.toContain(ticket.secret.slice(0, 8));
+    expect(ticketFromSecret(ticket.secret.slice(1))).toBeNull();
+    // One spelling for one secret: the bits of the last character beyond the 256 are 0.
+    const alphabet = 'abcdefghijklmnopqrstuvwxyz234567';
+    const last = alphabet.indexOf(ticket.secret.at(-1)!);
+    expect(ticketFromSecret(ticket.secret.slice(0, -1) + alphabet[last ^ 1])).toBeNull();
+    expect(ticketFromSecret('1'.repeat(52))).toBeNull();
+    expect(newTicket().secret).not.toBe(ticket.secret);
+  });
+
+  it('admits a member who holds the link, on every path, without the invite record', () => {
+    const inv = invite();
+    const join = joinWith(carol, inv);
+    expect(validateRecord(join, ctx([space(), inv])).ok).toBe(true);
+    // A replicating server or an app does not have to find the invite: the member record carries it.
+    expect(validateRecord(join, ctx([space()], false)).ok).toBe(true);
+    expect(isSpaceMember(ctx([space(), join]), spaceId, carol.userId)).toBe(true);
+  });
+
+  it('is not given away by the records: another user cannot use what one user signed', () => {
+    const inv = invite();
+    const carols = joinWith(carol, inv);
+    const stolen = signRecord(dave, 'member', recordKey.member(spaceId, dave.userId), {
+      spaceId,
+      userId: dave.userId,
+      ticket: carols.body.ticket!,
+    });
+    expect(validateRecord(stolen, ctx([space()], false))).toMatchObject({
+      ok: false,
+      reason: 'the ticket was not used by this user',
+    });
+    // Nor does the invite record, which is all a server holds, do it without the secret.
+    const guessed = joinWith(dave, inv, newTicket());
+    expect(validateRecord(guessed, ctx([space(), inv], false))).toMatchObject({ ok: false });
+  });
+
+  it('is not joined by naming it as an invite code, however the record is taken', () => {
+    const inv = invite();
+    const named = signRecord(dave, 'member', recordKey.member(spaceId, dave.userId), {
+      spaceId,
+      userId: dave.userId,
+      inviteCode: ticket.tid,
+    });
+    for (const fresh of [true, false])
+      expect(validateRecord(named, ctx([space(), inv], fresh))).toMatchObject({
+        ok: false,
+        reason: 'this invite is used with its ticket',
+      });
+    // And one is not both.
+    const both = joinWith(carol, inv, ticket, { inviteCode: ticket.tid });
+    expect(validateRecord(both, ctx([space(), inv]))).toMatchObject({ ok: false });
+  });
+
+  it('is made by the owner, an admin, or a former one, and no one else', () => {
+    const asAdmin = signRecord(
+      alice,
+      'space',
+      key,
+      {
+        ...base,
+        admins: [bob.userId],
+        publicInvite: ticket.tid,
+        authority: signSpaceAuthority(alice, spaceId, [bob.userId], now - 2000),
+      },
+      now - 2000,
+    );
+    const byBob = invite(bob);
+    expect(validateRecord(byBob, ctx([asAdmin])).ok).toBe(true);
+    expect(validateRecord(joinWith(carol, byBob), ctx([asAdmin, byBob])).ok).toBe(true);
+    // Not by someone the space does not know. (Such an invite is not even taken.)
+    const byMallory = invite(mallory);
+    expect(validateRecord(byMallory, ctx([space()]))).toMatchObject({ ok: false });
+    expect(validateRecord(joinWith(carol, byMallory), ctx([space()], false))).toMatchObject({
+      ok: false,
+      reason: 'invite was made by someone who could not invite',
+      // (The space we hold may be older than the one that lists them: try again later.)
+      retryable: true,
+    });
+    // A write straight from its author is not held to be tried again.
+    const written = validateRecord(joinWith(carol, byMallory), ctx([space()]));
+    expect(written).toMatchObject({ ok: false });
+    expect(written).not.toMatchObject({ retryable: true });
+  });
+
+  it('keeps those an admin let in when the owner removes the admin, if the owner lists them as former', () => {
+    const admins = [bob.userId];
+    const asAdmin = signRecord(
+      alice,
+      'space',
+      key,
+      {
+        ...base,
+        admins,
+        publicInvite: ticket.tid,
+        authority: signSpaceAuthority(alice, spaceId, admins, now - 2000),
+      },
+      now - 2000,
+    );
+    const byBob = invite(bob);
+    const join = joinWith(carol, byBob);
+    expect(isSpaceMember(ctx([asAdmin, join]), spaceId, carol.userId)).toBe(true);
+    // Removed without being listed: what they made no longer admits anyone.
+    const removed = signRecord(
+      alice,
+      'space',
+      key,
+      {
+        ...base,
+        admins: [],
+        publicInvite: ticket.tid,
+        authority: signSpaceAuthority(alice, spaceId, [], now - 1500),
+      },
+      now - 1500,
+    );
+    expect(isSpaceMember(ctx([removed, join]), spaceId, carol.userId)).toBe(false);
+    expect(validateRecord(join, ctx([removed], false))).toMatchObject({ ok: false });
+    // Listed as former: they stay, on the path that has no clock...
+    const listed = signRecord(
+      alice,
+      'space',
+      key,
+      {
+        ...base,
+        admins: [],
+        formerAdmins: [bob.userId],
+        publicInvite: ticket.tid,
+        authority: signSpaceAuthority(alice, spaceId, [], now - 1500, undefined, [bob.userId]),
+      },
+      now - 1500,
+    );
+    expect(validateRecord(listed, ctx([asAdmin])).ok).toBe(true);
+    expect(isSpaceMember(ctx([listed, join]), spaceId, carol.userId)).toBe(true);
+    expect(validateRecord(join, ctx([listed], false)).ok).toBe(true);
+    // ...but nobody new joins by it where a join is taken as it is made.
+    expect(validateRecord(join, ctx([listed, byBob]))).toMatchObject({
+      ok: false,
+      reason: 'invite was made by someone who may no longer invite',
+    });
+  });
+
+  it('can only be added to in the list of former admins, and only by the owner', () => {
+    const listed = signRecord(
+      alice,
+      'space',
+      key,
+      {
+        ...base,
+        admins: [],
+        formerAdmins: [bob.userId],
+        authority: signSpaceAuthority(alice, spaceId, [], now - 1500, undefined, [bob.userId]),
+      },
+      now - 1500,
+    );
+    const dropped = signRecord(
+      alice,
+      'space',
+      key,
+      {
+        ...base,
+        admins: [],
+        authority: signSpaceAuthority(alice, spaceId, [], now - 1400),
+      },
+      now - 1400,
+    );
+    expect(validateRecord(dropped, ctx([listed]))).toMatchObject({
+      ok: false,
+      reason: 'former admins cannot be taken off the list',
+    });
+    // Nor does a list mean anything without the owner's signature on it.
+    const unsigned = signRecord(
+      alice,
+      'space',
+      key,
+      { ...base, admins: [], formerAdmins: [bob.userId] },
+      now - 1300,
+    );
+    expect(validateRecord(unsigned, ctx([]))).toMatchObject({ ok: false });
+    // An admin cannot list anyone: the owner's signature is over the list.
+    const admins = [carol.userId];
+    const asAdmin = signRecord(
+      alice,
+      'space',
+      key,
+      {
+        ...base,
+        admins,
+        authority: signSpaceAuthority(alice, spaceId, admins, now - 2000),
+      },
+      now - 2000,
+    );
+    const added = signRecord(
+      carol,
+      'space',
+      key,
+      { ...asAdmin.body, formerAdmins: [mallory.userId] },
+      now - 1900,
+    );
+    expect(validateRecord(added, ctx([asAdmin]))).toMatchObject({
+      ok: false,
+      reason: 'bad admin list signature',
+    });
+  });
+
+  it('still verifies an admin list signed before there were former admins', () => {
+    // What the code signed before: nothing about former admins in it, an empty list the same.
+    const signed = sign(alice, SIG_DOMAIN.spaceAdmins, { spaceId, admins: [bob.userId], at: 1234 });
+    const body = {
+      ...base,
+      admins: [bob.userId],
+      authority: { ownerKey: alice.publicKey, at: 1234, sig: signed },
+    };
+    expect(spaceAuthorityValid(spaceId, body)).toBe(true);
+    expect(spaceAuthorityValid(spaceId, { ...body, formerAdmins: [] })).toBe(true);
+    expect(spaceAuthorityValid(spaceId, { ...body, formerAdmins: [mallory.userId] })).toBe(false);
+  });
+
+  it('is judged, where a join is taken as it is made, by whether the link is on', () => {
+    const inv = invite();
+    const join = joinWith(carol, inv);
+    const revoked = signRecord(alice, 'invite', recordKey.invite(ticket.tid), {
+      ...inv.body,
+      revoked: true,
+    });
+    expect(validateRecord(join, ctx([space(), revoked]))).toMatchObject({
+      ok: false,
+      reason: 'invite was revoked',
+    });
+    const replaced = space({ publicInvite: newTicket().tid });
+    expect(validateRecord(join, ctx([replaced, inv]))).toMatchObject({
+      ok: false,
+      reason: 'this link has been replaced or turned off',
+    });
+    const expired = invite(alice, { expiresAt: now - 1000 });
+    expect(validateRecord(joinWith(carol, expired), ctx([space(), expired]))).toMatchObject({
+      ok: false,
+      reason: 'invite expired',
+    });
+    expect(validateRecord(join, ctx([space({ bans: [carol.userId] }), inv]))).toMatchObject({
+      ok: false,
+      reason: 'you are banned from this space',
+    });
+    expect(validateRecord(join, ctx([space()]))).toMatchObject({ ok: false, retryable: true });
+    // The invite held for the name is that of this space.
+    const elsewhere = signRecord(alice, 'invite', recordKey.invite(ticket.tid), {
+      ...inv.body,
+      spaceId: spaceIdFor(alice.publicKey, randomId()),
+    });
+    expect(validateRecord(join, ctx([space(), elsewhere]))).toMatchObject({
+      ok: false,
+      reason: 'ticket does not match its invite',
+    });
+    // A membership already made is still one when the link is turned off.
+    expect(validateRecord(join, ctx([replaced, revoked], false)).ok).toBe(true);
+    // Another invite's record does not stand in for the one the member carries.
+    const other = newTicket();
+    const mine = invite(alice, {}, other);
+    const carried = joinWith(carol, mine, other);
+    expect(validateRecord(carried, ctx([space({ publicInvite: other.tid }), inv]))).toMatchObject({
+      ok: false,
+      reason: 'unknown invite',
+    });
+  });
+
+  it('is made only as the open link: named by the hash of its key, and not for a person', () => {
+    expect(validateRecord(invite(), ctx([space()])).ok).toBe(true);
+    const wrongName = newTicket();
+    const misnamed = signRecord(alice, 'invite', recordKey.invite(wrongName.tid), {
+      spaceId,
+      code: wrongName.tid,
+      tpub: ticket.tpub,
+      expiresAt: now + week,
+    });
+    expect(validateRecord(misnamed, ctx([space()]))).toMatchObject({
+      ok: false,
+      reason: 'invite name does not match its key',
+    });
+    const named = invite(alice, { for: carol.userId });
+    expect(validateRecord(named, ctx([space()]))).toMatchObject({
+      ok: false,
+      reason: 'a ticket is for the open link',
+    });
+    // The key of a link does not change under it.
+    const first = invite();
+    const swapped = signRecord(
+      alice,
+      'invite',
+      recordKey.invite(ticket.tid),
+      { spaceId, code: ticket.tid, expiresAt: now + week },
+      Date.now() + 1000,
+    );
+    expect(validateRecord(swapped, ctx([space(), first]))).toMatchObject({
+      ok: false,
+      reason: 'an invite cannot change its ticket',
     });
   });
 });
