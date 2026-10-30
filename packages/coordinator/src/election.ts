@@ -10,7 +10,7 @@ import type { SessionMember } from '@crocodile/protocol';
  * What a member says about its machine cannot be checked, so what it can gain by
  * saying more is capped: the best score a claim can reach is one an honest desktop
  * with a good connection reaches too (uplink counts up to a fixed share, cores and
- * round-trip time not at all; they are still sent, for servers that score them). Ties go by a hash of the session and the device, so
+ * round-trip time not at all). Ties go by a hash of the session and the device, so
  * they do not always favour the name that sorts first (a device id is still its own to
  * pick, so this is no protection against one that tries many). Each person is one candidate (their best
  * device), so having many devices gives no more chances, and a backup is a different
@@ -63,10 +63,16 @@ export function elect({ sessionId, members, host, backup, penalties, now }: Elec
     hostScore(b, now) - hostScore(a, now) ||
     fnv1a(`${sessionId}|${b.peer}`) - fnv1a(`${sessionId}|${a.peer}`) ||
     a.peer.localeCompare(b.peer);
-  // One candidate a person: their best device.
+  // A network that others can reach, or one that could not be checked, beats a known symmetric one.
+  const reachable = (m: SessionMember) => m.caps.nat !== 'symmetric';
+  // One candidate a person: their best device, one others can reach if they have one.
   const onePerPerson = (list: SessionMember[]) => {
-    const seen = new Set<string>();
-    return list.sort(better).filter((m) => !seen.has(m.userId) && !!seen.add(m.userId));
+    const best = new Map<string, SessionMember>();
+    for (const m of list.sort(better)) {
+      const have = best.get(m.userId);
+      if (!have || (!reachable(have) && reachable(m))) best.set(m.userId, m);
+    }
+    return [...best.values()].sort(better);
   };
   const ranked = onePerPerson(members.filter(available));
 
@@ -74,12 +80,8 @@ export function elect({ sessionId, members, host, backup, penalties, now }: Elec
   const current = host ? byId.get(host) : undefined;
   // A network check that couldn't finish ('unknown') is still a better bet
   // than a known symmetric NAT (a device with UDP blocked reports symmetric).
-  const reachable = (m: SessionMember) => m.caps.nat !== 'symmetric';
-  // Looked for among all devices: a person's best device may be the symmetric one.
   const betterReachable =
-    current?.caps.nat === 'symmetric'
-      ? onePerPerson(members.filter((m) => available(m) && reachable(m)))[0]
-      : undefined;
+    current?.caps.nat === 'symmetric' ? ranked.find((m) => reachable(m)) : undefined;
   if (betterReachable) nextHost = betterReachable.peer;
   else if (current && available(current)) nextHost = current.peer;
   else {

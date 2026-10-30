@@ -385,4 +385,51 @@ describe('election', () => {
     });
     expect(r.host).toBe('b.d2');
   });
+
+  it("puts a person's reachable device up as backup when their best one is behind a symmetric NAT", () => {
+    const user = (u: string, n: number, nat: 'open' | 'cone' | 'symmetric', extra = {}) => ({
+      ...member(`${u}.d${n}`, nat, extra),
+      userId: u,
+    });
+    const members = [
+      user('host', 1, 'open', { uplinkKbps: 100_000 }),
+      user('b', 1, 'symmetric', { uplinkKbps: 100_000 }),
+      user('b', 2, 'cone', { onBattery: true }),
+    ];
+    const r = elect({
+      sessionId: 's1',
+      members,
+      host: 'host.d1',
+      backup: null,
+      penalties: new Map(),
+      now: 0,
+    });
+    expect(r.backup).toBe('b.d2');
+  });
+
+  it('with everyone penalised, keeps one candidate a person, and drops a backup who left', () => {
+    const user = (u: string, n: number, extra = {}) => ({
+      ...member(`${u}.d${n}`, 'open', extra),
+      userId: u,
+    });
+    const members = [
+      user('a', 1, { onBattery: true }),
+      user('a', 2),
+      user('b', 1, { onBattery: true }),
+    ];
+    const penalties = new Map(members.map((m) => [m.peer, 1000]));
+    const r = elect({ sessionId: 's1', members, host: null, backup: 'gone.d1', penalties, now: 0 });
+    // Nobody else to choose: the best device of the best person; the backup is the other person.
+    expect(r.host).toBe('a.d2');
+    expect(r.backup).toBeNull();
+    const free = elect({
+      sessionId: 's1',
+      members,
+      host: 'a.d2',
+      backup: 'gone.d1',
+      penalties: new Map(),
+      now: 0,
+    });
+    expect(free.backup).toBe('b.d1');
+  });
 });
