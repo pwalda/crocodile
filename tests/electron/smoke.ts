@@ -92,6 +92,24 @@ await a.page.waitForFunction(() => /Alice#\d+/.test(document.body.innerText), un
 });
 await shot(a.page, '03-home');
 
+// A file dropped on the window must not open in it as a page with the app's bridge.
+const startUrl = a.page.url();
+const dropOutcome = await a.page.evaluate(() => {
+  const data = new DataTransfer();
+  data.items.add(new File(['<h1>x</h1>'], 'x.html', { type: 'text/html' }));
+  const over = new DragEvent('dragover', { dataTransfer: data, bubbles: true, cancelable: true });
+  document.body.dispatchEvent(over);
+  const drop = new DragEvent('drop', { dataTransfer: data, bubbles: true, cancelable: true });
+  document.body.dispatchEvent(drop);
+  return {
+    overRefused: over.defaultPrevented && data.dropEffect === 'none',
+    dropRefused: drop.defaultPrevented,
+  };
+});
+if (!dropOutcome.overRefused || !dropOutcome.dropRefused)
+  throw new Error(`a stray drop is not refused: ${JSON.stringify(dropOutcome)}`);
+if (a.page.url() !== startUrl) throw new Error('a stray drop navigated the window');
+
 // Create a space.
 await a.page.getByTitle('Create or join a space').click();
 await a.page.getByText('Create my own').click();

@@ -1,4 +1,5 @@
-import { desktopCapturer, ipcMain, session, systemPreferences } from 'electron';
+import { desktopCapturer, session, systemPreferences } from 'electron';
+import { handle } from './ipc-guard';
 import type { ScreenSource, ScreenSources } from './ipc-types';
 
 /**
@@ -16,7 +17,7 @@ const CHOICE_TTL_MS = 30_000;
 let chosen: { id: string; audio: boolean; at: number } | null = null;
 
 export function setupScreenShare() {
-  ipcMain.handle('screen:sources', async (): Promise<ScreenSources> => {
+  handle('screen:sources', async (): Promise<ScreenSources> => {
     // macOS asks once, in System Settings, whether the app may record the screen.
     const access =
       process.platform === 'darwin' ? systemPreferences.getMediaAccessStatus('screen') : 'granted';
@@ -37,7 +38,7 @@ export function setupScreenShare() {
     return { sources, canShareSound: CAN_SHARE_SOUND, access };
   });
 
-  ipcMain.handle('screen:choose', (_e, id: unknown, audio: unknown) => {
+  handle('screen:choose', (_e, id: unknown, audio: unknown) => {
     if (typeof id !== 'string' || id.length > 200) throw new Error('bad source');
     chosen = { id, audio: audio === true && CAN_SHARE_SOUND, at: Date.now() };
   });

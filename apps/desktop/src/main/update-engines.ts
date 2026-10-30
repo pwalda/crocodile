@@ -4,6 +4,7 @@ import { execFile, spawn } from 'node:child_process';
 import { accessSync, constants, existsSync, readFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { promisify } from 'node:util';
+import { testSetting } from './test-settings';
 import {
   electronUpdaterEngine,
   MacSwapEngine,
@@ -18,7 +19,7 @@ const run = promisify(execFile);
 
 /** The engine for this install, or null for a development build. */
 export async function createUpdateEngine(): Promise<UpdateEngine | null> {
-  const fake = process.env.CROC_FAKE_UPDATE;
+  const fake = testSetting('CROC_FAKE_UPDATE');
   if (fake) return electronUpdaterEngine(fakeUpdater(fake));
   const mode = updateMode({
     packaged: app.isPackaged,
@@ -80,7 +81,7 @@ export async function createUpdateEngine(): Promise<UpdateEngine | null> {
  * behaves like an installer that didn't start (it logs, the app keeps running).
  */
 function fakeUpdater(version: string): AutoUpdaterLike {
-  const step = Number(process.env.CROC_FAKE_UPDATE_STEP_MS ?? 300);
+  const step = Number(testSetting('CROC_FAKE_UPDATE_STEP_MS') ?? 300);
   const listeners = new Set<(p: { percent: number }) => void>();
   return {
     autoDownload: false,
