@@ -475,6 +475,21 @@ describe('events and session operations from other servers', () => {
       expect(state().epoch).toBeLessThan(5);
     });
 
+    it('keeps the epoch of a hint that names no host', async () => {
+      const net = await conversation();
+      const state = await joined(net);
+      const device = peerIds.device(net.alice.conn.peer);
+      net.toVictim.send(
+        presenceFrom(net.rogue, Date.now(), [entry(net.alice.identity.userId, [device])]),
+      );
+      op(net, net.alice.conn.peer, {
+        op: 'join',
+        caps: caps(),
+        hint: { epoch: 1000, host: null, backup: null },
+      });
+      await waitFor(() => state().epoch >= 1000, 5000, 'the epoch to be kept');
+    });
+
     it('keeps the host a hint names when only the backup it names is not a device that exists', async () => {
       const net = await conversation();
       const state = await joined(net);

@@ -217,10 +217,6 @@ export class SessionService {
     return { device: removed ? null : record, removed };
   }
 
-  private async deviceOf(peer: string): Promise<SignedRecord<'device'> | null> {
-    return (await this.lookupDevice(peer)).device;
-  }
-
   /**
    * What the server takes from a device of ours that joins or updates: it must have a record
    * on its account (the sign-in names a device but proves only the account), and what kind of
@@ -575,11 +571,11 @@ export class SessionService {
   /**
    * What of a hint is believed: the host it names, and the backup, if they may be in the
    * session as devices that exist (a record not yet found is waited for, as at a join). A
-   * backup that does not pass is left out and the host kept; a host that does not pass
-   * makes the whole hint worthless.
+   * backup that does not pass is left out and the host kept; a host that is named and does
+   * not pass makes the whole hint worthless (none named is fine: the epoch is kept).
    */
   private async hintAllowed(sessionId: string, hint: Hint): Promise<Hint | null> {
-    if (hint.epoch < 0 || hint.epoch > HINT_EPOCH_MAX || !hint.host) return null;
+    if (hint.epoch < 0 || hint.epoch > HINT_EPOCH_MAX) return null;
     const known = async (peer: string | null) => {
       if (!peer) return null;
       try {
@@ -590,7 +586,8 @@ export class SessionService {
       }
     };
     const [host, backup] = await Promise.all([known(hint.host), known(hint.backup)]);
-    return host ? { epoch: hint.epoch, host, backup } : null;
+    // A room that had no host still has an epoch to keep.
+    return host || !hint.host ? { epoch: hint.epoch, host, backup } : null;
   }
 
   handleRemoteResult(opId: string, ok: unknown, err?: { code: string; message: string }) {
