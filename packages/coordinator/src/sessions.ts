@@ -171,9 +171,30 @@ export class SessionService {
   private async findDevice(peer: string): Promise<SignedRecord<'device'> | null> {
     const key = deviceKey(peer);
     const [record] = await this.hub.dist.get([key]);
-    return record && record.key === key && record.kind === 'device'
-      ? (record as SignedRecord<'device'>)
+    if (!record || record.key !== key || record.kind !== 'device') return null;
+    const device = record as SignedRecord<'device'>;
+    // Belongs to this very device of this very account.
+    return device.body.userId === peerIds.user(peer) &&
+      device.body.deviceId === peerIds.device(peer)
+      ? device
       : null;
+  }
+
+  /** Looks for a record that is not there yet for a moment; devices waited for share the wait. */
+  private waitForDevice(peer: string): Promise<SignedRecord<'device'> | null> {
+    const running = this.waiting.get(peer);
+    if (running) return running;
+    if (this.waiting.size >= DEVICE_WAITERS_MAX) return Promise.resolve(null);
+    const wait = (async () => {
+      for (let i = 0; i < DEVICE_LOOKUPS; i++) {
+        await new Promise((r) => setTimeout(r, DEVICE_LOOKUP_WAIT_MS));
+        const record = await this.findDevice(peer);
+        if (record) return record;
+      }
+      return null;
+    })().finally(() => this.waiting.delete(peer));
+    this.waiting.set(peer, wait);
+    return wait;
   }
 
   /**
@@ -187,21 +208,8 @@ export class SessionService {
     patient = false,
   ): Promise<{ device: SignedRecord<'device'> | null; removed: boolean }> {
     let record = await this.findDevice(peer);
-    // Waiting is capped, like the wait for news of a device: made-up devices must not hold
-    // up the server.
-    if (patient && !record && this.deviceWaiters < DEVICE_WAITERS_MAX && !this.waiting.has(peer)) {
-      this.deviceWaiters += 1;
-      this.waiting.add(peer);
-      try {
-        for (let i = 0; !record && i < DEVICE_LOOKUPS; i++) {
-          await new Promise((r) => setTimeout(r, DEVICE_LOOKUP_WAIT_MS));
-          record = await this.findDevice(peer);
-        }
-      } finally {
-        this.deviceWaiters -= 1;
-        this.waiting.delete(peer);
-      }
-    }
+    // Few may wait at once, and a device waits once however many rooms it is joining.
+    if (patient && !record) record = await this.waitForDevice(peer);
     const removed = record?.body.revoked === true;
     return { device: removed ? null : record, removed };
   }
@@ -453,9 +461,8 @@ export class SessionService {
   /** Operations on one session are applied one at a time, in the order they arrived. */
   private opChains = new Map<string, Promise<void>>();
   private hostingWaiters = 0;
-  private deviceWaiters = 0;
-  /** Devices whose record is being waited for: one wait each, so one cannot use up the rest. */
-  private waiting = new Set<string>();
+  /** Devices whose record is being waited for, with the wait. */
+  private waiting = new Map<string, Promise<SignedRecord<'device'> | null>>();
 
   handleRemoteOp(fromServer: string, frame: FedSessionOp) {
     const reply = (res: { ok: unknown } | { err: unknown }) =>

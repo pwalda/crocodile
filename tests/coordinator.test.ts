@@ -938,13 +938,13 @@ describe('sessions and host election', () => {
       const { c, alice, sessionId } = await setup();
       const bare = await connectUser(c, alice.identity, 'alice', randomDeviceId(), false);
       cleanup.push(() => bare.conn.close());
-      const internals = c.sessions as unknown as { deviceWaiters: number };
-      internals.deviceWaiters = 1_000_000;
+      const internals = c.sessions as unknown as { waiting: Map<string, unknown> };
+      for (let i = 0; i < 1000; i++) internals.waiting.set(`full${i}`, Promise.resolve(null));
       const start = Date.now();
       await expect(bare.conn.request('session.join', { sessionId, caps: caps() })).rejects.toThrow(
         /device/,
       );
-      internals.deviceWaiters = 0;
+      internals.waiting.clear();
       expect(Date.now() - start).toBeLessThan(250);
     });
 
@@ -1035,18 +1035,21 @@ describe('sessions and host election', () => {
       expect(c.sessions.ownedState(sessionId)?.members ?? []).toEqual([]);
     });
 
-    it('gives a device one wait at a time for a record, so one cannot use up the others', async () => {
-      const { c, alice, sessionId } = await setup();
+    it('lets a device joining two rooms at once wait for its record once, and join both', async () => {
+      const { c, alice, bob, spaceId, voiceChannel } = await setup();
       const bare = await connectUser(c, alice.identity, 'alice', randomDeviceId(), false);
       cleanup.push(() => bare.conn.close());
-      const first = bare.conn.request('session.join', { sessionId, caps: caps() }).catch(() => {});
-      await new Promise((r) => setTimeout(r, 50));
-      const start = Date.now();
-      await expect(bare.conn.request('session.join', { sessionId, caps: caps() })).rejects.toThrow(
-        /device/,
+      const voice = sessionIds.voice(spaceId, voiceChannel);
+      const dm = sessionIds.dm(alice.identity.userId, bob.identity.userId);
+      const joins = [voice, dm].map((sessionId) =>
+        bare.conn.request('session.join', { sessionId, caps: caps() }),
       );
-      expect(Date.now() - start).toBeLessThan(250);
-      await first;
+      // Its record arrives while they wait.
+      await new Promise((r) => setTimeout(r, 350));
+      await registerDevice(bare);
+      await Promise.all(joins);
+      expect(c.sessions.inSession(bare.conn.peer, voice)).toBe(true);
+      expect(c.sessions.inSession(bare.conn.peer, dm)).toBe(true);
     });
 
     it('does not count the vote of a device that has left, though the person has another', async () => {
