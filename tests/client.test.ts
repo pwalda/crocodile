@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   CoordinatorLink,
   CrocodileClient,
@@ -1571,6 +1571,77 @@ describe('leaving', () => {
     await waitFor(() => !bob.state.spaces[bobs]?.members.includes(aliceId), 5000, 'left bob space');
     await waitFor(() => !bob.state.friends.friends.includes(aliceId), 5000, 'unfriended');
     expect(bob.state.friends.outgoing).not.toContain(aliceId);
+  });
+
+  it('comes up on reconnect even when one space cannot be checked just now', async () => {
+    const coord = await server();
+    const alice = await signUp(makeClient(new FakeRelayNetwork(), coord), 'alice');
+    const spaceId = await alice.createSpace('Swamp');
+    const userId = alice.userId;
+    const link = (alice as unknown as { link: CoordinatorLink }).link;
+    const asked = vi.spyOn(link, 'request');
+    // The server cannot find out who is in the space, the first two times it is asked: its member
+    // list is an error to try again.
+    const get = coord.dist.get.bind(coord.dist);
+    let failures = 2;
+    const spy = vi.spyOn(coord.dist, 'get').mockImplementation(async (keys) => {
+      if (keys.includes(recordKey.space(spaceId)) && keys.some((k) => k.startsWith('member:')))
+        if (failures-- > 0) throw new Error('owners unreachable');
+      return get(keys);
+    });
+    for (const client of coord.presence.localOf(userId)) client.close(4000, 'going away');
+    await waitFor(() => alice.state.link !== 'connected', 3000, 'disconnected');
+    await waitFor(() => alice.state.link === 'connected', 5000, 'reconnected');
+    // The rest of coming up still ran: the space is followed.
+    await waitFor(
+      () =>
+        coord.presence
+          .localOf(userId)
+          .some((c) =>
+            (c as unknown as { subscriptions: Set<string> }).subscriptions.has(
+              recordKey.space(spaceId),
+            ),
+          ),
+      3000,
+      'subscribed',
+    );
+    // And the member list was asked for again.
+    const lists = () =>
+      asked.mock.calls.filter(
+        ([m, p]) =>
+          m === 'records.list' &&
+          (p as { prefix: string }).prefix === recordKey.memberPrefix(spaceId),
+      ).length;
+    // The first two asks fail (coming up, and what a change in the space makes the client do);
+    // a third is the client trying again by itself.
+    await waitFor(() => lists() >= 3, 8000, 'member list asked for again');
+    asked.mockRestore();
+    spy.mockRestore();
+  });
+
+  it('asks again for the members of a space it has just joined, when only itself came back', async () => {
+    const coord = await server();
+    const net = new FakeRelayNetwork();
+    const alice = await signUp(makeClient(net, coord), 'alice');
+    const bob = await signUp(makeClient(net, coord), 'bob');
+    const carol = await signUp(makeClient(net, coord), 'carol');
+    const spaceId = await alice.createSpace('Swamp');
+    const code = await alice.createInvite(spaceId);
+    await carol.joinWithInvite(code);
+    // The owners have not heard of bob's membership yet: for a moment the server finds that
+    // he may not read the list.
+    const conn = coord.presence.localOf(bob.userId)[0] as unknown as {
+      mayReadMembers(spaceId: string): Promise<boolean>;
+    };
+    const original = conn.mayReadMembers.bind(conn);
+    const until = Date.now() + 2500;
+    const spy = vi
+      .spyOn(conn, 'mayReadMembers')
+      .mockImplementation(async (id) => (Date.now() < until ? false : original(id)));
+    await bob.joinWithInvite(code);
+    expect(bob.state.spaces[spaceId]?.members ?? []).not.toContain(carol.userId);
+    await waitFor(() => bob.state.spaces[spaceId]?.members.includes(carol.userId), 8000, 'carol');
+    spy.mockRestore();
   });
 
   it('a stopped link fails requests at once instead of waiting for a server', async () => {

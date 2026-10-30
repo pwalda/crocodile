@@ -28,7 +28,7 @@ import {
   type OperatorInfo,
   isOperatorContact,
 } from '@crocodile/protocol';
-import { ClientConnection } from './client';
+import { ClientConnection, spaceOfRecord } from './client';
 import { DirectoryClient } from './directory-client';
 import { Distribution, defaultDistributionConfig, type DistributionConfig } from './distribution';
 import { Membership, defaultMembershipTiming, type MembershipTiming } from './membership';
@@ -577,13 +577,20 @@ export class Coordinator {
         : record.kind === 'note'
           ? record.key.split(':')[1]
           : undefined;
+    // A join, a leave, a ban or a deleted space changes who may read the member list of that
+    // space (of a member record, for that user alone): what a connection found out is looked up again.
+    const space = spaceOfRecord(record);
     for (const client of this.presence.localClients()) {
-      if (
-        (client as ClientConnection).wants(record) ||
-        friendOf?.has(client.userId) ||
-        forUser === client.userId
-      ) {
+      const conn = client as ClientConnection;
+      if (space !== undefined && (record.kind === 'space' || forUser === client.userId))
+        conn.forgetMembers(space);
+      if (friendOf?.has(client.userId) || forUser === client.userId) {
         client.send('record', { record });
+      } else if (conn.wants(record)) {
+        // Who is in a space is told to those in it (found out first, so it may take a moment).
+        const others = conn.othersMemberOf(record);
+        if (others === undefined) client.send('record', { record });
+        else void conn.sendMemberRecord(record, others);
       }
     }
   }

@@ -165,6 +165,222 @@ describe('records', () => {
   });
 });
 
+describe('member lists', () => {
+  const keysOf = (res: { records: SignedRecord[] }) => res.records.map((r) => r.key).sort();
+
+  it('are read by the owner and the members of a space, not by anyone else', async () => {
+    const c = await server();
+    const alice = await user(c);
+    const bob = await user(c);
+    const eve = await user(c); // knows the space id, never joined
+    const { spaceId, code } = await createSpace(alice);
+    await joinSpace(bob, spaceId, code);
+    const prefix = recordKey.memberPrefix(spaceId);
+    const both = [
+      recordKey.member(spaceId, alice.identity.userId),
+      recordKey.member(spaceId, bob.identity.userId),
+    ].sort();
+
+    expect(keysOf(await alice.conn.request('records.list', { prefix }))).toEqual(both);
+    expect(keysOf(await bob.conn.request('records.list', { prefix }))).toEqual(both);
+
+    // The same list asked without the colon; a prefix spanning spaces gives only a member's own.
+    expect(
+      keysOf(await alice.conn.request('records.list', { prefix: prefix.slice(0, -1) })),
+    ).toEqual(both);
+    expect(keysOf(await eve.conn.request('records.list', { prefix: prefix.slice(0, -1) }))).toEqual(
+      [],
+    );
+    // A prefix spanning spaces gives a member only their own records.
+    expect(keysOf(await bob.conn.request('records.list', { prefix: 'member:' }))).toEqual([
+      recordKey.member(spaceId, bob.identity.userId),
+    ]);
+
+    // Eve gets nothing, by listing (also by a shorter prefix) or by asking for a key.
+    for (const p of [prefix, 'member:', 'mem'])
+      expect((await eve.conn.request('records.list', { prefix: p, limit: 5000 })).records).toEqual(
+        [],
+      );
+    const asked = await eve.conn.request('records.get', {
+      keys: [recordKey.member(spaceId, bob.identity.userId), recordKey.space(spaceId)],
+    });
+    expect(asked.records.map((r) => r.key)).toEqual([recordKey.space(spaceId)]);
+    // Nor a share of what the members are told as people join.
+    await eve.conn.request('records.subscribe', { prefixes: [prefix] });
+    await bob.conn.request('records.subscribe', { prefixes: [prefix] });
+    const carol = await user(c);
+    await joinSpace(carol, spaceId, code);
+    const carolKey = recordKey.member(spaceId, carol.identity.userId);
+    const told = (u: { events: { ev: string; d: unknown }[] }) =>
+      u.events.some(
+        (e) => e.ev === 'record' && (e.d as { record: SignedRecord }).record.key === carolKey,
+      );
+    await waitFor(() => told(bob), 2000, 'a member told of the new member');
+    expect(told(eve)).toBe(false);
+
+    // Eve's own record is hers to read; and once she is in, she reads the list at once.
+    await joinSpace(eve, spaceId, code);
+    expect(keysOf(await eve.conn.request('records.list', { prefix })).length).toBe(4);
+  });
+
+  it('stop being readable to somebody who leaves or is banned, to a list or a push', async () => {
+    const c = await server();
+    const alice = await user(c);
+    const bob = await user(c);
+    const carol = await user(c);
+    const { spaceId, code } = await createSpace(alice);
+    await joinSpace(bob, spaceId, code);
+    await joinSpace(carol, spaceId, code);
+    const prefix = recordKey.memberPrefix(spaceId);
+    const mine = (u: TestUser) => recordKey.member(spaceId, u.identity.userId);
+    for (const u of [alice, bob, carol]) {
+      expect((await u.conn.request('records.list', { prefix })).records).toHaveLength(3);
+      await u.conn.request('records.subscribe', { prefixes: [prefix] });
+    }
+    const told = (u: TestUser, key: string) =>
+      u.events.some(
+        (e) => e.ev === 'record' && (e.d as { record: SignedRecord }).record.key === key,
+      );
+    const join = async (name: string) => {
+      const u = await user(c, name);
+      await joinSpace(u, spaceId, code);
+      return u;
+    };
+
+    // Both are told of a new member.
+    const dave = await join('dave');
+    await waitFor(() => told(bob, mine(dave)) && told(carol, mine(dave)), 2000, 'told of dave');
+
+    // Bob leaves: his list is his own record, and nothing more is pushed to him.
+    expectAccepted(
+      await bob.conn.request('records.put', {
+        record: signRecord(
+          bob.identity,
+          'member',
+          mine(bob),
+          { spaceId, userId: bob.identity.userId, left: true },
+          Date.now() + 10,
+        ),
+      }),
+    );
+    expect((await bob.conn.request('records.list', { prefix })).records.map((r) => r.key)).toEqual([
+      mine(bob),
+    ]);
+
+    // Carol is banned by the owner: closed to her at once, from the next list and push.
+    const space = (await alice.conn.request('records.get', { keys: [recordKey.space(spaceId)] }))
+      .records[0] as SignedRecord<'space'>;
+    expectAccepted(
+      await alice.conn.request('records.put', {
+        record: signRecord(
+          alice.identity,
+          'space',
+          space.key,
+          { ...space.body, bans: [carol.identity.userId] },
+          space.version + 1,
+        ),
+      }),
+    );
+    expect(
+      (await carol.conn.request('records.list', { prefix })).records.map((r) => r.key),
+    ).toEqual([mine(carol)]);
+    const erin = await join('erin');
+    // Alice, still in, is told; the two who are out are not.
+    await waitFor(() => told(alice, mine(erin)), 2000, 'the owner told of erin');
+    await new Promise((done) => setTimeout(done, 100));
+    expect(told(bob, mine(erin)) || told(carol, mine(erin))).toBe(false);
+  });
+
+  it('are followed through a prefix naming the space, not a broad one', async () => {
+    const c = await server();
+    const alice = await user(c);
+    const bob = await user(c);
+    const { spaceId, code } = await createSpace(alice);
+    await joinSpace(bob, spaceId, code);
+    await bob.conn.request('records.subscribe', { prefixes: ['member:'] });
+    const carol = await user(c);
+    await joinSpace(carol, spaceId, code);
+    await new Promise((done) => setTimeout(done, 150));
+    const told = (key: string) =>
+      bob.events.some(
+        (e) => e.ev === 'record' && (e.d as { record: SignedRecord }).record.key === key,
+      );
+    expect(told(recordKey.member(spaceId, carol.identity.userId))).toBe(false);
+    // Bob's own record is still his to hear of, wherever he wrote it from.
+    expect(told(recordKey.member(spaceId, bob.identity.userId))).toBe(true);
+  });
+
+  it('are not served while it cannot be found out who may read them', async () => {
+    const c = await server();
+    const alice = await user(c);
+    const bob = await user(c);
+    const { spaceId, code } = await createSpace(alice);
+    await joinSpace(bob, spaceId, code);
+    const prefix = recordKey.memberPrefix(spaceId);
+    const get = vi.spyOn(c.dist, 'get').mockRejectedValueOnce(new Error('owners unreachable'));
+    // An error to try again, not a list that looks complete and is not.
+    await expect(bob.conn.request('records.list', { prefix })).rejects.toThrow(/try again/);
+    // Owners that do not answer give no error, only no space: not a "no" either.
+    get.mockResolvedValueOnce([]);
+    await expect(bob.conn.request('records.list', { prefix })).rejects.toThrow(/try again/);
+    get.mockRestore();
+    expect((await bob.conn.request('records.list', { prefix })).records).toHaveLength(2);
+  });
+
+  it('are not sent to somebody banned while it was being found out whether they may have them', async () => {
+    const c = await server();
+    const alice = await user(c);
+    const carol = await user(c);
+    const { spaceId, code } = await createSpace(alice);
+    await joinSpace(carol, spaceId, code);
+    const prefix = recordKey.memberPrefix(spaceId);
+    await carol.conn.request('records.subscribe', { prefixes: [prefix] });
+    const told = (key: string) =>
+      carol.events.some(
+        (e) => e.ev === 'record' && (e.d as { record: SignedRecord }).record.key === key,
+      );
+
+    // What was found out about carol has run out. The next look-up answers at once, but is
+    // delivered only after the ban: the answer it gives is out of date by then.
+    vi.useFakeTimers({ toFake: ['Date'] });
+    const original = c.dist.get.bind(c.dist);
+    let release = () => {};
+    const gate = new Promise<void>((done) => (release = done));
+    const carolKey = recordKey.member(spaceId, carol.identity.userId);
+    const lookup = vi.spyOn(c.dist, 'get').mockImplementation(async (keys) => {
+      const found = await original(keys);
+      if (keys.includes(carolKey)) await gate;
+      return found;
+    });
+    try {
+      vi.setSystemTime(Date.now() + 60_000);
+      const dave = await user(c);
+      await joinSpace(dave, spaceId, code);
+      await waitFor(() => lookup.mock.calls.some(([k]) => k.includes(carolKey)), 2000, 'look-up');
+      const space = (await alice.conn.request('records.get', { keys: [recordKey.space(spaceId)] }))
+        .records[0] as SignedRecord<'space'>;
+      expectAccepted(
+        await alice.conn.request('records.put', {
+          record: signRecord(
+            alice.identity,
+            'space',
+            space.key,
+            { ...space.body, bans: [carol.identity.userId] },
+            space.version + 1,
+          ),
+        }),
+      );
+      release();
+      await new Promise((done) => setTimeout(done, 200));
+      expect(told(recordKey.member(spaceId, dave.identity.userId))).toBe(false);
+    } finally {
+      release();
+      lookup.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+});
+
 describe('server hello', () => {
   /** A WebSocket that lets someone on the path rewrite the server's hello. */
   function tampered(change: (hello: Record<string, unknown>) => Record<string, unknown>) {

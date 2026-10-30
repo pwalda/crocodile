@@ -159,10 +159,11 @@ describe('sharded records', () => {
     const found = await readers[5]!.conn.request('users.search', { query: 'alice' });
     expect(found.profiles.map((p) => p.key)).toEqual([recordKey.profile(alice.identity.userId)]);
     await joinSpace(readers[3]!, spaceId, code);
-    const members = await readers[4]!.conn.request('records.list', {
-      prefix: recordKey.memberPrefix(spaceId),
-    });
-    expect(members.records).toHaveLength(2);
+    // The list is for those in the space, wherever their own record and the others live.
+    const prefix = recordKey.memberPrefix(spaceId);
+    for (const reader of [readers[3]!, alice])
+      expect((await reader.conn.request('records.list', { prefix })).records).toHaveLength(2);
+    expect((await readers[4]!.conn.request('records.list', { prefix })).records).toEqual([]);
     const mine = await readers[3]!.conn.request('spaces.mine', {});
     expect(mine.spaces.map((s) => s.key)).toEqual([space.key]);
   });
@@ -655,8 +656,7 @@ describe('across servers that are not linked', () => {
       }),
     );
     await waitFor(() => holders(servers, memberKey).length === 0, 8000, 'membership erased');
-    const reader = await user(servers[2]!);
-    const { records } = await reader.conn.request('records.list', {
+    const { records } = await alice.conn.request('records.list', {
       prefix: recordKey.memberPrefix(spaceId),
     });
     expect(records.map((r) => r.key)).toEqual([recordKey.member(spaceId, alice.identity.userId)]);
