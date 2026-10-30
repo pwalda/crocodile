@@ -54,7 +54,10 @@ const VOICE_AHEAD_MS = 5 * 60_000;
  */
 const HOSTING_GRACE_MS = 1500;
 const HOSTING_WAITERS_MAX = 200;
-const DEVICE_REFUSED = 'that device is not on the account or was removed';
+const DEVICE_REMOVED = 'that device was removed from the account';
+const DEVICE_UNKNOWN = 'no record of that device on the account was found';
+/** How many may wait at once for the record of a device that has only just been published. */
+const DEVICE_WAITERS_MAX = 100;
 
 /** The key of a device's record. */
 const deviceKey = (peer: string) => recordKey.device(peerIds.user(peer), peerIds.device(peer));
@@ -179,15 +182,15 @@ export class SessionService {
     let record = await this.findDevice(peer);
     // Waiting is capped, like the wait for news of a device: made-up devices must not hold
     // up the server.
-    if (patient && !record && this.hostingWaiters < HOSTING_WAITERS_MAX) {
-      this.hostingWaiters += 1;
+    if (patient && !record && this.deviceWaiters < DEVICE_WAITERS_MAX) {
+      this.deviceWaiters += 1;
       try {
         for (let i = 0; !record && i < DEVICE_LOOKUPS; i++) {
           await new Promise((r) => setTimeout(r, DEVICE_LOOKUP_WAIT_MS));
           record = await this.findDevice(peer);
         }
       } finally {
-        this.hostingWaiters -= 1;
+        this.deviceWaiters -= 1;
       }
     }
     const removed = record?.body.revoked === true;
@@ -205,10 +208,19 @@ export class SessionService {
    * removed also leaves the room at once.
    */
   private async vouchOrDrop(peer: string, sessionId: string, caps: HostCaps, patient = false) {
-    const { device, removed } = await this.lookupDevice(peer, patient);
-    if (device) return { ...caps, platform: device.body.platform };
-    if (removed) await this.leave(peer, sessionId);
-    throw new RpcFailure('forbidden', DEVICE_REFUSED);
+    let found: Awaited<ReturnType<SessionService['lookupDevice']>>;
+    try {
+      found = await this.lookupDevice(peer, patient);
+    } catch {
+      throw new RpcFailure('unavailable', 'could not look up that device');
+    }
+    if (found.device) return { ...caps, platform: found.device.body.platform };
+    if (found.removed) {
+      await this.leave(peer, sessionId);
+      throw new RpcFailure('forbidden', DEVICE_REMOVED);
+    }
+    // Not found is not the same as removed: the servers that hold it may not be reachable.
+    throw new RpcFailure('unavailable', DEVICE_UNKNOWN);
   }
 
   /**
@@ -219,14 +231,26 @@ export class SessionService {
   private async admit(
     server: string,
     peer: string,
-  ): Promise<{ refused: string } | { device: SignedRecord<'device'> }> {
-    if (!(await this.connectedTo(server, peer)))
-      return { refused: 'that device is not connected to the sending server' };
+    sessionId: string,
+    op: FedSessionOp['op'],
+  ): Promise<
+    | { refused: string; code: 'forbidden' | 'unavailable' }
+    | { device: SignedRecord<'device'>; hintOk: boolean }
+  > {
     try {
-      const { device } = await this.lookupDevice(peer, true);
-      return device ? { device } : { refused: DEVICE_REFUSED };
+      if (!(await this.connectedTo(server, peer)))
+        return { refused: 'that device is not connected to the sending server', code: 'forbidden' };
+      const { device, removed } = await this.lookupDevice(peer, true);
+      if (!device)
+        return removed
+          ? { refused: DEVICE_REMOVED, code: 'forbidden' }
+          : { refused: DEVICE_UNKNOWN, code: 'unavailable' };
+      // What a hint names is looked into here too, not in the room's queue.
+      const hintOk =
+        op.op === 'join' && op.hint ? await this.hintAllowed(sessionId, op.hint) : true;
+      return { device, hintOk };
     } catch {
-      return { refused: 'could not look up that device' };
+      return { refused: 'could not look up that device', code: 'unavailable' };
     }
   }
 
@@ -319,12 +343,11 @@ export class SessionService {
 
   async update(client: ClientHandle, sessionId: string, caps: HostCaps) {
     const members = this.local.get(sessionId);
-    if (!members?.has(client.peer)) throw new RpcFailure('not_found', 'not in session');
-    caps = await this.vouchOrDrop(client.peer, sessionId, caps);
-    // It may have left while the record was being looked up.
-    if (!this.local.get(sessionId)?.has(client.peer))
-      throw new RpcFailure('not_found', 'not in session');
-    this.local.get(sessionId)!.set(client.peer, caps);
+    const current = members?.get(client.peer);
+    if (!members || !current) throw new RpcFailure('not_found', 'not in session');
+    // What kind of device it is was settled by the join; a removed device is found by the recheck.
+    caps = { ...caps, platform: current.platform };
+    members.set(client.peer, caps);
     await this.submit(sessionId, client.peer, { op: 'update', caps });
   }
 
@@ -415,6 +438,7 @@ export class SessionService {
   /** Operations on one session are applied one at a time, in the order they arrived. */
   private opChains = new Map<string, Promise<void>>();
   private hostingWaiters = 0;
+  private deviceWaiters = 0;
 
   handleRemoteOp(fromServer: string, frame: FedSessionOp) {
     const reply = (res: { ok: unknown } | { err: unknown }) =>
@@ -433,9 +457,15 @@ export class SessionService {
     // looked into (a leave must not pass it); other devices' operations are not held up.
     const gateKey = `${frame.sessionId}|${frame.peer}`;
     const gate = this.gates.get(gateKey) ?? Promise.resolve();
-    const admitted: Promise<{ refused: string } | { device?: SignedRecord<'device'> }> = gate.then(
-      () => (frame.op.op === 'join' ? this.admit(fromServer, frame.peer) : {}),
-    );
+    type Admitted =
+      Awaited<ReturnType<SessionService['admit']>> | { device?: undefined; hintOk?: undefined };
+    const admitted: Promise<Admitted> = gate
+      .then(() =>
+        frame.op.op === 'join'
+          ? this.admit(fromServer, frame.peer, frame.sessionId, frame.op)
+          : ({} as Admitted),
+      )
+      .catch((): Admitted => ({ refused: 'could not look up that device', code: 'unavailable' }));
     const next = admitted.then(
       () => {},
       () => {},
@@ -446,13 +476,13 @@ export class SessionService {
     });
     void admitted.then((result) => {
       if ('refused' in result) {
-        fail(new RpcFailure('forbidden', result.refused));
+        fail(new RpcFailure(result.code, result.refused));
         return;
       }
       const previous = this.opChains.get(frame.sessionId) ?? Promise.resolve();
       const run: Promise<void> = previous.then(async () => {
         try {
-          reply({ ok: await this.runRemoteOp(fromServer, frame, result.device) });
+          reply({ ok: await this.runRemoteOp(fromServer, frame, result) });
         } catch (err) {
           fail(err);
         }
@@ -490,7 +520,7 @@ export class SessionService {
   private async runRemoteOp(
     fromServer: string,
     frame: FedSessionOp,
-    device?: SignedRecord<'device'>,
+    admitted: { device?: SignedRecord<'device'>; hintOk?: boolean },
   ): Promise<unknown> {
     let op = frame.op;
     if (op.op === 'update') {
@@ -506,10 +536,10 @@ export class SessionService {
     if (op.op === 'join') {
       await this.checkAccess(peerIds.user(frame.peer), frame.sessionId);
       // `admit` found the record; a join always comes with it.
-      op = { ...op, caps: { ...op.caps, platform: device!.body.platform } };
-      if (op.hint) {
-        const { hint, ...rest } = op;
-        op = (await this.hintAllowed(frame.sessionId, hint)) ? op : rest;
+      op = { ...op, caps: { ...op.caps, platform: admitted.device!.body.platform } };
+      if (op.hint && !admitted.hintOk) {
+        const { hint: _hint, ...rest } = op;
+        op = rest;
       }
     }
     return this.apply(frame.sessionId, frame.peer, fromServer, op);
@@ -880,7 +910,7 @@ export class SessionService {
             this.hub.log.warn('re-join after owner change failed', { sessionId, err: String(err) });
             // Refused for good (not allowed, or no longer a device of the account): not tried again.
             if (err instanceof RpcFailure && err.code === 'forbidden') {
-              void this.leave(peer, sessionId);
+              if (this.local.get(sessionId)?.get(peer) === caps) void this.leave(peer, sessionId);
               return;
             }
             // Try again shortly, unless the owner changed meanwhile (that re-joins anyway).

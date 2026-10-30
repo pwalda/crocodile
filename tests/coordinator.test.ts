@@ -872,9 +872,10 @@ describe('sessions and host election', () => {
       const { c, alice, sessionId } = await setup();
       const bare = await connectUser(c, alice.identity, 'alice', randomDeviceId(), false);
       cleanup.push(() => bare.conn.close());
+      // Not found is not the same as removed: the answer may come once the record has.
       await expect(
         bare.conn.request('session.join', { sessionId, caps: caps({ nat: 'open' }) }),
-      ).rejects.toThrow(/device/);
+      ).rejects.toMatchObject({ code: 'unavailable', message: expect.stringMatching(/device/) });
       // Its record is all it needs.
       await registerDevice(bare);
       const { state } = await bare.conn.request('session.join', { sessionId, caps: caps() });
@@ -903,21 +904,6 @@ describe('sessions and host election', () => {
       await expect(
         second.conn.request('session.update', { sessionId, caps: caps() }),
       ).rejects.toThrow();
-    });
-
-    it('takes a device out of the room as soon as it updates after being removed', async () => {
-      const { c, alice, bob, sessionId } = await setup();
-      await alice.conn.request('session.join', { sessionId, caps: caps({ nat: 'open' }) });
-      const second = await anotherDevice(c, bob);
-      await second.conn.request('session.join', { sessionId, caps: caps() });
-      await registerDevice(second, 'bot', true, Date.now() + 1000);
-      await expect(
-        second.conn.request('session.update', { sessionId, caps: caps({ nat: 'open' }) }),
-      ).rejects.toThrow(/device/);
-      expect(c.sessions.inSession(second.conn.peer, sessionId)).toBe(false);
-      expect(c.sessions.ownedState(sessionId)!.members.map((m) => m.peer)).not.toContain(
-        second.conn.peer,
-      );
     });
 
     it('does not count a device as in the room when the owner refuses its join', async () => {
@@ -951,13 +937,13 @@ describe('sessions and host election', () => {
       const { c, alice, sessionId } = await setup();
       const bare = await connectUser(c, alice.identity, 'alice', randomDeviceId(), false);
       cleanup.push(() => bare.conn.close());
-      const internals = c.sessions as unknown as { hostingWaiters: number };
-      internals.hostingWaiters = 1_000_000;
+      const internals = c.sessions as unknown as { deviceWaiters: number };
+      internals.deviceWaiters = 1_000_000;
       const start = Date.now();
       await expect(bare.conn.request('session.join', { sessionId, caps: caps() })).rejects.toThrow(
         /device/,
       );
-      internals.hostingWaiters = 0;
+      internals.deviceWaiters = 0;
       expect(Date.now() - start).toBeLessThan(250);
     });
 
@@ -978,6 +964,38 @@ describe('sessions and host election', () => {
       await waitFor(() => !c.sessions.inSession(alice.conn.peer, sessionId), 3000, 'to let go');
       submit.mockRestore();
       expect(internals.rebalanceTimer).toBeUndefined();
+    });
+
+    it('keeps trying a member after the owner changed when the owner could not tell', async () => {
+      const { c, alice, sessionId } = await setup();
+      await alice.conn.request('session.join', { sessionId, caps: caps() });
+      const internals = c.sessions as unknown as {
+        lastOwner: Map<string, string>;
+        submit(): unknown;
+        rebalance(): void;
+        rebalanceTimer?: unknown;
+      };
+      internals.lastOwner.set(sessionId, 'someone-else');
+      const submit = vi
+        .spyOn(internals, 'submit')
+        .mockRejectedValueOnce(new RpcFailure('unavailable', 'no record of that device'));
+      internals.rebalance();
+      await waitFor(() => internals.rebalanceTimer, 3000, 'a new try');
+      submit.mockRestore();
+      expect(c.sessions.inSession(alice.conn.peer, sessionId)).toBe(true);
+    });
+
+    it('keeps the kind of device the join found when it updates, without looking it up', async () => {
+      const { c, bob, sessionId } = await setup();
+      const page = await connectUser(c, bob.identity, 'page', randomDeviceId(), 'web');
+      cleanup.push(() => page.conn.close());
+      await page.conn.request('session.join', { sessionId, caps: caps({ platform: 'desktop' }) });
+      const find = vi.spyOn(c.sessions as unknown as { findDevice(): unknown }, 'findDevice');
+      await page.conn.request('session.update', { sessionId, caps: caps({ platform: 'desktop' }) });
+      expect(find).not.toHaveBeenCalled();
+      find.mockRestore();
+      const member = c.sessions.ownedState(sessionId)!.members[0]!;
+      expect(member.caps.platform).toBe('web');
     });
 
     it('does not start a second look-up while one is running', async () => {
