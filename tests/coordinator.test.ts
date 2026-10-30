@@ -1035,6 +1035,29 @@ describe('sessions and host election', () => {
       expect(c.sessions.ownedState(sessionId)?.members ?? []).toEqual([]);
     });
 
+    it('does not add a device to the room that left while its record was looked up', async () => {
+      const { c, alice, sessionId } = await setup();
+      const slow = vi
+        .spyOn(
+          c.sessions as unknown as { lookupDevice(p: string): Promise<unknown> },
+          'lookupDevice',
+        )
+        .mockImplementationOnce(async () => {
+          await new Promise((r) => setTimeout(r, 300));
+          return { device: { body: { platform: 'bot' } }, removed: false };
+        });
+      const joining = alice.conn.request('session.join', { sessionId, caps: caps() }).then(
+        () => 'joined',
+        () => 'refused',
+      );
+      await new Promise((r) => setTimeout(r, 50));
+      await alice.conn.request('session.leave', { sessionId });
+      expect(await joining).toBe('refused');
+      slow.mockRestore();
+      expect(c.sessions.inSession(alice.conn.peer, sessionId)).toBe(false);
+      expect(c.sessions.ownedState(sessionId)?.members ?? []).toEqual([]);
+    });
+
     it('lets a device joining two rooms at once wait for its record once, and join both', async () => {
       const { c, alice, bob, spaceId, voiceChannel } = await setup();
       const bare = await connectUser(c, alice.identity, 'alice', randomDeviceId(), false);

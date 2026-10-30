@@ -38,6 +38,8 @@ export class OwnerSilent extends RpcFailure {
   }
 }
 
+class Refused extends Error {}
+
 type Hint = { epoch: number; host: string | null; backup: string | null };
 
 const PENDING_HOST_GRACE_MS = 4000;
@@ -97,6 +99,8 @@ export class SessionService {
   private lastKnown = new Map<string, Hint>();
   private owned = new Map<string, OwnedSession>();
   private rechecking = false;
+  /** A join of ours being looked into, by room and device; a leave in the meantime cancels it. */
+  private joining = new Map<string, symbol>();
   /** The latest operation of a device waiting to be queued, by room and device. */
   private gates = new Map<string, Promise<void>>();
   /** `frame` is what the owner signed, kept to hand on as it was (none if we made the entry up). */
@@ -191,7 +195,8 @@ export class SessionService {
     const wait = (async () => {
       for (let i = 0; i < DEVICE_LOOKUPS; i++) {
         await new Promise((r) => setTimeout(r, DEVICE_LOOKUP_WAIT_MS));
-        const record = await this.findDevice(peer);
+        // A failed try is one try spent, not the end of the wait.
+        const record = await this.findDevice(peer).catch(() => null);
         if (record) return record;
       }
       return null;
@@ -254,6 +259,10 @@ export class SessionService {
     | { device: SignedRecord<'device'>; hint?: Hint }
   > {
     try {
+      // The cheap refusals first: a device made up for somebody who may not be here costs no wait.
+      await this.checkAccess(peerIds.user(peer), sessionId).catch((err) => {
+        throw new Refused(err instanceof RpcFailure ? err.message : 'not allowed');
+      });
       if (!(await this.connectedTo(server, peer)))
         return {
           refused: 'that device is not connected to the sending server',
@@ -267,7 +276,8 @@ export class SessionService {
       // What a hint names is looked into here too, not in the room's queue.
       const hint = op.op === 'join' && op.hint ? await this.hintAllowed(sessionId, op.hint) : null;
       return { device, ...(hint ? { hint } : {}) };
-    } catch {
+    } catch (err) {
+      if (err instanceof Refused) return { refused: err.message, code: 'forbidden' };
       return { refused: 'could not look up that device', code: 'unavailable' };
     }
   }
@@ -327,8 +337,20 @@ export class SessionService {
   }
 
   async join(client: ClientHandle, sessionId: string, caps: HostCaps): Promise<SessionState> {
-    await this.checkAccess(client.userId, sessionId);
-    caps = await this.vouchOrDrop(client.peer, sessionId, caps, true);
+    const joinKey = `${sessionId}|${client.peer}`;
+    const token = Symbol('join');
+    this.joining.set(joinKey, token);
+    try {
+      await this.checkAccess(client.userId, sessionId);
+      caps = await this.vouchOrDrop(client.peer, sessionId, caps, true);
+    } catch (err) {
+      if (this.joining.get(joinKey) === token) this.joining.delete(joinKey);
+      throw err;
+    }
+    // It may have left meanwhile (or joined again).
+    if (this.joining.get(joinKey) !== token)
+      throw new RpcFailure('not_found', 'left before it joined');
+    this.joining.delete(joinKey);
     // It may have gone (or been replaced) while the record was looked up; nothing would remove it later.
     if (!this.hub.presence.localOf(client.userId).includes(client))
       throw new RpcFailure('unavailable', 'the connection closed');
@@ -373,6 +395,7 @@ export class SessionService {
   }
 
   async leave(peer: string, sessionId: string) {
+    this.joining.delete(`${sessionId}|${peer}`);
     const members = this.local.get(sessionId);
     if (!members?.delete(peer)) return;
     if (members.size === 0) {
