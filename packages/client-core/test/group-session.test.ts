@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createIdentity } from '@crocodile/crypto';
 import { GroupKeyring } from '../src/keyring';
 import type { RelayGrant, SealedBox, SessionState } from '@crocodile/protocol';
@@ -226,6 +226,37 @@ describe('group session', () => {
     await s.leave();
     await s.rejoin();
     expect(joins).toBe(3);
+  });
+
+  it('goes on joining again for as long as the owner cannot be reached, and leaves the room when refused for good', async () => {
+    vi.useFakeTimers();
+    try {
+      let joins = 0;
+      let refuse = false;
+      const { s } = session(
+        async () => grant(60_000),
+        async (type) => {
+          if (type !== 'session.join') return {};
+          joins++;
+          if (refuse)
+            throw Object.assign(new Error('not a member of this space'), { code: 'forbidden' });
+          if (joins < 10) throw new Error('the owner cannot be reached');
+          return { state: state('bbbbbbbbbbbbbbbbbbbbbbbbbb.dev1', 1) };
+        },
+      );
+      const done = s.rejoin();
+      await vi.advanceTimersByTimeAsync(10 * 60_000);
+      await done;
+      expect(joins).toBe(10);
+      // Refused for good: no more tries, and the room is left.
+      refuse = true;
+      void s.rejoin();
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(joins).toBe(11);
+      expect(s.status).toBe('left');
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('does not join a room it was never in because an update finds it is not', async () => {

@@ -181,9 +181,9 @@ export type GroupSessionEvents = {
  * be (werift's limit, which host relays use).
  */
 const HISTORY_CHUNK_BYTES = 32 * 1024;
-/** Joined again, when taken out of the room: this many tries, this far apart. */
-const REJOIN_TRIES = 6;
+/** Joined again, when taken out of the room: tries this far apart, twice as far each time up to the most. */
 const REJOIN_RETRY_MS = 1_000;
+const REJOIN_RETRY_MAX_MS = 30_000;
 /** An update or report that finds we are not in the room starts a join no more often than this. */
 const JOIN_LOST_RETRY_MS = 5_000;
 const PENDING_TTL_MS = 15_000;
@@ -336,16 +336,20 @@ export class GroupSession extends Emitter<GroupSessionEvents> {
   }
 
   /**
-   * Taken out of the room by the server: joins again, a few times if the owner cannot be reached
-   * at once (the server does not ask for this one).
+   * Taken out of the room by the server (it did not hear from us in time): joins again, for as
+   * long as the owner cannot be reached (the server does not ask for this one). Refused for good
+   * (no longer allowed in): the room is left instead.
    */
   async rejoin() {
-    for (let attempt = 0; attempt < REJOIN_TRIES && !this.left; attempt++) {
+    for (let attempt = 0; !this.left; attempt++) {
       try {
         await this.join({ fresh: true });
         return;
-      } catch {
-        await new Promise((r) => setTimeout(r, REJOIN_RETRY_MS));
+      } catch (err) {
+        if ((err as { code?: string }).code === 'forbidden') return this.leave();
+        await new Promise((r) =>
+          setTimeout(r, Math.min(REJOIN_RETRY_MS * 2 ** attempt, REJOIN_RETRY_MAX_MS)),
+        );
       }
     }
   }
