@@ -165,7 +165,7 @@ export function InviteModal({ spaceId }: { spaceId: string }) {
   // What the space has on (it is read again whenever the space changes, and now and then).
   const link = client.openLinkOf(spaceId);
   const invite = 'invite' in link ? link.invite : undefined;
-  const code = link.state === 'good' ? invite!.body.code : null;
+  const code = link.state === 'good' ? link.token : null;
   const run = async (what: () => Promise<unknown>) => {
     setBusy(true);
     setError(null);

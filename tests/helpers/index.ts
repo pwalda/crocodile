@@ -6,7 +6,9 @@ import {
   randomDeviceId,
   randomId,
   signRecord,
+  signTicketUse,
   spaceIdFor,
+  ticketFromSecret,
   type Identity,
 } from '@crocodile/crypto';
 import {
@@ -14,6 +16,7 @@ import {
   recordKey,
   type HostCaps,
   type Platform,
+  type RecordBodies,
   type SignedRecord,
 } from '@crocodile/protocol';
 import { CoordinatorConnection } from '@crocodile/client-core';
@@ -166,16 +169,26 @@ export async function createSpace(user: TestUser, name = 'Swamp') {
   return { spaceId, textChannel: text, voiceChannel: voice, code, space };
 }
 
+/** Joins a space with what a link carries: the secret of a ticket, or the code of an older invite. */
 export async function joinSpace(user: TestUser, spaceId: string, code: string) {
+  const ticket = ticketFromSecret(code);
+  let body: RecordBodies['member'] = { spaceId, userId: user.identity.userId, inviteCode: code };
+  if (ticket) {
+    const { records } = await user.conn.request('records.get', {
+      keys: [recordKey.invite(ticket.tid)],
+    });
+    const invite = records[0] as SignedRecord<'invite'>;
+    body = {
+      spaceId,
+      userId: user.identity.userId,
+      ticket: { invite, proof: signTicketUse(ticket, spaceId, user.identity.userId) },
+    };
+  }
   const member = signRecord(
     user.identity,
     'member',
     recordKey.member(spaceId, user.identity.userId),
-    {
-      spaceId,
-      userId: user.identity.userId,
-      inviteCode: code,
-    },
+    body,
   );
   expectAccepted(await user.conn.request('records.put', { record: member }));
 }

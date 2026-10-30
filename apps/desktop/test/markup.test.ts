@@ -47,6 +47,13 @@ describe('message markup', () => {
     expect(inviteCodes('croc://join/abcdefgh23 and again croc://join/ABCDEFGH23')).toEqual([
       'abcdefgh23',
     ]);
+    // The link of a ticket carries a secret of 52 characters.
+    const secret = 'abcdefghijklmnopqrstuvwxyz234567abcdefghijklmnopqrst';
+    expect(tokenize(`join: croc://join/${secret}.`)).toEqual([
+      { t: 'text', v: 'join: ' },
+      { t: 'invite', v: `croc://join/${secret}`, code: secret },
+      { t: 'text', v: '.' },
+    ]);
     // Quoted in code, it's an example, not an invite (nor a mention).
     expect(inviteCodes('use `croc://join/abcdefgh23` or ```\ncroc://join/abcdefgh24```')).toEqual(
       [],
