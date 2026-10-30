@@ -23,7 +23,7 @@ import { cpus } from 'node:os';
 import { contextMenuTemplate } from './context-menu';
 import { configureGlobalPtt, stopGlobalPtt } from './global-ptt';
 import { FileExports, FileStore, RISKY_EXTENSIONS, safeFileName } from './file-store';
-import { SecureStore } from './secure-store';
+import { SecureStore, type Protection } from './secure-store';
 import { isAllowedNavigation } from './navigation';
 import { allowAsking, handle, useIpc } from './ipc-guard';
 import { grantToApp } from './permissions';
@@ -88,6 +88,11 @@ const secure = new SecureStore(join(userData(), 'secure.json'), safeStorage);
 handle('secure:get', (_e, key: string) => secure.get(key));
 handle('secure:set', (_e, key: string, value: string) => secure.set(key, value));
 handle('secure:delete', (_e, key: string) => secure.delete(key));
+handle('secure:status', (): { protection: Protection } => {
+  // The keyring may have started since last time; what was stored plainly then moves in.
+  secure.upgrade();
+  return { protection: secure.protection() };
+});
 
 // ---------------------------------------------------------------------------
 // Host relay utility process
@@ -430,6 +435,7 @@ app.whenReady().then(() => {
     ),
   );
 
+  secure.upgrade();
   createWindow();
   createTray();
   applyCoordinator();

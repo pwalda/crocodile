@@ -1,6 +1,6 @@
 import { ConnectionModal } from './modals/ConnectionModals';
 import { useEffect, useState } from 'react';
-import { Phone, PhoneOff, Server, Video, Wifi, WifiOff } from 'lucide-react';
+import { Phone, PhoneOff, Server, ShieldAlert, Video, Wifi, WifiOff } from 'lucide-react';
 import { sessionIds } from '@crocodile/protocol';
 import {
   closeModal,
@@ -121,6 +121,7 @@ function Shell() {
   return (
     <div className="flex h-full flex-col">
       <TopBar />
+      <UnprotectedKeysBanner />
       <NoServerBanner />
       <div className={`flex min-h-0 flex-1 gap-2.5 px-2.5 ${inCall ? 'pb-[84px]' : 'pb-2.5'}`}>
         {sidebar}
@@ -132,6 +133,33 @@ function Shell() {
       <CommandPalette />
       <CallPrompts />
       <Toasts />
+    </div>
+  );
+}
+
+/**
+ * Shown for as long as this computer has no system keychain to keep the
+ * account's keys in: they are then readable by anything that runs as this user.
+ */
+function UnprotectedKeysBanner() {
+  const [protection, setProtection] = useState<'keychain' | 'weak' | 'none'>('keychain');
+  useEffect(() => {
+    void desktop?.secure.status().then((s) => setProtection(s.protection));
+  }, []);
+  if (protection === 'keychain') return null;
+  return (
+    <div role="alert" className="island rise mx-2.5 mb-2.5 flex items-center gap-3 px-4 py-3">
+      <ShieldAlert size={18} className="shrink-0 text-warn" />
+      <div className="min-w-0 flex-1 text-sm">
+        <div className="font-bold">Your keys are not protected by a keychain</div>
+        <div className="text-muted">
+          {protection === 'weak'
+            ? 'This computer has no keyring running, so your account keys and messages are only lightly protected.'
+            : 'This computer has no keychain, so your account keys and messages are stored without protection.'}{' '}
+          Anything running as you can read them. Install or unlock a keyring (such as GNOME Keyring
+          or KWallet) and restart Crocodile.
+        </div>
+      </div>
     </div>
   );
 }

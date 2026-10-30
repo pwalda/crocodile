@@ -22,6 +22,9 @@ const api = {
     set: (key: string, value: string) =>
       ipcRenderer.invoke('secure:set', key, value) as Promise<void>,
     delete: (key: string) => ipcRenderer.invoke('secure:delete', key) as Promise<void>,
+    /** How well secrets are kept on this computer. */
+    status: () =>
+      ipcRenderer.invoke('secure:status') as Promise<{ protection: 'keychain' | 'weak' | 'none' }>,
   },
   relay: {
     send: (msg: RelayProcessIn) => ipcRenderer.invoke('relay:send', msg) as Promise<void>,
