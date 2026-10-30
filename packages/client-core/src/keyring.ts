@@ -127,10 +127,10 @@ export class GroupKeyring extends Emitter<{ changed: FrameKeys; rotated: Exporte
     return [...new Set([...this.peers.values()].map((p) => p.peer))];
   }
 
-  /** Whether a message of this key and generation is one the key we hold has already passed. */
-  isBehind(kid: number, g: number) {
+  /** Whether a message of this key, which is `peer`'s, is one the key we hold has already passed. */
+  isBehind(peer: string, kid: number, g: number) {
     const pk = this.peers.get(kid >>> 0);
-    return !!pk && g < pk.text.gen;
+    return !!pk && pk.peer === peer && g < pk.text.gen;
   }
 
   hasKeyFrom(peer: string) {

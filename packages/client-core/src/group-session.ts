@@ -1426,7 +1426,7 @@ export class GroupSession extends Emitter<GroupSessionEvents> {
     const result = this.keyring.decrypt(env.kid, env.g, env.ct);
     if (!result) {
       // A key we hold that cannot open it: the message is from before the key we were given.
-      if (this.keyring.isBehind(env.kid, env.g)) {
+      if (this.keyring.isBehind(from, env.kid, env.g)) {
         this.missed(from);
         return;
       }
@@ -1530,30 +1530,30 @@ export class GroupSession extends Emitter<GroupSessionEvents> {
       const result = this.keyring.decrypt(p.env.kid, p.env.g, p.env.ct);
       if (result) {
         if (result.peer === p.from) await this.onGroupPlaintext(p.from, result.plaintext);
-      } else if (this.keyring.isBehind(p.env.kid, p.env.g)) this.missed(p.from);
+      } else if (this.keyring.isBehind(p.from, p.env.kid, p.env.g)) this.missed(p.from);
       else this.pendingGroup.push(p);
     }
   }
 
   /**
    * A message sent live that we cannot open any more (it was sent before the key we got for it
-   * could reach us). It is not lost: the others hold it, so history is asked for again, from
-   * the sender first, at most every few seconds for each.
+   * could reach us). It is not lost: the sender holds it, so history is asked of them again (of
+   * the host if they are not there), at most every few seconds for each.
    */
   private missed(from: string) {
     const now = Date.now();
     if (now - (this.missedAt.get(from) ?? 0) < MISSED_HISTORY_MS) return;
-    this.missedAt.set(from, now);
-    this.requestHistory([from], true);
+    if (this.requestHistory([from], true)) this.missedAt.set(from, now);
   }
 
   // -------------------------------------------------------------------------
   // History sync
   // -------------------------------------------------------------------------
 
-  private requestHistory(candidates: string[], again = false) {
+  /** Whether a request was made. */
+  private requestHistory(candidates: string[], again = false): boolean {
     const channels = this.ctx.historyChannels(this.sessionId);
-    if (channels.length === 0) return;
+    if (channels.length === 0) return false;
     const st = this.state;
     const preferred = [...(again ? candidates : []), st?.host, st?.backup, ...candidates].filter(
       (u): u is string =>
@@ -1563,8 +1563,8 @@ export class GroupSession extends Emitter<GroupSessionEvents> {
         (again || !this.historyAsked.has(u)) &&
         this.ctx.isAllowedPeer(this.sessionId, u),
     );
-    const targets = [...new Set(preferred)].slice(0, 2);
-    if (targets.length === 0) return;
+    const targets = [...new Set(preferred)].slice(0, again ? 1 : 2);
+    if (targets.length === 0) return false;
     void (async () => {
       const since: Record<string, number> = {};
       for (const ch of channels) {
@@ -1576,6 +1576,7 @@ export class GroupSession extends Emitter<GroupSessionEvents> {
         await this.sendSealed(t, { type: 'history_req', since });
       }
     })();
+    return true;
   }
 
   private async serveHistory(to: string, since: Record<string, number>) {

@@ -445,8 +445,13 @@ describe('group session', () => {
     // The sender is asked first, from before the newest message held.
     const again = transport!.requests.filter((r) => r.type === 'history_req').slice(2);
     expect(again[0]).toMatchObject({ to: bob, since: { ch: 500_000 - 120_000 } });
-    // Another one he cannot open soon after does not ask again.
+    expect(asked()).toBe(3);
+    // Bob's key replayed by someone else is not a message of theirs that was missed.
     const before = asked();
+    transport!.emit('message', { t: 'msg', from: host, direct: false, d: { k: 'group', ...env } });
+    await wait(50);
+    expect(asked()).toBe(before);
+    // Another one he cannot open soon after does not ask again.
     transport!.emit('message', { t: 'msg', from: bob, direct: false, d: { k: 'group', ...env } });
     await wait(50);
     expect(asked()).toBe(before);
