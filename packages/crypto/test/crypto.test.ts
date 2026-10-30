@@ -1383,4 +1383,21 @@ describe('session operations', () => {
       sessionOpPayload(sessionId, peer, report3, p),
     );
   });
+
+  it('signs the claims as the receiver will have them', () => {
+    // A field that is not a claim is dropped by the receiver's parsing; the signature must not depend on it.
+    const wide = { ...caps, extra: 'x' } as HostCaps;
+    const proof = signSessionOp(alice, sessionId, peer, { op: 'join', caps: wide }, context);
+    expect(verifySessionOp(alice.publicKey, sessionId, peer, join, proof)).toBe(true);
+    expect(() =>
+      signSessionOp(alice, sessionId, peer, { op: 'join', caps: { ...caps, rttMs: NaN } }, context),
+    ).toThrow();
+  });
+
+  it('does not take an operation it does not sign', () => {
+    const leave = { op: 'leave' } as unknown as typeof join;
+    const proof = signSessionOp(alice, sessionId, peer, report3, { ...context, since: 5 });
+    expect(verifySessionOp(alice.publicKey, sessionId, peer, leave, proof)).toBe(false);
+    expect(() => signSessionOp(alice, sessionId, peer, leave, { ...context, since: 5 })).toThrow();
+  });
 });

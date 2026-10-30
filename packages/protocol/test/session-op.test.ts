@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { FedFrameSchema, RpcParams, SESSION_OP_SKEW_MS, sessionOpPayload } from '../src';
+import { FedFrameSchema, RpcParams, canonicalJson, sessionOpPayload } from '../src';
 
 const caps = { canHost: true, platform: 'desktop', nat: 'open' } as const;
 const proof = {
@@ -59,6 +59,8 @@ describe('session operation proofs', () => {
       { ...proof, at: 1.5 },
       { ...proof, since: 'now' },
       { server: 'server-one', at: 1 },
+      { ...proof, server: '' },
+      { ...proof, sig: '' },
     ])
       expect(RpcParams['session.join'].safeParse({ sessionId, caps, proof: bad }).success).toBe(
         false,
@@ -73,13 +75,12 @@ describe('session operation proofs', () => {
       { op: 'join', caps: { ...caps, rttMs: undefined } },
       proof,
     );
-    expect(JSON.stringify(a)).toBe(JSON.stringify(b));
+    expect(canonicalJson(a)).toBe(canonicalJson(b));
     expect(
       sessionOpPayload(sessionId, peer, { op: 'join', caps }, { server: 's', at: 1 }),
     ).toMatchObject({
       since: null,
       n: null,
     });
-    expect(SESSION_OP_SKEW_MS).toBe(300_000);
   });
 });

@@ -223,9 +223,6 @@ export interface FedRoute {
   d: unknown;
 }
 
-/** How far the time on a session operation may be from the receiver's clock (as for mailbox proofs). */
-export const SESSION_OP_SKEW_MS = 5 * 60_000;
-
 /**
  * A device's signature on its own join, update or report in a session, so that a server
  * other than the one the device is connected to cannot speak for it. The key to check it
@@ -235,7 +232,7 @@ export const SESSION_OP_SKEW_MS = 5 * 60_000;
  * up (`n`), so that an older one is not taken for a newer.
  */
 export const SessionOpProof = z.object({
-  server: z.string().max(200),
+  server: z.string().min(1).max(200),
   at: z.number().int().safe().min(0),
   since: z.number().int().safe().min(0).optional(),
   n: z
@@ -244,7 +241,7 @@ export const SessionOpProof = z.object({
     .min(0)
     .max(2 ** 31)
     .optional(),
-  sig: z.string().max(200),
+  sig: z.string().min(1).max(200),
 });
 export type SessionOpProof = z.infer<typeof SessionOpProof>;
 
@@ -261,7 +258,9 @@ export type SignedSessionOp =
 export function sessionOpShapeOk(op: SignedSessionOp, proof: Omit<SessionOpProof, 'sig'>) {
   if (op.op === 'join') return proof.since === undefined && proof.n === undefined;
   if (op.op === 'update') return proof.since !== undefined && proof.n !== undefined;
-  return proof.since !== undefined && proof.n === undefined;
+  if (op.op === 'report') return proof.since !== undefined && proof.n === undefined;
+  // Nothing else is signed (a leave from the member's own server is not).
+  return false;
 }
 
 /** What a SessionOpProof signs: where, who, for which server, when, and what was asked. */

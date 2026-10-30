@@ -2,6 +2,7 @@ import {
   bytesEqual,
   fromB32,
   fromB64u,
+  HostCaps,
   mailProofPayload,
   sessionOpPayload,
   sessionOpShapeOk,
@@ -288,6 +289,8 @@ export function signSessionOp(
     ...(n === undefined ? {} : { n }),
   };
   if (!sessionOpShapeOk(op, proof)) throw new Error(`a ${op.op} does not carry that`);
+  // What is signed is what the receiver will have after it has parsed the claims.
+  if (op.op !== 'report') op = { ...op, caps: HostCaps.parse(op.caps) };
   return {
     ...proof,
     sig: sign(identity, SIG_DOMAIN.sessionOp, sessionOpPayload(sessionId, peer, op, proof)),
