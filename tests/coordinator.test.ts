@@ -32,7 +32,7 @@ import {
 } from '@crocodile/protocol';
 import { CoordinatorConnection } from '@crocodile/client-core';
 import { Coordinator, lanAddress, rendezvousOwner } from '@crocodile/coordinator';
-import { OwnerSilent } from '../packages/coordinator/src/sessions';
+import { DEVICE_REMOVED, OwnerSilent } from '../packages/coordinator/src/sessions';
 import { RpcFailure } from '../packages/coordinator/src/util';
 import {
   caps,
@@ -960,7 +960,7 @@ describe('sessions and host election', () => {
       internals.lastOwner.set(sessionId, 'someone-else');
       const submit = vi
         .spyOn(internals, 'submit')
-        .mockRejectedValueOnce(new RpcFailure('forbidden', 'not a member of this space'));
+        .mockRejectedValueOnce(new RpcFailure('forbidden', DEVICE_REMOVED));
       internals.rebalance();
       await waitFor(() => !c.sessions.inSession(alice.conn.peer, sessionId), 3000, 'to let go');
       submit.mockRestore();
@@ -977,6 +977,47 @@ describe('sessions and host election', () => {
       ).rejects.toThrow();
       submit.mockRestore();
       expect(c.sessions.inSession(alice.conn.peer, sessionId)).toBe(false);
+    });
+
+    it('keeps trying a member after the owner changed when it says the member may not be there, as it may be behind', async () => {
+      const { c, alice, sessionId } = await setup();
+      await alice.conn.request('session.join', { sessionId, caps: caps() });
+      const internals = c.sessions as unknown as {
+        lastOwner: Map<string, string>;
+        submit(): unknown;
+        rebalance(): void;
+        rebalanceTimer?: unknown;
+      };
+      internals.lastOwner.set(sessionId, 'someone-else');
+      const submit = vi
+        .spyOn(internals, 'submit')
+        .mockRejectedValueOnce(new RpcFailure('forbidden', 'not a member of this space'));
+      internals.rebalance();
+      await waitFor(() => internals.rebalanceTimer, 3000, 'a new try');
+      submit.mockRestore();
+      expect(c.sessions.inSession(alice.conn.peer, sessionId)).toBe(true);
+    });
+
+    it('lets a join finish when a later one of the same device finishes before it', async () => {
+      const { c, alice, sessionId } = await setup();
+      let calls = 0;
+      const slow = vi
+        .spyOn(
+          c.sessions as unknown as { lookupDevice(p: string): Promise<unknown> },
+          'lookupDevice',
+        )
+        .mockImplementation(async () => {
+          // The first is slower than the second.
+          await new Promise((r) => setTimeout(r, calls++ === 0 ? 300 : 50));
+          return { device: { body: { platform: 'bot' } }, removed: false };
+        });
+      const join = () => alice.conn.request('session.join', { sessionId, caps: caps() });
+      const first = join();
+      await new Promise((r) => setTimeout(r, 20));
+      await join();
+      await first;
+      slow.mockRestore();
+      expect(c.sessions.inSession(alice.conn.peer, sessionId)).toBe(true);
     });
 
     it('keeps trying a member after the owner changed when the owner could not tell', async () => {

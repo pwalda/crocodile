@@ -66,7 +66,7 @@ const HOSTING_WAITERS_MAX = 200;
 /** Whether a device's record says it was removed from the account. */
 const isRemoved = (record: SignedRecord<'device'> | null) => record?.body.revoked === true;
 
-const DEVICE_REMOVED = 'that device was removed from the account';
+export const DEVICE_REMOVED = 'that device was removed from the account';
 const DEVICE_UNKNOWN = 'no record of that device on the account was found';
 /** How many may wait at once for the record of a device that has only just been published. */
 const DEVICE_WAITERS_MAX = 100;
@@ -100,7 +100,7 @@ export class SessionService {
   private owned = new Map<string, OwnedSession>();
   private rechecking = false;
   /** A join of ours being looked into, by room and device; a leave in the meantime cancels it. */
-  private joining = new Map<string, symbol>();
+  private joining = new Map<string, { pending: number; leaves: number }>();
   /** The latest operation of a device waiting to be queued, by room and device. */
   private gates = new Map<string, Promise<void>>();
   /** `frame` is what the owner signed, kept to hand on as it was (none if we made the entry up). */
@@ -340,25 +340,24 @@ export class SessionService {
 
   async join(client: ClientHandle, sessionId: string, caps: HostCaps): Promise<SessionState> {
     const joinKey = `${sessionId}|${client.peer}`;
-    const token = Symbol('join');
-    this.joining.set(joinKey, token);
+    const wait = this.joining.get(joinKey) ?? { pending: 0, leaves: 0 };
+    this.joining.set(joinKey, wait);
+    wait.pending += 1;
+    const leavesBefore = wait.leaves;
     try {
       await this.checkAccess(client.userId, sessionId);
       caps = await this.vouchOrDrop(client.peer, sessionId, caps, true);
-    } catch (err) {
-      if (this.joining.get(joinKey) === token) this.joining.delete(joinKey);
-      throw err;
+    } finally {
+      if (--wait.pending === 0 && this.joining.get(joinKey) === wait) this.joining.delete(joinKey);
     }
     // It may have left meanwhile. (Joined again is no matter: both go on, and a join said twice
     // is the same join.)
-    if (!this.joining.has(joinKey)) throw new RpcFailure('not_found', 'left before it joined');
-    if (this.joining.get(joinKey) === token) this.joining.delete(joinKey);
+    if (wait.leaves !== leavesBefore) throw new RpcFailure('not_found', 'left before it joined');
     // It may have gone (or been replaced) while the record was looked up; nothing would remove it later.
     if (!this.hub.presence.localOf(client.userId).includes(client))
       throw new RpcFailure('unavailable', 'the connection closed');
-    const leaveKey = `${sessionId}|${client.peer}`;
-    clearTimeout(this.pendingLeaves.get(leaveKey));
-    this.pendingLeaves.delete(leaveKey);
+    clearTimeout(this.pendingLeaves.get(joinKey));
+    this.pendingLeaves.delete(joinKey);
     let members = this.local.get(sessionId);
     if (!members) this.local.set(sessionId, (members = new Map()));
     const before = members.get(client.peer);
@@ -397,7 +396,8 @@ export class SessionService {
   }
 
   async leave(peer: string, sessionId: string) {
-    this.joining.delete(`${sessionId}|${peer}`);
+    const joining = this.joining.get(`${sessionId}|${peer}`);
+    if (joining) joining.leaves += 1;
     const members = this.local.get(sessionId);
     if (!members?.delete(peer)) return;
     if (members.size === 0) {
@@ -581,8 +581,7 @@ export class SessionService {
       op = { ...op, caps: { ...op.caps, platform: member.caps.platform } };
     }
     if (op.op === 'join') {
-      await this.checkAccess(peerIds.user(frame.peer), frame.sessionId);
-      // `admit` found the record; a join always comes with it.
+      // `admit` checked that the account may be in the room, and found the record; a join always comes with it.
       if (!admitted.device) throw new RpcFailure('internal', 'join was not admitted');
       op = { ...op, caps: { ...op.caps, platform: admitted.device.body.platform } };
       if (op.hint) {
@@ -959,8 +958,9 @@ export class SessionService {
         this.submit(sessionId, peer, { op: 'join', caps, ...(hint ? { hint } : {}) }).catch(
           (err) => {
             this.hub.log.warn('re-join after owner change failed', { sessionId, err: String(err) });
-            // Refused for good (not allowed, or no longer a device of the account): not tried again.
-            if (err instanceof RpcFailure && err.code === 'forbidden') {
+            // Only a device found removed is final: whatever else a new owner says (it may be
+            // behind on the records) is tried again.
+            if (err instanceof RpcFailure && err.message === DEVICE_REMOVED) {
               if (this.local.get(sessionId)?.get(peer) === caps) void this.leave(peer, sessionId);
               return;
             }
