@@ -68,7 +68,7 @@ export function elect({ sessionId, members, host, backup, penalties, now }: Elec
   // One candidate a person: their best device, one others can reach if they have one.
   const onePerPerson = (list: SessionMember[]) => {
     const best = new Map<string, SessionMember>();
-    for (const m of list.sort(better)) {
+    for (const m of [...list].sort(better)) {
       const have = best.get(m.userId);
       if (!have || (!reachable(have) && reachable(m))) best.set(m.userId, m);
     }
@@ -107,11 +107,14 @@ export function elect({ sessionId, members, host, backup, penalties, now }: Elec
   let nextBackup: string | null = candidates[0]?.peer ?? null;
   const currentBackup = backup && backup !== nextHost ? byId.get(backup) : undefined;
   // (Only one of the candidates: not the host's other device, nor a person who is out.)
+  // Nor a device behind a symmetric NAT when the person has one that can be reached.
+  const standIn = currentBackup && candidates.find((m) => m.userId === currentBackup.userId);
   if (
     currentBackup &&
     available(currentBackup) &&
     candidates[0] &&
-    candidates.some((m) => m.userId === currentBackup.userId)
+    standIn &&
+    (reachable(currentBackup) || !reachable(standIn))
   ) {
     if (hostScore(candidates[0], now) - hostScore(currentBackup, now) < 10)
       nextBackup = currentBackup.peer;

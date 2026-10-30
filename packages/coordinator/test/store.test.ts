@@ -419,7 +419,7 @@ describe('election', () => {
     ];
     const penalties = new Map(members.map((m) => [m.peer, 1000]));
     const r = elect({ sessionId: 's1', members, host: null, backup: 'gone.d1', penalties, now: 0 });
-    // Nobody else to choose: the best device of the best person; the backup is the other person.
+    // Nobody else to choose: the best device of the best person, and no standby (as before).
     expect(r.host).toBe('a.d2');
     expect(r.backup).toBeNull();
     const free = elect({
@@ -431,5 +431,26 @@ describe('election', () => {
       now: 0,
     });
     expect(free.backup).toBe('b.d1');
+  });
+
+  it('does not keep a symmetric device as backup when its person has one that can be reached', () => {
+    const user = (u: string, n: number, nat: 'open' | 'cone' | 'symmetric', extra = {}) => ({
+      ...member(`${u}.d${n}`, nat, extra),
+      userId: u,
+    });
+    const members = [
+      user('host', 1, 'open', { uplinkKbps: 100_000 }),
+      user('b', 1, 'symmetric', { uplinkKbps: 100_000 }),
+      user('b', 2, 'cone', { onBattery: true }),
+    ];
+    const r = elect({
+      sessionId: 's1',
+      members,
+      host: 'host.d1',
+      backup: 'b.d1',
+      penalties: new Map(),
+      now: 0,
+    });
+    expect(r.backup).toBe('b.d2');
   });
 });

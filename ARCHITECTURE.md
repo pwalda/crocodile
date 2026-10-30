@@ -289,7 +289,7 @@ stays gone for 20 s.
 
 Members report `HostCaps` when joining: whether they can and may host (desktop
 only, user setting), NAT type (detected by comparing the mappings the server's two STUN ports report), uplink,
-CPU cores, battery, RTT.
+battery (and CPU cores and RTT, which the election no longer reads).
 
 A device joins only if it has a record on its account that hasn't been
 removed, and the kind of device (desktop, web, ...) is read from that record
