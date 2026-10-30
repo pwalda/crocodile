@@ -5,6 +5,7 @@ import {
   SIG_DOMAIN,
   parseSessionId,
   peerIds,
+  recordKey,
   voiceSigned,
   type FedSessionOp,
   type FedVoice,
@@ -23,6 +24,7 @@ interface OwnedSession {
   state: SessionState;
   memberServer: Map<string, string>;
   penalties: Map<string, number>;
+  /** User ids that have said the host is unreachable (one vote a person). */
   reports: Set<string>;
   /** Host adopted from a hint whose member has not re-joined yet. */
   pendingHostUntil: number;
@@ -52,6 +54,8 @@ const VOICE_AHEAD_MS = 5 * 60_000;
  */
 const HOSTING_GRACE_MS = 1500;
 const HOSTING_WAITERS_MAX = 200;
+/** How often an owner asks again whether the devices in its rooms have been removed. */
+const DEVICE_RECHECK_MS = 60_000;
 /** A new owner adopts the epoch a member saw; no honest session has changed host this often. */
 const HINT_EPOCH_MAX = 1_000_000;
 
@@ -84,10 +88,13 @@ export class SessionService {
   >();
 
   private voiceRefresh: ReturnType<typeof setInterval>;
+  private deviceRecheck: ReturnType<typeof setInterval>;
 
   constructor(private readonly hub: Coordinator) {
     this.voiceRefresh = setInterval(() => this.refreshVoice(), VOICE_REFRESH_MS);
     this.voiceRefresh.unref?.();
+    this.deviceRecheck = setInterval(() => void this.recheckDevices(), DEVICE_RECHECK_MS);
+    this.deviceRecheck.unref?.();
   }
 
   get selfId() {
@@ -133,12 +140,63 @@ export class SessionService {
     // so servers can't (and shouldn't) know who blocked whom.
   }
 
+  /** The record of a device that is on its account and has not been removed from it. */
+  private async deviceOf(peer: string): Promise<SignedRecord<'device'> | null> {
+    const key = recordKey.device(peerIds.user(peer), peerIds.device(peer));
+    const [record] = await this.hub.dist.get([key]);
+    if (!record || record.key !== key || record.kind !== 'device') return null;
+    const device = record as SignedRecord<'device'>;
+    return device.body.revoked ? null : device;
+  }
+
+  /**
+   * What the server takes from a device that joins or updates: it must have a record on its
+   * account (the sign-in names a device but proves only the account), and what kind of device
+   * it is comes from that record, not from what it says.
+   */
+  private async vouch(peer: string, caps: HostCaps): Promise<HostCaps> {
+    const device = await this.deviceOf(peer);
+    if (!device)
+      throw new RpcFailure('forbidden', 'that device is not on the account or was removed');
+    return { ...caps, platform: device.body.platform };
+  }
+
+  /**
+   * Takes out of the rooms this server owns the devices that have been removed from their
+   * accounts. A record that cannot be found now says nothing (it was there at the join), so
+   * only a removal counts.
+   */
+  async recheckDevices() {
+    for (const s of [...this.owned.values()]) {
+      const keys = new Map(
+        s.state.members.map((m) => [
+          recordKey.device(peerIds.user(m.peer), peerIds.device(m.peer)),
+          m.peer,
+        ]),
+      );
+      if (keys.size === 0) continue;
+      let records: SignedRecord[];
+      try {
+        records = await this.hub.dist.get([...keys.keys()]);
+      } catch {
+        continue;
+      }
+      if (this.owned.get(s.state.id) !== s) continue;
+      for (const r of records) {
+        const peer = keys.get(r.key);
+        if (peer && r.kind === 'device' && (r as SignedRecord<'device'>).body.revoked)
+          this.removeMember(s, peer);
+      }
+    }
+  }
+
   inSession(peer: string, sessionId: string) {
     return this.local.get(sessionId)?.has(peer) ?? false;
   }
 
   async join(client: ClientHandle, sessionId: string, caps: HostCaps): Promise<SessionState> {
     await this.checkAccess(client.userId, sessionId);
+    caps = await this.vouch(client.peer, caps);
     const leaveKey = `${sessionId}|${client.peer}`;
     clearTimeout(this.pendingLeaves.get(leaveKey));
     this.pendingLeaves.delete(leaveKey);
@@ -158,7 +216,11 @@ export class SessionService {
   async update(client: ClientHandle, sessionId: string, caps: HostCaps) {
     const members = this.local.get(sessionId);
     if (!members?.has(client.peer)) throw new RpcFailure('not_found', 'not in session');
-    members.set(client.peer, caps);
+    caps = await this.vouch(client.peer, caps);
+    // It may have left while the record was being looked up.
+    if (!this.local.get(sessionId)?.has(client.peer))
+      throw new RpcFailure('not_found', 'not in session');
+    this.local.get(sessionId)!.set(client.peer, caps);
     await this.submit(sessionId, client.peer, { op: 'update', caps });
   }
 
@@ -310,8 +372,10 @@ export class SessionService {
   /** The owner's side of an operation: whoever joins must still be allowed, and so must the host they name. */
   private async runRemoteOp(fromServer: string, frame: FedSessionOp): Promise<unknown> {
     let op = frame.op;
+    if (op.op === 'update') op = { ...op, caps: await this.vouch(frame.peer, op.caps) };
     if (op.op === 'join') {
       await this.checkAccess(peerIds.user(frame.peer), frame.sessionId);
+      op = { ...op, caps: await this.vouch(frame.peer, op.caps) };
       if (op.hint) {
         const { hint, ...rest } = op;
         op = (await this.hintAllowed(frame.sessionId, hint)) ? op : rest;
@@ -320,12 +384,14 @@ export class SessionService {
     return this.apply(frame.sessionId, frame.peer, fromServer, op);
   }
 
-  /** A hint is believed only if the host and backup it names may be in the session. */
+  /** A hint is believed only if the host and backup it names may be in the session, as devices that exist. */
   private async hintAllowed(sessionId: string, hint: Hint): Promise<boolean> {
     if (hint.epoch < 0 || hint.epoch > HINT_EPOCH_MAX) return false;
     try {
       for (const peer of [hint.host, hint.backup]) {
-        if (peer) await this.checkAccess(peerIds.user(peer), sessionId);
+        if (!peer) continue;
+        await this.checkAccess(peerIds.user(peer), sessionId);
+        if (!(await this.deviceOf(peer))) return false;
       }
       return true;
     } catch {
@@ -414,15 +480,19 @@ export class SessionService {
         this.removeMember(s, peer);
         return {};
       case 'report': {
-        if (!member || op.epoch !== s.state.epoch || !s.state.host || peer === s.state.host)
-          return {};
-        s.reports.add(peer);
-        const others = s.state.members.length - 1;
-        if (s.reports.size >= Math.max(1, Math.ceil(others / 2))) {
-          s.penalties.set(s.state.host, now + HOST_PENALTY_MS);
+        // One vote a person, and not against one's own host: more devices are not more people.
+        const host = s.state.host;
+        if (!member || op.epoch !== s.state.epoch || !host) return {};
+        const hostUser = peerIds.user(host);
+        if (userId === hostUser) return {};
+        s.reports.add(userId);
+        const others = new Set(s.state.members.map((m) => m.userId));
+        others.delete(hostUser);
+        if (s.reports.size >= Math.max(1, Math.ceil(others.size / 2))) {
+          s.penalties.set(host, now + HOST_PENALTY_MS);
           this.hub.log.info('host reported unreachable; failing over', {
             sessionId,
-            host: s.state.host,
+            host,
           });
           this.recompute(s);
         }
@@ -435,7 +505,9 @@ export class SessionService {
     const before = s.state.members.length;
     s.state.members = s.state.members.filter((m) => m.peer !== peer);
     s.memberServer.delete(peer);
-    s.reports.delete(peer);
+    // The person's vote stays while any of their devices does.
+    if (!s.state.members.some((m) => m.userId === peerIds.user(peer)))
+      s.reports.delete(peerIds.user(peer));
     if (s.state.members.length === before) return;
     if (s.state.members.length === 0) {
       this.dropOwned(s.state.id, true);
@@ -687,6 +759,7 @@ export class SessionService {
   close() {
     clearTimeout(this.rebalanceTimer);
     clearInterval(this.voiceRefresh);
+    clearInterval(this.deviceRecheck);
     for (const t of this.pendingLeaves.values()) clearTimeout(t);
     for (const t of this.orphanTimers.values()) clearTimeout(t);
     for (const s of this.owned.values()) if (s.timer) clearTimeout(s.timer);

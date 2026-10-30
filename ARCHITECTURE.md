@@ -291,6 +291,11 @@ Members report `HostCaps` when joining: whether they can and may host (desktop
 only, user setting), NAT type (detected by comparing the mappings the server's two STUN ports report), uplink,
 CPU cores, battery, RTT. `coordinator/src/election.ts` scores members:
 
+- A device joins only if it has a record on its account that hasn't been
+  removed, and the kind of device (desktop, web, ...) is read from that record
+  rather than from what the device says. The owner looks again about once a
+  minute and drops devices that have since been removed. The rest of
+  `HostCaps` is reported by the device and cannot be checked.
 - Open or cone NAT scores highest and symmetric NAT lowest; web and mobile
   clients never host.
 - The current host is kept while it is healthy (no flapping when a slightly
@@ -307,7 +312,9 @@ Failover triggers:
    backup is promoted (epoch + 1).
 2. Members fail to connect to the host twice, or once with no network path
    at all from a member whose own network isn't symmetric, and report it.
-   Once half of them agree, the host is penalised for 60 s and the backup promoted.
+   Once half of the other people agree (a person counts once, however many
+   devices they have, and the host's own devices don't vote), the host is
+   penalised for 60 s and the backup promoted.
 3. The owner server dies. Ownership moves (see above) and the host is kept.
 
 Every host change bumps the **epoch**; signals carry it, so stale offers and

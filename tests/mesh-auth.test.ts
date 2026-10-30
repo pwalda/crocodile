@@ -434,6 +434,38 @@ describe('events and session operations from other servers', () => {
       expect(state().epoch).toBeLessThan(5);
     });
 
+    it('does not let a server join a device that has no record', async () => {
+      const net = await conversation();
+      const state = await joined(net);
+      // The rogue server says Alice has another device on it; she has never made one.
+      const peer = peerIds.make(net.alice.identity.userId, 'abcdefgh');
+      net.toVictim.send(
+        presenceFrom(net.rogue, Date.now(), [entry(net.alice.identity.userId, ['abcdefgh'])]),
+      );
+      op(net, peer, { op: 'join', caps: caps({ nat: 'open' }) });
+      await settled(net);
+      expect(state().members.map((m) => m.peer)).not.toContain(peer);
+    });
+
+    it('does not take a host or backup that is a device with no record', async () => {
+      const net = await conversation();
+      const state = await joined(net);
+      // Alice's real device, claimed by the rogue server, names a device she never made as host.
+      const device = peerIds.device(net.alice.conn.peer);
+      net.toVictim.send(
+        presenceFrom(net.rogue, Date.now(), [entry(net.alice.identity.userId, [device])]),
+      );
+      const ghost = peerIds.make(net.alice.identity.userId, 'abcdefgh');
+      op(net, net.alice.conn.peer, {
+        op: 'join',
+        caps: caps(),
+        hint: { epoch: 1000, host: ghost, backup: null },
+      });
+      await settled(net);
+      expect(state().host).not.toBe(ghost);
+      expect(state().epoch).toBeLessThan(5);
+    });
+
     it('does not take a host from a member who was never there', async () => {
       const net = await conversation();
       const state = await joined(net);

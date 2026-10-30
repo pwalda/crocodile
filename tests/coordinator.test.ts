@@ -39,6 +39,7 @@ import {
   expectAccepted,
   joinSpace,
   lastSession,
+  registerDevice,
   startCoordinator,
   waitFor,
   type TestUser,
@@ -858,6 +859,150 @@ describe('sessions and host election', () => {
     expect(lastSession(bob, sessionId)!.host).toBe(alice.conn.peer);
   });
 
+  describe('devices and votes', () => {
+    /** The same account on another device, with a record of its own. */
+    async function anotherDevice(c: Coordinator, u: TestUser, platform: 'bot' | 'web' = 'bot') {
+      const d = await connectUser(c, u.identity, 'again', randomDeviceId(), platform);
+      cleanup.push(() => d.conn.close());
+      return d;
+    }
+
+    it('lets a device join only if it has a record', async () => {
+      const { c, alice, sessionId } = await setup();
+      const bare = await connectUser(c, alice.identity, 'alice', randomDeviceId(), false);
+      cleanup.push(() => bare.conn.close());
+      await expect(
+        bare.conn.request('session.join', { sessionId, caps: caps({ nat: 'open' }) }),
+      ).rejects.toThrow(/device/);
+      // Its record is all it needs.
+      await registerDevice(bare);
+      const { state } = await bare.conn.request('session.join', { sessionId, caps: caps() });
+      expect(state.host).toBe(bare.conn.peer);
+    });
+
+    it('refuses a revoked device, and takes one out of the room when it is revoked', async () => {
+      const { c, alice, bob, sessionId } = await setup();
+      await alice.conn.request('session.join', { sessionId, caps: caps({ nat: 'open' }) });
+      const second = await anotherDevice(c, bob);
+      await bob.conn.request('session.join', { sessionId, caps: caps() });
+      await second.conn.request('session.join', { sessionId, caps: caps() });
+      const members = () => c.sessions.ownedState(sessionId)!.members.map((m) => m.peer);
+      expect(members()).toContain(second.conn.peer);
+
+      await registerDevice(second, 'bot', true, Date.now() + 1000);
+      // Not asked again at once, but within the minute.
+      await c.sessions.recheckDevices();
+      expect(members()).not.toContain(second.conn.peer);
+      expect(members()).toContain(bob.conn.peer);
+      await expect(
+        second.conn.request('session.join', { sessionId, caps: caps() }),
+      ).rejects.toThrow(/device/);
+      await expect(
+        second.conn.request('session.update', { sessionId, caps: caps() }),
+      ).rejects.toThrow();
+    });
+
+    it('takes a revoked host out and elects another', async () => {
+      const { c, alice, bob, sessionId } = await setup();
+      const { state } = await alice.conn.request('session.join', {
+        sessionId,
+        caps: caps({ nat: 'open' }),
+      });
+      await bob.conn.request('session.join', { sessionId, caps: caps() });
+      expect(state.host).toBe(alice.conn.peer);
+      await registerDevice(alice, 'bot', true, Date.now() + 1000);
+      await c.sessions.recheckDevices();
+      const now = c.sessions.ownedState(sessionId)!;
+      expect(now.host).toBe(bob.conn.peer);
+      expect(now.epoch).toBe(state.epoch + 1);
+    });
+
+    it("takes the platform from the device's record, not from what it says", async () => {
+      const { c, alice, bob, sessionId } = await setup();
+      // A web page that says it is a desktop.
+      const page = await connectUser(c, bob.identity, 'page', randomDeviceId(), 'web');
+      cleanup.push(() => page.conn.close());
+      const first = await page.conn.request('session.join', {
+        sessionId,
+        caps: caps({ platform: 'desktop', nat: 'open', canHost: true }),
+      });
+      expect(first.state.host).toBeNull();
+      expect(first.state.members[0]!.caps.platform).toBe('web');
+      const { state } = await alice.conn.request('session.join', { sessionId, caps: caps() });
+      expect(state.host).toBe(alice.conn.peer);
+      // And an update cannot change it back.
+      await page.conn.request('session.update', {
+        sessionId,
+        caps: caps({ platform: 'desktop', nat: 'open' }),
+      });
+      expect(c.sessions.ownedState(sessionId)!.host).toBe(alice.conn.peer);
+    });
+
+    it('counts a report from a person once, however many devices they report from', async () => {
+      const { c, alice, bob, carol, spaceId, code, sessionId } = await setup();
+      const dave = await user(c);
+      const erin = await user(c);
+      await joinSpace(dave, spaceId, code);
+      await joinSpace(erin, spaceId, code);
+      const { state } = await alice.conn.request('session.join', {
+        sessionId,
+        caps: caps({ nat: 'open' }),
+      });
+      for (const u of [bob, carol, dave, erin])
+        await u.conn.request('session.join', { sessionId, caps: caps() });
+      const report = (u: TestUser) =>
+        u.conn.request('session.report', {
+          sessionId,
+          epoch: state.epoch,
+          issue: 'host_unreachable',
+        });
+      // Bob has four more devices, all in the room, and all say the host is gone.
+      for (let i = 0; i < 4; i++) {
+        const d = await anotherDevice(c, bob);
+        await d.conn.request('session.join', { sessionId, caps: caps() });
+        await report(d);
+      }
+      await report(bob);
+      await new Promise((r) => setTimeout(r, 100));
+      const owned = () => c.sessions.ownedState(sessionId)!;
+      // One of four other people.
+      expect(owned().host).toBe(alice.conn.peer);
+      expect(owned().epoch).toBe(state.epoch);
+      // Two of four is half.
+      await report(carol);
+      await waitFor(() => owned().host !== alice.conn.peer, 3000, 'failover');
+    });
+
+    it("does not let the host's own devices vote against it", async () => {
+      const { c, alice, bob, sessionId } = await setup();
+      const { state } = await alice.conn.request('session.join', {
+        sessionId,
+        caps: caps({ nat: 'open' }),
+      });
+      await bob.conn.request('session.join', { sessionId, caps: caps() });
+      const mine = await anotherDevice(c, alice);
+      await mine.conn.request('session.join', { sessionId, caps: caps() });
+      await mine.conn.request('session.report', {
+        sessionId,
+        epoch: state.epoch,
+        issue: 'host_unreachable',
+      });
+      await new Promise((r) => setTimeout(r, 100));
+      expect(c.sessions.ownedState(sessionId)!.host).toBe(alice.conn.peer);
+      // The one other person still can.
+      await bob.conn.request('session.report', {
+        sessionId,
+        epoch: state.epoch,
+        issue: 'host_unreachable',
+      });
+      await waitFor(
+        () => c.sessions.ownedState(sessionId)!.host !== alice.conn.peer,
+        3000,
+        'failover',
+      );
+    });
+  });
+
   it('routes signalling only between session members and rejects outsiders', async () => {
     const { c, alice, bob, sessionId } = await setup();
     const outsider = await user(c);
@@ -1322,7 +1467,9 @@ describe('record quotas', () => {
 
   it('limits devices per account and invites per space', async () => {
     const c = await server({ quotas: { devicesPerUser: 2, invitesPerSpace: 2 } });
-    const alice = await user(c);
+    // Without a record of its own, so that the two allowed are the two made below.
+    const alice = await connectUser(c, createIdentity(), undefined, undefined, false);
+    cleanup.push(() => alice.conn.close());
     const device = () => {
       const deviceId = randomDeviceId();
       return signRecord(
