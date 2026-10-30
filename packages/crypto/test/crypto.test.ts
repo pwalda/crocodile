@@ -877,6 +877,15 @@ describe('open link tickets', () => {
       ok: false,
       reason: 'former admins cannot be taken off the list',
     });
+    // Nor does a list mean anything without the owner's signature on it.
+    const unsigned = signRecord(
+      alice,
+      'space',
+      key,
+      { ...base, admins: [], formerAdmins: [bob.userId] },
+      now - 1300,
+    );
+    expect(validateRecord(unsigned, ctx([]))).toMatchObject({ ok: false });
     // An admin cannot list anyone: the owner's signature is over the list.
     const admins = [carol.userId];
     const asAdmin = signRecord(

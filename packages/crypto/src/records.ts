@@ -210,6 +210,9 @@ export function validateRecord(input: unknown, ctx: ValidationContext): Validati
       // An edit made under an admin list the owner has since replaced.
       const before = (existing?.body as SpaceBody | undefined)?.authority?.at ?? 0;
       if (authority && authority.at < before) return reject('the admin list has changed');
+      // The list means something only under the owner's signature.
+      if (body.formerAdmins?.length && !authority)
+        return reject("former admins need the owner's signature on the admin list");
       // Those let in by an admin stay, so the admins the owner has removed are only added to.
       const kept = new Set(body.formerAdmins ?? []);
       if ((existing?.body as SpaceBody | undefined)?.formerAdmins?.some((u) => !kept.has(u)))
