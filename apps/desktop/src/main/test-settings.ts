@@ -1,15 +1,6 @@
 import { app } from 'electron';
-import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { buildInfo } from './build-info';
 import { honoursTestSettings } from './trust';
-
-function buildInfo(): { crocTestBuild?: unknown } {
-  try {
-    return JSON.parse(readFileSync(join(app.getAppPath(), 'package.json'), 'utf8'));
-  } catch {
-    return {};
-  }
-}
 
 export const testSettingsOn = honoursTestSettings(app.isPackaged, buildInfo());
 

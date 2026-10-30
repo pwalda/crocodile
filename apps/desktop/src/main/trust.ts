@@ -46,14 +46,27 @@ export function honoursTestSettings(packaged: boolean, meta: { crocTestBuild?: u
 /**
  * Chromium and Node switches that open the running app to another program
  * (a debugging port or pipe, an inspector). The fuses turn off Node's; these
- * Chromium's are refused at start. Returns the first one found.
+ * Chromium's are refused at start. Chromium takes `--x`, `-x` and, on
+ * Windows, `/x`. Returns the first one found.
  */
-export function openingSwitch(argv: readonly string[]): string | undefined {
-  return argv.find((a) => /^--(remote-debugging-|remote-allow-origins|inspect|debug)/.test(a));
+export function openingSwitch(
+  argv: readonly string[],
+  platform = process.platform,
+): string | undefined {
+  const lead = platform === 'win32' ? '(?:--?|/)' : '--?';
+  const re = new RegExp(`^${lead}(?:remote-debugging-|remote-allow-origins|inspect|debug)`, 'i');
+  return argv.find((a) => re.test(a));
 }
 
-/** The environment for a script the app starts: a release passes no relaunch command to it. */
+/**
+ * The environment for the script that swaps in an update: a fixed path and
+ * the few things the system tools need, nothing else from the app's own
+ * environment. A relaunch command is passed on only where test settings are.
+ */
 export function scriptEnvironment(env: NodeJS.ProcessEnv, honoured: boolean): NodeJS.ProcessEnv {
-  const { CROC_RELAUNCH, ...rest } = env;
-  return honoured && CROC_RELAUNCH !== undefined ? { ...rest, CROC_RELAUNCH } : rest;
+  const fixed: NodeJS.ProcessEnv = { PATH: '/usr/bin:/bin:/usr/sbin:/sbin' };
+  for (const name of ['HOME', 'USER', 'LOGNAME', 'TMPDIR', 'LANG'])
+    if (env[name] !== undefined) fixed[name] = env[name];
+  if (honoured && env.CROC_RELAUNCH !== undefined) fixed.CROC_RELAUNCH = env.CROC_RELAUNCH;
+  return fixed;
 }

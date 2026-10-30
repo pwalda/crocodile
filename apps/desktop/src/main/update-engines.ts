@@ -4,6 +4,7 @@ import { execFile, spawn } from 'node:child_process';
 import { accessSync, constants, existsSync, readFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { promisify } from 'node:util';
+import { buildInfo } from './build-info';
 import { testSetting, testSettingsOn } from './test-settings';
 import { scriptEnvironment } from './trust';
 import {
@@ -108,12 +109,7 @@ function fakeUpdater(version: string): AutoUpdaterLike {
 
 /** Set at build time when the macOS build has a Developer ID signature. */
 function developerSigned(): boolean {
-  try {
-    const pkg = JSON.parse(readFileSync(join(app.getAppPath(), 'package.json'), 'utf8'));
-    return pkg.crocSigned === true;
-  } catch {
-    return false;
-  }
+  return buildInfo().crocSigned === true;
 }
 
 /** 'deb' or 'rpm' for those installs (electron-builder writes the file). */

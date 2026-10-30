@@ -26,6 +26,7 @@ import { FileExports, FileStore, RISKY_EXTENSIONS, safeFileName } from './file-s
 import { SecureStore } from './secure-store';
 import { isAllowedNavigation } from './navigation';
 import { allowAsking, handle, useIpc } from './ipc-guard';
+import { grantToApp } from './permissions';
 import { testSetting, testSettingsOn } from './test-settings';
 import { mayAsk, openingSwitch, type Pages } from './trust';
 import { createUpdateEngine } from './update-engines';
@@ -44,7 +45,10 @@ import { setupScreenShare } from './screen-share';
 const isDev = !app.isPackaged && !!process.env.CROC_RENDERER_URL;
 const APP_PROTOCOL = 'croc';
 // A release does not start with a debugging port or inspector open to other programs.
-if (!testSettingsOn && openingSwitch(process.argv)) app.exit(1);
+if (!testSettingsOn && openingSwitch(process.argv, process.platform)) {
+  app.exit(1);
+  process.exit(1);
+}
 useIpc(ipcMain);
 /** The one page that may ask the main process for anything. */
 const pages: Pages = {
@@ -417,15 +421,7 @@ app.whenReady().then(() => {
     'clipboard-sanitized-write',
     'speaker-selection',
   ];
-  session.defaultSession.setPermissionRequestHandler((wc, permission, callback, details) => {
-    callback(
-      allowed.includes(permission) && fromApp(wc, details.requestingUrl, details.isMainFrame),
-    );
-  });
-  session.defaultSession.setPermissionCheckHandler(
-    (wc, permission, _origin, details) =>
-      allowed.includes(permission) && fromApp(wc, details.requestingUrl, details.isMainFrame),
-  );
+  grantToApp(session.defaultSession, allowed, fromApp);
   setupScreenShare((frame) =>
     fromApp(
       frame ? webContents.fromFrame(frame) : null,

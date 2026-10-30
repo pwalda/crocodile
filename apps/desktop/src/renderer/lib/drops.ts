@@ -9,6 +9,7 @@
 export interface DropEvent {
   defaultPrevented: boolean;
   dataTransfer: { dropEffect: string; types: readonly string[] } | null;
+  target: unknown;
   preventDefault(): void;
 }
 
@@ -16,7 +17,11 @@ export function refuseStrayDrops(doc: {
   addEventListener(type: 'dragover' | 'drop', fn: (e: DropEvent) => void): void;
 }) {
   // Only files: text dragged within or into a field is left alone.
-  const carriesFiles = (e: DropEvent) => !!e.dataTransfer?.types.includes('Files');
+  // A file chooser takes a file dropped on it itself and never navigates.
+  const onFileInput = (e: DropEvent) =>
+    !!(e.target as { closest?: (s: string) => unknown } | null)?.closest?.('input[type=file]');
+  const carriesFiles = (e: DropEvent) =>
+    !!e.dataTransfer?.types.includes('Files') && !onFileInput(e);
   doc.addEventListener('dragover', (e) => {
     if (e.defaultPrevented || !carriesFiles(e)) return;
     e.preventDefault();

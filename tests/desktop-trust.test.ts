@@ -2,6 +2,7 @@ import { readdirSync, readFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { join } from 'node:path';
 import { beforeEach, describe, expect, it } from 'vitest';
+import { grantToApp } from '../apps/desktop/src/main/permissions';
 import { allowAsking, handle, useIpc } from '../apps/desktop/src/main/ipc-guard';
 import {
   honoursTestSettings,
@@ -66,13 +67,26 @@ describe('requests from the UI', () => {
   });
 
   it('are all registered through the guard', () => {
-    const dir = join(__dirname, '../apps/desktop/src/main');
-    const bypass = readdirSync(dir)
-      .filter((f) => f.endsWith('.ts') && f !== 'ipc-guard.ts')
-      .filter((f) =>
-        /ipcMain\.(handle|handleOnce|on|once)\(/.test(readFileSync(join(dir, f), 'utf8')),
+    // Only main.ts hands ipcMain to the guard (the import and one call); no other file reaches it,
+    // and nothing registers on a window's own ipc.
+    const files = (dir: string): string[] =>
+      readdirSync(dir, { withFileTypes: true }).flatMap((f) =>
+        f.isDirectory()
+          ? files(join(dir, f.name))
+          : f.name.endsWith('.ts')
+            ? [join(dir, f.name)]
+            : [],
       );
-    expect(bypass).toEqual([]);
+    const uses: Record<string, number> = {};
+    for (const f of files(join(__dirname, '../apps/desktop/src')).filter(
+      (f) => !f.endsWith('ipc-guard.ts'),
+    )) {
+      const text = readFileSync(f, 'utf8');
+      const n = (text.match(/\bipcMain\b/g) ?? []).length;
+      if (n) uses[f.replace(/^.*\/src\//, '')] = n;
+      expect(text, f).not.toMatch(/\.ipc\.(handle|on|once)\(/);
+    }
+    expect(uses).toEqual({ 'main/main.ts': 2 });
   });
 });
 
@@ -98,11 +112,86 @@ describe('a release', () => {
     expect(openingSwitch(['crocodile', '--no-sandbox', 'croc://join/abc'])).toBeUndefined();
   });
 
+  it('refuses the other spellings Chromium takes for a switch', () => {
+    expect(openingSwitch(['crocodile', '-remote-debugging-port=9222'], 'linux')).toBeDefined();
+    expect(openingSwitch(['crocodile', '--Remote-Debugging-Port=1'], 'linux')).toBeDefined();
+    expect(openingSwitch(['crocodile', '/remote-debugging-port=9222'], 'win32')).toBeDefined();
+    // On Linux a path is not a switch.
+    expect(openingSwitch(['crocodile', '/debug/file.txt'], 'linux')).toBeUndefined();
+  });
+
   it('passes no relaunch command to the update script', () => {
     const env = { PATH: '/bin', CROC_RELAUNCH: '/tmp/payload' };
-    expect(scriptEnvironment(env, false)).toEqual({ PATH: '/bin' });
-    expect(scriptEnvironment(env, true)).toEqual(env);
-    expect(scriptEnvironment({ PATH: '/bin' }, true)).toEqual({ PATH: '/bin' });
+    expect(scriptEnvironment(env, false).CROC_RELAUNCH).toBeUndefined();
+    expect(scriptEnvironment(env, true).CROC_RELAUNCH).toBe('/tmp/payload');
+  });
+
+  it('runs the update script with a fixed path, not the one it was started with', () => {
+    const env = { PATH: '/tmp/evil:/bin', ENV: '/tmp/x', BASH_ENV: '/tmp/y', HOME: '/Users/me' };
+    expect(scriptEnvironment(env, false)).toEqual({
+      PATH: '/usr/bin:/bin:/usr/sbin:/sbin',
+      HOME: '/Users/me',
+    });
+  });
+});
+
+describe('permissions', () => {
+  type Wc = { getURL(): string };
+  const wc = (url: string): Wc => ({ getURL: () => url });
+  const appWc = wc(pages.appUrl);
+  const fromApp = (c: { getURL(): string } | null, url: string | undefined, top: boolean) =>
+    mayAsk({ fromWindow: c === appWc, url, topFrame: top }, pages);
+  const allowed = ['media', 'speaker-selection'];
+  const setup = () => {
+    let request!: (c: typeof appWc, p: string, cb: (g: boolean) => void, d: never) => void;
+    let check!: (c: typeof appWc | null, p: string, o: string, d: never) => boolean;
+    grantToApp(
+      {
+        setPermissionRequestHandler: (h) => void (request = h as never),
+        setPermissionCheckHandler: (h) => void (check = h as never),
+      },
+      allowed,
+      fromApp,
+    );
+    const asked = (
+      c: typeof appWc,
+      p: string,
+      d: { requestingUrl?: string; isMainFrame: boolean },
+    ) => {
+      let got: boolean | undefined;
+      request(c, p, (g) => (got = g), d as never);
+      return got;
+    };
+    return {
+      asked,
+      check: (
+        c: typeof appWc | null,
+        p: string,
+        d: { requestingUrl?: string; isMainFrame: boolean },
+      ) => check(c, p, '', d as never),
+    };
+  };
+
+  it('go to the app page and to nothing else', () => {
+    const { asked, check } = setup();
+    const top = { requestingUrl: pages.appUrl, isMainFrame: true };
+    expect(asked(appWc, 'media', top)).toBe(true);
+    expect(check(appWc, 'media', top)).toBe(true);
+    // A file shown in the window, a frame inside the page, another window, a permission not on the list.
+    const stray = { requestingUrl: 'file:///home/me/Downloads/x.html', isMainFrame: true };
+    expect(asked(appWc, 'media', stray)).toBe(false);
+    expect(check(appWc, 'media', stray)).toBe(false);
+    expect(asked(appWc, 'media', { requestingUrl: pages.appUrl, isMainFrame: false })).toBe(false);
+    expect(asked(wc(pages.appUrl), 'media', top)).toBe(false);
+    expect(check(null, 'media', top)).toBe(false);
+    expect(asked(appWc, 'geolocation', top)).toBe(false);
+  });
+
+  it('use the contents address when Chromium gives none, for the top frame only', () => {
+    const { check } = setup();
+    expect(check(appWc, 'speaker-selection', { isMainFrame: true })).toBe(true);
+    expect(check(appWc, 'speaker-selection', { requestingUrl: '', isMainFrame: true })).toBe(true);
+    expect(check(appWc, 'speaker-selection', { isMainFrame: false })).toBe(false);
   });
 });
 
@@ -149,13 +238,18 @@ describe('files dropped on the window', () => {
   function drop() {
     const listeners: Record<string, (e: DropEvent) => void> = {};
     refuseStrayDrops({ addEventListener: (type, fn) => void (listeners[type] = fn) });
-    const event = (handled = false, withFiles = true): DropEvent & { prevented: boolean } => {
+    const event = (
+      handled = false,
+      withFiles = true,
+      target: unknown = null,
+    ): DropEvent & { prevented: boolean } => {
       const e = {
         prevented: handled,
         get defaultPrevented() {
           return this.prevented;
         },
         dataTransfer: { dropEffect: 'copy', types: withFiles ? ['Files'] : ['text/plain'] },
+        target,
         preventDefault() {
           this.prevented = true;
         },
@@ -183,6 +277,17 @@ describe('files dropped on the window', () => {
     expect(over.prevented).toBe(false);
     expect(over.dataTransfer!.dropEffect).toBe('copy');
     const dropped = event(false, false);
+    listeners.drop!(dropped);
+    expect(dropped.prevented).toBe(false);
+  });
+
+  it('are left to a file chooser, which takes them itself', () => {
+    const { listeners, event } = drop();
+    const input = { closest: (sel: string) => (sel === 'input[type=file]' ? {} : null) };
+    const over = event(false, true, input);
+    listeners.dragover!(over);
+    expect(over.prevented).toBe(false);
+    const dropped = event(false, true, input);
     listeners.drop!(dropped);
     expect(dropped.prevented).toBe(false);
   });
