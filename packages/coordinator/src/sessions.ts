@@ -188,6 +188,18 @@ export class SessionService {
   // What a device signed
   // -------------------------------------------------------------------------
 
+  /** What can be told of a proof without the key: that it is there, for this server, and a join recent. */
+  private checkProofIsFor(
+    server: string,
+    op: Exclude<SessionOp, { op: 'leave' }>,
+    proof: SessionOpProof | undefined,
+  ): asserts proof is SessionOpProof {
+    if (!proof) throw new RpcFailure('bad_request', UNSIGNED);
+    if (proof.server !== server) throw new RpcFailure('forbidden', 'signed for another server');
+    if (op.op === 'join' && Math.abs(Date.now() - proof.at) > SESSION_OP_SKEW_MS)
+      throw new RpcFailure('forbidden', NOT_RECENT);
+  }
+
   /**
    * Whether `proof` is the device's own signature on this operation, made for `server` (the
    * one that sent it to us), with the key of its account. A join must also be recent. What
@@ -201,10 +213,7 @@ export class SessionService {
     op: Exclude<SessionOp, { op: 'leave' }>,
     proof: SessionOpProof | undefined,
   ) {
-    if (!proof) throw new RpcFailure('bad_request', UNSIGNED);
-    if (proof.server !== server) throw new RpcFailure('forbidden', 'signed for another server');
-    if (op.op === 'join' && Math.abs(Date.now() - proof.at) > SESSION_OP_SKEW_MS)
-      throw new RpcFailure('forbidden', NOT_RECENT);
+    this.checkProofIsFor(server, op, proof);
     // What a server may add (a hint) or must set (the kind of device) is not what was signed.
     const signed: SignedSessionOp =
       op.op === 'report'
@@ -445,17 +454,24 @@ export class SessionService {
     }
     // It may have left meanwhile. (Joined again is no matter: both go on, and a join said twice
     // is the same join.)
-    if (wait.leaves !== leavesBefore) throw new RpcFailure('not_found', 'left before it joined');
+    // (Either way nobody is left to wait for.)
+    if (wait.leaves !== leavesBefore) {
+      this.endRenewal(joinKey);
+      throw new RpcFailure('not_found', 'left before it joined');
+    }
     // It may have gone (or been replaced) while the record was looked up; nothing would remove it later.
-    if (!this.hub.presence.localOf(client.userId).includes(client))
+    if (!this.hub.presence.localOf(client.userId).includes(client)) {
+      this.endRenewal(joinKey);
       throw new RpcFailure('unavailable', 'the connection closed');
+    }
     clearTimeout(this.pendingLeaves.get(joinKey));
     this.pendingLeaves.delete(joinKey);
     let members = this.local.get(sessionId);
     if (!members) this.local.set(sessionId, (members = new Map()));
     const before = members.get(client.peer);
     members.set(client.peer, vouched);
-    this.lastOwner.set(sessionId, this.ownerOf(sessionId));
+    const owner = this.ownerOf(sessionId);
+    this.lastOwner.set(sessionId, owner);
     const hint = this.lastKnown.get(sessionId);
     try {
       // What was signed goes on as it was; the owner sets the kind of device from the record itself.
@@ -466,9 +482,8 @@ export class SessionService {
         proof,
         device,
       )) as SessionState;
-      // Taken by the owner: nothing more to ask of it.
-      clearTimeout(this.renewing.get(joinKey)?.timer);
-      this.renewing.delete(joinKey);
+      // Taken by the owner: nothing more to ask of it (unless the owner has changed again meanwhile).
+      if (this.lastOwner.get(sessionId) === owner) this.endRenewal(joinKey);
       return state;
     } catch (err) {
       // Refused: the client is told so, and must not be treated as in the room (or as having
@@ -508,8 +523,15 @@ export class SessionService {
       proof,
     );
     // What kind of device it is was settled by the join; a removed device is found by the recheck.
-    members.set(client.peer, { ...caps, platform: current.platform });
-    await this.submit(sessionId, client.peer, { op: 'update', caps }, proof);
+    const said = { ...caps, platform: current.platform };
+    members.set(client.peer, said);
+    try {
+      await this.submit(sessionId, client.peer, { op: 'update', caps }, proof);
+    } catch (err) {
+      // Not taken: what we hold is what the owner has (unless it was said again meanwhile).
+      if (members.get(client.peer) === said) members.set(client.peer, current);
+      throw err;
+    }
   }
 
   async leave(peer: string, sessionId: string) {
@@ -658,6 +680,15 @@ export class SessionService {
     // member who disconnects is already gone from the presence when its leave arrives.)
     // What a device does is taken in the order it was sent, also while a join is still being
     // looked into (a leave must not pass it); other devices' operations are not held up.
+    // A join that is not signed for us, or not recent, costs no look-up of the device.
+    if (frame.op.op === 'join') {
+      try {
+        this.checkProofIsFor(fromServer, frame.op, frame.proof);
+      } catch (err) {
+        fail(err);
+        return;
+      }
+    }
     const gateKey = `${frame.sessionId}|${frame.peer}`;
     const gate = this.gates.get(gateKey) ?? Promise.resolve();
     type Admitted =
@@ -1150,6 +1181,11 @@ export class SessionService {
     }
   }
 
+  private endRenewal(key: string) {
+    clearTimeout(this.renewing.get(key)?.timer);
+    this.renewing.delete(key);
+  }
+
   private askToRenew(sessionId: string, peer: string, deadline?: number) {
     const key = `${sessionId}|${peer}`;
     const running = this.renewing.get(key);
@@ -1199,6 +1235,8 @@ export class SessionService {
     const peer = client.peer;
     if (!renewal) return;
     if (err instanceof RpcFailure && err.message === DEVICE_REMOVED) return;
+    // Gone meanwhile: nobody to ask.
+    if (!this.local.get(sessionId)?.has(peer)) return;
     // The time it had has gone: whatever the new owner said, it is not in the room there.
     if (Date.now() >= renewal.deadline) {
       this.dropUnrenewed(sessionId, peer, client);
@@ -1209,6 +1247,10 @@ export class SessionService {
     clearTimeout(this.renewing.get(key)?.timer);
     const timer = setTimeout(() => {
       if (this.renewing.get(key)?.timer !== timer) return;
+      if (!this.local.get(sessionId)?.has(peer)) {
+        this.renewing.delete(key);
+        return;
+      }
       if (Date.now() >= renewal.deadline) {
         this.renewing.delete(key);
         this.dropUnrenewed(sessionId, peer, client);

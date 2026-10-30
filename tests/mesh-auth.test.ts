@@ -725,6 +725,40 @@ describe('events and session operations from other servers', () => {
         expect(memberOf(net, net.bob.conn.peer)).toBeDefined();
       });
 
+      it('looks up the record of a device only for a join that is signed for the sender and recent', async () => {
+        const net = await conversation();
+        await joined(net);
+        claimBob(net);
+        const find = vi.spyOn(
+          net.victim.sessions as unknown as { findDevice(): unknown },
+          'findDevice',
+        );
+        const body = { op: 'join', caps: caps() };
+        op(net, net.bob.conn.peer, body);
+        op(net, net.bob.conn.peer, body, net.bob.identity, { at: Date.now() - 10 * 60_000 });
+        const forOther = signSessionOp(
+          net.bob.identity,
+          net.sessionId,
+          net.bob.conn.peer,
+          { op: 'join', caps: caps() },
+          { server: net.honest.info.id },
+        );
+        net.toVictim.send({
+          t: 'session_op',
+          opId: 'o2',
+          sessionId: net.sessionId,
+          peer: net.bob.conn.peer,
+          op: body,
+          proof: forOther,
+        });
+        await settled(net);
+        await new Promise((r) => setTimeout(r, 300));
+        expect(find).not.toHaveBeenCalled();
+        op(net, net.bob.conn.peer, body, net.bob.identity, { at: Date.now() + 1000 });
+        await waitFor(() => find.mock.calls.length > 0, 3000, 'the look-up of a join that is fine');
+        find.mockRestore();
+      });
+
       it('does not take a join that was signed for another server', async () => {
         const net = await conversation();
         await joined(net);

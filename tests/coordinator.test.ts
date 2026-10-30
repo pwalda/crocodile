@@ -1115,6 +1115,31 @@ describe('sessions and host election', () => {
         expect(c.sessions.inSession(alice.conn.peer, sessionId)).toBe(true);
       });
 
+      it('dates the floor of its joins by the server they are for', async () => {
+        const { c, alice, sessionId } = await setup();
+        await alice.conn.request('session.join', { sessionId, caps: caps() });
+        const floors = (alice.conn.constructor as unknown as { joinedAt: Map<string, number> })
+          .joinedAt;
+        expect([...floors.keys()]).toContain(`${c.info.id}|${alice.conn.peer}|${sessionId}`);
+      });
+
+      it('puts back what a device said of itself when the owner does not take an update', async () => {
+        const { c, alice, sessionId } = await setup();
+        await alice.conn.request('session.join', { sessionId, caps: caps({ nat: 'cone' }) });
+        const internals = c.sessions as unknown as {
+          local: Map<string, Map<string, { nat: string }>>;
+          submit(): unknown;
+        };
+        const submit = vi
+          .spyOn(internals, 'submit')
+          .mockRejectedValueOnce(new RpcFailure('conflict', 'not the join'));
+        await expect(
+          alice.conn.request('session.update', { sessionId, caps: caps({ nat: 'open' }) }),
+        ).rejects.toThrow();
+        submit.mockRestore();
+        expect(internals.local.get(sessionId)!.get(alice.conn.peer)!.nat).toBe('cone');
+      });
+
       it('lets a device that left join again', async () => {
         const { c, alice, sessionId } = await setup();
         await alice.conn.request('session.join', { sessionId, caps: caps() });
@@ -1291,6 +1316,41 @@ describe('sessions and host election', () => {
       await waitFor(() => internals.renewing.size === 0, 3000, 'the join to be taken');
       submit.mockRestore();
       expect(c.sessions.inSession(alice.conn.peer, sessionId)).toBe(true);
+    });
+
+    it('goes on waiting for a join when the owner has changed again while the last was on its way', async () => {
+      const { c, alice, sessionId } = await setup();
+      await alice.conn.request('session.join', { sessionId, caps: caps() });
+      const internals = c.sessions as unknown as {
+        lastOwner: Map<string, string>;
+        ownerOf(id: string): string;
+        submit(): unknown;
+        rebalance(): void;
+        renewing: Map<string, unknown>;
+      };
+      // The owner is B, and then C.
+      let owner = 'owner-b';
+      const ownerOf = vi.spyOn(internals, 'ownerOf').mockImplementation(() => owner);
+      const submit = vi.spyOn(internals, 'submit').mockImplementationOnce(async () => {
+        await new Promise((r) => setTimeout(r, 400));
+        return {};
+      });
+      let first: Promise<unknown> | undefined;
+      alice.conn.on('session_renew', ({ sessionId: id }) => {
+        first ??= alice.conn.request('session.join', { sessionId: id, caps: caps() });
+      });
+      internals.lastOwner.set(sessionId, 'someone-else');
+      internals.rebalance();
+      await waitFor(() => first !== undefined, 3000, 'the first join');
+      // The owner changes again while it is on its way.
+      await new Promise((r) => setTimeout(r, 100));
+      owner = 'owner-c';
+      internals.rebalance();
+      await first;
+      // The device has not given a join for the newer owner: it is still waited for.
+      expect(internals.renewing.size).toBe(1);
+      ownerOf.mockRestore();
+      submit.mockRestore();
     });
 
     it('does not ask again for a join once the time it had has gone, but takes the device out', async () => {

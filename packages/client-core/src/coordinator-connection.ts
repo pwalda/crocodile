@@ -83,7 +83,10 @@ export class CoordinatorConnection extends Emitter<ConnectionEvents> {
    * on its way. A join counts only once it is taken.
    */
   private signing = new Map<string, { since?: number; n: number; joining?: Promise<unknown> }>();
-  /** The time of the last join signed for each room, across connections: it only goes up. */
+  /**
+   * The time of the last join signed for each room, across connections to the same server: it
+   * only goes up. (Per server: the time of another is of no concern to this one.)
+   */
   private static joinedAt = new Map<string, number>();
 
   private constructor(
@@ -285,7 +288,7 @@ export class CoordinatorConnection extends Emitter<ConnectionEvents> {
     let proof: SessionOpProof | undefined;
     if (method === 'session.join') {
       const p = params as RpcParamsOf<'session.join'>;
-      const key = `${this.peer}|${sessionId}`;
+      const key = `${this.server.id}|${this.peer}|${sessionId}`;
       // Each join is later than the last, whatever the clock does: it is what the others name.
       const joined = CoordinatorConnection.joinedAt;
       const at = Math.max(Date.now() + this.clockOffset, (joined.get(key) ?? 0) + 1);
@@ -370,6 +373,9 @@ export class CoordinatorConnection extends Emitter<ConnectionEvents> {
       if (frame.err) p.reject(new RpcCallError(frame.err.code, frame.err.message));
       else p.resolve(frame.ok);
     } else if (frame.t === 'ev') {
+      // Out of a room by the server's doing: nothing we signed there stands.
+      if (frame.ev === 'session_closed')
+        this.signing.delete((frame.d as ServerEvents['session_closed']).sessionId);
       this.emit(frame.ev, frame.d as never);
     }
   }
