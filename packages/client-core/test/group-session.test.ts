@@ -261,6 +261,32 @@ describe('group session', () => {
     }
   });
 
+  it('does not leave a room because some of the answers it got while joining again were refusals', async () => {
+    vi.useFakeTimers();
+    try {
+      let joins = 0;
+      const { s } = session(
+        async () => grant(60_000),
+        async (type) => {
+          if (type !== 'session.join') return {};
+          // Refused, and not reached, in turn.
+          if (++joins < 30)
+            throw joins % 2
+              ? Object.assign(new Error('not a member of this space'), { code: 'forbidden' })
+              : new Error('the owner cannot be reached');
+          return { state: state('bbbbbbbbbbbbbbbbbbbbbbbbbb.dev1', 1) };
+        },
+      );
+      const done = s.rejoin();
+      await vi.advanceTimersByTimeAsync(60 * 60_000);
+      await done;
+      expect(joins).toBe(30);
+      expect(s.status).not.toBe('left');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('does not join a room it was never in because an update finds it is not', async () => {
     const sent: string[] = [];
     const { s } = session(

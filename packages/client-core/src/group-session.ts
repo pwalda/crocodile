@@ -357,8 +357,9 @@ export class GroupSession extends Emitter<GroupSessionEvents> {
         await this.join({ fresh: true });
         return;
       } catch (err) {
-        if ((err as { code?: string }).code === 'forbidden' && ++refused >= REJOIN_REFUSALS)
-          return this.leave();
+        // (Running: any other answer in between starts the count again.)
+        refused = (err as { code?: string }).code === 'forbidden' ? refused + 1 : 0;
+        if (refused >= REJOIN_REFUSALS) return this.leave();
         await new Promise((r) =>
           setTimeout(r, Math.min(REJOIN_RETRY_MS * 2 ** attempt, REJOIN_RETRY_MAX_MS)),
         );
