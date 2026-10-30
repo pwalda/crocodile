@@ -3,7 +3,7 @@ import type { SessionMember } from '@crocodile/protocol';
 /**
  * Host election. The host runs the session's relay, so we want the member
  * most likely to be reachable by everyone with bandwidth to spare: an open or
- * cone NAT, a desktop on mains power, fast uplink, low latency. A little
+ * cone NAT, a desktop on mains power, fast uplink. A little
  * tenure bonus plus "keep the current host while it is healthy" avoid
  * flapping when a slightly better peer joins.
  *

@@ -453,4 +453,22 @@ describe('election', () => {
     });
     expect(r.backup).toBe('b.d2');
   });
+
+  it('keeps the host when it is not the best device of its person', () => {
+    const user = (u: string, n: number, nat: 'open' | 'cone', extra = {}) => ({
+      ...member(`${u}.d${n}`, nat, extra),
+      userId: u,
+    });
+    const members = [user('a', 1, 'open'), user('a', 2, 'cone'), user('b', 1, 'cone')];
+    const r = elect({
+      sessionId: 's1',
+      members,
+      host: 'a.d2',
+      backup: null,
+      penalties: new Map(),
+      now: 0,
+    });
+    expect(r.host).toBe('a.d2');
+    expect(r.backup).toBe('b.d1');
+  });
 });
