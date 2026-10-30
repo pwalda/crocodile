@@ -8,7 +8,8 @@ import {
   FileExports,
   FileStore,
   markFromOutside,
-  opensWithoutAsking,
+  askBeforeOpening,
+  kindOf,
   RISKY_EXTENSIONS,
   safeFileName,
 } from '../apps/desktop/src/main/file-store';
@@ -181,7 +182,7 @@ describe('files received from other people', () => {
 
   it('are marked as downloaded on Windows (Mark-of-the-Web)', async () => {
     const { calls, deps: d } = deps('win32');
-    expect(await markFromOutside('C:\\Users\\me\\Downloads\\report.docx', d)).toBe(true);
+    expect(await markFromOutside('C:\\Users\\me\\Downloads\\report.docx', d)).toBe('marked');
     expect(calls).toEqual([
       [
         'stream',
@@ -193,7 +194,7 @@ describe('files received from other people', () => {
 
   it('are quarantined on macOS', async () => {
     const { calls, deps: d } = deps('darwin');
-    expect(await markFromOutside('/Users/me/Downloads/app.zip', d)).toBe(true);
+    expect(await markFromOutside('/Users/me/Downloads/app.zip', d)).toBe('marked');
     expect(calls).toEqual([
       ['quarantine', '/Users/me/Downloads/app.zip', '0083;6553f100;Crocodile;'],
     ]);
@@ -201,13 +202,13 @@ describe('files received from other people', () => {
 
   it('are left as they are where there is no such mark, or the drive cannot carry it', async () => {
     const linux = deps('linux');
-    expect(await markFromOutside('/home/me/x.pdf', linux.deps)).toBe(false);
+    expect(await markFromOutside('/home/me/x.pdf', linux.deps)).toBe('none');
     expect(linux.calls).toEqual([]);
     const fat = deps('win32');
     fat.deps.writeStream = async () => {
       throw new Error('EINVAL');
     };
-    expect(await markFromOutside('E:\\x.pdf', fat.deps)).toBe(false);
+    expect(await markFromOutside('E:\\x.pdf', fat.deps)).toBe('failed');
   });
 
   it('are marked when finished, whether saved or opened, but not when abandoned', async () => {
@@ -246,13 +247,15 @@ describe('files received from other people', () => {
       'paper.pdf',
       'sheet.xlsx',
     ])
-      expect(opensWithoutAsking(name), name).toBe(true);
-    // Programs, macro documents and web pages, archives, kinds not heard of, and no kind at all.
+      expect(askBeforeOpening(name, false), name).toBeNull();
+    // Programs, macro documents, web pages, documents that carry links, archives, kinds not heard of, and no kind at all.
     for (const name of [
       'a.exe',
       'a.docm',
       'a.html',
       'a.svg',
+      'a.rtf',
+      'a.odt',
       'a.zip',
       'a.7z',
       'a.iso',
@@ -260,9 +263,36 @@ describe('files received from other people', () => {
       'README',
       'a.pdf.exe',
       'a.exe.',
-      'a.exe.',
+      'a.exe ',
       '.pdf',
     ])
-      expect(opensWithoutAsking(name), name).toBe(false);
+      expect(askBeforeOpening(name, false), name).toBeTruthy();
+  });
+
+  it('say whether a kind runs code, is not known, or just could not be marked', () => {
+    expect(kindOf('a.exe')).toBe('runs-code');
+    expect(kindOf('a.xyz')).toBe('unknown');
+    expect(kindOf('a.pdf')).toBe('safe');
+    expect(askBeforeOpening('a.exe', false)).toMatch(/can run code/);
+    expect(askBeforeOpening('a.xyz', false)).toMatch(/doesn't know this kind/);
+    expect(askBeforeOpening('a.pdf', true)).toMatch(/could not mark/);
+  });
+
+  it('are asked about even if safe when the system mark could not be put on them', async () => {
+    const dir = tempDir();
+    const x = new FileExports(async (p) => (p.endsWith('bad.pdf') ? 'failed' : 'marked'));
+    const bad = join(dir, 'bad.pdf');
+    await x.end(await x.begin(bad, false));
+    const good = join(dir, 'good.pdf');
+    await x.end(await x.begin(good, false));
+    expect(x.markFailed(good)).toBe(false);
+    expect(x.markFailed(bad)).toBe(true);
+    expect(x.markFailed(bad)).toBe(false);
+    const throws = new FileExports(async () => {
+      throw new Error('no');
+    });
+    const p = join(dir, 'c.pdf');
+    await throws.end(await throws.begin(p, false));
+    expect(throws.markFailed(p)).toBe(true);
   });
 });

@@ -64,7 +64,13 @@ export class SecureStore {
         // Left as it was; tried again next time.
       }
     }
-    if (moved) this.write(data);
+    if (!moved) return 0;
+    try {
+      this.write(data);
+    } catch {
+      // A folder that can't be written to just now: tried again next time.
+      return 0;
+    }
     return moved;
   }
 
@@ -101,7 +107,11 @@ export class SecureStore {
   private read(): Record<string, string> {
     if (!existsSync(this.path)) return {};
     try {
-      return JSON.parse(readFileSync(this.path, 'utf8')) as Record<string, string>;
+      const parsed = JSON.parse(readFileSync(this.path, 'utf8')) as Record<string, unknown>;
+      // Only text values; anything else in a damaged file is not a secret of ours.
+      return Object.fromEntries(
+        Object.entries(parsed).filter((e): e is [string, string] => typeof e[1] === 'string'),
+      );
     } catch {
       return {};
     }

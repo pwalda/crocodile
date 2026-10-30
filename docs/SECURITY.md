@@ -244,7 +244,7 @@ picture size.
   quarantine attribute on macOS, so the system's own checks apply; Linux has
   no such mark, and a drive that can't carry it is left unmarked), and asks
   before opening anything but pictures, sound, video, plain text, PDFs and
-  Office or OpenDocument files without macros. A file a member sends can still
+  Word, Excel and PowerPoint files without macros, and also asks when the mark could not be put on a file. A file a member sends can still
   be harmful.
 
 Please report vulnerabilities privately through

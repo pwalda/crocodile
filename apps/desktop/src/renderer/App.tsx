@@ -144,7 +144,10 @@ function Shell() {
 function UnprotectedKeysBanner() {
   const [protection, setProtection] = useState<'keychain' | 'weak' | 'none'>('keychain');
   useEffect(() => {
-    void desktop?.secure.status().then((s) => setProtection(s.protection));
+    desktop?.secure
+      .status()
+      .then((s) => setProtection(s.protection))
+      .catch((err) => console.warn('keychain status unavailable', err));
   }, []);
   if (protection === 'keychain') return null;
   return (

@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -90,5 +90,21 @@ describe('secure storage', () => {
     expect(store.get('identity-seed')).toBe('the seed');
     k.failEncrypt = false;
     expect(store.upgrade()).toBe(1);
+  });
+
+  it('keeps going when the moved values cannot be written, and ignores what is not text', () => {
+    const k = keychain();
+    const dir = mkdtempSync(join(tmpdir(), 'croc-'));
+    const path = join(dir, 'secure.json');
+    writeFileSync(path, JSON.stringify({ 'identity-seed': 'raw:the seed', odd: 42, nested: {} }));
+    const store = new SecureStore(path, k);
+    // The folder can't take the new file: the old one stays, and nothing throws.
+    mkdirSync(`${path}.tmp`);
+    expect(store.upgrade()).toBe(0);
+    expect(store.get('identity-seed')).toBe('the seed');
+    expect(store.get('odd')).toBeUndefined();
+    rmSync(`${path}.tmp`, { recursive: true });
+    expect(store.upgrade()).toBe(1);
+    expect(store.get('identity-seed')).toBe('the seed');
   });
 });

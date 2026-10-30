@@ -17,18 +17,12 @@ import {
   type WebContents,
 } from 'electron';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { basename, extname, join } from 'node:path';
+import { basename, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { cpus } from 'node:os';
 import { contextMenuTemplate } from './context-menu';
 import { configureGlobalPtt, stopGlobalPtt } from './global-ptt';
-import {
-  FileExports,
-  FileStore,
-  opensWithoutAsking,
-  RISKY_EXTENSIONS,
-  safeFileName,
-} from './file-store';
+import { FileExports, FileStore, askBeforeOpening, safeFileName } from './file-store';
 import { SecureStore, type Protection } from './secure-store';
 import { isAllowedNavigation } from './navigation';
 import { allowAsking, handle, useIpc } from './ipc-guard';
@@ -94,11 +88,7 @@ const secure = new SecureStore(join(userData(), 'secure.json'), safeStorage);
 handle('secure:get', (_e, key: string) => secure.get(key));
 handle('secure:set', (_e, key: string, value: string) => secure.set(key, value));
 handle('secure:delete', (_e, key: string) => secure.delete(key));
-handle('secure:status', (): { protection: Protection } => {
-  // The keyring may have started since last time; what was stored plainly then moves in.
-  secure.upgrade();
-  return { protection: secure.protection() };
-});
+handle('secure:status', (): { protection: Protection } => ({ protection: secure.protection() }));
 
 // ---------------------------------------------------------------------------
 // Host relay utility process
@@ -241,19 +231,15 @@ handle('files:end', async (_e, token: string, then: 'open' | 'reveal' | 'none') 
   if (then === 'reveal') shell.showItemInFolder(path);
   if (then === 'open') {
     // Asked here rather than in the UI, so nothing the UI does can skip it.
-    if (!opensWithoutAsking(path)) {
-      const runsCode = RISKY_EXTENSIONS.has(extname(safeFileName(path)).slice(1).toLowerCase());
+    const warning = askBeforeOpening(path, exportsInProgress.markFailed(path));
+    if (warning) {
       const options = {
         type: 'warning' as const,
         buttons: ['Cancel', 'Open anyway'],
         defaultId: 0,
         cancelId: 0,
         message: `Open ${basename(path)}?`,
-        detail: runsCode
-          ? 'This kind of file can run code on your computer. Only open it if you trust ' +
-            'the person who sent it and expected it.'
-          : "Crocodile doesn't know this kind of file, and some can run code on your " +
-            'computer. Only open it if you trust the person who sent it and expected it.',
+        detail: warning,
       };
       const res = win
         ? await dialog.showMessageBox(win, options)
