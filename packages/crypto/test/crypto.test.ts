@@ -1400,4 +1400,18 @@ describe('session operations', () => {
     expect(verifySessionOp(alice.publicKey, sessionId, peer, leave, proof)).toBe(false);
     expect(() => signSessionOp(alice, sessionId, peer, leave, { ...context, since: 5 })).toThrow();
   });
+
+  it('refuses to sign what the schema would refuse, and does not throw on claims that are not claims', () => {
+    const update = { op: 'update', caps } as const;
+    expect(() =>
+      signSessionOp(alice, sessionId, peer, update, { ...context, since: 5, n: 2 ** 31 }),
+    ).toThrow();
+    expect(() =>
+      signSessionOp(alice, sessionId, peer, update, { ...context, since: 5, n: -1 }),
+    ).toThrow();
+    expect(() => signSessionOp(alice, sessionId, peer, join, { ...context, at: -1 })).toThrow();
+    const proof = signSessionOp(alice, sessionId, peer, join, context);
+    const bad = { op: 'join', caps: { ...caps, platform: 'toaster' } } as unknown as typeof join;
+    expect(verifySessionOp(alice.publicKey, sessionId, peer, bad, proof)).toBe(false);
+  });
 });

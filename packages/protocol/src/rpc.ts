@@ -296,7 +296,7 @@ export const RpcParams = {
   }),
   'session.report': z.object({
     sessionId: SessionId,
-    epoch: z.number().int(),
+    epoch: z.number().int().safe().min(0),
     issue: z.enum(['host_unreachable']),
     proof: SessionOpProof.optional(),
   }),

@@ -227,7 +227,8 @@ export interface FedRoute {
  * A device's signature on its own join, update or report in a session, so that a server
  * other than the one the device is connected to cannot speak for it. The key to check it
  * with is the account's, which the receiver has from the device's record (or the sign-in).
- * `server` is the server the device is connected to, `at` the device's clock. An update or
+ * `server` is the id of the server the device is connected to, exactly as that server gives it in
+ * its hello (compared as it is, never normalised), `at` the device's clock. An update or
  * a report names the join it belongs to by that join's `at` (`since`); an update also counts
  * up (`n`), so that an older one is not taken for a newer.
  */
@@ -239,7 +240,7 @@ export const SessionOpProof = z.object({
     .number()
     .int()
     .min(0)
-    .max(2 ** 31)
+    .max(2 ** 31 - 1)
     .optional(),
   sig: z.string().min(1).max(200),
 });
@@ -280,7 +281,8 @@ export function sessionOpPayload(
     op:
       op.op === 'report'
         ? { op: op.op, epoch: op.epoch, issue: op.issue }
-        : { op: op.op, caps: op.caps },
+        : // The claims as a receiver has them once parsed, whoever builds the bytes.
+          { op: op.op, caps: HostCaps.parse(op.caps) },
   };
 }
 
@@ -406,7 +408,7 @@ const SessionOpSchema = z.discriminatedUnion('op', [
   z.object({ op: z.literal('leave') }),
   z.object({
     op: z.literal('report'),
-    epoch: z.number().int(),
+    epoch: z.number().int().safe().min(0),
     issue: z.literal('host_unreachable'),
   }),
 ]);

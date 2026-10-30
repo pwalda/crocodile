@@ -83,4 +83,26 @@ describe('session operation proofs', () => {
       n: null,
     });
   });
+
+  it('bound the epoch of a report', () => {
+    for (const epoch of [-1, 1e300, 1.5])
+      expect(
+        RpcParams['session.report'].safeParse({
+          sessionId,
+          epoch,
+          issue: 'host_unreachable',
+          proof,
+        }).success,
+      ).toBe(false);
+    expect(
+      FedFrameSchema.safeParse({
+        t: 'session_op',
+        opId: 'x',
+        sessionId,
+        peer,
+        op: { op: 'report', epoch: 1e300, issue: 'host_unreachable' },
+        proof,
+      }).success,
+    ).toBe(false);
+  });
 });

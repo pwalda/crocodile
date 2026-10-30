@@ -2,16 +2,15 @@ import {
   bytesEqual,
   fromB32,
   fromB64u,
-  HostCaps,
   mailProofPayload,
   sessionOpPayload,
+  SessionOpProof,
   sessionOpShapeOk,
   SIG_DOMAIN,
   toB32,
   toB64u,
   utf8,
   type MailProof,
-  type SessionOpProof,
   type SignedSessionOp,
 } from '@crocodile/protocol';
 import {
@@ -289,8 +288,7 @@ export function signSessionOp(
     ...(n === undefined ? {} : { n }),
   };
   if (!sessionOpShapeOk(op, proof)) throw new Error(`a ${op.op} does not carry that`);
-  // What is signed is what the receiver will have after it has parsed the claims.
-  if (op.op !== 'report') op = { ...op, caps: HostCaps.parse(op.caps) };
+  SessionOpProof.omit({ sig: true }).parse(proof);
   return {
     ...proof,
     sig: sign(identity, SIG_DOMAIN.sessionOp, sessionOpPayload(sessionId, peer, op, proof)),
@@ -313,5 +311,15 @@ export function verifySessionOp(
   if (!keyMatchesUserId(key, peer.split('.')[0]!)) return false;
   const { sig, ...rest } = proof;
   if (!sessionOpShapeOk(op, rest)) return false;
-  return verifyPayload(key, SIG_DOMAIN.sessionOp, sessionOpPayload(sessionId, peer, op, rest), sig);
+  try {
+    return verifyPayload(
+      key,
+      SIG_DOMAIN.sessionOp,
+      sessionOpPayload(sessionId, peer, op, rest),
+      sig,
+    );
+  } catch {
+    // Claims that are not claims.
+    return false;
+  }
 }
