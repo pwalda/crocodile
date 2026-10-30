@@ -32,6 +32,7 @@ import {
 } from '@crocodile/protocol';
 import { CoordinatorConnection } from '@crocodile/client-core';
 import { Coordinator, lanAddress, rendezvousOwner } from '@crocodile/coordinator';
+import { OwnerSilent } from '../packages/coordinator/src/sessions';
 import { RpcFailure } from '../packages/coordinator/src/util';
 import {
   caps,
@@ -924,7 +925,7 @@ describe('sessions and host election', () => {
       const { c, alice, sessionId } = await setup();
       const submit = vi
         .spyOn(c.sessions as unknown as { submit(): unknown }, 'submit')
-        .mockRejectedValueOnce(new RpcFailure('unavailable', 'session owner did not respond'));
+        .mockRejectedValueOnce(new OwnerSilent());
       await expect(
         alice.conn.request('session.join', { sessionId, caps: caps() }),
       ).rejects.toThrow();
@@ -964,6 +965,18 @@ describe('sessions and host election', () => {
       await waitFor(() => !c.sessions.inSession(alice.conn.peer, sessionId), 3000, 'to let go');
       submit.mockRestore();
       expect(internals.rebalanceTimer).toBeUndefined();
+    });
+
+    it('does not keep a device in the room when the owner answers that it cannot tell', async () => {
+      const { c, alice, sessionId } = await setup();
+      const submit = vi
+        .spyOn(c.sessions as unknown as { submit(): unknown }, 'submit')
+        .mockRejectedValueOnce(new RpcFailure('unavailable', 'no record of that device'));
+      await expect(
+        alice.conn.request('session.join', { sessionId, caps: caps() }),
+      ).rejects.toThrow();
+      submit.mockRestore();
+      expect(c.sessions.inSession(alice.conn.peer, sessionId)).toBe(false);
     });
 
     it('keeps trying a member after the owner changed when the owner could not tell', async () => {

@@ -289,13 +289,16 @@ stays gone for 20 s.
 
 Members report `HostCaps` when joining: whether they can and may host (desktop
 only, user setting), NAT type (detected by comparing the mappings the server's two STUN ports report), uplink,
-CPU cores, battery, RTT. `coordinator/src/election.ts` scores members:
+CPU cores, battery, RTT.
 
-- A device joins only if it has a record on its account that hasn't been
-  removed, and the kind of device (desktop, web, ...) is read from that record
-  rather than from what the device says. The owner looks again about once a
-  minute and drops devices that have since been removed. The rest of
-  `HostCaps` is reported by the device and cannot be checked.
+A device joins only if it has a record on its account that hasn't been
+removed, and the kind of device (desktop, web, ...) is read from that record
+rather than from what the device says. The owner looks again about once a
+minute and drops devices that have since been removed. The rest of
+`HostCaps` is reported by the device and cannot be checked.
+
+`coordinator/src/election.ts` scores members:
+
 - Open or cone NAT scores highest and symmetric NAT lowest; web and mobile
   clients never host.
 - The current host is kept while it is healthy (no flapping when a slightly

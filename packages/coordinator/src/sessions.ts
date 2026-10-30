@@ -31,6 +31,13 @@ interface OwnedSession {
   timer?: ReturnType<typeof setTimeout>;
 }
 
+/** The owner did not answer in time: it may have done what it was asked all the same. */
+export class OwnerSilent extends RpcFailure {
+  constructor() {
+    super('unavailable', 'session owner did not respond');
+  }
+}
+
 type Hint = { epoch: number; host: string | null; backup: string | null };
 
 const PENDING_HOST_GRACE_MS = 4000;
@@ -239,7 +246,10 @@ export class SessionService {
   > {
     try {
       if (!(await this.connectedTo(server, peer)))
-        return { refused: 'that device is not connected to the sending server', code: 'forbidden' };
+        return {
+          refused: 'that device is not connected to the sending server',
+          code: 'unavailable',
+        };
       const { device, removed } = await this.lookupDevice(peer, true);
       if (!device)
         return removed
@@ -331,7 +341,7 @@ export class SessionService {
       // said what was refused) meanwhile. Not if another join of it has since taken its place.
       // Not when the owner simply did not answer: it may have applied the join.
       const current = this.local.get(sessionId);
-      const silent = err instanceof RpcFailure && err.code === 'unavailable';
+      const silent = err instanceof OwnerSilent;
       const forbidden = err instanceof RpcFailure && err.code === 'forbidden';
       if (!silent && current?.get(client.peer) === caps) {
         if (before && !forbidden) current.set(client.peer, before);
@@ -423,7 +433,7 @@ export class SessionService {
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pendingOps.delete(opId);
-        reject(new RpcFailure('unavailable', 'session owner did not respond'));
+        reject(new OwnerSilent());
       }, OP_TIMEOUT_MS);
       this.pendingOps.set(opId, { server: owner, resolve, reject, timer });
       const sent = this.hub.mesh.sendTo(owner, { t: 'session_op', opId, sessionId, peer, op });
@@ -450,9 +460,9 @@ export class SessionService {
           message: err instanceof Error ? err.message : String(err),
         },
       });
-    // Only a join has to be vouched for by presence: whoever else speaks for a
-    // member must be the server it joined from, which `apply` checks. (A member
-    // who disconnects is already gone from the presence when its leave arrives.)
+    // Only a join has to be vouched for (by presence and by the device's record): whoever
+    // else speaks for a member must be the server it joined from, which `apply` checks. (A
+    // member who disconnects is already gone from the presence when its leave arrives.)
     // What a device does is taken in the order it was sent, also while a join is still being
     // looked into (a leave must not pass it); other devices' operations are not held up.
     const gateKey = `${frame.sessionId}|${frame.peer}`;
