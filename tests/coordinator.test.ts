@@ -894,12 +894,43 @@ describe('sessions and host election', () => {
       await c.sessions.recheckDevices();
       expect(members()).not.toContain(second.conn.peer);
       expect(members()).toContain(bob.conn.peer);
+      // Its own server forgets it too, so it can no longer signal the room or ask for a relay.
+      expect(c.sessions.inSession(second.conn.peer, sessionId)).toBe(false);
       await expect(
         second.conn.request('session.join', { sessionId, caps: caps() }),
       ).rejects.toThrow(/device/);
       await expect(
         second.conn.request('session.update', { sessionId, caps: caps() }),
       ).rejects.toThrow();
+    });
+
+    it('takes a device out of the room as soon as it updates after being removed', async () => {
+      const { c, alice, bob, sessionId } = await setup();
+      await alice.conn.request('session.join', { sessionId, caps: caps({ nat: 'open' }) });
+      const second = await anotherDevice(c, bob);
+      await second.conn.request('session.join', { sessionId, caps: caps() });
+      await registerDevice(second, 'bot', true, Date.now() + 1000);
+      await expect(
+        second.conn.request('session.update', { sessionId, caps: caps({ nat: 'open' }) }),
+      ).rejects.toThrow(/device/);
+      expect(c.sessions.inSession(second.conn.peer, sessionId)).toBe(false);
+      expect(c.sessions.ownedState(sessionId)!.members.map((m) => m.peer)).not.toContain(
+        second.conn.peer,
+      );
+    });
+
+    it('does not count a device as in the room when the owner refuses its join', async () => {
+      const { c, alice, sessionId } = await setup();
+      const apply = vi
+        .spyOn(c.sessions as unknown as { apply(): unknown }, 'apply')
+        .mockImplementationOnce(() => {
+          throw new Error('session is full');
+        });
+      await expect(
+        alice.conn.request('session.join', { sessionId, caps: caps() }),
+      ).rejects.toThrow();
+      apply.mockRestore();
+      expect(c.sessions.inSession(alice.conn.peer, sessionId)).toBe(false);
     });
 
     it('takes a revoked host out and elects another', async () => {

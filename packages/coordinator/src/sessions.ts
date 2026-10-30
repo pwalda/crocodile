@@ -56,6 +56,9 @@ const HOSTING_GRACE_MS = 1500;
 const HOSTING_WAITERS_MAX = 200;
 /** How often an owner asks again whether the devices in its rooms have been removed. */
 const DEVICE_RECHECK_MS = 60_000;
+/** A device record not found for a server that vouches for it is looked for this often, this far apart. */
+const DEVICE_LOOKUPS = 3;
+const DEVICE_LOOKUP_WAIT_MS = 300;
 /** A new owner adopts the epoch a member saw; no honest session has changed host this often. */
 const HINT_EPOCH_MAX = 1_000_000;
 
@@ -140,13 +143,27 @@ export class SessionService {
     // so servers can't (and shouldn't) know who blocked whom.
   }
 
-  /** The record of a device that is on its account and has not been removed from it. */
-  private async deviceOf(peer: string): Promise<SignedRecord<'device'> | null> {
+  /** The record of a device (a removed one included), or null if none can be found. */
+  private async findDevice(peer: string): Promise<SignedRecord<'device'> | null> {
     const key = recordKey.device(peerIds.user(peer), peerIds.device(peer));
     const [record] = await this.hub.dist.get([key]);
-    if (!record || record.key !== key || record.kind !== 'device') return null;
-    const device = record as SignedRecord<'device'>;
-    return device.body.revoked ? null : device;
+    return record && record.key === key && record.kind === 'device'
+      ? (record as SignedRecord<'device'>)
+      : null;
+  }
+
+  /**
+   * The record of a device that is on its account and has not been removed from it. With
+   * `patient`, a record that is not there is looked for again for a moment: one just
+   * published may not have reached the servers that hold it.
+   */
+  private async deviceOf(peer: string, patient = false): Promise<SignedRecord<'device'> | null> {
+    let device = await this.findDevice(peer);
+    for (let i = 0; patient && !device && i < DEVICE_LOOKUPS; i++) {
+      await new Promise((r) => setTimeout(r, DEVICE_LOOKUP_WAIT_MS));
+      device = await this.findDevice(peer);
+    }
+    return device?.body.revoked ? null : device;
   }
 
   /**
@@ -154,40 +171,51 @@ export class SessionService {
    * account (the sign-in names a device but proves only the account), and what kind of device
    * it is comes from that record, not from what it says.
    */
-  private async vouch(peer: string, caps: HostCaps): Promise<HostCaps> {
-    const device = await this.deviceOf(peer);
+  private async vouch(peer: string, caps: HostCaps, patient = false): Promise<HostCaps> {
+    const device = await this.deviceOf(peer, patient);
     if (!device)
       throw new RpcFailure('forbidden', 'that device is not on the account or was removed');
     return { ...caps, platform: device.body.platform };
   }
 
   /**
-   * Takes out of the rooms this server owns the devices that have been removed from their
-   * accounts. A record that cannot be found now says nothing (it was there at the join), so
-   * only a removal counts.
+   * Takes out of the rooms the devices that have been removed from their accounts: of the
+   * rooms this server owns (whichever server the device is on), and of those its own clients
+   * are in (so that they can no longer signal or ask for a relay). A record that cannot be
+   * found now says nothing (it was there at the join), so only a removal counts.
    */
   async recheckDevices() {
-    for (const s of [...this.owned.values()]) {
-      const keys = new Map(
-        s.state.members.map((m) => [
-          recordKey.device(peerIds.user(m.peer), peerIds.device(m.peer)),
-          m.peer,
-        ]),
-      );
-      if (keys.size === 0) continue;
-      let records: SignedRecord[];
-      try {
-        records = await this.hub.dist.get([...keys.keys()]);
-      } catch {
-        continue;
-      }
-      if (this.owned.get(s.state.id) !== s) continue;
-      for (const r of records) {
-        const peer = keys.get(r.key);
-        if (peer && r.kind === 'device' && (r as SignedRecord<'device'>).body.revoked)
-          this.removeMember(s, peer);
-      }
+    const key = (peer: string) => recordKey.device(peerIds.user(peer), peerIds.device(peer));
+    const owned = [...this.owned.values()];
+    const mine = [...this.local].map(([sessionId, members]) => ({
+      sessionId,
+      peers: [...members.keys()],
+    }));
+    const keys = new Set<string>();
+    for (const s of owned) for (const m of s.state.members) keys.add(key(m.peer));
+    for (const { peers } of mine) for (const peer of peers) keys.add(key(peer));
+    if (keys.size === 0) return;
+    let records: SignedRecord[];
+    try {
+      // One lookup for every room, each device once.
+      records = await this.hub.dist.get([...keys]);
+    } catch (err) {
+      this.hub.log.debug('could not look up devices', { err: String(err) });
+      return;
     }
+    const removed = new Set(
+      records
+        .filter((r) => r.kind === 'device' && (r as SignedRecord<'device'>).body.revoked)
+        .map((r) => r.key),
+    );
+    if (removed.size === 0) return;
+    for (const s of owned) {
+      if (this.owned.get(s.state.id) !== s) continue;
+      for (const m of [...s.state.members])
+        if (removed.has(key(m.peer))) this.removeMember(s, m.peer);
+    }
+    for (const { sessionId, peers } of mine)
+      for (const peer of peers) if (removed.has(key(peer))) await this.leave(peer, sessionId);
   }
 
   inSession(peer: string, sessionId: string) {
@@ -202,21 +230,34 @@ export class SessionService {
     this.pendingLeaves.delete(leaveKey);
     let members = this.local.get(sessionId);
     if (!members) this.local.set(sessionId, (members = new Map()));
+    const rejoining = members.has(client.peer);
     members.set(client.peer, caps);
     this.lastOwner.set(sessionId, this.ownerOf(sessionId));
     const hint = this.lastKnown.get(sessionId);
-    const state = (await this.submit(sessionId, client.peer, {
-      op: 'join',
-      caps,
-      ...(hint ? { hint } : {}),
-    })) as SessionState;
-    return state;
+    try {
+      return (await this.submit(sessionId, client.peer, {
+        op: 'join',
+        caps,
+        ...(hint ? { hint } : {}),
+      })) as SessionState;
+    } catch (err) {
+      // Refused: the client is told so, and must not be treated as in the room meanwhile.
+      if (!rejoining) await this.leave(client.peer, sessionId);
+      throw err;
+    }
   }
 
   async update(client: ClientHandle, sessionId: string, caps: HostCaps) {
     const members = this.local.get(sessionId);
     if (!members?.has(client.peer)) throw new RpcFailure('not_found', 'not in session');
-    caps = await this.vouch(client.peer, caps);
+    try {
+      caps = await this.vouch(client.peer, caps);
+    } catch (err) {
+      // A device that has been removed does not stay in the room on what it said before.
+      if ((await this.findDevice(client.peer))?.body.revoked)
+        await this.leave(client.peer, sessionId);
+      throw err;
+    }
     // It may have left while the record was being looked up.
     if (!this.local.get(sessionId)?.has(client.peer))
       throw new RpcFailure('not_found', 'not in session');
@@ -372,10 +413,10 @@ export class SessionService {
   /** The owner's side of an operation: whoever joins must still be allowed, and so must the host they name. */
   private async runRemoteOp(fromServer: string, frame: FedSessionOp): Promise<unknown> {
     let op = frame.op;
-    if (op.op === 'update') op = { ...op, caps: await this.vouch(frame.peer, op.caps) };
+    if (op.op === 'update') op = { ...op, caps: await this.vouch(frame.peer, op.caps, true) };
     if (op.op === 'join') {
       await this.checkAccess(peerIds.user(frame.peer), frame.sessionId);
-      op = { ...op, caps: await this.vouch(frame.peer, op.caps) };
+      op = { ...op, caps: await this.vouch(frame.peer, op.caps, true) };
       if (op.hint) {
         const { hint, ...rest } = op;
         op = (await this.hintAllowed(frame.sessionId, hint)) ? op : rest;
