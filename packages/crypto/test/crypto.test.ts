@@ -177,12 +177,14 @@ describe('records', () => {
   it('binds spaces to their owner and gates membership on invites', () => {
     const nonce = randomId();
     const spaceId = spaceIdFor(alice.publicKey, nonce);
+    const code = randomId(5);
     const space = signRecord(alice, 'space', recordKey.space(spaceId), {
       name: 'Swamp',
       owner: alice.userId,
       nonce,
       admins: [],
       bans: [],
+      publicInvite: code,
       channels: [{ id: randomId(), name: 'general', kind: 'text' }],
     });
     expect(validateRecord(space, ctx([])).ok).toBe(true);
@@ -193,17 +195,16 @@ describe('records', () => {
     });
     expect(validateRecord(hijack, ctx([space])).ok).toBe(false);
 
-    const code = randomId(5);
     const invite = signRecord(alice, 'invite', recordKey.invite(code), {
       spaceId,
       code,
-      expiresAt: null,
+      expiresAt: Date.now() + 7 * 24 * 3600_000,
     });
     expect(validateRecord(invite, ctx([space])).ok).toBe(true);
     const fakeInvite = signRecord(mallory, 'invite', recordKey.invite(code), {
       spaceId,
       code,
-      expiresAt: null,
+      expiresAt: Date.now() + 7 * 24 * 3600_000,
     });
     expect(validateRecord(fakeInvite, ctx([space])).ok).toBe(false);
 
@@ -516,20 +517,33 @@ describe('records', () => {
       const invite = signRecord(bob, 'invite', recordKey.invite(code), {
         spaceId,
         code,
-        expiresAt: null,
+        expiresAt: now + 7 * 24 * 3600_000,
       });
       expect(validateRecord(invite, ctx([withBob])).ok).toBe(true);
+      // The space names it as its open invite (the admin's edit carries the owner's list on).
+      const named = signRecord(
+        bob,
+        'space',
+        key,
+        { ...withBob.body, publicInvite: code },
+        now - 900,
+      );
       const join = signRecord(carol, 'member', recordKey.member(spaceId, carol.userId), {
         spaceId,
         userId: carol.userId,
         inviteCode: code,
       });
-      expect(validateRecord(join, { ...ctx([withBob, invite]), fresh: true }).ok).toBe(true);
+      expect(validateRecord(join, { ...ctx([named, invite]), fresh: true }).ok).toBe(true);
       const without = signRecord(
         alice,
         'space',
         key,
-        { ...base, admins: [], authority: signSpaceAuthority(alice, spaceId, [], now - 500) },
+        {
+          ...base,
+          admins: [],
+          publicInvite: code,
+          authority: signSpaceAuthority(alice, spaceId, [], now - 500),
+        },
         now - 500,
       );
       expect(validateRecord(join, { ...ctx([without, invite]), fresh: true })).toMatchObject({
@@ -542,6 +556,62 @@ describe('records', () => {
         signRecord(who, 'invite', recordKey.invite(code), { ...invite.body, revoked: true });
       expect(validateRecord(revoke(bob), ctx([without]))).toMatchObject({ ok: false });
       expect(validateRecord(revoke(alice), ctx([without])).ok).toBe(true);
+    });
+
+    describe('the open invite', () => {
+      const code = randomId(5);
+      const other = randomId(5);
+      const week = 7 * 24 * 3600_000;
+      const named = signRecord(
+        alice,
+        'space',
+        key,
+        { ...base, admins: [], publicInvite: code },
+        now - 800,
+      );
+      const open = (c: string, expiresAt: number | null, who = alice) =>
+        signRecord(who, 'invite', recordKey.invite(c), { spaceId, code: c, expiresAt });
+      const join = (c: string) =>
+        signRecord(carol, 'member', recordKey.member(spaceId, carol.userId), {
+          spaceId,
+          userId: carol.userId,
+          inviteCode: c,
+        });
+
+      it('is the one the space names, and joining with another is refused', () => {
+        const a = open(code, now + week);
+        const b = open(other, now + week);
+        expect(validateRecord(join(code), ctx([named, a])).ok).toBe(true);
+        expect(validateRecord(join(other), ctx([named, b]))).toMatchObject({
+          ok: false,
+          reason: 'this link has been replaced or turned off',
+        });
+        // No link on at all.
+        const off = signRecord(alice, 'space', key, { ...base, admins: [] }, now - 700);
+        expect(validateRecord(join(code), ctx([off, a]))).toMatchObject({ ok: false });
+        // Only those taking a join as it is made look at that: a membership already made is
+        // still a member when the link is replaced.
+        expect(validateRecord(join(other), ctx([named, b], false)).ok).toBe(true);
+      });
+
+      it('ends within 30 days when it is made, and what was made before stays as it was', () => {
+        const month = 31 * 24 * 3600_000;
+        for (const expiresAt of [null, now + month])
+          expect(validateRecord(open(code, expiresAt), ctx([named]))).toMatchObject({
+            ok: false,
+            reason: 'an invite needs an end, within 30 days',
+          });
+        expect(validateRecord(open(code, now + week), ctx([named])).ok).toBe(true);
+        // Seen again later, or withdrawn, it is not turned away for lacking an end.
+        expect(validateRecord(open(code, null), ctx([named], false)).ok).toBe(true);
+        const withdrawn = signRecord(alice, 'invite', recordKey.invite(code), {
+          spaceId,
+          code,
+          expiresAt: null,
+          revoked: true,
+        });
+        expect(validateRecord(withdrawn, ctx([named])).ok).toBe(true);
+      });
     });
   });
 });

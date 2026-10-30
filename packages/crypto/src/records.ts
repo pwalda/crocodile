@@ -169,8 +169,16 @@ export function validateRecord(input: unknown, ctx: ValidationContext): Validati
         if (!USER_ID.test(body.for)) return reject('bad invite recipient');
         if (body.for === authorId) return reject('an invite is for somebody else');
         // It lapses: a named invitation does not wait for ever.
-        if (body.expiresAt === null || body.expiresAt > ctx.now + PRIVATE_INVITE_MAX_MS)
+        if (body.expiresAt === null || body.expiresAt > ctx.now + INVITE_MAX_MS)
           return reject('an invitation to a person needs an end, within 30 days');
+      } else if (
+        // The open invite too, when it is made (those already made, without an end, stay as they
+        // were, and so does their withdrawal).
+        ctx.fresh &&
+        !body.revoked &&
+        (body.expiresAt === null || body.expiresAt > ctx.now + INVITE_MAX_MS)
+      ) {
+        return reject('an invite needs an end, within 30 days');
       }
       // The owner and current admins make and revoke invites. (A removed
       // admin's invites stop working anyway; see 'member' below.)
@@ -221,6 +229,9 @@ export function validateRecord(input: unknown, ctx: ValidationContext): Validati
         return reject('invite is for somebody else');
       if (ctx.fresh) {
         if (invite.body.revoked) return reject('invite was revoked');
+        // The open invite is the one the space names; a newer one has replaced the rest.
+        if (invite.body.for === undefined && space.body.publicInvite !== invite.body.code)
+          return reject('this link has been replaced or turned off');
         // An invite from someone who may no longer make it stops working: an admin who was
         // removed, or, for a named person, a member where the space no longer allows that.
         const maker = userIdFromKey(invite.author);
@@ -266,8 +277,8 @@ export function validateRecord(input: unknown, ctx: ValidationContext): Validati
 
 const USER_ID = /^[a-z2-7]{26}$/;
 
-/** The furthest ahead an invitation to a named person may end. */
-const PRIVATE_INVITE_MAX_MS = 30 * 24 * 3600_000;
+/** The furthest ahead an invite may end. */
+const INVITE_MAX_MS = 30 * 24 * 3600_000;
 
 /** May change the space: its owner, or one of its admins. */
 export function canManageSpace(space: SpaceBody, userId: string): boolean {

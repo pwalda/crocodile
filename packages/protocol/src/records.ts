@@ -187,6 +187,14 @@ export const SpaceBody = z.object({
    * The one open invite is always made by the owner or an admin.
    */
   invitePolicy: z.enum(['admins', 'members']).optional(),
+  /**
+   * The one invite anyone holding it can join with, if the space has one on. Making a new one
+   * replaces it, and so ends the old one; the owner and admins set it.
+   */
+  publicInvite: z
+    .string()
+    .regex(/^[a-z2-7]{8,16}$/)
+    .optional(),
   channels: z.array(Channel).max(LIMITS.channelsPerSpace),
   deleted: z.boolean().optional(),
   /**

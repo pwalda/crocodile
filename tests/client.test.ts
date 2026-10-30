@@ -1646,6 +1646,48 @@ describe('leaving', () => {
     spy.mockRestore();
   });
 
+  describe('the open invite', () => {
+    async function trio() {
+      const coord = await server();
+      const net = new FakeRelayNetwork();
+      const alice = await signUp(makeClient(net, coord), 'alice');
+      const bob = await signUp(makeClient(net, coord), 'bob');
+      const carol = await signUp(makeClient(net, coord), 'carol');
+      const spaceId = await alice.createSpace('Swamp');
+      return { alice, bob, carol, spaceId };
+    }
+
+    it('is one link: a new one replaces the old, and the space can turn it off', async () => {
+      const { alice, bob, carol, spaceId } = await trio();
+      const first = await alice.shareInvite(spaceId);
+      // Asked for again while it is good, it is the same link.
+      expect(await alice.shareInvite(spaceId)).toBe(first);
+      expect(await bob.previewInvite(first)).toMatchObject({ expired: false });
+      const second = await alice.createInvite(spaceId);
+      expect(second).not.toBe(first);
+      expect(await alice.shareInvite(spaceId)).toBe(second);
+      // The old link says so and cannot be used, the new one can.
+      expect(await bob.previewInvite(first)).toMatchObject({ expired: true });
+      await expect(bob.joinWithInvite(first)).rejects.toThrow(/revoked|replaced or turned off/);
+      await bob.joinWithInvite(second);
+      // Turned off, nothing joins until there is a new link.
+      await alice.stopOpenInvite(spaceId);
+      expect(alice.openInviteOf(spaceId)).toBeUndefined();
+      expect(await carol.previewInvite(second)).toMatchObject({ expired: true });
+      await expect(carol.joinWithInvite(second)).rejects.toThrow(/replaced or turned off|revoked/);
+      const third = await alice.shareInvite(spaceId);
+      await carol.joinWithInvite(third);
+      expect(carol.state.spaces[spaceId]).toBeDefined();
+    });
+
+    it('lasts 30 days at most', async () => {
+      const { alice, spaceId } = await trio();
+      await expect(alice.createInvite(spaceId, 31 * 24 * 3600_000)).rejects.toThrow(/30 days/);
+      const code = await alice.createInvite(spaceId, 30 * 24 * 3600_000);
+      expect(alice.openInviteOf(spaceId)?.body.code).toBe(code);
+    });
+  });
+
   describe('private invites', () => {
     async function trio() {
       const coord = await server();

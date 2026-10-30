@@ -3,7 +3,17 @@ import { Check, Copy, Hash, Volume2 } from 'lucide-react';
 import type { ChannelKind } from '@crocodile/protocol';
 import { closeModal, getClient, navigate, openModal, useCroc } from '../croc';
 import { copyText, imageToDataUrl, initials } from '../lib/format';
-import { Avatar, Button, Input, Label, Modal, Toggle, UserName, cx } from '../components/ui';
+import {
+  Avatar,
+  Button,
+  Input,
+  Label,
+  Modal,
+  Segmented,
+  Toggle,
+  UserName,
+  cx,
+} from '../components/ui';
 
 export function AddSpaceModal() {
   const [mode, setMode] = useState<'choose' | 'create' | 'join'>('choose');
@@ -133,28 +143,49 @@ export function AddSpaceModal() {
   );
 }
 
+const DAY_MS = 86_400_000;
+const LINK_LIFETIMES = { '1d': DAY_MS, '7d': 7 * DAY_MS, '30d': 30 * DAY_MS } as const;
+type LinkLifetime = keyof typeof LINK_LIFETIMES;
+
 export function InviteModal({ spaceId }: { spaceId: string }) {
   const space = useCroc((s) => s.spaces[spaceId]);
-  const [code, setCode] = useState<string | null>(null);
+  const client = getClient();
+  const [lifetime, setLifetime] = useState<LinkLifetime>('7d');
+  const [busy, setBusy] = useState(false);
   const [copied, setCopied] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [confirm, setConfirm] = useState<'new' | 'off' | null>(null);
+  const open = client.openInviteOf(spaceId);
+  const code = open?.body.code ?? null;
+  // The link on offer is the one the space has on; one is made when the window opens and there is none.
+  const [offered, setOffered] = useState(false);
   useEffect(() => {
-    getClient()
-      .shareInvite(spaceId)
-      .then(setCode, (e) => setError(e.message));
-  }, [spaceId]);
+    if (offered || open) return;
+    setOffered(true);
+    client.shareInvite(spaceId).catch((e: Error) => setError(e.message));
+  }, [client, spaceId, offered, open]);
+  const run = async (what: () => Promise<unknown>) => {
+    setBusy(true);
+    setError(null);
+    try {
+      await what();
+      setCopied(false);
+      setConfirm(null);
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
   const link = code ? `croc://join/${code}` : '';
-  const expiresAt = code
-    ? (getClient().records.get(`invite:${code}`)?.body as { expiresAt?: number | null } | undefined)
-        ?.expiresAt
-    : undefined;
-  const days = expiresAt ? Math.max(1, Math.round((expiresAt - Date.now()) / 86_400_000)) : 7;
+  const expiresAt = open?.body.expiresAt ?? undefined;
+  const days = expiresAt ? Math.max(1, Math.round((expiresAt - Date.now()) / DAY_MS)) : undefined;
   return (
     <Modal
       title={`Invite friends to ${space?.name ?? 'this space'}`}
       subtitle={
-        expiresAt === null
-          ? 'Anyone with this link can join.'
+        days === undefined
+          ? 'Anyone with the link can join.'
           : `Anyone with this link can join for the next ${days === 1 ? 'day' : `${days} days`}.`
       }
       onClose={closeModal}
@@ -162,7 +193,7 @@ export function InviteModal({ spaceId }: { spaceId: string }) {
       <Label>Invite link</Label>
       <div className="flex items-center gap-2 rounded-xl bg-field p-1 pl-3">
         <span className="selectable flex-1 truncate font-mono text-sm">
-          {error ?? (link || 'Creating invite…')}
+          {error ?? (link || (offered ? 'No link is on.' : 'Creating invite…'))}
         </span>
         <Button
           disabled={!code}
@@ -175,9 +206,79 @@ export function InviteModal({ spaceId }: { spaceId: string }) {
           {copied ? <Check size={16} /> : <Copy size={16} />} {copied ? 'Copied' : 'Copy'}
         </Button>
       </div>
+      {code && (
+        <p className="mt-3 text-xs text-muted">
+          Friends can also paste just the code: <b className="selectable text-text">{code}</b>
+        </p>
+      )}
       <p className="mt-3 text-xs text-muted">
-        Friends can also paste just the code: <b className="selectable text-text">{code}</b>
+        There is one link at a time. A new link replaces this one, and turning it off stops it
+        working; people already in stay. To bring one person in, invite them from their profile
+        instead.
       </p>
+      <div className="mt-5 flex flex-wrap items-end justify-between gap-3">
+        <div>
+          <Label>New link lasts</Label>
+          <Segmented
+            label="New link lasts"
+            value={lifetime}
+            options={[
+              { id: '1d', label: '1 day' },
+              { id: '7d', label: '7 days' },
+              { id: '30d', label: '30 days' },
+            ]}
+            onChange={(v) => {
+              setConfirm(null);
+              setLifetime(v);
+            }}
+          />
+        </div>
+        <div className="flex gap-2">
+          {code && (
+            <Button variant="ghost" disabled={busy} onClick={() => setConfirm('off')}>
+              Turn off…
+            </Button>
+          )}
+          <Button
+            variant="ghost"
+            disabled={busy}
+            onClick={() =>
+              code
+                ? setConfirm('new')
+                : void run(() => client.createInvite(spaceId, LINK_LIFETIMES[lifetime]))
+            }
+          >
+            {code ? 'New link…' : 'Make a link'}
+          </Button>
+        </div>
+      </div>
+      {confirm && (
+        <div className="mt-4 rounded-2xl border border-line bg-island-2 p-4">
+          <p className="text-sm text-text">
+            {confirm === 'new'
+              ? 'The link above stops working and a new one takes its place. Anyone who has not joined yet will need the new one.'
+              : 'The link stops working. Nobody can join with a link until you make a new one.'}
+          </p>
+          <div className="mt-3 flex flex-wrap justify-end gap-2">
+            <Button variant="ghost" disabled={busy} onClick={() => setConfirm(null)}>
+              Cancel
+            </Button>
+            <Button
+              variant="danger"
+              disabled={busy}
+              onClick={() =>
+                void run(() =>
+                  confirm === 'new'
+                    ? client.createInvite(spaceId, LINK_LIFETIMES[lifetime])
+                    : client.stopOpenInvite(spaceId),
+                )
+              }
+            >
+              {confirm === 'new' ? 'Make a new link' : 'Turn off'}
+            </Button>
+          </div>
+        </div>
+      )}
     </Modal>
   );
 }

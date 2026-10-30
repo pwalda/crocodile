@@ -129,7 +129,7 @@ describe('records', () => {
         record: signRecord(alice.identity, 'invite', recordKey.invite(code2), {
           spaceId,
           code: code2,
-          expiresAt: null,
+          expiresAt: Date.now() + 3600_000,
         }),
       }),
     );
@@ -1349,7 +1349,7 @@ describe('record quotas', () => {
       return signRecord(alice.identity, 'invite', recordKey.invite(code), {
         spaceId: s.spaceId,
         code,
-        expiresAt: null,
+        expiresAt: Date.now() + 3600_000,
       });
     };
     expectAccepted(await put(alice, invite()));
@@ -1413,7 +1413,7 @@ describe('record quotas', () => {
           signRecord(eve.identity, 'invite', recordKey.invite(open), {
             spaceId,
             code: open,
-            expiresAt: null,
+            expiresAt: Date.now() + 3600_000,
           }),
         )
       ).accepted,
@@ -1449,7 +1449,7 @@ describe('record quotas', () => {
         signRecord(alice.identity, 'invite', recordKey.invite(open), {
           spaceId,
           code: open,
-          expiresAt: null,
+          expiresAt: Date.now() + 3600_000,
         }),
       ),
     );

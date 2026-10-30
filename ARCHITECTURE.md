@@ -108,6 +108,15 @@ to someone who left or was banned), whether asked by key, by list or by
 subscription. Servers still replicate invites and memberships among
 themselves, and the one that stores an invite can read it.
 
+**The open link.** A space has at most one invite anyone can join with. The
+space record names it (`publicInvite`, set by the owner or an admin); a new
+link replaces it, and so ends the old one, and turning it off removes the
+name. It ends within 30 days. A server taking a join checks that the invite
+used is the one the space names now; memberships already made are not
+affected when the link changes. Invites made before this setting existed are
+not the open link of any space, so none of them works until an owner or admin
+makes a new link.
+
 **Invitations to one person.** An invite may name a user (`for`); only that
 user can join with it, whoever holds the code, so reading it from a member
 record gives nobody else a way in. A person is sent one as a message, which
