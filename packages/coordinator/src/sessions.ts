@@ -507,6 +507,8 @@ export class SessionService {
       const keep = !final && !!renewal && Date.now() < renewal.deadline;
       if (!silent && current?.get(client.peer) === vouched) {
         if (before && (!forbidden || keep)) current.set(client.peer, before);
+        // (Out because the time it had has gone: it is told, so that it joins again.)
+        else if (renewal && before) this.dropUnrenewed(sessionId, client.peer);
         else void this.leave(client.peer, sessionId);
       }
       if (!final) this.askAgain(renewal, sessionId, client, err);
@@ -1260,32 +1262,36 @@ export class SessionService {
     const peer = client.peer;
     if (!renewal) return;
     if (err instanceof RpcFailure && err.message === DEVICE_REMOVED) return;
+    // What stands now, not what was when this join began: it may have been taken meanwhile by
+    // another join (nothing to ask), or asked for again by an owner change (with a time of its own).
+    const key = `${sessionId}|${peer}`;
+    const live = this.renewing.get(key);
+    if (!live) return;
     // Gone meanwhile: nobody to ask.
     if (!this.local.get(sessionId)?.has(peer)) {
-      this.endRenewal(`${sessionId}|${peer}`);
+      this.endRenewal(key);
       return;
     }
+    const { deadline } = live;
     // The time it had has gone: whatever the new owner said, it is not in the room there.
-    if (Date.now() >= renewal.deadline) {
+    if (Date.now() >= deadline) {
       this.dropUnrenewed(sessionId, peer);
       return;
     }
-    const key = `${sessionId}|${peer}`;
-    // (Said again by another join of the device, which is also asked for: the later wait stands.)
-    clearTimeout(this.renewing.get(key)?.timer);
+    clearTimeout(live.timer);
     const timer = setTimeout(() => {
       if (this.renewing.get(key)?.timer !== timer) return;
       if (!this.local.get(sessionId)?.has(peer)) {
         this.renewing.delete(key);
         return;
       }
-      if (Date.now() >= renewal.deadline) {
+      if (Date.now() >= deadline) {
         this.renewing.delete(key);
         this.dropUnrenewed(sessionId, peer);
-      } else this.askToRenew(sessionId, peer, renewal.deadline);
+      } else this.askToRenew(sessionId, peer, deadline);
     }, this.renewRetryMs);
     timer.unref?.();
-    this.renewing.set(key, { timer, deadline: renewal.deadline });
+    this.renewing.set(key, { timer, deadline });
   }
 
   close() {

@@ -316,7 +316,6 @@ export class GroupSession extends Emitter<GroupSessionEvents> {
    */
   join(opts: { fresh?: boolean } = {}): Promise<void> {
     this.left = false;
-    this.removed = false;
     if (opts.fresh) this.joining = undefined;
     const sent: Promise<void> = (this.joining ??= this.sendJoin().finally(() => {
       if (this.joining === sent) this.joining = undefined;
@@ -352,15 +351,6 @@ export class GroupSession extends Emitter<GroupSessionEvents> {
   }
 
   /**
-   * Taken out of the room by the server because it may no longer be there: not joined again
-   * unless asked to (an update that finds it is not in the room does not do it).
-   */
-  removedByServer() {
-    this.removed = true;
-  }
-  private removed = false;
-
-  /**
    * The server that keeps the session changed, and asks for a new signed join (it asks again if
    * the new one is not taken, and takes us out if it hears nothing).
    */
@@ -388,7 +378,7 @@ export class GroupSession extends Emitter<GroupSessionEvents> {
     // Not on top of a join that is on its way, nor again and again.
     const now = Date.now();
     // (Only for a room we are in: one that was never joined is not joined by an update.)
-    if (!this.state || this.left || this.removed || this.joining) return;
+    if (!this.state || this.left || this.joining) return;
     if (now - this.joinLostAt < JOIN_LOST_RETRY_MS) return;
     this.joinLostAt = now;
     void this.join().catch(() => {});

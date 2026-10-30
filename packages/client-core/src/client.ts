@@ -955,7 +955,7 @@ export class CrocodileClient extends Emitter<ClientEvents> {
     link.on('session_closed', ({ sessionId, again }) => {
       const session = this.sessions.get(sessionId);
       if (again) void session?.rejoin();
-      else session?.removedByServer();
+      else void session?.leave();
     });
     link.on('signal', ({ from, sessionId, data }) =>
       this.sessions.get(sessionId)?.handleSignal(from, data),

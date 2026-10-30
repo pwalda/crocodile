@@ -724,6 +724,7 @@ describe('calls', () => {
     // Taken out because it may no longer be there: it does not try to join again.
     const settled = joined();
     internals.dropUnrenewed(sid, peer, false);
+    await waitFor(() => alice.state.sessions[sid]?.status === 'left', 5000, 'to leave the room');
     await new Promise((r) => setTimeout(r, 2500));
     expect(joined()).toBe(settled);
     expect(internals.local.get(sid)?.has(peer) ?? false).toBe(false);

@@ -1541,6 +1541,60 @@ describe('sessions and host election', () => {
       expect(again.events.find((e) => e.ev === 'session_closed')!.d).toMatchObject({ again: true });
     });
 
+    it('tells a device it may join again when its new join is refused after the time it had', async () => {
+      const { c, alice, sessionId } = await setup();
+      await alice.conn.request('session.join', { sessionId, caps: caps() });
+      answerRenewals(alice, caps());
+      const internals = c.sessions as unknown as {
+        lastOwner: Map<string, string>;
+        submit(): unknown;
+        rebalance(): void;
+        renewTimeoutMs: number;
+      };
+      internals.renewTimeoutMs = 200;
+      internals.lastOwner.set(sessionId, 'someone-else');
+      const submit = vi.spyOn(internals, 'submit').mockImplementationOnce(async () => {
+        await new Promise((r) => setTimeout(r, 400));
+        throw new RpcFailure('forbidden', 'not a member of this space');
+      });
+      internals.rebalance();
+      await waitFor(() => alice.events.some((e) => e.ev === 'session_closed'), 3000, 'to be told');
+      submit.mockRestore();
+      expect(alice.events.find((e) => e.ev === 'session_closed')!.d).toMatchObject({ again: true });
+      expect(c.sessions.inSession(alice.conn.peer, sessionId)).toBe(false);
+    });
+
+    it('does not take a device out for the time of an earlier ask when a later join of it was taken', async () => {
+      const { c, alice, sessionId } = await setup();
+      await alice.conn.request('session.join', { sessionId, caps: caps() });
+      answerRenewals(alice, caps());
+      const internals = c.sessions as unknown as {
+        lastOwner: Map<string, string>;
+        submit(): unknown;
+        rebalance(): void;
+        renewRetryMs: number;
+        renewTimeoutMs: number;
+      };
+      internals.renewRetryMs = 50;
+      internals.renewTimeoutMs = 300;
+      internals.lastOwner.set(sessionId, 'someone-else');
+      // The first join is slow to be refused: by then its time has gone, and a later ask (the owner
+      // changed again) has been answered.
+      const submit = vi.spyOn(internals, 'submit').mockImplementationOnce(async () => {
+        await new Promise((r) => setTimeout(r, 600));
+        throw new RpcFailure('unavailable', 'the owner cannot be reached');
+      });
+      internals.rebalance();
+      await new Promise((r) => setTimeout(r, 400));
+      internals.lastOwner.set(sessionId, 'someone-else');
+      internals.rebalance();
+      await new Promise((r) => setTimeout(r, 500));
+      submit.mockRestore();
+      expect(alice.events.filter((e) => e.ev === 'session_renew')).toHaveLength(2);
+      expect(alice.events.some((e) => e.ev === 'session_closed')).toBe(false);
+      expect(c.sessions.inSession(alice.conn.peer, sessionId)).toBe(true);
+    });
+
     it('keeps a device in the room that signs a new join when the owner changed', async () => {
       const { c, alice, bob, sessionId } = await setup();
       await alice.conn.request('session.join', { sessionId, caps: caps({ nat: 'open' }) });
