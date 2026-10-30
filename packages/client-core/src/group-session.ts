@@ -184,6 +184,8 @@ const HISTORY_CHUNK_BYTES = 32 * 1024;
 const PENDING_TTL_MS = 15_000;
 /** The least time between two asks for history because a live message could not be opened. */
 const MISSED_HISTORY_MS = 5_000;
+/** How far back history is asked for again: the message missed may be older than the newest held. */
+const MISSED_LOOKBACK_MS = 120_000;
 /** How far a sealed sender key's date may be from our clock. */
 const SENDER_KEY_SKEW_MS = 10 * 60_000;
 
@@ -263,6 +265,8 @@ export class GroupSession extends Emitter<GroupSessionEvents> {
     [];
   private historyServedAt = new Map<string, number[]>();
   private historyAsked = new Set<string>();
+  /** When history was last asked for again because of a message from each peer. */
+  private missedAt = new Map<string, number>();
   private relayRequested = false;
   /** Peers we already offered our outbox to on this connection. */
   private outboxOffered = new Set<string>();
@@ -1086,6 +1090,7 @@ export class GroupSession extends Emitter<GroupSessionEvents> {
             this.ctx.log('could not add video to the call', { err: String(err) }),
           );
         this.historyAsked.clear();
+        this.missedAt.clear();
         this.outboxOffered.clear();
         for (const p of msg.peers) this.onPeerPresent(p.id);
         this.requestHistory([...this.peers.keys()]);
@@ -1421,7 +1426,7 @@ export class GroupSession extends Emitter<GroupSessionEvents> {
     const result = this.keyring.decrypt(env.kid, env.g, env.ct);
     if (!result) {
       // A key we hold that cannot open it: the message is from before the key we were given.
-      if (this.keyring.holdsKey(env.kid)) {
+      if (this.keyring.isBehind(env.kid, env.g)) {
         this.missed(from);
         return;
       }
@@ -1525,21 +1530,20 @@ export class GroupSession extends Emitter<GroupSessionEvents> {
       const result = this.keyring.decrypt(p.env.kid, p.env.g, p.env.ct);
       if (result) {
         if (result.peer === p.from) await this.onGroupPlaintext(p.from, result.plaintext);
-      } else if (this.keyring.holdsKey(p.env.kid)) this.missed(p.from);
+      } else if (this.keyring.isBehind(p.env.kid, p.env.g)) this.missed(p.from);
       else this.pendingGroup.push(p);
     }
   }
 
-  private missedAt = 0;
   /**
    * A message sent live that we cannot open any more (it was sent before the key we got for it
-   * could reach us). It is not lost: the others hold it, so history is asked for again, at most
-   * every few seconds.
+   * could reach us). It is not lost: the others hold it, so history is asked for again, from
+   * the sender first, at most every few seconds for each.
    */
   private missed(from: string) {
     const now = Date.now();
-    if (now - this.missedAt < MISSED_HISTORY_MS) return;
-    this.missedAt = now;
+    if (now - (this.missedAt.get(from) ?? 0) < MISSED_HISTORY_MS) return;
+    this.missedAt.set(from, now);
     this.requestHistory([from], true);
   }
 
@@ -1551,7 +1555,7 @@ export class GroupSession extends Emitter<GroupSessionEvents> {
     const channels = this.ctx.historyChannels(this.sessionId);
     if (channels.length === 0) return;
     const st = this.state;
-    const preferred = [st?.host, st?.backup, ...candidates].filter(
+    const preferred = [...(again ? candidates : []), st?.host, st?.backup, ...candidates].filter(
       (u): u is string =>
         !!u &&
         u !== this.me &&
@@ -1563,7 +1567,10 @@ export class GroupSession extends Emitter<GroupSessionEvents> {
     if (targets.length === 0) return;
     void (async () => {
       const since: Record<string, number> = {};
-      for (const ch of channels) since[ch] = await this.ctx.syncCursor(ch);
+      for (const ch of channels) {
+        const cursor = await this.ctx.syncCursor(ch);
+        since[ch] = again ? Math.max(0, cursor - MISSED_LOOKBACK_MS) : cursor;
+      }
       for (const t of targets) {
         this.historyAsked.add(t);
         await this.sendSealed(t, { type: 'history_req', since });

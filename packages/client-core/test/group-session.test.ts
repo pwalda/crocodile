@@ -11,6 +11,13 @@ import {
 } from '../src/group-session';
 import type { RelayLinkEvents } from '../src/relay-link';
 
+const waitFor = async (fn: () => boolean, ms = 2000) => {
+  for (const start = Date.now(); !fn();) {
+    if (Date.now() - start > ms) throw new Error('timed out');
+    await new Promise((r) => setTimeout(r, 10));
+  }
+};
+
 /** A connection that never gets anywhere: the session decides what happens to it. */
 class StuckTransport extends Emitter<RelayLinkEvents> implements RelayTransport {
   closed = false;
@@ -43,12 +50,17 @@ const box = (from: string, to: string, text: string): SealedBox => ({
 /** A connection that is up: it keeps what the session sends over it. */
 class OpenTransport extends StuckTransport {
   override readonly isOpen = true;
+  readonly requests: { to: string; type: string; since?: Record<string, number> }[] = [];
   constructor(private readonly sent: string[]) {
     super();
   }
   override send(msg: unknown) {
-    const m = msg as { d?: { k?: string; box?: SealedBox } };
-    if (m.d?.k === 'sealed') this.sent.push(JSON.parse(m.d.box!.ct).type);
+    const m = msg as { to?: string; d?: { k?: string; box?: SealedBox } };
+    if (m.d?.k === 'sealed') {
+      const payload = JSON.parse(m.d.box!.ct) as { type: string; since?: Record<string, number> };
+      this.sent.push(payload.type);
+      this.requests.push({ to: m.to!, type: payload.type, since: payload.since });
+    }
     return true;
   }
 }
@@ -385,7 +397,8 @@ describe('group session', () => {
       hasDevice: () => true,
       refreshPeer: async () => {},
       historyChannels: () => ['ch'],
-      syncCursor: async () => 0,
+      // A newer message than the one that will be missed is already held.
+      syncCursor: async () => 500_000,
       outbox: { pending: () => [], acked: () => {} },
       acceptMessage: async () => true,
       admits: () => true,
@@ -428,8 +441,15 @@ describe('group session', () => {
       direct: true,
       d: { k: 'sealed', box: box(bob, self, JSON.stringify(key)) },
     });
+    await waitFor(() => asked() > 2);
+    // The sender is asked first, from before the newest message held.
+    const again = transport!.requests.filter((r) => r.type === 'history_req').slice(2);
+    expect(again[0]).toMatchObject({ to: bob, since: { ch: 500_000 - 120_000 } });
+    // Another one he cannot open soon after does not ask again.
+    const before = asked();
+    transport!.emit('message', { t: 'msg', from: bob, direct: false, d: { k: 'group', ...env } });
     await wait(50);
-    expect(asked()).toBeGreaterThan(2);
+    expect(asked()).toBe(before);
   });
 
   it('does not connect to a host that has no device record, and tells the server', async () => {

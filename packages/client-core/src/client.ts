@@ -2809,17 +2809,21 @@ export class CrocodileClient extends Emitter<ClientEvents> {
     if (!scope) return false;
     const userId = peerIds.user(peer);
     if (peer.includes('.')) {
-      const device = this.records.get(recordKey.device(userId, peerIds.device(peer))) as
-        SignedRecord<'device'> | undefined;
-      if (device?.body.revoked) return false;
+      if (this.deviceRecord(peer)?.body.revoked) return false;
     }
     if (scope.kind === 'dm') return scope.users.includes(userId);
     return isSpaceMember(this.records, scope.spaceId, userId);
   }
 
-  hasDevice(peer: string): boolean {
-    const device = this.records.get(recordKey.device(peerIds.user(peer), peerIds.device(peer))) as
+  /** The record of a peer's device, if we hold one. */
+  private deviceRecord(peer: string) {
+    return this.records.get(recordKey.device(peerIds.user(peer), peerIds.device(peer))) as
       SignedRecord<'device'> | undefined;
+  }
+
+  /** Whether we hold a record for the peer's device, and it has not been removed. */
+  hasDevice(peer: string): boolean {
+    const device = this.deviceRecord(peer);
     return !!device && !device.body.revoked;
   }
 
