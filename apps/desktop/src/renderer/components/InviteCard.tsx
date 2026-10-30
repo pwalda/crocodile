@@ -80,7 +80,7 @@ export function InviteCard({ code }: { code: string }) {
       )}
       <div className="min-w-0 flex-1">
         <div className="text-[11px] font-semibold uppercase tracking-wide text-muted">
-          Invite to a space
+          {preview.private ? 'Invitation to a space' : 'Invite to a space'}
         </div>
         <div className="truncate font-bold">{preview.name}</div>
       </div>
@@ -88,6 +88,8 @@ export function InviteCard({ code }: { code: string }) {
         <Button variant="ghost" onClick={() => openInvite({ ...preview, joined: true })}>
           <Check size={15} /> Open
         </Button>
+      ) : preview.forOther ? (
+        <span className="text-xs text-muted">For somebody else</span>
       ) : preview.expired ? (
         <span className="text-xs text-muted">Expired</span>
       ) : (

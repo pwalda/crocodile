@@ -34,6 +34,7 @@ import {
   AddSpaceModal,
   CreateChannelModal,
   InviteModal,
+  InvitePersonModal,
   SpaceSettingsModal,
 } from './modals/SpaceModals';
 import { ConfirmModal, NewDmModal, ProfileModal } from './modals/UserModals';
@@ -214,6 +215,8 @@ function Modals() {
       return <AddSpaceModal />;
     case 'invite':
       return <InviteModal spaceId={modal.spaceId} />;
+    case 'invite-person':
+      return <InvitePersonModal userId={modal.userId} />;
     case 'create-channel':
       return <CreateChannelModal spaceId={modal.spaceId} />;
     case 'space-settings':
@@ -576,6 +579,7 @@ function askToJoin(code: string) {
     .then((preview) => {
       if (preview?.joined) return openInvite(preview);
       if (preview?.expired) return client.reportError('This invite has expired or was revoked.');
+      if (preview?.forOther) return client.reportError('That invitation is for somebody else.');
       closeModal();
       openModal({
         kind: 'confirm',

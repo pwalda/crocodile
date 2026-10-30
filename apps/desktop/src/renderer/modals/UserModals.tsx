@@ -1,7 +1,7 @@
 import { useState } from 'react';
-import { MessageCircle, Phone, ShieldCheck, UserPlus } from 'lucide-react';
+import { MessageCircle, Phone, ShieldCheck, UserPlus, Users } from 'lucide-react';
 import { safetyNumber } from '@crocodile/crypto';
-import { closeModal, getClient, navigate, useCroc } from '../croc';
+import { closeModal, getClient, navigate, openModal, useCroc } from '../croc';
 import { colorFor } from '../lib/format';
 import { Avatar, Button, Input, Modal, UserName } from '../components/ui';
 
@@ -14,6 +14,10 @@ export function ProfileModal({ userId }: { userId: string }) {
   const isMe = me?.userId === userId;
   const isFriend = friends.friends.includes(userId);
   const pending = friends.outgoing.includes(userId);
+  const spaces = useCroc((s) => s.spaces);
+  const canInvite = Object.values(spaces).some(
+    (s) => client.canInviteTo(s.id) && !s.members.includes(userId),
+  );
   return (
     <div
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/55 backdrop-blur-sm"
@@ -79,6 +83,15 @@ export function ProfileModal({ userId }: { userId: string }) {
                 >
                   <Phone size={16} />
                 </Button>
+                {canInvite && (
+                  <Button
+                    variant="secondary"
+                    title="Invite to a space"
+                    onClick={() => openModal({ kind: 'invite-person', userId })}
+                  >
+                    <Users size={16} />
+                  </Button>
+                )}
                 {!isFriend && (
                   <Button
                     variant="secondary"
