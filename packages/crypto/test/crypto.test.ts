@@ -63,8 +63,12 @@ import {
   signRecord,
   signSdp,
   signSpaceAuthority,
+  emptyRosterHash,
   inviteCommitment,
   newTicket,
+  rosterHash,
+  rosterOf,
+  signRoster,
   signTicketUse,
   spaceAuthorityValid,
   spaceIdFor,
@@ -211,7 +215,8 @@ describe('records', () => {
       code,
       expiresAt: Date.now() + 7 * 24 * 3600_000,
     });
-    expect(validateRecord(invite, ctx([space])).ok).toBe(true);
+    // (An invite of the older kind, which is no longer made but is still taken as it was.)
+    expect(validateRecord(invite, ctx([space], false)).ok).toBe(true);
     const fakeInvite = signRecord(mallory, 'invite', recordKey.invite(code), {
       spaceId,
       code,
@@ -225,7 +230,7 @@ describe('records', () => {
       inviteCode: code,
     });
     expect(validateRecord(join, ctx([space])).ok).toBe(false);
-    expect(validateRecord(join, ctx([space, invite])).ok).toBe(true);
+    expect(validateRecord(join, ctx([space, invite], false)).ok).toBe(true);
     const noInvite = signRecord(mallory, 'member', recordKey.member(spaceId, mallory.userId), {
       spaceId,
       userId: mallory.userId,
@@ -523,28 +528,19 @@ describe('records', () => {
       });
     });
 
-    it("lets admins make invites, which stop working when they're no longer admins", () => {
+    it('does not take an open link of the older kind from an admin who makes one now, but lets it be withdrawn', () => {
       const code = randomId(16);
       const invite = signRecord(bob, 'invite', recordKey.invite(code), {
         spaceId,
         code,
         expiresAt: now + 7 * 24 * 3600_000,
       });
-      expect(validateRecord(invite, ctx([withBob])).ok).toBe(true);
-      // The space names it as its open invite (the admin's edit carries the owner's list on).
-      const named = signRecord(
-        bob,
-        'space',
-        key,
-        { ...withBob.body, publicInvite: inviteCommitment(spaceId, code) },
-        now - 900,
-      );
-      const join = signRecord(carol, 'member', recordKey.member(spaceId, carol.userId), {
-        spaceId,
-        userId: carol.userId,
-        inviteCode: code,
+      expect(validateRecord(invite, ctx([withBob]))).toMatchObject({
+        ok: false,
+        reason: 'an open link is made as a ticket',
       });
-      expect(validateRecord(join, { ...ctx([named, invite]), fresh: true }).ok).toBe(true);
+      // One made before is held as it was, and taken back by the owner or a current admin.
+      expect(validateRecord(invite, ctx([withBob], false)).ok).toBe(true);
       const without = signRecord(
         alice,
         'space',
@@ -552,26 +548,18 @@ describe('records', () => {
         {
           ...base,
           admins: [],
-          publicInvite: inviteCommitment(spaceId, code),
           authority: signSpaceAuthority(alice, spaceId, [], now - 500),
         },
         now - 500,
       );
-      expect(validateRecord(join, { ...ctx([without, invite]), fresh: true })).toMatchObject({
-        ok: false,
-        reason: 'invite was made by someone who may no longer invite',
-      });
-      // Revoking it is the owner's (or a current admin's) to do, checked
-      // with nothing but the space: no earlier invite needed.
       const revoke = (who: typeof bob) =>
         signRecord(who, 'invite', recordKey.invite(code), { ...invite.body, revoked: true });
       expect(validateRecord(revoke(bob), ctx([without]))).toMatchObject({ ok: false });
       expect(validateRecord(revoke(alice), ctx([without])).ok).toBe(true);
     });
 
-    describe('the open invite', () => {
+    describe('the open invite of the older kind', () => {
       const code = randomId(16);
-      const other = randomId(16);
       const week = 7 * 24 * 3600_000;
       const named = signRecord(
         alice,
@@ -589,59 +577,16 @@ describe('records', () => {
           inviteCode: c,
         });
 
-      it('is the one the space names, and joining with another is refused', () => {
-        const a = open(code, now + week);
-        const b = open(other, now + week);
-        expect(validateRecord(join(code), ctx([named, a])).ok).toBe(true);
-        expect(validateRecord(join(other), ctx([named, b]))).toMatchObject({
-          ok: false,
-          reason: 'this link has been replaced or turned off',
-        });
-        // No link on at all.
-        const off = signRecord(alice, 'space', key, { ...base, admins: [] }, now - 700);
-        expect(validateRecord(join(code), ctx([off, a]))).toMatchObject({ ok: false });
-        // Only those taking a join as it is made look at that: a membership already made is
-        // still a member when the link is replaced.
-        expect(validateRecord(join(other), ctx([named, b], false)).ok).toBe(true);
-      });
-
-      it('is never one with no end or a short code, however the space came to name it', () => {
-        const legacy = open(code, null);
-        expect(validateRecord(join(code), ctx([named, legacy]))).toMatchObject({
-          ok: false,
-          reason: 'this link is out of date; make a new one',
-        });
-        const shortCode = randomId(5);
-        const shortNamed = signRecord(
-          alice,
-          'space',
-          key,
-          { ...base, admins: [], publicInvite: inviteCommitment(spaceId, shortCode) },
-          now - 790,
-        );
-        expect(
-          validateRecord(join(shortCode), ctx([shortNamed, open(shortCode, now + week)])),
-        ).toMatchObject({ ok: false, reason: 'this link is out of date; make a new one' });
-        // Nor can one be made.
-        expect(validateRecord(open(shortCode, now + week), ctx([shortNamed]))).toMatchObject({
-          ok: false,
-          reason: 'the code of an open link is too short',
-        });
-      });
-
-      it('ends within 30 days when it is made, and what was made before stays as it was', () => {
-        const month = 32 * 24 * 3600_000;
-        for (const expiresAt of [null, now + month])
+      it('is not made now, however long it lasts or whoever makes it', () => {
+        for (const expiresAt of [null, now + week])
           expect(validateRecord(open(code, expiresAt), ctx([named]))).toMatchObject({
             ok: false,
-            reason: 'an invite needs an end, within 30 days',
+            reason: 'an open link is made as a ticket',
           });
-        expect(validateRecord(open(code, now + week), ctx([named])).ok).toBe(true);
-        // A clock a little ahead of the server's does not turn the full 30 days away.
-        expect(
-          validateRecord(open(code, now + 30 * 24 * 3600_000 + 3600_000), ctx([named])).ok,
-        ).toBe(true);
-        // Seen again later, or withdrawn, it is not turned away for lacking an end.
+        expect(validateRecord(open(code, now + week, bob), ctx([withBob]))).toMatchObject({
+          ok: false,
+        });
+        // One already made is held as it was, and withdrawn without being turned away for lacking an end.
         expect(validateRecord(open(code, null), ctx([named], false)).ok).toBe(true);
         const withdrawn = signRecord(alice, 'invite', recordKey.invite(code), {
           spaceId,
@@ -650,6 +595,16 @@ describe('records', () => {
           revoked: true,
         });
         expect(validateRecord(withdrawn, ctx([named])).ok).toBe(true);
+      });
+
+      it('is not joined with now, but a membership made with it is taken as it was', () => {
+        const a = open(code, now + week);
+        expect(validateRecord(join(code), ctx([named, a]))).toMatchObject({
+          ok: false,
+          reason: 'this link is out of date; ask for a new one',
+        });
+        expect(validateRecord(join(code), ctx([named, a], false)).ok).toBe(true);
+        expect(isSpaceMember(ctx([named, a, join(code)]), spaceId, carol.userId)).toBe(true);
       });
     });
   });
@@ -1009,6 +964,336 @@ describe('open link tickets', () => {
       ok: false,
       reason: 'an invite cannot change its ticket',
     });
+  });
+
+  it('ends within 30 days when it is made, and what was made before stays as it was', () => {
+    const month = 32 * 24 * 3600_000;
+    for (const expiresAt of [null, now + month])
+      expect(validateRecord(invite(alice, { expiresAt }), ctx([space()]))).toMatchObject({
+        ok: false,
+        reason: 'an invite needs an end, within 30 days',
+      });
+    // A clock a little ahead of the server's does not turn the full 30 days away.
+    expect(
+      validateRecord(
+        invite(alice, { expiresAt: now + 30 * 24 * 3600_000 + 3600_000 }),
+        ctx([space()]),
+      ).ok,
+    ).toBe(true);
+    // Seen again later, or withdrawn, it is not turned away for lacking an end.
+    expect(validateRecord(invite(alice, { expiresAt: null }), ctx([space()], false)).ok).toBe(true);
+    expect(
+      validateRecord(invite(alice, { expiresAt: null, revoked: true }), ctx([space()])).ok,
+    ).toBe(true);
+  });
+});
+
+describe('the roster of an owner', () => {
+  const alice = createIdentity();
+  const bob = createIdentity();
+  const carol = createIdentity();
+  const dave = createIdentity();
+  const mallory = createIdentity();
+  const nonce = randomId();
+  const spaceId = spaceIdFor(alice.publicKey, nonce);
+  const key = recordKey.space(spaceId);
+  const now = Date.now();
+  const week = 7 * 24 * 3600_000;
+  const base = {
+    name: 'Swamp',
+    owner: alice.userId,
+    nonce,
+    bans: [] as string[],
+    channels: [{ id: randomId(), name: 'general', kind: 'text' as const }],
+  };
+  const code = randomId(16);
+  const oldInvite = signRecord(alice, 'invite', recordKey.invite(code), {
+    spaceId,
+    code,
+    expiresAt: null,
+  });
+  /** A space whose owner has signed a roster (or none: `undefined`). */
+  const space = (roster?: string, over: Partial<SpaceBody> = {}, version = now - 1000) =>
+    signRecord(
+      alice,
+      'space',
+      key,
+      {
+        ...base,
+        admins: [],
+        publicInvite: inviteCommitment(spaceId, code),
+        ...over,
+        ...(roster
+          ? {
+              authority: signSpaceAuthority(
+                alice,
+                spaceId,
+                [],
+                now - 2000,
+                undefined,
+                undefined,
+                roster,
+              ),
+            }
+          : {}),
+      },
+      version,
+    );
+  const rosterOf_ = (who: string[]) => signRoster(alice, spaceId, who, now - 900);
+  /** Joined by the open link of the older kind. */
+  const oldJoin = (who: typeof bob, c = code) =>
+    signRecord(who, 'member', recordKey.member(spaceId, who.userId), {
+      spaceId,
+      userId: who.userId,
+      inviteCode: c,
+    });
+  const named = (to: typeof bob) => {
+    const c = randomId(6);
+    return signRecord(alice, 'invite', recordKey.invite(c), {
+      spaceId,
+      code: c,
+      expiresAt: now + week,
+      for: to.userId,
+    });
+  };
+
+  it('is named by a hash of who it lists, in order, and of nobody else', () => {
+    const a = [bob.userId, carol.userId].sort();
+    expect(rosterHash(spaceId, a)).toMatch(/^[A-Za-z0-9_-]{43}$/);
+    expect(rosterHash(spaceId, a)).toBe(rosterHash(spaceId, [...a]));
+    expect(rosterHash(spaceId, a)).not.toBe(rosterHash(spaceId, [a[0]!]));
+    // Not for every space alike.
+    expect(rosterHash(spaceId, a)).not.toBe(rosterHash(spaceIdFor(bob.publicKey, 'x'), a));
+    expect(emptyRosterHash(spaceId)).toBe(rosterHash(spaceId, []));
+    const signed = signRoster(alice, spaceId, [carol.userId, bob.userId, bob.userId]);
+    expect(signed.record.body.members).toEqual(a);
+    expect(signed.hash).toBe(rosterHash(spaceId, a));
+  });
+
+  it('is signed with the admin list, and an admin list signed without one is as valid as ever', () => {
+    const r = rosterOf_([bob.userId]);
+    expect(spaceAuthorityValid(spaceId, space(r.hash).body)).toBe(true);
+    // Nobody can name another roster, or take it away, under the owner's signature.
+    const named = space(r.hash).body;
+    expect(
+      spaceAuthorityValid(spaceId, {
+        ...named,
+        authority: { ...named.authority!, roster: rosterHash(spaceId, [mallory.userId]) },
+      }),
+    ).toBe(false);
+    const { roster: _, ...without } = named.authority!;
+    expect(spaceAuthorityValid(spaceId, { ...named, authority: without })).toBe(false);
+    // What was signed before there were rosters: the same bytes, and no roster in it.
+    const old = sign(alice, SIG_DOMAIN.spaceAdmins, { spaceId, admins: [], at: 1234 });
+    const body = {
+      ...base,
+      admins: [],
+      authority: { ownerKey: alice.publicKey, at: 1234, sig: old },
+    };
+    expect(spaceAuthorityValid(spaceId, body)).toBe(true);
+    expect(signSpaceAuthority(alice, spaceId, [], 1234)).not.toHaveProperty('roster');
+    expect(signSpaceAuthority(alice, spaceId, [], 1234).sig).toBe(old);
+  });
+
+  it('is written by the owner alone, in order, for the space its key names', () => {
+    const r = rosterOf_([bob.userId, carol.userId]);
+    expect(validateRecord(r.record, ctx([space()])).ok).toBe(true);
+    expect(validateRecord(r.record, ctx([]))).toMatchObject({
+      ok: false,
+      reason: 'unknown space',
+      retryable: true,
+    });
+    // An admin, or anyone, does not write it.
+    const asAdmin = signRecord(mallory, 'roster', r.record.key, r.record.body);
+    expect(validateRecord(asAdmin, ctx([space()]))).toMatchObject({
+      ok: false,
+      reason: 'only the owner may sign a roster',
+    });
+    const wrongKey = signRecord(alice, 'roster', recordKey.roster('abcdefgh'), r.record.body);
+    expect(validateRecord(wrongKey, ctx([space()]))).toMatchObject({
+      ok: false,
+      reason: 'roster key mismatch',
+    });
+    // One list has one hash: in order, each once, and user ids.
+    const ids = [bob.userId, carol.userId].sort();
+    for (const members of [[ids[1]!, ids[0]!], [ids[0]!, ids[0]!], ['nobodynobody']])
+      expect(
+        validateRecord(
+          signRecord(alice, 'roster', r.record.key, { spaceId, members, at: now }),
+          ctx([space()]),
+        ),
+      ).toMatchObject({ ok: false, reason: 'a roster lists each member once, in order' });
+  });
+
+  it('is the one the space names, and no other is taken in its place', () => {
+    const r = rosterOf_([bob.userId]);
+    const other = rosterOf_([bob.userId, carol.userId]);
+    expect(validateRecord(other.record, ctx([space(r.hash)]))).toMatchObject({
+      ok: false,
+      reason: 'this is not the roster the space names',
+    });
+    expect(validateRecord(r.record, ctx([space(r.hash)])).ok).toBe(true);
+    // Held but not the one named: it lists nobody.
+    expect(rosterOf(ctx([other.record]), spaceId, space(r.hash).body)).toBeNull();
+    expect(rosterOf(ctx([r.record]), spaceId, space(r.hash).body)?.has(bob.userId)).toBe(true);
+    // Signed by anyone but the owner is not one either, whatever it says.
+    const forged = signRecord(mallory, 'roster', r.record.key, r.record.body);
+    expect(rosterOf(ctx([forged]), spaceId, space(r.hash).body)).toBeNull();
+  });
+
+  it('is never changed or taken off by a later version of the space, but a deleted space needs none', () => {
+    const r = rosterOf_([bob.userId]);
+    const named = space(r.hash);
+    const later = (body: Partial<SpaceBody>, version = now - 500) =>
+      signRecord(alice, 'space', key, { ...named.body, ...body }, version);
+    // Without one, or with another, even signed by the owner.
+    const bare = space(undefined, { authority: undefined }, now - 500);
+    expect(validateRecord(bare, ctx([named]))).toMatchObject({
+      ok: false,
+      reason: 'the roster of a space cannot be changed or taken off',
+    });
+    const swapped = space(rosterOf_([mallory.userId]).hash, {}, now - 500);
+    expect(validateRecord(swapped, ctx([named]))).toMatchObject({
+      ok: false,
+      reason: 'the roster of a space cannot be changed or taken off',
+    });
+    // Another change keeps it.
+    expect(validateRecord(later({ name: 'Marsh' }), ctx([named])).ok).toBe(true);
+    // An account that is deleted takes its spaces with it.
+    const deleted = signRecord(
+      alice,
+      'space',
+      key,
+      {
+        name: 'Deleted space',
+        owner: alice.userId,
+        nonce,
+        admins: [],
+        bans: [],
+        channels: [],
+        deleted: true,
+      },
+      now - 400,
+    );
+    expect(validateRecord(deleted, ctx([named])).ok).toBe(true);
+  });
+
+  describe('for memberships of the older kind', () => {
+    const r = rosterOf_([bob.userId]);
+    const listed = space(r.hash);
+    const held = [listed, oldInvite, r.record];
+
+    it('counts all of them until the owner signs one', () => {
+      const none = space();
+      for (const who of [bob, carol])
+        expect(isSpaceMember(ctx([none, oldInvite, oldJoin(who)]), spaceId, who.userId)).toBe(true);
+      expect(validateRecord(oldJoin(carol), ctx([none, oldInvite], false)).ok).toBe(true);
+    });
+
+    it('then counts the ones on the roster, and not the others', () => {
+      expect(isSpaceMember(ctx([...held, oldJoin(bob)]), spaceId, bob.userId)).toBe(true);
+      expect(isSpaceMember(ctx([...held, oldJoin(carol)]), spaceId, carol.userId)).toBe(false);
+      expect(validateRecord(oldJoin(bob), ctx(held, false)).ok).toBe(true);
+      expect(validateRecord(oldJoin(carol), ctx(held, false))).toMatchObject({
+        ok: false,
+        reason: 'this link is out of date; ask for a new one',
+        retryable: false,
+      });
+      // The owner is a member of their own space, listed or not.
+      expect(isSpaceMember(ctx(held), spaceId, alice.userId)).toBe(true);
+    });
+
+    it('waits for the roster where it is not yet held, and counts nobody meanwhile', () => {
+      expect(validateRecord(oldJoin(bob), ctx([listed, oldInvite], false))).toMatchObject({
+        ok: false,
+        retryable: true,
+      });
+      expect(isSpaceMember(ctx([listed, oldInvite, oldJoin(bob)]), spaceId, bob.userId)).toBe(
+        false,
+      );
+    });
+
+    it('does not count one made after the roster, whoever signs it with an old date', () => {
+      // A record made to look older than the roster is no better than any other.
+      const backdated = signRecord(
+        carol,
+        'member',
+        recordKey.member(spaceId, carol.userId),
+        { spaceId, userId: carol.userId, inviteCode: code },
+        1000,
+      );
+      expect(isSpaceMember(ctx([...held, backdated]), spaceId, carol.userId)).toBe(false);
+      expect(validateRecord(backdated, ctx(held, false)).ok).toBe(false);
+    });
+
+    it('counts nobody of that kind where the roster is of nobody, which needs no record', () => {
+      const empty = space(emptyRosterHash(spaceId));
+      expect(isSpaceMember(ctx([empty, oldInvite, oldJoin(bob)]), spaceId, bob.userId)).toBe(false);
+      expect(validateRecord(oldJoin(bob), ctx([empty, oldInvite], false))).toMatchObject({
+        ok: false,
+        retryable: false,
+      });
+    });
+
+    it('still counts one who was invited by name, listed or not', () => {
+      const inv = named(dave);
+      const join = oldJoin(dave, inv.body.code);
+      expect(isSpaceMember(ctx([listed, inv, join, r.record]), spaceId, dave.userId)).toBe(true);
+      expect(validateRecord(join, ctx([listed, inv, r.record], false)).ok).toBe(true);
+      // The invite is not here to tell: neither counted nor given up on.
+      expect(validateRecord(join, ctx([listed, r.record], false))).toMatchObject({
+        ok: false,
+        retryable: true,
+      });
+      expect(isSpaceMember(ctx([listed, join, r.record]), spaceId, dave.userId)).toBe(false);
+      // And an invite for somebody else is not one for this member.
+      const forOther = named(carol);
+      const borrowed = oldJoin(dave, forOther.body.code);
+      expect(isSpaceMember(ctx([listed, forOther, borrowed, r.record]), spaceId, dave.userId)).toBe(
+        false,
+      );
+    });
+
+    it('is not asked of a membership by a ticket, or of one that is left', () => {
+      const ticket = newTicket();
+      const link = signRecord(alice, 'invite', recordKey.invite(ticket.tid), {
+        spaceId,
+        code: ticket.tid,
+        tpub: ticket.tpub,
+        expiresAt: now + week,
+      });
+      const byTicket = signRecord(carol, 'member', recordKey.member(spaceId, carol.userId), {
+        spaceId,
+        userId: carol.userId,
+        ticket: { invite: link, proof: signTicketUse(ticket, spaceId, carol.userId) },
+      });
+      expect(isSpaceMember(ctx([listed, byTicket]), spaceId, carol.userId)).toBe(true);
+      const left = signRecord(carol, 'member', recordKey.member(spaceId, carol.userId), {
+        spaceId,
+        userId: carol.userId,
+        left: true,
+      });
+      expect(validateRecord(left, ctx([listed], false)).ok).toBe(true);
+    });
+
+    it('is a ban first of all: someone on the roster who is banned is not a member', () => {
+      const banned = space(r.hash, { bans: [bob.userId] });
+      expect(
+        isSpaceMember(ctx([banned, oldInvite, r.record, oldJoin(bob)]), spaceId, bob.userId),
+      ).toBe(false);
+    });
+  });
+
+  it('turns away a join with a link of the older kind made now, with or without a roster', () => {
+    for (const roster of [undefined, rosterOf_([]).hash]) {
+      expect(validateRecord(oldJoin(carol), ctx([space(roster), oldInvite]))).toMatchObject({
+        ok: false,
+        reason: 'this link is out of date; ask for a new one',
+      });
+    }
+    // The invitation of a person, made for them, is not that link.
+    const inv = named(dave);
+    expect(validateRecord(oldJoin(dave, inv.body.code), ctx([space(), inv])).ok).toBe(true);
   });
 });
 

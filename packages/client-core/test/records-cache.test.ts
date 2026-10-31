@@ -1,5 +1,13 @@
 import { describe, expect, it } from 'vitest';
-import { createIdentity, signRecord, spaceIdFor, type Identity } from '@crocodile/crypto';
+import {
+  createIdentity,
+  inviteCommitment,
+  signRecord,
+  signRoster,
+  signSpaceAuthority,
+  spaceIdFor,
+  type Identity,
+} from '@crocodile/crypto';
 import { recordKey, type SignedRecord } from '@crocodile/protocol';
 import { MemoryKeyValueStore } from '../src';
 import { RecordCache } from '../src/records-cache';
@@ -44,5 +52,44 @@ describe('records waiting for one they depend on', () => {
     expect(cache.ingest(space, false)).toBe(true);
     expect(cache.get(recordKey.member(spaceId, owner.userId))).toBeDefined();
     expect(cache.waitingCount).toBe(399);
+  });
+
+  it('a membership of the older kind waits for the roster the space names, and asks for it', () => {
+    const cache = new RecordCache(new MemoryKeyValueStore());
+    const owner = createIdentity();
+    const bob = createIdentity();
+    const nonce = 'nonce-of-roster';
+    const spaceId = spaceIdFor(owner.publicKey, nonce);
+    const code = 'abcdefghijklmnop';
+    const roster = signRoster(owner, spaceId, [bob.userId]);
+    const space = signRecord(owner, 'space', recordKey.space(spaceId), {
+      name: 'Space',
+      owner: owner.userId,
+      nonce,
+      admins: [],
+      bans: [],
+      publicInvite: inviteCommitment(spaceId, code),
+      channels: [],
+      authority: signSpaceAuthority(owner, spaceId, [], 1, undefined, undefined, roster.hash),
+    });
+    const invite = signRecord(owner, 'invite', recordKey.invite(code), {
+      spaceId,
+      code,
+      expiresAt: null,
+    });
+    const join = signRecord(bob, 'member', recordKey.member(spaceId, bob.userId), {
+      spaceId,
+      userId: bob.userId,
+      inviteCode: code,
+    });
+    const asked: string[][] = [];
+    cache.on('wanted', (keys) => asked.push(keys));
+    cache.ingestAll([space, invite], false);
+    expect(cache.ingest(join, false)).toBe(false);
+    expect(asked.at(-1)).toContain(recordKey.roster(spaceId));
+    // It gets in when the roster arrives, not before.
+    expect(cache.get(join.key)).toBeUndefined();
+    expect(cache.ingest(roster.record, false)).toBe(true);
+    expect(cache.get(join.key)).toBeDefined();
   });
 });

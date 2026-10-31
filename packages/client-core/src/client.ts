@@ -30,9 +30,12 @@ import {
   spaceAuthorityValid,
   mayInviteByName,
   INVITE_MAX_MS,
+  emptyRosterHash,
   newTicket,
   OPEN_CODE_LENGTH,
   openLinkName,
+  rosterOf,
+  signRoster,
   signedInvitePolicy,
   signTicketUse,
   ticketFromSecret,
@@ -211,6 +214,11 @@ export interface SpaceView {
   invitePolicy: 'admins' | 'members';
   /** The code of the link anyone can join with, if one is on. */
   publicInvite?: string;
+  /**
+   * For the owner, until they have signed the list of those who stay: the members who joined by
+   * a link of the older kind, which anyone could forge a membership to. (Nobody is a list too.)
+   */
+  rosterToReview?: string[];
 }
 
 /** A session as the UI sees it: user ids (devices collapsed). */
@@ -1372,6 +1380,7 @@ export class CrocodileClient extends Emitter<ClientEvents> {
       return;
     }
     this.refreshDerivedState(record);
+    if (record.kind === 'space') this.wantRoster(record as SignedRecord<'space'>);
     if (
       record.kind === 'member' ||
       record.kind === 'device' ||
@@ -1445,7 +1454,12 @@ export class CrocodileClient extends Emitter<ClientEvents> {
       if (!changed || changed.kind === 'friends') this.absorbFriendRecords();
       patch.friends = this.friendsView();
     }
-    if (!changed || changed.kind === 'space' || changed.kind === 'member') {
+    if (
+      !changed ||
+      changed.kind === 'space' ||
+      changed.kind === 'member' ||
+      changed.kind === 'roster'
+    ) {
       const spaces: Record<string, SpaceView> = {};
       // A text channel id names the channel everywhere on this device, so two
       // spaces can't both use one. The space joined first keeps it (the
@@ -1486,6 +1500,9 @@ export class CrocodileClient extends Emitter<ClientEvents> {
           admins: spaceAuthorityValid(id, body) ? body.admins : [],
           invitePolicy: body.invitePolicy ?? 'admins',
           ...(body.publicInvite ? { publicInvite: body.publicInvite } : {}),
+          ...(body.owner === me && !body.authority?.roster
+            ? { rosterToReview: this.legacyMembers(id) }
+            : {}),
         };
       }
       patch.spaces = spaces;
@@ -1934,6 +1951,16 @@ export class CrocodileClient extends Emitter<ClientEvents> {
         { id: randomId(), name: 'General', kind: 'voice' },
       ],
       ...(icon ? { icon } : {}),
+      // Nobody joined by a link of the older kind, and nobody will.
+      authority: signSpaceAuthority(
+        id,
+        spaceId,
+        [],
+        Date.now(),
+        undefined,
+        undefined,
+        emptyRosterHash(spaceId),
+      ),
     };
     // (Kept before the space names the link: a link named and not kept could not be shown again.)
     await this.keepTicket(ticket);
@@ -1985,6 +2012,57 @@ export class CrocodileClient extends Emitter<ClientEvents> {
     }, 20);
   }
 
+  /** The owner's roster, where the space names one that is not held: those it lists are members only with it. */
+  private wantRoster(space: SignedRecord<'space'>) {
+    const spaceId = space.key.slice('space:'.length);
+    if (rosterOf(this.records, spaceId, space.body) === null)
+      this.fetchWanted([recordKey.roster(spaceId)]);
+  }
+
+  /**
+   * The members of a space who joined by a link of the older kind and are not invited by name: the
+   * ones the owner's roster is for. (Of those whose invite is not here, the owner is the judge.)
+   */
+  private legacyMembers(spaceId: string): string[] {
+    const space = this.records.get(recordKey.space(spaceId)) as SignedRecord<'space'> | undefined;
+    if (!space) return [];
+    return (this.records.list(recordKey.memberPrefix(spaceId)) as SignedRecord<'member'>[])
+      .filter((m) => {
+        const b = m.body;
+        if (
+          b.left ||
+          b.ticket ||
+          b.userId === space.body.owner ||
+          space.body.bans.includes(b.userId)
+        )
+          return false;
+        const invite = b.inviteCode
+          ? (this.records.get(recordKey.invite(b.inviteCode)) as SignedRecord<'invite'> | undefined)
+          : undefined;
+        return invite?.body.for !== b.userId;
+      })
+      .map((m) => m.body.userId)
+      .sort();
+  }
+
+  /**
+   * As the owner: signs who of those who joined by a link of the older kind stay (those the owner
+   * was shown and has not banned since). Memberships of that kind then count only for them, so
+   * nobody can be put among the members by a record made to look as old as theirs.
+   */
+  async signRoster(spaceId: string, keep: string[]) {
+    const space = this.records.get(recordKey.space(spaceId)) as SignedRecord<'space'> | undefined;
+    if (!space || space.body.owner !== this.userId) throw new Error('only the owner can do this');
+    if (space.body.authority?.roster) return;
+    // Only those who are still there to be kept, never someone the owner was not shown.
+    const present = new Set(this.legacyMembers(spaceId));
+    const members = [...new Set(keep)].filter((u) => present.has(u)).sort();
+    const { record, hash } = signRoster(this.identity!, spaceId, members);
+    // The list goes first: the space names it only once it is there to be found.
+    if (members.length) await this.putRecord(record);
+    await this.updateSpace(spaceId, (b) => b, hash);
+  }
+
   private adopting = new Set<string>();
 
   private async adoptSpace(spaceId: string) {
@@ -2012,6 +2090,8 @@ export class CrocodileClient extends Emitter<ClientEvents> {
     try {
       const records = await fetchList(link, recordKey.memberPrefix(spaceId));
       this.records.ingestAll(records);
+      const space = this.records.get(recordKey.space(spaceId)) as SignedRecord<'space'> | undefined;
+      if (space) this.wantRoster(space);
       const mine = recordKey.member(spaceId, this.userId);
       if (attempt === 0 && records.every((r) => r.key === mine)) retryIn = MEMBER_LIST_ALONE_MS;
     } catch (err) {
@@ -2046,7 +2126,7 @@ export class CrocodileClient extends Emitter<ClientEvents> {
    * carries a fresh signature on the admin list whenever it changes; an
    * admin's keeps the owner's list and signature as they are.
    */
-  async updateSpace(spaceId: string, mutate: (b: SpaceBody) => SpaceBody) {
+  async updateSpace(spaceId: string, mutate: (b: SpaceBody) => SpaceBody, roster?: string) {
     const key = recordKey.space(spaceId);
     const r = this.records.get(key) as SignedRecord<'space'> | undefined;
     if (!r) throw new Error('unknown space');
@@ -2068,8 +2148,11 @@ export class CrocodileClient extends Emitter<ClientEvents> {
       ];
       if (formerAdmins.length > LIMITS.formerAdminsMax)
         throw new Error('Too many admins have been taken off this space to take off another.');
+      // (Once the owner has signed a roster it goes with the list, whatever else is changed.)
+      const rostered = roster ?? r.body.authority?.roster;
       const unchanged =
         !!r.body.authority &&
+        rostered === r.body.authority.roster &&
         signedInvitePolicy(r.body.invitePolicy) === signedInvitePolicy(body.invitePolicy) &&
         admins.length === r.body.admins.length &&
         admins.every((u, i) => u === r.body.admins[i]) &&
@@ -2087,6 +2170,7 @@ export class CrocodileClient extends Emitter<ClientEvents> {
               Math.max(Date.now(), (r.body.authority?.at ?? 0) + 1),
               body.invitePolicy,
               formerAdmins,
+              rostered,
             ),
       };
       if (!body.formerAdmins) delete body.formerAdmins;

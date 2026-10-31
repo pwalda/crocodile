@@ -8,6 +8,7 @@ import {
   createPrekey,
   isSpaceMember,
   linkNonce,
+  newTicket,
   randomDeviceId,
   randomId,
   sealAnonymous,
@@ -47,6 +48,7 @@ import {
   createSpace,
   expectAccepted,
   joinSpace,
+  memberBody,
   lastSession,
   registerDevice,
   startCoordinator,
@@ -119,7 +121,7 @@ describe('records', () => {
   it('does not let a stranger enumerate invite codes', async () => {
     const c = await server();
     const alice = await user(c);
-    const { spaceId, code } = await createSpace(alice);
+    const { spaceId, tid } = await createSpace(alice);
     const eve = await user(c); // never handed the invite code
 
     // No prefix sweep reveals an invite. The server's undefined invite shard
@@ -133,12 +135,13 @@ describe('records', () => {
     // and friends prefixes, then put a fresh invite and a fresh friends record;
     // only the non-invite one should arrive.
     await eve.conn.request('records.subscribe', { prefixes: ['invite:', 'friends:'] });
-    const code2 = randomId(16);
+    const second = newTicket();
     expectAccepted(
       await alice.conn.request('records.put', {
-        record: signRecord(alice.identity, 'invite', recordKey.invite(code2), {
+        record: signRecord(alice.identity, 'invite', recordKey.invite(second.tid), {
           spaceId,
-          code: code2,
+          code: second.tid,
+          tpub: second.tpub,
           expiresAt: Date.now() + 3600_000,
         }),
       }),
@@ -170,8 +173,8 @@ describe('records', () => {
     expect((await asked('rec_list', { prefix: 'space:' })).records.length).toBeGreaterThan(0);
 
     // The legitimate path is untouched: with the exact code in hand, get works.
-    const got = await eve.conn.request('records.get', { keys: [recordKey.invite(code)] });
-    expect(got.records.map((r) => r.key)).toEqual([recordKey.invite(code)]);
+    const got = await eve.conn.request('records.get', { keys: [recordKey.invite(tid)] });
+    expect(got.records.map((r) => r.key)).toEqual([recordKey.invite(tid)]);
   });
 });
 
@@ -2006,7 +2009,7 @@ describe('coordination mesh', () => {
     const alice = await user(a, 'alice');
     const s = await createSpace(alice);
     const b = await server({ name: 'B', meshPeers: [a.url] });
-    await waitFor(() => b.records.get(`invite:${s.code}`), 3000, 'backlog sync');
+    await waitFor(() => b.records.get(`invite:${s.tid}`), 3000, 'backlog sync');
     expect(isSpaceMember(b.records, s.spaceId, alice.identity.userId)).toBe(true);
   });
 
@@ -2015,7 +2018,7 @@ describe('coordination mesh', () => {
     const alice = await user(a);
     const bob = await user(b);
     const s = await createSpace(alice);
-    await waitFor(() => b.records.get(`invite:${s.code}`), 3000, 'invite replicated');
+    await waitFor(() => b.records.get(`invite:${s.tid}`), 3000, 'invite replicated');
     await joinSpace(bob, s.spaceId, s.code);
     await waitFor(
       () => isSpaceMember(a.records, s.spaceId, bob.identity.userId),
@@ -2098,7 +2101,7 @@ describe('coordination mesh', () => {
     expect(a.sessions.ownerOf(sessionId)).toBe(a.info.id);
 
     const hostId = createIdentity();
-    await waitFor(() => b.records.get(`invite:${s.code}`), 3000, 'replicated');
+    await waitFor(() => b.records.get(`invite:${s.tid}`), 3000, 'replicated');
     const host = await connectUser(b, hostId, 'host', 'hostdevicex');
     cleanup.push(() => host.conn.close());
     await joinSpace(host, s.spaceId, s.code);
@@ -2156,7 +2159,7 @@ describe('coordination mesh', () => {
         Date.now() + 1,
       ),
     });
-    await waitFor(() => b.records.get(`invite:${s.code}`), 3000, 'replicated');
+    await waitFor(() => b.records.get(`invite:${s.tid}`), 3000, 'replicated');
     const bob = await user(b);
     await joinSpace(bob, s.spaceId, s.code);
     await waitFor(() => isSpaceMember(c.records, s.spaceId, bob.identity.userId), 3000);
@@ -2424,10 +2427,11 @@ describe('record quotas', () => {
     const s = space(alice);
     expectAccepted(await put(alice, s.record));
     const invite = () => {
-      const code = randomId(16);
-      return signRecord(alice.identity, 'invite', recordKey.invite(code), {
+      const t = newTicket();
+      return signRecord(alice.identity, 'invite', recordKey.invite(t.tid), {
         spaceId: s.spaceId,
-        code,
+        code: t.tid,
+        tpub: t.tpub,
         expiresAt: Date.now() + 3600_000,
       });
     };
@@ -2522,12 +2526,13 @@ describe('record quotas', () => {
     expect((await send(invite(people[2]!))).reason).toMatch(/at most 2 invitations waiting/);
     // The open invite and a changed record of one already counted are not held back.
     expectAccepted(await send({ ...first, version: first.version }));
-    const open = randomId(16);
+    const open = newTicket();
     expectAccepted(
       await send(
-        signRecord(alice.identity, 'invite', recordKey.invite(open), {
+        signRecord(alice.identity, 'invite', recordKey.invite(open.tid), {
           spaceId,
-          code: open,
+          code: open.tid,
+          tpub: open.tpub,
           expiresAt: Date.now() + 3600_000,
         }),
       ),
@@ -2649,18 +2654,18 @@ describe('record quotas', () => {
     const two = await createSpace(await user(c), 'Two');
     const alice = await user(c);
     await joinSpace(alice, one.spaceId, one.code);
-    const member = (spaceId: string, code: string, left?: boolean) =>
+    const member = async (spaceId: string, code: string, left?: boolean) =>
       signRecord(alice.identity, 'member', recordKey.member(spaceId, alice.identity.userId), {
-        spaceId,
-        userId: alice.identity.userId,
-        inviteCode: code,
+        ...(await memberBody(alice, spaceId, code)),
         ...(left ? { left } : {}),
       });
-    expect((await put(alice, member(two.spaceId, two.code))).reason).toMatch(/at most 1 spaces/);
-    expectAccepted(await put(alice, member(one.spaceId, one.code, true)));
-    expectAccepted(await put(alice, member(two.spaceId, two.code)));
+    expect((await put(alice, await member(two.spaceId, two.code))).reason).toMatch(
+      /at most 1 spaces/,
+    );
+    expectAccepted(await put(alice, await member(one.spaceId, one.code, true)));
+    expectAccepted(await put(alice, await member(two.spaceId, two.code)));
     // Rejoining the first space would make two again.
-    expect((await put(alice, member(one.spaceId, one.code))).reason).toMatch(/quota reached/);
+    expect((await put(alice, await member(one.spaceId, one.code))).reason).toMatch(/quota reached/);
   });
 
   it('refuses leave records for memberships that never existed', async () => {

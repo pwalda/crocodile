@@ -59,6 +59,7 @@ live full-copy server:
 | profile               | `user:<id>`, `name:<lowercase>`  | `user:<id>`            |
 | device, friends, note | `user:<id>`                      | `user:<id>`            |
 | space                 | `space:<id>`, `user:<owner>`     | `user:<owner>`         |
+| roster                | `space:<space>`                  | `space:<space>`        |
 | invite                | `invite:<code>`, `space:<space>` | `space:<space>`        |
 | member                | `space:<space>`, `user:<member>` | `user:<member>`        |
 

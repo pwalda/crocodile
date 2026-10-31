@@ -2,7 +2,7 @@ import { Coordinator, type CoordinatorConfig } from '@crocodile/coordinator';
 import {
   createIdentity,
   createPrekey,
-  inviteCommitment,
+  newTicket,
   randomDeviceId,
   randomId,
   signRecord,
@@ -136,14 +136,16 @@ export async function createSpace(user: TestUser, name = 'Swamp') {
   const spaceId = spaceIdFor(user.identity.publicKey, nonce);
   const text = randomId();
   const voice = randomId();
-  const code = randomId(16);
+  // The open link is a ticket: `code` is the secret in the link and `tid` the name of its invite.
+  const ticket = newTicket();
+  const code = ticket.secret;
   const space = signRecord(user.identity, 'space', recordKey.space(spaceId), {
     name,
     owner: user.identity.userId,
     nonce,
     admins: [],
     bans: [],
-    publicInvite: inviteCommitment(spaceId, code),
+    publicInvite: ticket.tid,
     channels: [
       { id: text, name: 'general', kind: 'text' },
       { id: voice, name: 'Lounge', kind: 'voice' },
@@ -160,35 +162,42 @@ export async function createSpace(user: TestUser, name = 'Swamp') {
     },
   );
   expectAccepted(await user.conn.request('records.put', { record: member }));
-  const invite = signRecord(user.identity, 'invite', recordKey.invite(code), {
+  const invite = signRecord(user.identity, 'invite', recordKey.invite(ticket.tid), {
     spaceId,
-    code,
+    code: ticket.tid,
+    tpub: ticket.tpub,
     expiresAt: Date.now() + 7 * 24 * 3600_000,
   });
   expectAccepted(await user.conn.request('records.put', { record: invite }));
-  return { spaceId, textChannel: text, voiceChannel: voice, code, space };
+  return { spaceId, textChannel: text, voiceChannel: voice, code, tid: ticket.tid, space };
+}
+
+/** The body of a membership made with what a link carries: the secret of a ticket, or an invite code. */
+export async function memberBody(
+  user: TestUser,
+  spaceId: string,
+  code: string,
+): Promise<RecordBodies['member']> {
+  const ticket = ticketFromSecret(code);
+  if (!ticket) return { spaceId, userId: user.identity.userId, inviteCode: code };
+  const { records } = await user.conn.request('records.get', {
+    keys: [recordKey.invite(ticket.tid)],
+  });
+  const invite = records[0] as SignedRecord<'invite'>;
+  return {
+    spaceId,
+    userId: user.identity.userId,
+    ticket: { invite, proof: signTicketUse(ticket, spaceId, user.identity.userId) },
+  };
 }
 
 /** Joins a space with what a link carries: the secret of a ticket, or the code of an older invite. */
 export async function joinSpace(user: TestUser, spaceId: string, code: string) {
-  const ticket = ticketFromSecret(code);
-  let body: RecordBodies['member'] = { spaceId, userId: user.identity.userId, inviteCode: code };
-  if (ticket) {
-    const { records } = await user.conn.request('records.get', {
-      keys: [recordKey.invite(ticket.tid)],
-    });
-    const invite = records[0] as SignedRecord<'invite'>;
-    body = {
-      spaceId,
-      userId: user.identity.userId,
-      ticket: { invite, proof: signTicketUse(ticket, spaceId, user.identity.userId) },
-    };
-  }
   const member = signRecord(
     user.identity,
     'member',
     recordKey.member(spaceId, user.identity.userId),
-    body,
+    await memberBody(user, spaceId, code),
   );
   expectAccepted(await user.conn.request('records.put', { record: member }));
 }

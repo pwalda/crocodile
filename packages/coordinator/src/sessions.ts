@@ -232,11 +232,7 @@ export class SessionService {
     if (!scope) throw new RpcFailure('bad_request', 'invalid session id');
     if (scope.kind === 'space' || scope.kind === 'voice') {
       // The space's records may live on other servers.
-      const records = await this.hub.dist.get([
-        `space:${scope.spaceId}`,
-        `member:${scope.spaceId}:${userId}`,
-      ]);
-      const byKey = new Map(records.map((r) => [r.key, r]));
+      const byKey = await this.hub.dist.membershipRecords([scope.spaceId], userId);
       if (!isSpaceMember({ get: (k) => byKey.get(k) }, scope.spaceId, userId))
         throw new RpcFailure('forbidden', 'not a member of this space');
       if (scope.kind === 'voice') {

@@ -13,6 +13,7 @@ export const RECORD_KINDS = [
   'device',
   'friends',
   'space',
+  'roster',
   'invite',
   'member',
   'note',
@@ -215,10 +216,33 @@ export const SpaceBody = z.object({
       ownerKey: z.string().max(64),
       at: z.number().int().min(0),
       sig: z.string().max(200),
+      /**
+       * The hash of the roster the owner has signed (see RosterBody): who joined by a link of the
+       * older kind and stays. Once a space names one, memberships of that kind count only for
+       * those on it. Signed with the admin list, and never changed or taken off.
+       */
+      roster: z
+        .string()
+        .regex(/^[A-Za-z0-9_-]{43}$/)
+        .optional(),
     })
     .optional(),
 });
 export type SpaceBody = z.infer<typeof SpaceBody>;
+
+/**
+ * Who stays in a space of those who joined by an open link of the older kind, which anyone could
+ * forge a membership to: the owner reads the list, removes those who should not be on it, and
+ * signs it once. Key `roster:<spaceId>`, written by the owner; the space's `authority` names it
+ * by its hash (a roster of nobody needs no record). The members are in order, each once.
+ */
+export const RosterBody = z.object({
+  spaceId: id,
+  members: z.array(id).max(LIMITS.rosterMax),
+  /** Epoch ms, when the owner signed it. */
+  at: z.number().int().positive(),
+});
+export type RosterBody = z.infer<typeof RosterBody>;
 
 export const InviteBody = z.object({
   spaceId: id,
@@ -273,6 +297,7 @@ export interface RecordBodies {
   device: DeviceBody;
   friends: FriendsBody;
   space: SpaceBody;
+  roster: RosterBody;
   invite: InviteBody;
   member: MemberBody;
   note: NoteBody;
@@ -283,6 +308,7 @@ export const RECORD_BODY_SCHEMAS = {
   device: DeviceBody,
   friends: FriendsBody,
   space: SpaceBody,
+  roster: RosterBody,
   invite: InviteBody,
   member: MemberBody,
   note: NoteBody,
@@ -307,6 +333,7 @@ export const recordKey = {
   devicePrefix: (userId: string) => `device:${userId}:`,
   friends: (userId: string) => `friends:${userId}`,
   space: (spaceId: string) => `space:${spaceId}`,
+  roster: (spaceId: string) => `roster:${spaceId}`,
   invite: (code: string) => `invite:${code}`,
   invitePrefix: 'invite:',
   member: (spaceId: string, userId: string) => `member:${spaceId}:${userId}`,
@@ -321,7 +348,8 @@ export const RECORD_KIND_ORDER: Record<RecordKind, number> = {
   device: 1,
   friends: 2,
   space: 3,
-  invite: 4,
-  member: 5,
-  note: 6,
+  roster: 4,
+  invite: 5,
+  member: 6,
+  note: 7,
 };

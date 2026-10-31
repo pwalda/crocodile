@@ -1,8 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import {
   createIdentity,
+  emptyRosterHash,
   newTicket,
   signRecord,
+  signRoster,
+  signSpaceAuthority,
   signTicketUse,
   spaceIdFor,
 } from '@crocodile/crypto';
@@ -11,6 +14,8 @@ import {
   HashRing,
   View,
   dependenciesOf,
+  homeShardOf,
+  rosterKeyOfMember,
   shardOfKey,
   shardOfPrefix,
   shardOfTerm,
@@ -123,5 +128,49 @@ describe('placement', () => {
       body: { spaceId, userId: bob.userId, inviteCode: 'x'.repeat(500) },
     };
     expect(dependenciesOf(long, bob.userId)).toEqual(wanted);
+  });
+
+  it('keeps the roster of a space with the space, and asks for it only where a space names one', () => {
+    const owner = createIdentity();
+    const bob = createIdentity();
+    const nonce = 'roster-nonce';
+    const spaceId = spaceIdFor(owner.publicKey, nonce);
+    const listed = signRoster(owner, spaceId, [bob.userId]);
+    const body = {
+      name: 'Swamp',
+      owner: owner.userId,
+      nonce,
+      admins: [],
+      bans: [],
+      channels: [],
+    };
+    const key = recordKey.space(spaceId);
+    const space = (roster?: string) =>
+      signRecord(owner, 'space', key, {
+        ...body,
+        ...(roster
+          ? {
+              authority: signSpaceAuthority(owner, spaceId, [], 1, undefined, undefined, roster),
+            }
+          : {}),
+      });
+    expect(shardsOf(listed.record)).toEqual([`space:${spaceId}`]);
+    expect(homeShardOf(listed.record)).toBe(`space:${spaceId}`);
+    expect(shardOfKey(listed.record.key)).toBe(`space:${spaceId}`);
+    expect(shardOfPrefix(listed.record.key)).toBe(`space:${spaceId}`);
+    const old = signRecord(bob, 'member', recordKey.member(spaceId, bob.userId), {
+      spaceId,
+      userId: bob.userId,
+      inviteCode: 'abcdefgh',
+    });
+    expect(rosterKeyOfMember(old, space(listed.hash))).toBe(recordKey.roster(spaceId));
+    // Not where the space names none, or a roster of nobody (which has no record), or the
+    // space is not known yet; nor for a membership by a ticket, or one that is left.
+    expect(rosterKeyOfMember(old, space())).toBeUndefined();
+    expect(rosterKeyOfMember(old, space(emptyRosterHash(spaceId)))).toBeUndefined();
+    expect(rosterKeyOfMember(old, undefined)).toBeUndefined();
+    const left = signRecord(bob, 'member', old.key, { spaceId, userId: bob.userId, left: true });
+    expect(rosterKeyOfMember(left, space(listed.hash))).toBeUndefined();
+    expect(rosterKeyOfMember(space(), space(listed.hash))).toBeUndefined();
   });
 });

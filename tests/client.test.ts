@@ -16,6 +16,9 @@ import {
   createChatMessage,
   createIdentity,
   createLinkKem,
+  emptyRosterHash,
+  encodeRecoveryKey,
+  inviteCommitment,
   linkCommitment,
   linkNonce,
   sealLink,
@@ -23,7 +26,9 @@ import {
   randomId,
   signRecord,
   signSpaceAuthority,
+  spaceIdFor,
   ticketFromSecret,
+  type Identity,
 } from '@crocodile/crypto';
 import {
   DELETED_PROFILE_NAME,
@@ -1694,6 +1699,263 @@ describe('leaving', () => {
     spy.mockRestore();
   });
 
+  describe('the roster of an owner', () => {
+    /**
+     * A space as it was before rosters, the way an older server kept it: the owner's account,
+     * a link of the older kind and the people who joined with it (Bob, and Mallory by a record
+     * made to look as old as theirs), all taken as copies from another server.
+     */
+    async function older() {
+      const coord = await server();
+      const net = new FakeRelayNetwork();
+      const owner = createIdentity();
+      const nonce = randomId();
+      const spaceId = spaceIdFor(owner.publicKey, nonce);
+      const code = randomId(16);
+      const copy = (r: SignedRecord) => {
+        const res = coord.records.put(r, { fresh: false, origin: 'peer' });
+        if (!res.accepted) throw new Error(`copy refused: ${res.reason}`);
+      };
+      copy(
+        signRecord(owner, 'space', recordKey.space(spaceId), {
+          name: 'Swamp',
+          owner: owner.userId,
+          nonce,
+          admins: [],
+          bans: [],
+          publicInvite: inviteCommitment(spaceId, code),
+          channels: [
+            { id: randomId(), name: 'general', kind: 'text' },
+            { id: randomId(), name: 'General', kind: 'voice' },
+          ],
+        }),
+      );
+      copy(
+        signRecord(owner, 'member', recordKey.member(spaceId, owner.userId), {
+          spaceId,
+          userId: owner.userId,
+        }),
+      );
+      copy(signRecord(owner, 'invite', recordKey.invite(code), { spaceId, code, expiresAt: null }));
+      const legacyJoin = (who: Identity, version?: number) =>
+        signRecord(
+          who,
+          'member',
+          recordKey.member(spaceId, who.userId),
+          { spaceId, userId: who.userId, inviteCode: code },
+          version,
+        );
+      const alice = makeClient(net, coord);
+      await alice.init();
+      await alice.restoreAccount(encodeRecoveryKey(owner.seed), 'alice');
+      await waitFor(() => alice.state.link === 'connected' && alice.state.me, 5000, 'alice');
+      const bob = await signUp(makeClient(net, coord), 'bob');
+      const mallory = createIdentity();
+      copy(legacyJoin(identityOf(bob)));
+      copy(legacyJoin(mallory, 1000));
+      // Dave was invited by name, which the roster is not for.
+      const dave = createIdentity();
+      const named = randomId(6);
+      copy(
+        signRecord(owner, 'invite', recordKey.invite(named), {
+          spaceId,
+          code: named,
+          expiresAt: Date.now() + 24 * 3600_000,
+          for: dave.userId,
+        }),
+      );
+      copy(
+        signRecord(dave, 'member', recordKey.member(spaceId, dave.userId), {
+          spaceId,
+          userId: dave.userId,
+          inviteCode: named,
+        }),
+      );
+      return { coord, net, alice, bob, mallory, dave, spaceId, code, legacyJoin };
+    }
+    /** The owner's list of those who joined by the older link, once Bob and Mallory are in it. */
+    const toReview = (owner: CrocodileClient, spaceId: string) =>
+      waitFor(
+        () => owner.state.spaces[spaceId]?.rosterToReview?.length === 2,
+        8000,
+        'the list to review',
+      );
+    const identityOf = (c: CrocodileClient) => (c as unknown as { identity: Identity }).identity;
+
+    it('asks the owner who of those who joined by an older link stays, and changes nothing until then', async () => {
+      const { alice, bob, mallory, dave, spaceId } = await older();
+      await toReview(alice, spaceId);
+      // (Not Dave, whom the owner invited by name.)
+      expect(alice.state.spaces[spaceId]!.rosterToReview).toEqual(
+        [bob.userId, mallory.userId].sort(),
+      );
+      // Until the owner has signed, they count as they always did.
+      expect(alice.state.spaces[spaceId]!.members).toEqual(
+        expect.arrayContaining([alice.userId, bob.userId, mallory.userId, dave.userId]),
+      );
+    });
+
+    it('keeps those the owner signs and no one else, for the owner, the servers and the others', async () => {
+      const { coord, alice, bob, mallory, dave, spaceId, legacyJoin } = await older();
+      await toReview(alice, spaceId);
+      await alice.signRoster(spaceId, [bob.userId]);
+      await waitFor(
+        () => !alice.state.spaces[spaceId]?.members.includes(mallory.userId),
+        5000,
+        'Mallory off the list',
+      );
+      const view = alice.state.spaces[spaceId]!;
+      expect(view.members.sort()).toEqual([alice.userId, bob.userId, dave.userId].sort());
+      expect(view.rosterToReview).toBeUndefined();
+      expect(await coord.areSpaceMember([spaceId], bob.userId)).toEqual([true]);
+      expect(await coord.areSpaceMember([spaceId], dave.userId)).toEqual([true]);
+      expect(await coord.areSpaceMember([spaceId], mallory.userId)).toEqual([false]);
+      // A record made to look older than the roster is turned away.
+      expect(
+        coord.records.put(legacyJoin(createIdentity(), 1), { fresh: false, origin: 'peer' })
+          .accepted,
+      ).toBe(false);
+      // Bob has kept his place, and the others see the same list as the owner does.
+      await waitFor(
+        () => {
+          const members = bob.state.spaces[spaceId]?.members;
+          return members?.length === 3 && !members.includes(mallory.userId);
+        },
+        8000,
+        'bob sees the same list',
+      );
+      expect(bob.state.spaces[spaceId]!.members.sort()).toEqual(
+        [alice.userId, bob.userId, dave.userId].sort(),
+      );
+    });
+
+    it('is fetched by a device that starts with nothing, before it shows who is in', async () => {
+      const { net, coord, alice, bob, mallory, dave, spaceId } = await older();
+      await toReview(alice, spaceId);
+      await alice.signRoster(spaceId, [bob.userId]);
+      const phone = makeClient(net, coord);
+      await phone.init();
+      await phone.restoreAccount(bob.recoveryKey());
+      await waitFor(
+        () => {
+          const members = phone.state.spaces[spaceId]?.members;
+          return members?.length === 3 && !members.includes(mallory.userId);
+        },
+        8000,
+        'the same list',
+      );
+      expect(phone.state.spaces[spaceId]!.members.sort()).toEqual(
+        [alice.userId, bob.userId, dave.userId].sort(),
+      );
+    });
+
+    it('lists nobody the owner was not shown, and nobody the owner has banned', async () => {
+      const { alice, bob, mallory, spaceId } = await older();
+      await toReview(alice, spaceId);
+      await alice.banMember(spaceId, mallory.userId);
+      await waitFor(
+        () => !alice.state.spaces[spaceId]?.rosterToReview?.includes(mallory.userId),
+        5000,
+        'the banned off the list',
+      );
+      const stranger = createIdentity();
+      await alice.signRoster(spaceId, [bob.userId, mallory.userId, stranger.userId]);
+      const roster = alice.records.get(recordKey.roster(spaceId)) as SignedRecord<'roster'>;
+      expect(roster.body.members).toEqual([bob.userId]);
+    });
+
+    it('is the owner’s alone to sign, and once', async () => {
+      const { alice, bob, spaceId } = await older();
+      await toReview(alice, spaceId);
+      await expect(bob.signRoster(spaceId, [bob.userId])).rejects.toThrow(
+        /only the owner can do this/,
+      );
+      await alice.signRoster(spaceId, [bob.userId]);
+      const first = alice.records.get(recordKey.roster(spaceId));
+      await alice.signRoster(spaceId, []);
+      expect(alice.records.get(recordKey.roster(spaceId))).toBe(first);
+    });
+
+    it('is only read by those in the space', async () => {
+      const { coord, alice, bob, spaceId } = await older();
+      await toReview(alice, spaceId);
+      await alice.signRoster(spaceId, [bob.userId]);
+      const stranger = await connectUser(coord);
+      cleanup.push(() => stranger.conn.close());
+      const ask = (link: Pick<CoordinatorLink, 'request'>) =>
+        link.request('records.get', { keys: [recordKey.roster(spaceId)] });
+      expect((await ask(stranger.conn)).records).toEqual([]);
+      expect((await ask(bob.link!)).records).toHaveLength(1);
+    });
+
+    it('is in a new space from the start, so that no one of the older kind is ever one of its members', async () => {
+      const coord = await server();
+      const net = new FakeRelayNetwork();
+      const alice = await signUp(makeClient(net, coord), 'alice');
+      const spaceId = await alice.createSpace('Swamp');
+      const space = alice.records.get(recordKey.space(spaceId)) as SignedRecord<'space'>;
+      expect(space.body.authority?.roster).toBe(emptyRosterHash(spaceId));
+      // A membership made to look as old as any, with a code that is not a secret.
+      const mallory = createIdentity();
+      const code = randomId(16);
+      coord.records.put(
+        signRecord(identityOf(alice), 'invite', recordKey.invite(code), {
+          spaceId,
+          code,
+          expiresAt: null,
+        }),
+        { fresh: false, origin: 'peer' },
+      );
+      const forged = signRecord(
+        mallory,
+        'member',
+        recordKey.member(spaceId, mallory.userId),
+        { spaceId, userId: mallory.userId, inviteCode: code },
+        1000,
+      );
+      expect(coord.records.put(forged, { fresh: false, origin: 'peer' }).accepted).toBe(false);
+      expect(await coord.areSpaceMember([spaceId], mallory.userId)).toEqual([false]);
+    });
+
+    it('still lets the owner make others admins, ban and change the space once it is signed', async () => {
+      const { alice, bob, spaceId } = await older();
+      await toReview(alice, spaceId);
+      await alice.signRoster(spaceId, [bob.userId]);
+      await alice.setAdmin(spaceId, bob.userId, true);
+      await waitFor(() => bob.state.spaces[spaceId]?.admins.includes(bob.userId), 5000, 'admin');
+      await alice.setAdmin(spaceId, bob.userId, false);
+      await alice.updateSpace(spaceId, (b) => ({ ...b, name: 'Marsh' }));
+      await waitFor(() => bob.state.spaces[spaceId]?.name === 'Marsh', 5000, 'renamed');
+      const space = alice.records.get(recordKey.space(spaceId)) as SignedRecord<'space'>;
+      expect(space.body.authority?.roster).toBeDefined();
+      expect(space.body.formerAdmins).toEqual([bob.userId]);
+    });
+
+    it('needs a link that works to come back after leaving, not the code that was listed', async () => {
+      const { alice, bob, spaceId, code } = await older();
+      await toReview(alice, spaceId);
+      await alice.signRoster(spaceId, [bob.userId]);
+      await bob.leaveSpace(spaceId);
+      await expect(bob.joinWithInvite(code)).rejects.toThrow();
+      const link = await alice.createInvite(spaceId);
+      await bob.joinWithInvite(link);
+      await waitFor(() => bob.state.spaces[spaceId], 5000, 'bob back');
+    });
+
+    it('is not in the way of deleting an account that owns a space with former admins and a roster', async () => {
+      const coord = await server();
+      const net = new FakeRelayNetwork();
+      const alice = await signUp(makeClient(net, coord), 'alice');
+      const bob = await signUp(makeClient(net, coord), 'bob');
+      const spaceId = await alice.createSpace('Swamp');
+      await alice.setAdmin(spaceId, bob.userId, true);
+      await alice.setAdmin(spaceId, bob.userId, false);
+      await alice.deleteAccount();
+      const marker = coord.records.get(recordKey.space(spaceId)) as SignedRecord<'space'>;
+      expect(marker.body.deleted).toBe(true);
+    });
+  });
+
   describe('the open invite', () => {
     async function trio() {
       const coord = await server();
@@ -1887,6 +2149,7 @@ describe('leaving', () => {
             (r.body.authority?.at ?? 0) + 1,
             r.body.invitePolicy,
             former,
+            r.body.authority?.roster,
           ),
         },
         r.version + 1,

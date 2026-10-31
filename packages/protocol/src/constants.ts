@@ -26,6 +26,8 @@ export const LIMITS = {
   recordMaxBytes: 400 * 1024,
   /** The most admins a space can list as removed (those they let in stay). */
   formerAdminsMax: 1000,
+  /** Members a roster can hold (a user id is about 29 bytes of a record). */
+  rosterMax: 10_000,
   wsMessageMaxBytes: 1024 * 1024,
   sessionMembersMax: 100,
   /** Unread notes a server holds for one user. */

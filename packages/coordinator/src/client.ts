@@ -598,11 +598,13 @@ export class ClientConnection implements ClientHandle {
   }
 
   /**
-   * The space a member record of somebody else belongs to; undefined for any
+   * The space a member record of somebody else (or a roster) belongs to; undefined for any
    * other record, and for this user's own. A key without a space gives '', which
    * nobody may read.
    */
   othersMemberOf(record: SignedRecord): string | undefined {
+    // (The owner's roster lists some of a space's members, so it is read by those in it.)
+    if (record.key.startsWith('roster:')) return record.key.split(':')[1] ?? '';
     if (!record.key.startsWith('member:')) return undefined;
     const [, spaceId, userId] = record.key.split(':');
     return userId === this.userId ? undefined : (spaceId ?? '');
@@ -667,8 +669,7 @@ export class ClientConnection implements ClientHandle {
    */
   private async lookUpMembership(spaceId: string): Promise<boolean> {
     const spaceKey = recordKey.space(spaceId);
-    const found = await this.hub.dist.get([spaceKey, recordKey.member(spaceId, this.userId)]);
-    const byKey = new Map(found.map((r) => [r.key, r]));
+    const byKey = await this.hub.dist.membershipRecords([spaceId], this.userId);
     if (!byKey.has(spaceKey)) throw new Error('space not found');
     return isSpaceMember({ get: (k) => byKey.get(k) }, spaceId, this.userId);
   }
