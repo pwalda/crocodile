@@ -615,7 +615,8 @@ function askToJoin(code: string) {
       openModal({
         kind: 'confirm',
         title: preview ? `Join ${preview.name}?` : 'Join this space?',
-        body: `You were invited with the code ${code}.`,
+        // (Not the link itself: it can be long, and it is what lets anyone in.)
+        body: 'You were invited with a link.',
         action: 'Join',
         onConfirm: () => joinAndOpen(code),
       });

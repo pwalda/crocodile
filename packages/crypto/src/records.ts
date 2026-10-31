@@ -66,6 +66,14 @@ export function inviteCommitment(spaceId: string, code: string): string {
   return toB32(sha256(utf8.encode(`croc/v1/open-invite\n${spaceId}\n${code}`))).slice(0, 26);
 }
 
+/**
+ * What a space names its open link by: a link that is a ticket by its own name, an older one by a
+ * hash of its code (the code being a secret).
+ */
+export function openLinkName(spaceId: string, code: string, isTicket: boolean): string {
+  return isTicket ? code : inviteCommitment(spaceId, code);
+}
+
 /** Characters in the code of an open link (128 bits): too many to guess from the hash. */
 export const OPEN_CODE_LENGTH = 26;
 
@@ -321,7 +329,7 @@ export function validateRecord(input: unknown, ctx: ValidationContext): Validati
           )
             return reject('ticket does not match its invite');
           if (invite.body.revoked) return reject('invite was revoked');
-          if (space.body.publicInvite !== tid)
+          if (space.body.publicInvite !== openLinkName(body.spaceId, tid, true))
             return reject('this link has been replaced or turned off');
           if (invite.body.expiresAt === null)
             return reject('this link is out of date; make a new one');
@@ -345,7 +353,7 @@ export function validateRecord(input: unknown, ctx: ValidationContext): Validati
         // The open invite is the one the space names; a newer one has replaced the rest.
         if (
           invite.body.for === undefined &&
-          space.body.publicInvite !== inviteCommitment(body.spaceId, invite.body.code)
+          space.body.publicInvite !== openLinkName(body.spaceId, invite.body.code, false)
         )
           return reject('this link has been replaced or turned off');
         // Nor is one that never ends the open link, however the space came to name it.
@@ -500,20 +508,42 @@ export function ticketProblem(
 ): { reason: string; retryable?: boolean } | undefined {
   const t = member.ticket;
   if (!t) return { reason: 'no ticket' };
-  const { invite } = t;
-  if (invite.key !== recordKey.invite(invite.body.code))
-    return { reason: 'ticket does not match its invite' };
-  if (invite.body.spaceId !== spaceId) return { reason: 'invite is for another space' };
-  if (invite.body.tpub === undefined || invite.body.for !== undefined)
-    return { reason: 'not a ticket' };
-  if (invite.body.code !== ticketIdOf(invite.body.tpub))
-    return { reason: 'invite name does not match its key' };
-  if (invite.body.revoked) return { reason: 'invite was revoked' };
-  if (!verifyPayload(invite.author, SIG_DOMAIN.record, signedPart(invite), invite.sig))
-    return { reason: 'bad signature on the ticket' };
-  if (!mayHaveIssuedTicket(space, userIdFromKey(invite.author)))
+  const intact = ticketIntact(spaceId, member);
+  if (intact.reason) return { reason: intact.reason };
+  // Whether its maker may have made it is for the space to say, and it can change.
+  if (!mayHaveIssuedTicket(space, intact.maker))
     // (The space we hold may be older than the one that lists the maker: try again later.)
     return { reason: 'invite was made by someone who could not invite', retryable: true };
+  return undefined;
+}
+
+// What does not depend on the space (the signatures, and who signed) is found once for each membership.
+const ticketSigned = new WeakMap<object, { reason?: string; maker: string }>();
+
+function ticketIntact(spaceId: string, member: RecordBodies['member']) {
+  // (What is checked is the membership as it names its space; asked about another, it is not that.)
+  if (spaceId !== member.spaceId) return { reason: 'invite is for another space', maker: '' };
+  let found = ticketSigned.get(member);
+  if (!found) {
+    const reason = ticketBroken(spaceId, member);
+    // (Who signed is looked for only in a ticket that is sound.)
+    found = { reason, maker: reason ? '' : userIdFromKey(member.ticket!.invite.author) };
+    ticketSigned.set(member, found);
+  }
+  return found;
+}
+
+function ticketBroken(spaceId: string, member: RecordBodies['member']): string | undefined {
+  const t = member.ticket!;
+  const { invite } = t;
+  if (invite.key !== recordKey.invite(invite.body.code)) return 'ticket does not match its invite';
+  if (invite.body.spaceId !== spaceId) return 'invite is for another space';
+  if (invite.body.tpub === undefined || invite.body.for !== undefined) return 'not a ticket';
+  if (invite.body.code !== ticketIdOf(invite.body.tpub))
+    return 'invite name does not match its key';
+  if (invite.body.revoked) return 'invite was revoked';
+  if (!verifyPayload(invite.author, SIG_DOMAIN.record, signedPart(invite), invite.sig))
+    return 'bad signature on the ticket';
   if (
     !verifyPayload(
       invite.body.tpub,
@@ -522,12 +552,9 @@ export function ticketProblem(
       t.proof,
     )
   )
-    return { reason: 'the ticket was not used by this user' };
+    return 'the ticket was not used by this user';
   return undefined;
 }
-
-// A ticket is checked once for each member record against each space record it is met with.
-const ticketChecked = new WeakMap<object, WeakMap<object, boolean>>();
 
 /** True if the user currently belongs to the space (owner or active, non-banned member). */
 export function isSpaceMember(lookup: RecordLookup, spaceId: string, userId: string): boolean {
@@ -539,9 +566,5 @@ export function isSpaceMember(lookup: RecordLookup, spaceId: string, userId: str
   if (!member || member.body.left) return false;
   if (!member.body.ticket) return true;
   // Who may have made the ticket is the space's to say now, whatever it said when this was taken.
-  let bySpace = ticketChecked.get(member);
-  if (!bySpace) ticketChecked.set(member, (bySpace = new WeakMap()));
-  let ok = bySpace.get(space);
-  if (ok === undefined) bySpace.set(space, (ok = !ticketProblem(spaceId, space.body, member.body)));
-  return ok;
+  return !ticketProblem(spaceId, space.body, member.body);
 }

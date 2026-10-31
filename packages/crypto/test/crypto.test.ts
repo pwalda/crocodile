@@ -849,6 +849,12 @@ describe('open link tickets', () => {
     });
   });
 
+  it('does not break on a ticket that is not sound, whoever signed it', () => {
+    const inv = invite();
+    const bad = joinWith(carol, { ...inv, author: '!!not-a-key!!' });
+    expect(isSpaceMember(ctx([space(), bad]), spaceId, carol.userId)).toBe(false);
+  });
+
   it('can only be added to in the list of former admins, and only by the owner', () => {
     const listed = signRecord(
       alice,

@@ -20,7 +20,10 @@ import {
   linkNonce,
   sealLink,
   sign,
+  randomId,
   signRecord,
+  signSpaceAuthority,
+  ticketFromSecret,
 } from '@crocodile/crypto';
 import {
   DELETED_PROFILE_NAME,
@@ -414,7 +417,11 @@ describe('client', () => {
     const bob = await signUp(makeClient(net, b), 'bob');
     const spaceId = await alice.createSpace('Federated');
     const code = await alice.createInvite(spaceId);
-    await waitFor(() => b.records.get(`invite:${code}`), 12000, 'invite replicated');
+    await waitFor(
+      () => b.records.get(`invite:${ticketFromSecret(code)!.tid}`),
+      12000,
+      'invite replicated',
+    );
     await bob.joinWithInvite(code);
     const ch = channelOf(alice, spaceId);
     await bob.openChannel(ch);
@@ -995,7 +1002,7 @@ describe('space admins', () => {
     await waitFor(() => bob.state.spaces[spaceId]?.admins.length === 0, 8000, 'no longer admin');
     await expect(bob.addChannel(spaceId, 'again', 'text')).rejects.toThrow(/owner or an admin/);
     // His invite stopped working with his rights.
-    await expect(dave.joinWithInvite(bobsInvite)).rejects.toThrow(/may no longer invite/);
+    await expect(dave.joinWithInvite(bobsInvite)).rejects.toThrow(/maker can no longer invite/);
   });
 });
 
@@ -1736,7 +1743,7 @@ describe('leaving', () => {
       expect(carol.openLinkOf(spaceId)).toEqual({ state: 'elsewhere' });
       await expect(carol.shareInvite(spaceId)).rejects.toThrow(/another device/);
       // Nothing was replaced.
-      expect(alice.openInviteOf(spaceId)?.body.code).toBe(link);
+      expect(alice.openInviteOf(spaceId)?.body.code).toBe(ticketFromSecret(link)!.tid);
       await carol.stopOpenInvite(spaceId);
       await waitFor(() => alice.state.spaces[spaceId]?.publicInvite === undefined, 5000, 'off');
       expect(alice.openLinkOf(spaceId)).toEqual({ state: 'none' });
@@ -1752,13 +1759,406 @@ describe('leaving', () => {
           (await bob.link!.request('records.get', { keys: [`space:${spaceId}`] })).records,
         ),
       ).not.toContain(link);
+      // Nor is it in the invite record, which anyone can read.
+      expect(named).toBe(ticketFromSecret(link)!.tid);
+      expect(
+        JSON.stringify(
+          (await bob.link!.request('records.get', { keys: [`invite:${named}`] })).records,
+        ),
+      ).not.toContain(link);
       // A link is the one that is shared until it is about to run out, then a new one.
-      await alice.createInvite(spaceId, 3 * 3600_000);
-      const short = alice.openInviteOf(spaceId)!.body.code;
+      const short = await alice.createInvite(spaceId, 3 * 3600_000);
       expect(await alice.shareInvite(spaceId)).toBe(short);
-      await alice.createInvite(spaceId, 1800_000);
-      const dying = alice.openInviteOf(spaceId)!.body.code;
+      const dying = await alice.createInvite(spaceId, 1800_000);
       expect(await alice.shareInvite(spaceId)).not.toBe(dying);
+    });
+
+    it('is joined with a ticket: the membership carries it, and the link is the only way in', async () => {
+      const { alice, bob, carol, spaceId } = await trio();
+      const link = await alice.shareInvite(spaceId);
+      const ticket = ticketFromSecret(link)!;
+      await bob.joinWithInvite(`croc://join/${link}`);
+      const mine = bob.records.get(`member:${spaceId}:${bob.userId}`) as SignedRecord<'member'>;
+      expect(mine.body.inviteCode).toBeUndefined();
+      expect(mine.body.ticket?.invite.body).toMatchObject({ code: ticket.tid, tpub: ticket.tpub });
+      await waitFor(
+        () => alice.state.spaces[spaceId]?.members.includes(bob.userId),
+        8000,
+        'alice sees bob',
+      );
+      // What the servers hold, the name of the link, is not a way in.
+      expect(await carol.previewInvite(ticket.tid)).toBeNull();
+      await expect(carol.joinWithInvite(ticket.tid)).rejects.toThrow(/not complete/);
+      expect(await carol.previewInvite(link)).toMatchObject({ expired: false, joined: false });
+      await carol.joinWithInvite(link);
+      expect(carol.state.spaces[spaceId]).toBeDefined();
+    });
+
+    it('needs a link that works to come back after leaving', async () => {
+      const { alice, bob, spaceId } = await trio();
+      const link = await alice.shareInvite(spaceId);
+      await bob.joinWithInvite(link);
+      await bob.leaveSpace(spaceId);
+      await waitFor(() => !bob.state.spaces[spaceId], 5000, 'bob left');
+      // The same link, while it is on, brings him back.
+      await bob.joinWithInvite(link);
+      expect(bob.state.spaces[spaceId]).toBeDefined();
+      await bob.leaveSpace(spaceId);
+      await waitFor(() => !bob.state.spaces[spaceId], 5000, 'bob left again');
+      // Not once the space has a new one.
+      await alice.createInvite(spaceId);
+      await expect(bob.joinWithInvite(link)).rejects.toThrow(/revoked|replaced or turned off/);
+    });
+
+    it('keeps those an admin let in when the admin is removed', async () => {
+      const { alice, bob, carol, spaceId } = await trio();
+      await carol.joinWithInvite(await alice.shareInvite(spaceId));
+      await alice.updateSpace(spaceId, (b) => ({ ...b, admins: [carol.userId] }));
+      await waitFor(
+        () => carol.state.spaces[spaceId]?.admins.includes(carol.userId),
+        5000,
+        'carol is an admin',
+      );
+      // The link carol makes is hers: she holds its secret, and it replaces alice's.
+      const link = await carol.createInvite(spaceId);
+      await bob.joinWithInvite(link);
+      await waitFor(
+        () => alice.state.spaces[spaceId]?.members.includes(bob.userId),
+        8000,
+        'alice sees bob',
+      );
+      await alice.setAdmin(spaceId, carol.userId, false);
+      await waitFor(
+        () => !alice.state.spaces[spaceId]?.admins.includes(carol.userId),
+        5000,
+        'carol is no longer an admin',
+      );
+      const space = alice.records.get(`space:${spaceId}`) as SignedRecord<'space'>;
+      expect(space.body.formerAdmins).toEqual([carol.userId]);
+      // The link she made is not one she can hand out any more.
+      await waitFor(() => carol.openLinkOf(spaceId).state === 'ended', 5000, 'her link has ended');
+      expect(alice.state.spaces[spaceId]!.members).toContain(bob.userId);
+      // And the owner can go on changing the space.
+      await alice.updateSpace(spaceId, (b) => ({ ...b, name: 'Marsh' }));
+      await waitFor(() => bob.state.spaces[spaceId]?.name === 'Marsh', 8000, 'bob sees the change');
+      expect(bob.state.spaces[spaceId]!.members).toContain(bob.userId);
+    });
+
+    it('ends the link another admin made when it is replaced, though this device does not hold its record', async () => {
+      const { alice, carol, spaceId } = await trio();
+      await carol.joinWithInvite(await alice.shareInvite(spaceId));
+      await alice.updateSpace(spaceId, (b) => ({ ...b, admins: [carol.userId] }));
+      await waitFor(
+        () => carol.state.spaces[spaceId]?.admins.includes(carol.userId),
+        5000,
+        'carol is an admin',
+      );
+      const hers = ticketFromSecret(await carol.createInvite(spaceId))!.tid;
+      await waitFor(
+        () => alice.state.spaces[spaceId]?.publicInvite === hers,
+        5000,
+        'the space names her link',
+      );
+      expect(alice.records.get(`invite:${hers}`)).toBeUndefined();
+      await alice.createInvite(spaceId);
+      expect((alice.records.get(`invite:${hers}`) as SignedRecord<'invite'>).body.revoked).toBe(
+        true,
+      );
+    });
+
+    it('does not take another admin off the list when it has no room for a former one', async () => {
+      const { alice, carol, spaceId } = await trio();
+      await alice.updateSpace(spaceId, (b) => ({ ...b, admins: [carol.userId] }));
+      // A list as long as it can be.
+      const owner = alice as unknown as { identity: import('@crocodile/crypto').Identity };
+      const former = Array.from({ length: 1000 }, () => randomId(16));
+      const r = alice.records.get(`space:${spaceId}`) as SignedRecord<'space'>;
+      const full = signRecord(
+        owner.identity,
+        'space',
+        r.key,
+        {
+          ...r.body,
+          formerAdmins: former,
+          authority: signSpaceAuthority(
+            owner.identity,
+            spaceId,
+            r.body.admins,
+            (r.body.authority?.at ?? 0) + 1,
+            r.body.invitePolicy,
+            former,
+          ),
+        },
+        r.version + 1,
+      );
+      alice.records.ingest(full);
+      await expect(alice.setAdmin(spaceId, carol.userId, false)).rejects.toThrow(/Too many admins/);
+      // Other changes to the space still go through.
+      await alice.updateSpace(spaceId, (b) => ({ ...b, name: 'Marsh' }));
+    });
+
+    it('takes an invite a server sends with a key that is not one as no invite', async () => {
+      const { alice, bob, spaceId } = await trio();
+      const link = await alice.shareInvite(spaceId);
+      const conn = bob.link!;
+      const real = conn.request.bind(conn) as (
+        m: string,
+        p: { keys?: string[] },
+      ) => Promise<unknown>;
+      vi.spyOn(conn, 'request').mockImplementation((async (m: string, p: { keys?: string[] }) => {
+        const res = (await real(m, p)) as { records?: SignedRecord[] };
+        if (m === 'records.get' && p.keys?.[0]?.startsWith('invite:'))
+          return { ...res, records: res.records!.map((r) => ({ ...r, author: '!!not-a-key!!' })) };
+        return res;
+      }) as never);
+      await expect(bob.joinWithInvite(link)).rejects.toThrow(/does not exist/);
+    });
+
+    it('tells someone joining with the link of an admin who has been removed that it is out of date', async () => {
+      const { alice, bob, carol, spaceId } = await trio();
+      await carol.joinWithInvite(await alice.shareInvite(spaceId));
+      await alice.updateSpace(spaceId, (b) => ({ ...b, admins: [carol.userId] }));
+      await waitFor(
+        () => carol.state.spaces[spaceId]?.admins.includes(carol.userId),
+        5000,
+        'carol is an admin',
+      );
+      const hers = await carol.createInvite(spaceId);
+      await alice.setAdmin(spaceId, carol.userId, false);
+      await waitFor(
+        () => !bob.state.spaces[spaceId] && !alice.state.spaces[spaceId]?.admins.length,
+        5000,
+        'carol is not an admin',
+      );
+      await expect(bob.joinWithInvite(hers)).rejects.toThrow(/maker can no longer invite/);
+    });
+
+    it('keeps the secret of its link across a restart, drops it when the link ends, and forgets it on signing out', async () => {
+      const coord = await server();
+      const net = new FakeRelayNetwork();
+      const alice = await signUp(makeClient(net, coord), 'alice');
+      const kv = alice.platform.kv as MemoryKeyValueStore;
+      const spaceId = await alice.createSpace('Swamp');
+      const first = await alice.shareInvite(spaceId);
+      const kept = async () =>
+        Object.keys((await kv.get<Record<string, string>>('invite-tickets')) ?? {});
+      expect(await kept()).toEqual([ticketFromSecret(first)!.tid]);
+      // The app is closed and opened again: the link can still be shown. (What is kept with it
+      // that is not a secret is not taken for one.)
+      await alice.shutdown();
+      await kv.set('invite-tickets', {
+        ...(await kv.get<Record<string, string>>('invite-tickets')),
+        notasecret: 5,
+        abcdefgh: 'short',
+      });
+      const again = new CrocodileClient(
+        { ...alice.platform, kv },
+        {
+          directories: [],
+          preferredServers: [coord.url],
+          transportFactory: net.transportFactory(),
+        },
+      );
+      cleanup.push(() => again.shutdown());
+      await again.init();
+      await waitFor(() => again.state.spaces[spaceId], 8000, 'the space is back');
+      expect(await again.shareInvite(spaceId)).toBe(first);
+      // A new link ends that one, and its secret is of no use any more.
+      const second = await again.createInvite(spaceId);
+      await again.createInvite(spaceId);
+      expect(await kept()).not.toContain(ticketFromSecret(first)!.tid);
+      expect(await kept()).not.toContain(ticketFromSecret(second)!.tid);
+      expect(await kept()).toHaveLength(1);
+      await again.signOut();
+      expect(await kept()).toEqual([]);
+    });
+
+    it('is one link even when two are made at once', async () => {
+      const { alice, bob, spaceId } = await trio();
+      await Promise.all([alice.createInvite(spaceId), alice.createInvite(spaceId)]);
+      const live = (alice.records.list('invite:') as SignedRecord<'invite'>[]).filter(
+        (r) => r.body.spaceId === spaceId && r.body.for === undefined && !r.body.revoked,
+      );
+      expect(live).toHaveLength(1);
+      expect(live[0]!.body.code).toBe(alice.state.spaces[spaceId]!.publicInvite);
+      await bob.joinWithInvite(await alice.shareInvite(spaceId));
+    });
+
+    it('gives everyone sharing at once the same link', async () => {
+      const { alice, bob, carol, spaceId } = await trio();
+      await alice.stopOpenInvite(spaceId);
+      const [one, two] = await Promise.all([
+        alice.shareInvite(spaceId),
+        alice.shareInvite(spaceId),
+      ]);
+      expect(two).toBe(one);
+      await bob.joinWithInvite(one);
+      await carol.joinWithInvite(two);
+    });
+
+    it('does not keep the secret of a first link that could not be made, or of one that ran out while the app was closed', async () => {
+      const coord = await server();
+      const net = new FakeRelayNetwork();
+      const alice = await signUp(makeClient(net, coord), 'alice');
+      const kv = alice.platform.kv as MemoryKeyValueStore;
+      const kept = async () =>
+        Object.keys((await kv.get<Record<string, string>>('invite-tickets')) ?? {});
+      const put = (alice as unknown as { putRecord(r: SignedRecord): Promise<unknown> }).putRecord;
+      const spy = vi
+        .spyOn(alice as unknown as { putRecord(r: SignedRecord): Promise<unknown> }, 'putRecord')
+        .mockImplementation(async function (this: unknown, r: SignedRecord) {
+          if (r.kind === 'invite') throw new Error('offline');
+          return put.call(alice, r);
+        });
+      await alice.createSpace('Swamp');
+      spy.mockRestore();
+      expect(await kept()).toEqual([]);
+      // A short link, and the app closed while it runs out.
+      const spaceId = await alice.createSpace('Marsh');
+      await alice.createInvite(spaceId, 2000);
+      expect(await kept()).toHaveLength(1);
+      await waitFor(() => alice.openLinkOf(spaceId).state === 'ended', 8000, 'the link to run out');
+      await alice.shutdown();
+      const again = new CrocodileClient(
+        { ...alice.platform, kv },
+        {
+          directories: [],
+          preferredServers: [coord.url],
+          transportFactory: net.transportFactory(),
+        },
+      );
+      cleanup.push(() => again.shutdown());
+      await again.init();
+      // (Written a moment after it starts.)
+      for (const start = Date.now(); (await kept()).length && Date.now() - start < 5000;)
+        await new Promise((r) => setTimeout(r, 50));
+      expect(await kept()).toEqual([]);
+    });
+
+    it('keeps the secret of the first link when the space names it, and works from the records it must ask for', async () => {
+      const coord = await server();
+      const net = new FakeRelayNetwork();
+      const alice = await signUp(makeClient(net, coord), 'alice');
+      const kv = alice.platform.kv as MemoryKeyValueStore;
+      const kept = async () =>
+        Object.keys((await kv.get<Record<string, string>>('invite-tickets')) ?? {});
+      const put = (alice as unknown as { putRecord(r: SignedRecord): Promise<unknown> }).putRecord;
+      const spy = vi
+        .spyOn(alice as unknown as { putRecord(r: SignedRecord): Promise<unknown> }, 'putRecord')
+        .mockImplementation(async function (this: unknown, r: SignedRecord) {
+          if (r.kind === 'member') throw new Error('offline');
+          return put.call(alice, r);
+        });
+      // The space is made and names its link; what follows fails.
+      await expect(alice.createSpace('Swamp')).rejects.toThrow(/offline/);
+      spy.mockRestore();
+      expect(await kept()).toHaveLength(1);
+
+      // Turning the link off ends it, also when this device does not hold its record just now.
+      const spaceId = await alice.createSpace('Marsh');
+      const link = await alice.shareInvite(spaceId);
+      const tid = ticketFromSecret(link)!.tid;
+      const forget = () =>
+        (alice.records as unknown as { map: Map<string, unknown> }).map.delete(`invite:${tid}`);
+      forget();
+      await alice.stopOpenInvite(spaceId);
+      expect((alice.records.get(`invite:${tid}`) as SignedRecord<'invite'>).body.revoked).toBe(
+        true,
+      );
+
+      // If the record cannot be asked for, nothing is decided on a guess.
+      const again = await alice.createInvite(spaceId);
+      (alice.records as unknown as { map: Map<string, unknown> }).map.delete(
+        `invite:${ticketFromSecret(again)!.tid}`,
+      );
+      const conn = alice.link!;
+      const real = conn.request.bind(conn) as (m: string, p: unknown) => Promise<unknown>;
+      const ask = vi.spyOn(conn, 'request').mockImplementation((async (m: string, p: unknown) => {
+        if (m === 'records.get') throw new Error('unreachable');
+        return real(m, p);
+      }) as never);
+      await expect(alice.shareInvite(spaceId)).rejects.toThrow(/unreachable/);
+      ask.mockRestore();
+      expect(await alice.shareInvite(spaceId)).toBe(again);
+    });
+
+    it('lasts as long as it was asked to, from when it is made', async () => {
+      const coord = await server();
+      const net = new FakeRelayNetwork();
+      const alice = await signUp(makeClient(net, coord), 'alice');
+      const kv = alice.platform.kv as MemoryKeyValueStore;
+      const spaceId = await alice.createSpace('Swamp');
+      const set = kv.set.bind(kv);
+      // Keeping the secret takes a while.
+      vi.spyOn(kv, 'set').mockImplementation(async (key: string, value: unknown) => {
+        if (key === 'invite-tickets') await new Promise((r) => setTimeout(r, 700));
+        return set(key, value);
+      });
+      const asked = Date.now();
+      await alice.createInvite(spaceId, 2 * 3600_000);
+      const invite = alice.openInviteOf(spaceId)!;
+      expect(invite.body.expiresAt! - asked).toBeGreaterThanOrEqual(2 * 3600_000 + 600);
+    });
+
+    it('does not write the secrets back after signing out', async () => {
+      const coord = await server();
+      const net = new FakeRelayNetwork();
+      const alice = await signUp(makeClient(net, coord), 'alice');
+      const kv = alice.platform.kv as MemoryKeyValueStore;
+      await alice.createSpace('Swamp');
+      const set = kv.set.bind(kv);
+      // A write of the secrets that is slow to finish.
+      vi.spyOn(kv, 'set').mockImplementation(async (key: string, value: unknown) => {
+        if (key === 'invite-tickets') await new Promise((r) => setTimeout(r, 200));
+        return set(key, value);
+      });
+      void (alice as unknown as { saveTickets(): Promise<void> }).saveTickets();
+      await alice.signOut();
+      // A write that was still to come, with nothing left to keep, leaves nothing either.
+      await (alice as unknown as { saveTickets(): Promise<void> }).saveTickets();
+      expect(await kv.get('invite-tickets')).toBeUndefined();
+      // A link being made as the account goes does not leave its secret behind either.
+      await (
+        alice as unknown as { keepTicket(t: { tid: string; secret: string }): Promise<void> }
+      ).keepTicket({ tid: 'abcdefgh', secret: 'secret' });
+      await new Promise((r) => setTimeout(r, 800));
+      expect(await kv.get('invite-tickets')).toBeUndefined();
+    });
+
+    it('asks for the record of a link it made when it does not hold it, and shows the link once it does', async () => {
+      const { alice, spaceId } = await trio();
+      const link = await alice.shareInvite(spaceId);
+      const tid = ticketFromSecret(link)!.tid;
+      // (This device's copy of the records is behind.)
+      (alice.records as unknown as { map: Map<string, unknown> }).map.delete(`invite:${tid}`);
+      expect(alice.openLinkOf(spaceId).state).toBe('elsewhere');
+      await waitFor(() => alice.openLinkOf(spaceId).state === 'good', 5000, 'the record to come');
+      expect(await alice.shareInvite(spaceId)).toBe(link);
+      // Sharing does not take a link made here for one made elsewhere because the record is
+      // not there at that moment, and looking at the state does not ask again and again.
+      (alice.records as unknown as { map: Map<string, unknown> }).map.delete(`invite:${tid}`);
+      expect(await alice.shareInvite(spaceId)).toBe(link);
+      const asked = vi.spyOn(alice.link!, 'request');
+      (alice.records as unknown as { map: Map<string, unknown> }).map.delete(`invite:${tid}`);
+      for (let i = 0; i < 20; i++) alice.openLinkOf(spaceId);
+      await new Promise((r) => setTimeout(r, 100));
+      expect(asked.mock.calls.filter((c) => c[0] === 'records.get')).toHaveLength(0);
+    });
+
+    it('cannot show a link made on another device, and replaces it with a new one', async () => {
+      const { alice, bob, spaceId } = await trio();
+      const link = await alice.shareInvite(spaceId);
+      // (This device does not have the secret of that link.)
+      (alice as unknown as { tickets: Map<string, string> }).tickets.clear();
+      const state = alice.openLinkOf(spaceId);
+      expect(state.state).toBe('elsewhere');
+      expect('invite' in state && state.invite?.body.code).toBe(ticketFromSecret(link)!.tid);
+      await expect(alice.shareInvite(spaceId)).rejects.toThrow(/another device/);
+      const next = await alice.createInvite(spaceId);
+      expect(next).not.toBe(link);
+      // The old one was ended with the new one named.
+      await expect(bob.joinWithInvite(link)).rejects.toThrow(/revoked|replaced or turned off/);
+      await bob.joinWithInvite(next);
     });
 
     it('is not left behind when it could not be named', async () => {
@@ -1782,7 +2182,7 @@ describe('leaving', () => {
       for (const bad of [0, -1, NaN])
         await expect(alice.createInvite(spaceId, bad)).rejects.toThrow(/time to last/);
       const code = await alice.createInvite(spaceId, 30 * 24 * 3600_000);
-      expect(alice.openInviteOf(spaceId)?.body.code).toBe(code);
+      expect(alice.openInviteOf(spaceId)?.body.code).toBe(ticketFromSecret(code)!.tid);
     });
   });
 

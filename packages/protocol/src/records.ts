@@ -186,15 +186,17 @@ export const SpaceBody = z.object({
    * Admins the owner has removed, kept (and only added to) so that those they let in stay: a
    * link an admin made still admits a member after the admin is gone. Signed with the admin list.
    */
-  formerAdmins: z.array(id).max(1000).optional(),
+  formerAdmins: z.array(id).max(LIMITS.formerAdminsMax).optional(),
   /**
    * Who may invite a named person: only the owner and admins (the default), or members too.
    * The one open invite is always made by the owner or an admin.
    */
   invitePolicy: z.enum(['admins', 'members']).optional(),
   /**
-   * The one invite anyone holding it can join with, if the space has one on, named by a hash of
-   * its code (the space record is readable by anyone who knows the space, the code is not).
+   * The one invite anyone holding the link can join with, if the space has one on. A link that
+   * is a ticket is named by the name of its invite (a hash of its public key; the secret in the
+   * link is not in any record); an older one by a hash of its code. The space record is readable
+   * by anyone who knows the space, so it holds nothing that is a way in.
    * Making a new one replaces it, and so ends the old one; the owner and admins set it.
    */
   publicInvite: z

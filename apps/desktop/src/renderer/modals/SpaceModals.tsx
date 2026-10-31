@@ -165,7 +165,7 @@ export function InviteModal({ spaceId }: { spaceId: string }) {
   // What the space has on (it is read again whenever the space changes, and now and then).
   const link = client.openLinkOf(spaceId);
   const invite = 'invite' in link ? link.invite : undefined;
-  const code = link.state === 'good' ? invite!.body.code : null;
+  const code = link.state === 'good' ? link.token : null;
   const run = async (what: () => Promise<unknown>) => {
     setBusy(true);
     setError(null);
@@ -187,9 +187,9 @@ export function InviteModal({ spaceId }: { spaceId: string }) {
     link.state === 'good'
       ? 'Anyone with this link can join'
       : link.state === 'ended'
-        ? 'The link has run out'
+        ? 'The link has ended'
         : link.state === 'elsewhere'
-          ? 'A link was made on another device, which this one cannot show'
+          ? 'A link is on, but this device cannot show it (it was made by another admin or on another device)'
           : 'No link is on';
   return (
     <Modal
@@ -203,7 +203,7 @@ export function InviteModal({ spaceId }: { spaceId: string }) {
     >
       <Label>Invite link</Label>
       <div className="flex items-center gap-2 rounded-xl bg-field p-1 pl-3">
-        <span className="selectable flex-1 truncate font-mono text-sm">
+        <span className="selectable min-w-0 flex-1 break-all font-mono text-xs">
           {url || 'Nobody can join with a link right now.'}
         </span>
         <Button
@@ -220,7 +220,8 @@ export function InviteModal({ spaceId }: { spaceId: string }) {
       {error && <p className="mt-2 text-xs text-danger">{error}</p>}
       {code && (
         <p className="mt-3 text-xs text-muted">
-          Friends can also paste just the code: <b className="selectable text-text">{code}</b>
+          Friends can also paste just the code:{' '}
+          <b className="selectable break-all text-text">{code}</b>
         </p>
       )}
       <p className="mt-3 text-xs text-muted">
