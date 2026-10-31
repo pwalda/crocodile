@@ -115,13 +115,19 @@ by name goes to `name:<name>`.
   another. The owner also admits a member only if the sending server has said
   that member's device is connected to it, checks again that the member may be in
   the session and that the device has a record on the member's account that has
-  not been removed, and believes the host hint a device signed into its join only while it is putting the
-  room together, and only if the host and backup it names
-  may be in the session and are such devices too; afterwards it takes operations
-  on that member only from the server it joined from (a leave, which the
-  member's server sends when the device disconnects, is not signed). When a
-  session's owner changes, each member's server asks its device to sign a new
-  join, and takes it out of the session if it does not. A client event
+  not been removed; afterwards it takes operations on that member only from the
+  server it joined from (a leave, which the member's server sends when the
+  device disconnects, is not signed). When a session's owner changes, each
+  member's server asks its device to sign a new join, which carries the host
+  the device last saw (epoch, host and backup), and takes it out of the session
+  if it does not. The owner takes such a hint only while it puts the room
+  together (the room has no member yet, or was made less than ten seconds ago),
+  only if its epoch is later than the room's, and only if the host and backup
+  it names may be in the session and are devices with records on their
+  accounts; a room that stands ignores hints. A member can therefore still
+  choose the host of a room in its first seconds, as a server could before
+  (the host must still be a real, allowed device, and one that is not in the
+  room is replaced after a few seconds). A client event
   routed to us is delivered only if it comes from a server that could be
   sending it: a signal from the server the sending device is connected to, a
   session's state or a conversation invitation from the session's owner.
