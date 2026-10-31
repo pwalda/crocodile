@@ -223,7 +223,9 @@ export function validateRecord(input: unknown, ctx: ValidationContext): Validati
       if (body.formerAdmins?.length && !authority)
         return reject("former admins need the owner's signature on the admin list");
       // Those let in by an admin stay, so the admins the owner has removed are only added to.
-      // (A space that is deleted keeps nothing but what names it, so there is nobody to let in.)
+      // A space that is deleted stays so, and keeps nothing but what names it: nobody is let in.
+      if ((existing?.body as SpaceBody | undefined)?.deleted && !body.deleted)
+        return reject('a deleted space stays deleted');
       const kept = new Set(body.formerAdmins ?? []);
       if (
         !body.deleted &&
@@ -609,8 +611,11 @@ export function emptyRosterHash(spaceId: string): string {
   return hash;
 }
 
-// What a roster holds is worked out once for each record held, not for each question put to it.
-const rosterMembers = new WeakMap<object, { hash: string; members: Set<string>; owner: string }>();
+// What a roster holds is worked out once for each roster, not for each question put to it (the
+// records held are taken from a store or a server afresh, so they are known by their signature;
+// those asked about have all been checked).
+const ROSTERS_KEPT = 100;
+const rosterMembers = new Map<string, { hash: string; members: Set<string>; owner: string }>();
 
 /**
  * Who the roster the space names lists: undefined if it names none (older memberships count as
@@ -626,14 +631,15 @@ export function rosterOf(
   if (named === emptyRosterHash(spaceId)) return NOBODY;
   const record = lookup.get(recordKey.roster(spaceId)) as SignedRecord<'roster'> | undefined;
   if (!record || record.body.spaceId !== spaceId) return null;
-  let found = rosterMembers.get(record);
+  let found = rosterMembers.get(record.sig);
   if (!found) {
     found = {
       hash: rosterHash(spaceId, record.body.members),
       members: new Set(record.body.members),
       owner: userIdFromKey(record.author),
     };
-    rosterMembers.set(record, found);
+    if (rosterMembers.size >= ROSTERS_KEPT) rosterMembers.clear();
+    rosterMembers.set(record.sig, found);
   }
   return found.hash === named && found.owner === space.owner ? found.members : null;
 }

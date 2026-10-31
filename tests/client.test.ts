@@ -1736,7 +1736,13 @@ describe('leaving', () => {
           userId: owner.userId,
         }),
       );
-      copy(signRecord(owner, 'invite', recordKey.invite(code), { spaceId, code, expiresAt: null }));
+      copy(
+        signRecord(owner, 'invite', recordKey.invite(code), {
+          spaceId,
+          code,
+          expiresAt: Date.now() + 7 * 24 * 3600_000,
+        }),
+      );
       const legacyJoin = (who: Identity, version?: number) =>
         signRecord(
           who,
@@ -1775,20 +1781,14 @@ describe('leaving', () => {
     }
     /** The owner's list of those who joined by the older link, once Bob and Mallory are in it. */
     const toReview = (owner: CrocodileClient, spaceId: string) =>
-      waitFor(
-        () => owner.state.spaces[spaceId]?.rosterToReview?.length === 2,
-        8000,
-        'the list to review',
-      );
+      waitFor(() => owner.legacyMembers(spaceId).length === 2, 8000, 'the list to review');
     const identityOf = (c: CrocodileClient) => (c as unknown as { identity: Identity }).identity;
 
     it('asks the owner who of those who joined by an older link stays, and changes nothing until then', async () => {
       const { alice, bob, mallory, dave, spaceId } = await older();
       await toReview(alice, spaceId);
       // (Not Dave, whom the owner invited by name.)
-      expect(alice.state.spaces[spaceId]!.rosterToReview).toEqual(
-        [bob.userId, mallory.userId].sort(),
-      );
+      expect(alice.legacyMembers(spaceId)).toEqual([bob.userId, mallory.userId].sort());
       // Until the owner has signed, they count as they always did.
       expect(alice.state.spaces[spaceId]!.members).toEqual(
         expect.arrayContaining([alice.userId, bob.userId, mallory.userId, dave.userId]),
@@ -1806,7 +1806,7 @@ describe('leaving', () => {
       );
       const view = alice.state.spaces[spaceId]!;
       expect(view.members.sort()).toEqual([alice.userId, bob.userId, dave.userId].sort());
-      expect(view.rosterToReview).toBeUndefined();
+      expect(view.rosterToSign).toBeUndefined();
       expect(await coord.areSpaceMember([spaceId], bob.userId)).toEqual([true]);
       expect(await coord.areSpaceMember([spaceId], dave.userId)).toEqual([true]);
       expect(await coord.areSpaceMember([spaceId], mallory.userId)).toEqual([false]);
@@ -1854,7 +1854,7 @@ describe('leaving', () => {
       await toReview(alice, spaceId);
       await alice.banMember(spaceId, mallory.userId);
       await waitFor(
-        () => !alice.state.spaces[spaceId]?.rosterToReview?.includes(mallory.userId),
+        () => !alice.legacyMembers(spaceId).includes(mallory.userId),
         5000,
         'the banned off the list',
       );
@@ -1872,8 +1872,33 @@ describe('leaving', () => {
       );
       await alice.signRoster(spaceId, [bob.userId]);
       const first = alice.records.get(recordKey.roster(spaceId));
-      await alice.signRoster(spaceId, []);
+      await expect(alice.signRoster(spaceId, [])).rejects.toThrow(/signed already/);
       expect(alice.records.get(recordKey.roster(spaceId))).toBe(first);
+    });
+
+    it('is not signed from a list of members that has not come in yet, nor one too long to keep', async () => {
+      const { alice, bob, spaceId } = await older();
+      await toReview(alice, spaceId);
+      const loaded = (alice as unknown as { membersLoaded: Set<string> }).membersLoaded;
+      loaded.delete(spaceId);
+      await expect(alice.signRoster(spaceId, [bob.userId])).rejects.toThrow(/still coming in/);
+      loaded.add(spaceId);
+      const many = Array.from({ length: 10_001 }, (_, i) => `${i}`.padStart(26, 'a'));
+      const spy = vi.spyOn(alice, 'legacyMembers').mockReturnValue(many);
+      await expect(alice.signRoster(spaceId, many)).rejects.toThrow(/At most 10000 people/);
+      spy.mockRestore();
+      expect(alice.state.spaces[spaceId]!.rosterToSign).toBe(true);
+    });
+
+    it('does not offer, preview or join with a link of the older kind, even one that has not ended', async () => {
+      const { net, coord, alice, spaceId, code } = await older();
+      await toReview(alice, spaceId);
+      // The space names it and it has time left, but servers turn every join with it away.
+      expect(alice.openLinkOf(spaceId).state).toBe('ended');
+      const carol = await signUp(makeClient(net, coord), 'carol');
+      expect(await carol.previewInvite(code)).toMatchObject({ expired: true });
+      await expect(carol.joinWithInvite(code)).rejects.toThrow(/That link is out of date\./);
+      expect(carol.state.spaces[spaceId]).toBeUndefined();
     });
 
     it('is only read by those in the space', async () => {

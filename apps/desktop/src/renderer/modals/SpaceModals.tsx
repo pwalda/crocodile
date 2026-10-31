@@ -605,12 +605,14 @@ export function RosterModal({ spaceId }: { spaceId: string }) {
   // Those taken off the list here; everyone else is kept.
   const [out, setOut] = useState<string[]>([]);
   const [busy, setBusy] = useState(false);
-  const people = space?.rosterToReview;
+  const pending = space?.rosterToSign;
   // Signed (here or on another device): there is nothing more to check.
   useEffect(() => {
-    if (space && !people) closeModal();
-  }, [space, people]);
-  if (!space || !people || space.owner !== me) return null;
+    if (space && !pending) closeModal();
+  }, [space, pending]);
+  if (!space || !pending || space.owner !== me) return null;
+  // (Read again whenever the space's members change.)
+  const people = client.legacyMembers(spaceId);
   const kept = people.filter((u) => !out.includes(u));
   const confirm = async () => {
     setBusy(true);

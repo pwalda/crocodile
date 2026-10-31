@@ -120,7 +120,7 @@ export function SpaceSidebar({ spaceId }: { spaceId: string }) {
           )}
         </Menu>
       </div>
-      {isOwner && space.rosterToReview && (
+      {isOwner && space.rosterToSign && (
         <button
           onClick={() => openModal({ kind: 'roster', spaceId })}
           className="mx-4 mb-3 flex items-center justify-center gap-2 rounded-xl bg-field py-2 text-sm font-semibold text-warn transition hover:brightness-125"

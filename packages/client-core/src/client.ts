@@ -32,7 +32,6 @@ import {
   INVITE_MAX_MS,
   emptyRosterHash,
   newTicket,
-  OPEN_CODE_LENGTH,
   openLinkName,
   rosterOf,
   signRoster,
@@ -215,10 +214,10 @@ export interface SpaceView {
   /** The code of the link anyone can join with, if one is on. */
   publicInvite?: string;
   /**
-   * For the owner, until they have signed the list of those who stay: the members who joined by
-   * a link of the older kind, which anyone could forge a membership to. (Nobody is a list too.)
+   * For the owner, until they have signed the list of those who stay of the members who joined
+   * by a link of the older kind, which anyone could forge a membership to (see `legacyMembers`).
    */
-  rosterToReview?: string[];
+  rosterToSign?: true;
 }
 
 /** A session as the UI sees it: user ids (devices collapsed). */
@@ -830,6 +829,7 @@ export class CrocodileClient extends Emitter<ClientEvents> {
     // (What is waiting to be written is written empty, and then the key goes.)
     this.tickets.clear();
     this.invitesAsked.clear();
+    this.membersLoaded.clear();
     await this.ticketsSaved;
     await this.platform.kv.delete('invite-tickets');
     this.outbox = new Outbox(this.platform.kv);
@@ -1500,9 +1500,7 @@ export class CrocodileClient extends Emitter<ClientEvents> {
           admins: spaceAuthorityValid(id, body) ? body.admins : [],
           invitePolicy: body.invitePolicy ?? 'admins',
           ...(body.publicInvite ? { publicInvite: body.publicInvite } : {}),
-          ...(body.owner === me && !body.authority?.roster
-            ? { rosterToReview: this.legacyMembers(id) }
-            : {}),
+          ...(body.owner === me && !body.authority?.roster ? { rosterToSign: true as const } : {}),
         };
       }
       patch.spaces = spaces;
@@ -2023,7 +2021,7 @@ export class CrocodileClient extends Emitter<ClientEvents> {
    * The members of a space who joined by a link of the older kind and are not invited by name: the
    * ones the owner's roster is for. (Of those whose invite is not here, the owner is the judge.)
    */
-  private legacyMembers(spaceId: string): string[] {
+  legacyMembers(spaceId: string): string[] {
     const space = this.records.get(recordKey.space(spaceId)) as SignedRecord<'space'> | undefined;
     if (!space) return [];
     return (this.records.list(recordKey.memberPrefix(spaceId)) as SignedRecord<'member'>[])
@@ -2053,15 +2051,24 @@ export class CrocodileClient extends Emitter<ClientEvents> {
   async signRoster(spaceId: string, keep: string[]) {
     const space = this.records.get(recordKey.space(spaceId)) as SignedRecord<'space'> | undefined;
     if (!space || space.body.owner !== this.userId) throw new Error('only the owner can do this');
-    if (space.body.authority?.roster) return;
+    if (space.body.authority?.roster)
+      throw new Error('The list of who stays has been signed already.');
+    // (The list is for ever: not from a list of members that has not come in yet.)
+    if (!this.membersLoaded.has(spaceId))
+      throw new Error('The list of members is still coming in. Try again in a moment.');
     // Only those who are still there to be kept, never someone the owner was not shown.
     const present = new Set(this.legacyMembers(spaceId));
     const members = [...new Set(keep)].filter((u) => present.has(u)).sort();
+    if (members.length > LIMITS.rosterMax)
+      throw new Error(`At most ${LIMITS.rosterMax} people can stay; take some off the list.`);
     const { record, hash } = signRoster(this.identity!, spaceId, members);
     // The list goes first: the space names it only once it is there to be found.
     if (members.length) await this.putRecord(record);
     await this.updateSpace(spaceId, (b) => b, hash);
   }
+
+  /** Spaces whose list of members has come in whole on this connection. */
+  private membersLoaded = new Set<string>();
 
   private adopting = new Set<string>();
 
@@ -2090,6 +2097,7 @@ export class CrocodileClient extends Emitter<ClientEvents> {
     try {
       const records = await fetchList(link, recordKey.memberPrefix(spaceId));
       this.records.ingestAll(records);
+      this.membersLoaded.add(spaceId);
       const space = this.records.get(recordKey.space(spaceId)) as SignedRecord<'space'> | undefined;
       if (space) this.wantRoster(space);
       const mine = recordKey.member(spaceId, this.userId);
@@ -2273,16 +2281,15 @@ export class CrocodileClient extends Emitter<ClientEvents> {
         this.fetchWanted([recordKey.invite(named)]);
       return { state: 'elsewhere' };
     }
-    // (One that never ends is not a link any more: servers turn joins with it away.)
+    // (One that never ends, or that is not a ticket, is not a link any more: servers turn joins with it away.)
     const good =
       !invite.body.revoked &&
       invite.body.expiresAt !== null &&
       invite.body.expiresAt > Date.now() &&
-      invite.body.code.length >= OPEN_CODE_LENGTH;
+      invite.body.tpub !== undefined;
     // (And its maker may still make one: an admin taken off the list ends the links they made.)
     const makerMay = canManageSpace(space!.body, userIdFromKey(invite.author));
     if (!good || !makerMay) return { state: 'ended', invite };
-    if (invite.body.tpub === undefined) return { state: 'good', invite, token: invite.body.code };
     const secret = this.tickets.get(invite.body.code);
     return secret ? { state: 'good', invite, token: secret } : { state: 'elsewhere', invite };
   }
@@ -2597,7 +2604,7 @@ export class CrocodileClient extends Emitter<ClientEvents> {
       // The link anyone can use is the one the space has on, no older one.
       (invite.body.for === undefined &&
         (invite.body.expiresAt === null ||
-          code.length < OPEN_CODE_LENGTH ||
+          invite.body.tpub === undefined ||
           space.body.publicInvite !== openLinkName(spaceId, code, !!ticket))) ||
       (invite.body.expiresAt !== null && invite.body.expiresAt < Date.now());
     return {
@@ -2634,7 +2641,7 @@ export class CrocodileClient extends Emitter<ClientEvents> {
       throw new Error('That invite has expired or was revoked.');
     if (
       invite.body.for === undefined &&
-      (invite.body.expiresAt === null || invite.body.code.length < OPEN_CODE_LENGTH)
+      (invite.body.expiresAt === null || invite.body.tpub === undefined)
     )
       throw new Error('That link is out of date. Ask for a new one.');
     const { spaceId } = invite.body;

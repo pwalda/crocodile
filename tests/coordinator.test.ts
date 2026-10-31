@@ -17,6 +17,8 @@ import {
   sealToDevice,
   sign,
   signRecord,
+  signRoster,
+  signSpaceAuthority,
   spaceIdFor,
   userTag,
 } from '@crocodile/crypto';
@@ -3267,5 +3269,30 @@ describe('device linking', () => {
       ),
     );
     expect(guesses.filter((m) => /too many attempts/.test(m))).toHaveLength(3);
+  });
+});
+
+describe('a roster that arrives before its space', () => {
+  it('is kept waiting for the space, and taken when the space comes', async () => {
+    const c = await server();
+    const owner = createIdentity();
+    const nonce = randomId();
+    const spaceId = spaceIdFor(owner.publicKey, nonce);
+    const listed = signRoster(owner, spaceId, [createIdentity().userId]);
+    const space = signRecord(owner, 'space', recordKey.space(spaceId), {
+      name: 'Swamp',
+      owner: owner.userId,
+      nonce,
+      admins: [],
+      bans: [],
+      channels: [],
+      authority: signSpaceAuthority(owner, spaceId, [], 1, undefined, undefined, listed.hash),
+    });
+    const early = c.records.put(listed.record, { fresh: false, origin: 'peer' });
+    expect(early).toMatchObject({ accepted: false });
+    expect(c.records.pendingCount).toBe(1);
+    expect(c.records.put(space, { fresh: false, origin: 'peer' }).accepted).toBe(true);
+    expect(c.records.get(listed.record.key)).toBeDefined();
+    expect(c.records.pendingCount).toBe(0);
   });
 });

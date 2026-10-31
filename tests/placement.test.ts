@@ -154,6 +154,10 @@ describe('placement', () => {
             }
           : {}),
       });
+    expect(dependenciesOf(listed.record, owner.userId)).toEqual([
+      recordKey.profile(owner.userId),
+      recordKey.space(spaceId),
+    ]);
     expect(shardsOf(listed.record)).toEqual([`space:${spaceId}`]);
     expect(homeShardOf(listed.record)).toBe(`space:${spaceId}`);
     expect(shardOfKey(listed.record.key)).toBe(`space:${spaceId}`);

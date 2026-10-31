@@ -6,6 +6,7 @@ import {
   SignedRecordEnvelope,
   type FedRequest,
   type ProfileBody,
+  type RecordBodies,
   type SignedRecord,
 } from '@crocodile/protocol';
 import type { Coordinator } from './coordinator';
@@ -239,11 +240,9 @@ export class Distribution {
     // The owner's roster, for memberships of the older kind in a space that names one.
     const rosters = new Set<string>();
     for (const record of records) {
-      const key = rosterKeyOfMember(
-        record,
-        inBatchByKey.get(`space:${(record.body as { spaceId?: string }).spaceId}`) ??
-          this.lookup(`space:${(record.body as { spaceId?: string }).spaceId}`),
-      );
+      if (record.kind !== 'member') continue;
+      const spaceKey = recordKey.space((record.body as RecordBodies['member']).spaceId);
+      const key = rosterKeyOfMember(record, inBatchByKey.get(spaceKey) ?? this.lookup(spaceKey));
       if (key && need(key)) rosters.add(key);
     }
     if (rosters.size) await this.get([...rosters]).catch(() => {});

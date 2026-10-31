@@ -1159,6 +1159,30 @@ describe('the roster of an owner', () => {
     });
     // Another change keeps it.
     expect(validateRecord(later({ name: 'Marsh' }), ctx([named])).ok).toBe(true);
+    // And a space that is deleted stays so: it cannot come back without the roster.
+    const back = signRecord(alice, 'space', key, { ...bare.body }, now - 300);
+    expect(
+      validateRecord(
+        back,
+        ctx([
+          signRecord(
+            alice,
+            'space',
+            key,
+            {
+              name: 'x',
+              owner: alice.userId,
+              nonce,
+              admins: [],
+              bans: [],
+              channels: [],
+              deleted: true,
+            },
+            now - 400,
+          ),
+        ]),
+      ),
+    ).toMatchObject({ ok: false, reason: 'a deleted space stays deleted' });
     // An account that is deleted takes its spaces with it.
     const deleted = signRecord(
       alice,
