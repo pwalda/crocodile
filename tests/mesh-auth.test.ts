@@ -18,6 +18,7 @@ import {
   voiceSigned,
   type FedPresence,
   type HostCaps,
+  type SessionHint,
 } from '@crocodile/protocol';
 import { Coordinator, rendezvousOwner } from '@crocodile/coordinator';
 import { RpcFailure } from '../packages/coordinator/src/util';
@@ -352,8 +353,12 @@ describe('events and session operations from other servers', () => {
     peer: string,
     body: { op: string; caps?: unknown; epoch?: number; issue?: string; hint?: unknown },
     holder?: Identity,
-    ctx: { at?: number; since?: number; n?: number } = {},
+    ctx: { at?: number; since?: number; n?: number; signedHint?: SessionHint | null } = {},
   ) => {
+    const { signedHint, ...times } = ctx;
+    // (What the holder signed of the hint is what is sent, unless the test says the server changed it.)
+    const hintSigned =
+      signedHint === undefined ? (body.hint as SessionHint | undefined) : signedHint;
     const signed =
       holder && body.op !== 'leave'
         ? signSessionOp(
@@ -362,8 +367,14 @@ describe('events and session operations from other servers', () => {
             peer,
             body.op === 'report'
               ? { op: 'report', epoch: body.epoch!, issue: 'host_unreachable' }
-              : { op: body.op as 'join' | 'update', caps: body.caps as HostCaps },
-            { server: net.rogue.info.id, ...ctx },
+              : body.op === 'join'
+                ? {
+                    op: 'join',
+                    caps: body.caps as HostCaps,
+                    ...(hintSigned ? { hint: hintSigned } : {}),
+                  }
+                : { op: 'update', caps: body.caps as HostCaps },
+            { server: net.rogue.info.id, ...times },
           )
         : undefined;
     net.toVictim.send({
@@ -499,7 +510,8 @@ describe('events and session operations from other servers', () => {
 
     it('does not take a host or backup that is a device with no record', async () => {
       const net = await conversation();
-      const state = await joined(net);
+      // (A room nobody is in yet, so that it is the signature and the check of the hint that decide.)
+      const state = () => net.victim.sessions.ownedState(net.sessionId);
       // Alice's real device, claimed by the rogue server, names a device she never made as host.
       const device = peerIds.device(net.alice.conn.peer);
       net.toVictim.send(
@@ -517,8 +529,14 @@ describe('events and session operations from other servers', () => {
         net.alice.identity,
       );
       await settled(net);
-      expect(state().host).not.toBe(ghost);
-      expect(state().epoch).toBeLessThan(5);
+      // (The join is taken, with the hint left out; looking into the hint is part of it.)
+      await waitFor(
+        () => state()?.members.some((m) => m.peer === net.alice.conn.peer),
+        5000,
+        'the join',
+      );
+      expect(state()!.host).not.toBe(ghost);
+      expect(state()?.epoch ?? 0).toBeLessThan(5);
     });
 
     it('answers a join to a room that is not there with what the check said, not forbidden', async () => {
@@ -559,7 +577,8 @@ describe('events and session operations from other servers', () => {
 
     it('keeps the epoch of a hint that names no host', async () => {
       const net = await conversation();
-      const state = await joined(net);
+      // (A room nobody is in yet: it is put together from what its members say they saw.)
+      const state = () => net.victim.sessions.ownedState(net.sessionId);
       const device = peerIds.device(net.alice.conn.peer);
       net.toVictim.send(
         presenceFrom(net.rogue, Date.now(), [entry(net.alice.identity.userId, [device])]),
@@ -574,12 +593,13 @@ describe('events and session operations from other servers', () => {
         },
         net.alice.identity,
       );
-      await waitFor(() => state().epoch >= 1000, 5000, 'the epoch to be kept');
+      await waitFor(() => (state()?.epoch ?? 0) >= 1000, 5000, 'the epoch to be kept');
     });
 
     it('keeps the host a hint names when only the backup it names is not a device that exists', async () => {
       const net = await conversation();
-      const state = await joined(net);
+      // (A room nobody is in yet: it is put together from what its members say they saw.)
+      const state = () => net.victim.sessions.ownedState(net.sessionId);
       const device = peerIds.device(net.alice.conn.peer);
       net.toVictim.send(
         presenceFrom(net.rogue, Date.now(), [entry(net.alice.identity.userId, [device])]),
@@ -595,9 +615,218 @@ describe('events and session operations from other servers', () => {
         },
         net.alice.identity,
       );
-      await waitFor(() => state().epoch >= 1000, 5000, 'the hint');
-      expect(state().host).toBe(net.bob.conn.peer);
-      expect(state().backup).not.toBe(ghost);
+      await waitFor(() => (state()?.epoch ?? 0) >= 1000, 5000, 'the hint');
+      expect(state()!.host).toBe(net.bob.conn.peer);
+      expect(state()!.backup).not.toBe(ghost);
+    });
+
+    it('does not take a hint a server adds to a join that was signed without one', async () => {
+      const net = await conversation();
+      // (A room nobody is in yet, so that it is the signature and the check of the hint that decide.)
+      const state = () => net.victim.sessions.ownedState(net.sessionId);
+      const device = peerIds.device(net.alice.conn.peer);
+      net.toVictim.send(
+        presenceFrom(net.rogue, Date.now(), [entry(net.alice.identity.userId, [device])]),
+      );
+      // The device signed a join with no hint; the rogue server names a host in it.
+      op(
+        net,
+        net.alice.conn.peer,
+        {
+          op: 'join',
+          caps: caps(),
+          hint: { epoch: 1000, host: net.bob.conn.peer, backup: null },
+        },
+        net.alice.identity,
+        { signedHint: null },
+      );
+      await settled(net);
+      expect(state()?.epoch ?? 0).toBeLessThan(5);
+    });
+
+    it('does not take a hint a server has changed after it was signed', async () => {
+      const net = await conversation();
+      // (A room nobody is in yet, so that it is the signature and the check of the hint that decide.)
+      const state = () => net.victim.sessions.ownedState(net.sessionId);
+      const device = peerIds.device(net.alice.conn.peer);
+      net.toVictim.send(
+        presenceFrom(net.rogue, Date.now(), [entry(net.alice.identity.userId, [device])]),
+      );
+      op(
+        net,
+        net.alice.conn.peer,
+        {
+          op: 'join',
+          caps: caps(),
+          hint: { epoch: 1000, host: net.bob.conn.peer, backup: null },
+        },
+        net.alice.identity,
+        { signedHint: { epoch: 7, host: net.bob.conn.peer, backup: null } },
+      );
+      await settled(net);
+      expect(state()?.epoch ?? 0).toBeLessThan(5);
+    });
+
+    it('takes the hint a device signed, from the server it is on', async () => {
+      const net = await conversation();
+      // (A room nobody is in yet: it is put together from what its members say they saw.)
+      const state = () => net.victim.sessions.ownedState(net.sessionId);
+      const device = peerIds.device(net.alice.conn.peer);
+      net.toVictim.send(
+        presenceFrom(net.rogue, Date.now(), [entry(net.alice.identity.userId, [device])]),
+      );
+      op(
+        net,
+        net.alice.conn.peer,
+        {
+          op: 'join',
+          caps: caps(),
+          hint: { epoch: 1000, host: net.bob.conn.peer, backup: null },
+        },
+        net.alice.identity,
+      );
+      await waitFor(() => (state()?.epoch ?? 0) >= 1000, 5000, 'the signed hint');
+      expect(state()!.host).toBe(net.bob.conn.peer);
+    });
+
+    it('does not let a member of a room that stands move its host with a hint', async () => {
+      const net = await conversation();
+      const state = await joined(net);
+      // (The moment after a room is made, in which its members say what they saw, is over.)
+      const owned = (
+        net.victim.sessions as unknown as { owned: Map<string, { rebuildUntil: number }> }
+      ).owned.get(net.sessionId)!;
+      owned.rebuildUntil = 0;
+      const before = { epoch: state().epoch, host: state().host };
+      // (And it is not looked into: a room that stands would not take it, so nobody waits for the records.)
+      const looked = vi.spyOn(
+        net.victim.sessions as unknown as { hintAllowed(...a: unknown[]): unknown },
+        'hintAllowed',
+      );
+      const device = peerIds.device(net.alice.conn.peer);
+      net.toVictim.send(
+        presenceFrom(net.rogue, Date.now(), [entry(net.alice.identity.userId, [device])]),
+      );
+      // Signed by the device itself, and naming devices that exist: still not what a room that stands goes by.
+      op(
+        net,
+        net.alice.conn.peer,
+        {
+          op: 'join',
+          caps: caps(),
+          hint: { epoch: 999, host: net.bob.conn.peer, backup: null },
+        },
+        net.alice.identity,
+        { at: Date.now() + 1000 },
+      );
+      await settled(net);
+      await new Promise((r) => setTimeout(r, 300));
+      expect(state().epoch).toBe(before.epoch);
+      expect(state().host).toBe(before.host);
+      expect(looked).not.toHaveBeenCalled();
+      looked.mockRestore();
+    });
+
+    it('takes the hint of a member that comes a moment after the room was made without one', async () => {
+      const net = await conversation();
+      const state = () => net.victim.sessions.ownedState(net.sessionId);
+      const device = peerIds.device(net.alice.conn.peer);
+      net.toVictim.send(
+        presenceFrom(net.rogue, Date.now(), [entry(net.alice.identity.userId, [device])]),
+      );
+      const now = Date.now();
+      // A device that has seen nothing makes the room; one that has seen the call comes after it.
+      op(net, net.alice.conn.peer, { op: 'join', caps: caps() }, net.alice.identity, { at: now });
+      await waitFor(() => state()?.members.length === 1, 5000, 'the room');
+      op(
+        net,
+        net.alice.conn.peer,
+        {
+          op: 'join',
+          caps: caps(),
+          hint: { epoch: 1000, host: net.bob.conn.peer, backup: null },
+        },
+        net.alice.identity,
+        { at: now + 1 },
+      );
+      await waitFor(() => (state()?.epoch ?? 0) >= 1000, 5000, 'the hint');
+      expect(state()!.host).toBe(net.bob.conn.peer);
+    });
+
+    it('does not keep the moment open for hints by taking one', async () => {
+      const net = await conversation();
+      const state = () => net.victim.sessions.ownedState(net.sessionId);
+      const device = peerIds.device(net.alice.conn.peer);
+      net.toVictim.send(
+        presenceFrom(net.rogue, Date.now(), [entry(net.alice.identity.userId, [device])]),
+      );
+      const join = (epoch: number, at: number) =>
+        op(
+          net,
+          net.alice.conn.peer,
+          { op: 'join', caps: caps(), hint: { epoch, host: net.bob.conn.peer, backup: null } },
+          net.alice.identity,
+          { at },
+        );
+      const now = Date.now();
+      join(1000, now);
+      await waitFor(() => (state()?.epoch ?? 0) >= 1000, 5000, 'the first hint');
+      // The moment after the room was made is over; the host of the hint just taken is still waited for.
+      (
+        net.victim.sessions as unknown as { owned: Map<string, { rebuildUntil: number }> }
+      ).owned.get(net.sessionId)!.rebuildUntil = 0;
+      join(2000, now + 1);
+      await settled(net);
+      await new Promise((r) => setTimeout(r, 300));
+      expect(state()!.epoch).toBe(1000);
+    });
+
+    it('does not go back to an earlier epoch when a later join in the same moment names one', async () => {
+      const net = await conversation();
+      const state = () => net.victim.sessions.ownedState(net.sessionId);
+      const device = peerIds.device(net.alice.conn.peer);
+      net.toVictim.send(
+        presenceFrom(net.rogue, Date.now(), [entry(net.alice.identity.userId, [device])]),
+      );
+      const join = (hint: SessionHint, at: number) =>
+        op(net, net.alice.conn.peer, { op: 'join', caps: caps(), hint }, net.alice.identity, {
+          at,
+        });
+      const now = Date.now();
+      join({ epoch: 1000, host: net.bob.conn.peer, backup: null }, now);
+      await waitFor(() => (state()?.epoch ?? 0) >= 1000, 5000, 'the first hint');
+      join({ epoch: 500, host: null, backup: null }, now + 1);
+      await settled(net);
+      await new Promise((r) => setTimeout(r, 300));
+      expect(state()!.epoch).toBe(1000);
+      expect(state()!.host).toBe(net.bob.conn.peer);
+    });
+
+    it('looks into a hint of a device on the server that keeps the room, as it does for another server', async () => {
+      const net = await conversation();
+      const ghost = peerIds.make(net.alice.identity.userId, 'abcdefgh');
+      const room = () => net.victim.sessions.ownedState(net.sessionId)!;
+      // Alice's own server keeps the room; her device names one she never made.
+      await net.alice.conn.request('session.join', {
+        sessionId: net.sessionId,
+        caps: caps(),
+        hint: { epoch: 1000, host: ghost, backup: null },
+      });
+      expect(room().members.map((m) => m.peer)).toContain(net.alice.conn.peer);
+      expect(room().host).not.toBe(ghost);
+      expect(room().epoch).toBeLessThan(5);
+    });
+
+    it('takes the hint of a device on the server that keeps the room when it names real devices', async () => {
+      const net = await conversation();
+      const room = () => net.victim.sessions.ownedState(net.sessionId)!;
+      await net.alice.conn.request('session.join', {
+        sessionId: net.sessionId,
+        caps: caps(),
+        hint: { epoch: 1000, host: net.bob.conn.peer, backup: null },
+      });
+      expect(room().epoch).toBe(1000);
+      expect(room().host).toBe(net.bob.conn.peer);
     });
 
     it("takes a device's operations in the order they were sent, also while its join is looked into", async () => {
