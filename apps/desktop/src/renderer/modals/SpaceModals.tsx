@@ -189,7 +189,7 @@ export function InviteModal({ spaceId }: { spaceId: string }) {
       : link.state === 'ended'
         ? 'The link has ended'
         : link.state === 'elsewhere'
-          ? 'A link is on, but this device cannot show it (it may have been made on another device)'
+          ? 'A link is on, but this device cannot show it (it was made by another admin or on another device)'
           : 'No link is on';
   return (
     <Modal

@@ -186,7 +186,7 @@ export const SpaceBody = z.object({
    * Admins the owner has removed, kept (and only added to) so that those they let in stay: a
    * link an admin made still admits a member after the admin is gone. Signed with the admin list.
    */
-  formerAdmins: z.array(id).max(1000).optional(),
+  formerAdmins: z.array(id).max(LIMITS.formerAdminsMax).optional(),
   /**
    * Who may invite a named person: only the owner and admins (the default), or members too.
    * The one open invite is always made by the owner or an admin.

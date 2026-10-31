@@ -1897,6 +1897,23 @@ describe('leaving', () => {
       await alice.updateSpace(spaceId, (b) => ({ ...b, name: 'Marsh' }));
     });
 
+    it('takes an invite a server sends with a key that is not one as no invite', async () => {
+      const { alice, bob, spaceId } = await trio();
+      const link = await alice.shareInvite(spaceId);
+      const conn = bob.link!;
+      const real = conn.request.bind(conn) as (
+        m: string,
+        p: { keys?: string[] },
+      ) => Promise<unknown>;
+      vi.spyOn(conn, 'request').mockImplementation((async (m: string, p: { keys?: string[] }) => {
+        const res = (await real(m, p)) as { records?: SignedRecord[] };
+        if (m === 'records.get' && p.keys?.[0]?.startsWith('invite:'))
+          return { ...res, records: res.records!.map((r) => ({ ...r, author: '!!not-a-key!!' })) };
+        return res;
+      }) as never);
+      await expect(bob.joinWithInvite(link)).rejects.toThrow(/does not exist/);
+    });
+
     it('tells someone joining with the link of an admin who has been removed that it is out of date', async () => {
       const { alice, bob, carol, spaceId } = await trio();
       await carol.joinWithInvite(await alice.shareInvite(spaceId));

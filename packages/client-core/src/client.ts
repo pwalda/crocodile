@@ -444,8 +444,6 @@ const DAY_MS = 24 * 3600_000;
 const HOUR_MS = 3600_000;
 /** Secrets of links this device made that it keeps to show again. */
 const TICKETS_KEPT = 500;
-/** The most former admins a space can list (what the protocol allows). */
-const FORMER_ADMINS_MAX = 1000;
 /** How often the record of a link we made is asked for while we do not hold it. */
 const INVITE_ASK_MS = 10_000;
 /** How long an invite lasts unless asked otherwise, and an invitation to a named person can be accepted. */
@@ -2068,7 +2066,7 @@ export class CrocodileClient extends Emitter<ClientEvents> {
           ...r.body.admins.filter((u) => !admins.includes(u)),
         ]),
       ];
-      if (formerAdmins.length > FORMER_ADMINS_MAX)
+      if (formerAdmins.length > LIMITS.formerAdminsMax)
         throw new Error('Too many admins have been taken off this space to take off another.');
       const unchanged =
         !!r.body.authority &&
@@ -2270,14 +2268,17 @@ export class CrocodileClient extends Emitter<ClientEvents> {
     const before = this.tickets.size;
     for (const tid of [...this.tickets.keys()]) {
       const r = this.records.get(recordKey.invite(tid)) as SignedRecord<'invite'> | undefined;
-      if (tid !== except && r && (r.body.revoked || (r.body.expiresAt ?? Infinity) < Date.now()))
+      if (tid !== except && r && (r.body.revoked || (r.body.expiresAt ?? Infinity) < Date.now())) {
         this.tickets.delete(tid);
+        this.invitesAsked.delete(tid);
+      }
     }
     return this.tickets.size !== before;
   }
 
   /** Forgets the secret of a link that was not made after all. */
   private forgetTicket(tid: string) {
+    this.invitesAsked.delete(tid);
     if (this.tickets.delete(tid)) void this.saveTickets();
   }
 
@@ -2295,7 +2296,7 @@ export class CrocodileClient extends Emitter<ClientEvents> {
         return link.token;
       if (link.state === 'elsewhere')
         throw new Error(
-          'The link for this space was made on another device. Make a new link to replace it.',
+          'The link for this space was made by another admin or on another device, so this device cannot show it. Make a new link to replace it.',
         );
       return this.makeOpenLink(spaceId, INVITE_MS);
     });
@@ -2559,11 +2560,14 @@ export class CrocodileClient extends Emitter<ClientEvents> {
     )
       throw new Error('That link has been replaced or turned off. Ask for a new one.');
     // Made by someone the space no longer lets make it: told here, not by a server's refusal.
-    if (
-      named &&
-      invite.body.for === undefined &&
-      !canManageSpace(named.body, userIdFromKey(invite.author))
-    )
+    let maker: string | undefined;
+    try {
+      maker = userIdFromKey(invite.author);
+    } catch {
+      // (Not a record: it is taken as if there were none.)
+    }
+    if (!maker) throw new Error('That invite does not exist (yet). Check the code and try again.');
+    if (named && invite.body.for === undefined && !canManageSpace(named.body, maker))
       throw new Error(
         'That link is out of date: its maker can no longer invite. Ask for a new one.',
       );
