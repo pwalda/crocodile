@@ -24,7 +24,8 @@ const INLINE = new RegExp(
     '\\*[^*\\n]+\\*',
     '~~[^~\\n]+~~',
     '<@[a-z2-7]{8,64}>',
-    'croc://join/[a-z2-7]{8,52}\\b',
+    // A code, or the secret of a link: nothing between.
+    'croc://join/(?:[a-z2-7]{8,32}|[a-z2-7]{52})\\b',
     // A URL ends before trailing punctuation: "see https://x.org." links x.org.
     '(?:https?://|www\\.)[^\\s<]+[^\\s<.,:;"\')\\]!?]',
     // A bare domain with a common ending, as people type them: example.com/path.

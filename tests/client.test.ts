@@ -1991,6 +1991,24 @@ describe('leaving', () => {
       expect(await alice.shareInvite(spaceId)).toBe(again);
     });
 
+    it('lasts as long as it was asked to, from when it is made', async () => {
+      const coord = await server();
+      const net = new FakeRelayNetwork();
+      const alice = await signUp(makeClient(net, coord), 'alice');
+      const kv = alice.platform.kv as MemoryKeyValueStore;
+      const spaceId = await alice.createSpace('Swamp');
+      const set = kv.set.bind(kv);
+      // Keeping the secret takes a while.
+      vi.spyOn(kv, 'set').mockImplementation(async (key: string, value: unknown) => {
+        if (key === 'invite-tickets') await new Promise((r) => setTimeout(r, 700));
+        return set(key, value);
+      });
+      const asked = Date.now();
+      await alice.createInvite(spaceId, 2 * 3600_000);
+      const invite = alice.openInviteOf(spaceId)!;
+      expect(invite.body.expiresAt! - asked).toBeGreaterThanOrEqual(2 * 3600_000 + 600);
+    });
+
     it('does not write the secrets back after signing out', async () => {
       const coord = await server();
       const net = new FakeRelayNetwork();

@@ -2334,15 +2334,16 @@ export class CrocodileClient extends Emitter<ClientEvents> {
   private async makeOpenLink(spaceId: string, expiresInMs: number): Promise<string> {
     // The open link is a ticket: its secret is only in the link, and in this device to show it again.
     const ticket = newTicket();
+    // The invite first, then the space naming it: until then the old link goes on working.
+    const previous = await this.openLinkNow(spaceId);
+    await this.keepTicket(ticket);
+    // (Dated now, not before the waits above: it lasts as long as it was asked to.)
     const invite = signRecord(this.identity!, 'invite', recordKey.invite(ticket.tid), {
       spaceId,
       code: ticket.tid,
       tpub: ticket.tpub,
       expiresAt: Date.now() + expiresInMs,
     });
-    // The invite first, then the space naming it: until then the old link goes on working.
-    const previous = await this.openLinkNow(spaceId);
-    await this.keepTicket(ticket);
     await this.putRecord(invite).catch((err) => {
       this.forgetTicket(ticket.tid);
       throw err;
