@@ -85,7 +85,7 @@ Metadata lives in signed records (`packages/protocol/src/records.ts`):
 | friends | `friends:<userId>`          | the user; sealed, readable only by the user's devices (see below)   |
 | space   | `space:<spaceId>`           | the owner, or an admin the owner signed for (see below)             |
 | roster  | `roster:<spaceId>`          | the space owner: who stays of those who joined by an older link     |
-| invite  | `invite:<code>`             | the space owner or an admin (a member, for one named person)        |
+| invite  | `invite:<code or name>`     | the space owner or an admin (a member, for one named person)        |
 | member  | `member:<spaceId>:<userId>` | the user, with a ticket proof or naming a valid invite              |
 | device  | `device:<userId>:<device>`  | the user (name, platform, current prekeys, revoked flag)            |
 | note    | `note:<userId>:<noteId>`    | anyone, once, with a one-time key; only the recipient may delete it |
@@ -104,7 +104,8 @@ Each change of the list raises `at`, and a version signed under a lower `at`
 than the one held is refused. An invite works only while its maker is still
 the owner or an admin. A server's list and subscription answers to clients,
 and its list and term answers to peer servers, leave invite records out.
-A member record names the invite its author joined with, so a server gives
+A member record names the invite its author joined with (for an open link it
+carries the maker's signed invite), so a server gives
 the member records of a space only to the space's owner and its members (not
 to someone who left or was banned), whether asked by key, by list or by
 subscription. Servers still replicate invites and memberships among
@@ -132,7 +133,7 @@ that the invite is for this space and not for a named person; and the proof.
 No server holds the secret, so no server, and nobody who only read the invite
 record, can make a membership. A server taking a new join also checks what
 only it can: that the space names this link now, that it has not ended or been
-revoked, that the maker is an admin now, and that the user is not banned.
+revoked, that the maker is the owner or an admin now, and that the user is not banned.
 Memberships already made are not affected when the link changes. The device
 that made the link keeps the secret to show it again; another device cannot
 (the space names it only by the name), says so, and offers a new link.

@@ -205,7 +205,7 @@ picture size.
 - Invites: a server leaves invites out of the lists and subscriptions it gives
   clients and out of the list and term answers it gives other servers, and
   gives a space's member records (which name the invite each member joined
-  with) only to its owner and members. A user who leaves or is banned stops
+  with, or carry the maker's signed invite for an open link) only to its owner and members. A user who leaves or is banned stops
   being served as soon as the server hears of it, and within ten seconds at
   the latest. This is not a boundary against servers, which
   replicate invites and memberships among themselves and can read the ones
@@ -239,16 +239,19 @@ picture size.
     works, lets them join again. Banning is.
   - Spaces made before tickets: a membership made with the older kind of link
     counts as it did until the space's owner has signed the list of who stays
-    (the app asks them). Until then anyone who read such a link's code from a
-    server could make a membership in that space, and a space whose owner
+    (the app asks them). Until then a server that is not updated, or one that
+    is hostile, can take or pass on a membership made with a code it read
+    (updated servers refuse a new join with a link of that kind, but cannot
+    tell when a record they only copy was made), and a space whose owner
     never returns stays that way. After it, those on the list stay and others
     need a new link; a membership forged before the owner signed is on the
     list unless the owner takes it off when asked, so the owner has to
     review it. The list names members, so it is given only to the space's
     members and owner (servers that store it can read it).
-  - Old apps and servers do not know the list: they cannot verify the space
-    record of a space that names one. Update every app and server before an
-    owner signs.
+  - Old apps and servers know neither tickets nor the list: they refuse a
+    membership made with a ticket, cannot read the invite records of one, and
+    cannot verify the space record of a space that names a list. Update every
+    app and server before any link is made or any owner signs.
 - Invites are never deleted, and a space takes at most 5000 invite records in
   all (50 from any one member). A space that invites very many people by name
   over its life can reach that; the owner or an admin can then no longer make
