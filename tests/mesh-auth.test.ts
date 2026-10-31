@@ -18,6 +18,7 @@ import {
   voiceSigned,
   type FedPresence,
   type HostCaps,
+  type SessionHint,
 } from '@crocodile/protocol';
 import { Coordinator, rendezvousOwner } from '@crocodile/coordinator';
 import { RpcFailure } from '../packages/coordinator/src/util';
@@ -352,8 +353,12 @@ describe('events and session operations from other servers', () => {
     peer: string,
     body: { op: string; caps?: unknown; epoch?: number; issue?: string; hint?: unknown },
     holder?: Identity,
-    ctx: { at?: number; since?: number; n?: number } = {},
+    ctx: { at?: number; since?: number; n?: number; signedHint?: SessionHint | null } = {},
   ) => {
+    const { signedHint, ...times } = ctx;
+    // (What the holder signed of the hint is what is sent, unless the test says the server changed it.)
+    const hintSigned =
+      signedHint === undefined ? (body.hint as SessionHint | undefined) : signedHint;
     const signed =
       holder && body.op !== 'leave'
         ? signSessionOp(
@@ -362,8 +367,14 @@ describe('events and session operations from other servers', () => {
             peer,
             body.op === 'report'
               ? { op: 'report', epoch: body.epoch!, issue: 'host_unreachable' }
-              : { op: body.op as 'join' | 'update', caps: body.caps as HostCaps },
-            { server: net.rogue.info.id, ...ctx },
+              : body.op === 'join'
+                ? {
+                    op: 'join',
+                    caps: body.caps as HostCaps,
+                    ...(hintSigned ? { hint: hintSigned } : {}),
+                  }
+                : { op: 'update', caps: body.caps as HostCaps },
+            { server: net.rogue.info.id, ...times },
           )
         : undefined;
     net.toVictim.send({
@@ -517,6 +528,7 @@ describe('events and session operations from other servers', () => {
         net.alice.identity,
       );
       await settled(net);
+      expect(state().members.map((m) => m.peer)).toContain(net.alice.conn.peer);
       expect(state().host).not.toBe(ghost);
       expect(state().epoch).toBeLessThan(5);
     });
@@ -598,6 +610,99 @@ describe('events and session operations from other servers', () => {
       await waitFor(() => state().epoch >= 1000, 5000, 'the hint');
       expect(state().host).toBe(net.bob.conn.peer);
       expect(state().backup).not.toBe(ghost);
+    });
+
+    it('does not take a hint a server adds to a join that was signed without one', async () => {
+      const net = await conversation();
+      const state = await joined(net);
+      const device = peerIds.device(net.alice.conn.peer);
+      net.toVictim.send(
+        presenceFrom(net.rogue, Date.now(), [entry(net.alice.identity.userId, [device])]),
+      );
+      // The device signed a join with no hint; the rogue server names a host in it.
+      op(
+        net,
+        net.alice.conn.peer,
+        {
+          op: 'join',
+          caps: caps(),
+          hint: { epoch: 1000, host: net.bob.conn.peer, backup: null },
+        },
+        net.alice.identity,
+        { signedHint: null },
+      );
+      await settled(net);
+      expect(state().epoch).toBeLessThan(5);
+    });
+
+    it('does not take a hint a server has changed after it was signed', async () => {
+      const net = await conversation();
+      const state = await joined(net);
+      const device = peerIds.device(net.alice.conn.peer);
+      net.toVictim.send(
+        presenceFrom(net.rogue, Date.now(), [entry(net.alice.identity.userId, [device])]),
+      );
+      op(
+        net,
+        net.alice.conn.peer,
+        {
+          op: 'join',
+          caps: caps(),
+          hint: { epoch: 1000, host: net.bob.conn.peer, backup: null },
+        },
+        net.alice.identity,
+        { signedHint: { epoch: 7, host: net.bob.conn.peer, backup: null } },
+      );
+      await settled(net);
+      expect(state().epoch).toBeLessThan(5);
+    });
+
+    it('takes the hint a device signed, from the server it is on', async () => {
+      const net = await conversation();
+      const state = await joined(net);
+      const device = peerIds.device(net.alice.conn.peer);
+      net.toVictim.send(
+        presenceFrom(net.rogue, Date.now(), [entry(net.alice.identity.userId, [device])]),
+      );
+      op(
+        net,
+        net.alice.conn.peer,
+        {
+          op: 'join',
+          caps: caps(),
+          hint: { epoch: 1000, host: net.bob.conn.peer, backup: null },
+        },
+        net.alice.identity,
+      );
+      await waitFor(() => state().epoch >= 1000, 5000, 'the signed hint');
+      expect(state().host).toBe(net.bob.conn.peer);
+    });
+
+    it('looks into a hint of a device on the server that keeps the room, as it does for another server', async () => {
+      const net = await conversation();
+      const ghost = peerIds.make(net.alice.identity.userId, 'abcdefgh');
+      const room = () => net.victim.sessions.ownedState(net.sessionId)!;
+      // Alice's own server keeps the room; her device names one she never made.
+      await net.alice.conn.request('session.join', {
+        sessionId: net.sessionId,
+        caps: caps(),
+        hint: { epoch: 1000, host: ghost, backup: null },
+      });
+      expect(room().members.map((m) => m.peer)).toContain(net.alice.conn.peer);
+      expect(room().host).not.toBe(ghost);
+      expect(room().epoch).toBeLessThan(5);
+    });
+
+    it('takes the hint of a device on the server that keeps the room when it names real devices', async () => {
+      const net = await conversation();
+      const room = () => net.victim.sessions.ownedState(net.sessionId)!;
+      await net.alice.conn.request('session.join', {
+        sessionId: net.sessionId,
+        caps: caps(),
+        hint: { epoch: 1000, host: net.bob.conn.peer, backup: null },
+      });
+      expect(room().epoch).toBe(1000);
+      expect(room().host).toBe(net.bob.conn.peer);
     });
 
     it("takes a device's operations in the order they were sent, also while its join is looked into", async () => {

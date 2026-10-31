@@ -413,6 +413,65 @@ describe('client', () => {
     await waitFor(() => bodies(bob, ch).includes('still here?'), 12000, 'chat after failover');
   });
 
+  it('signs the host it last saw into the join it renews, and none into the first or after leaving', async () => {
+    const coord = await server();
+    const net = new FakeRelayNetwork();
+    const alice = await signUp(makeClient(net, coord, { nat: 'open' }), 'alice');
+    const bob = await signUp(makeClient(net, coord, { nat: 'cone' }), 'bob');
+    const link = bob.link!;
+    const joins: { sessionId: string; hint?: unknown }[] = [];
+    // How each was answered (a join the server finds not to be signed as it was sent is refused).
+    const answers: string[] = [];
+    const request = link.request.bind(link);
+    link.request = (async (method: string, params: { sessionId: string; hint?: unknown }) => {
+      if (method !== 'session.join') return request(method as never, params as never);
+      joins.push(params);
+      const at = joins.length - 1;
+      return request(method as never, params as never).then(
+        (res) => ((answers[at] = 'ok'), res),
+        (err) => {
+          answers[at] = String(err);
+          throw err;
+        },
+      );
+    }) as typeof link.request;
+    const spaceId = await alice.createSpace('Hint');
+    await bob.joinWithInvite(await alice.createInvite(spaceId));
+    const ch = channelOf(alice, spaceId);
+    const sid = sessionIds.space(spaceId);
+    await alice.openChannel(ch);
+    await bob.openChannel(ch);
+    await waitFor(() => bob.state.sessions[sid]?.peers.includes(alice.userId), 12000, 'connected');
+    // The first join has seen nothing.
+    expect(joins[0]!.sessionId).toBe(sid);
+    expect(joins[0]!.hint).toBeUndefined();
+
+    // The server that keeps the room changed: it asks for a new join, which says what Bob saw.
+    const seen = coord.sessions.ownedState(sid)!;
+    expect(seen.host).toMatch(new RegExp(`^${alice.userId}\\.`));
+    const before = joins.length;
+    (link as unknown as { emit(ev: string, d: unknown): void }).emit('session_renew', {
+      sessionId: sid,
+    });
+    await waitFor(() => answers[before] !== undefined, 5000, 'the answer to a new join');
+    expect(answers[before]).toBe('ok');
+    expect(joins[before]!.hint).toEqual({
+      epoch: seen.epoch,
+      host: seen.host,
+      backup: seen.backup,
+    });
+
+    // After leaving, what it saw is no longer what the room is.
+    const session = (
+      bob as unknown as { sessions: Map<string, { leave(): Promise<void>; join(): Promise<void> }> }
+    ).sessions.get(sid)!;
+    await session.leave();
+    const afterLeave = joins.length;
+    await session.join();
+    expect(joins[afterLeave]!.hint).toBeUndefined();
+    expect(answers[afterLeave]).toBe('ok');
+  });
+
   it('works across two coordination servers in a mesh', async () => {
     const a = await server({ name: 'A' });
     const b = await server({ name: 'B', meshPeers: [a.url] });

@@ -326,6 +326,9 @@ export class GroupSession extends Emitter<GroupSessionEvents> {
   }
 
   private async sendJoin() {
+    // What we last saw of the room, for a new owner to keep the same host (signed with the join).
+    // None if we have not been in it (since the last leave): that is not what the room is now.
+    const seen = this.status === 'idle' || this.status === 'left' ? undefined : this.state;
     if (this.status === 'idle' || this.status === 'left') this.setStatus('joining');
     const caps = await this.ctx.caps();
     // Left meanwhile: a join now would come after the leave.
@@ -333,6 +336,7 @@ export class GroupSession extends Emitter<GroupSessionEvents> {
     const { state } = await this.ctx.link().request('session.join', {
       sessionId: this.sessionId,
       caps,
+      ...(seen ? { hint: { epoch: seen.epoch, host: seen.host, backup: seen.backup } } : {}),
     });
     this.applyState(state);
   }

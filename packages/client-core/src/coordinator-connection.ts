@@ -320,7 +320,7 @@ export class CoordinatorConnection extends Emitter<ConnectionEvents> {
         this.signer,
         sessionId,
         this.peer,
-        { op: 'join', caps: p.caps },
+        { op: 'join', caps: p.caps, ...(p.hint ? { hint: p.hint } : {}) },
         { server: this.server.id, at },
       );
       const joining: Promise<unknown> = this.send(method, { ...p, proof }, timeoutMs);
