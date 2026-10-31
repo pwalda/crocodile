@@ -30,9 +30,9 @@ import {
   spaceAuthorityValid,
   mayInviteByName,
   INVITE_MAX_MS,
-  inviteCommitment,
   newTicket,
   OPEN_CODE_LENGTH,
+  openLinkName,
   signedInvitePolicy,
   signTicketUse,
   ticketFromSecret,
@@ -2179,7 +2179,7 @@ export class CrocodileClient extends Emitter<ClientEvents> {
           r.body.spaceId === spaceId &&
           r.body.for === undefined &&
           r.body.tpub === undefined &&
-          namedBy(spaceId, r.body.code, false) === named,
+          openLinkName(spaceId, r.body.code, false) === named,
       );
     if (!invite || invite.body.spaceId !== spaceId || invite.body.for !== undefined) {
       // A link we made whose record we do not hold yet (it is not on this device's copy): ask for it.
@@ -2495,7 +2495,7 @@ export class CrocodileClient extends Emitter<ClientEvents> {
       (invite.body.for === undefined &&
         (invite.body.expiresAt === null ||
           code.length < OPEN_CODE_LENGTH ||
-          space.body.publicInvite !== namedBy(spaceId, code, !!ticket))) ||
+          space.body.publicInvite !== openLinkName(spaceId, code, !!ticket))) ||
       (invite.body.expiresAt !== null && invite.body.expiresAt < Date.now());
     return {
       code: token,
@@ -2542,9 +2542,18 @@ export class CrocodileClient extends Emitter<ClientEvents> {
     if (
       named &&
       invite.body.for === undefined &&
-      named.body.publicInvite !== namedBy(spaceId, code, !!ticket)
+      named.body.publicInvite !== openLinkName(spaceId, code, !!ticket)
     )
       throw new Error('That link has been replaced or turned off. Ask for a new one.');
+    // Made by someone the space no longer lets make it: told here, not by a server's refusal.
+    if (
+      named &&
+      invite.body.for === undefined &&
+      !canManageSpace(named.body, userIdFromKey(invite.author))
+    )
+      throw new Error(
+        'That link is out of date: its maker can no longer invite. Ask for a new one.',
+      );
     this.records.ingestAll([...space.records, invite]);
     const me = this.userId;
     const key = recordKey.member(spaceId, me);
@@ -4094,14 +4103,6 @@ function fitName(name: string) {
     out += ch;
   }
   return out + ext;
-}
-
-/**
- * What a space names its open link by: a link that is a ticket by its own name, an older one by a
- * hash of its code (the code being a secret).
- */
-function namedBy(spaceId: string, code: string, isTicket: boolean): string {
-  return isTicket ? code : inviteCommitment(spaceId, code);
 }
 
 /** The code in an invite link or code as pasted ("croc://join/abc…", "ABC…"). */

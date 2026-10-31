@@ -1000,7 +1000,7 @@ describe('space admins', () => {
     await waitFor(() => bob.state.spaces[spaceId]?.admins.length === 0, 8000, 'no longer admin');
     await expect(bob.addChannel(spaceId, 'again', 'text')).rejects.toThrow(/owner or an admin/);
     // His invite stopped working with his rights.
-    await expect(dave.joinWithInvite(bobsInvite)).rejects.toThrow(/may no longer invite/);
+    await expect(dave.joinWithInvite(bobsInvite)).rejects.toThrow(/maker can no longer invite/);
   });
 });
 
@@ -1840,6 +1840,25 @@ describe('leaving', () => {
       await alice.updateSpace(spaceId, (b) => ({ ...b, name: 'Marsh' }));
       await waitFor(() => bob.state.spaces[spaceId]?.name === 'Marsh', 8000, 'bob sees the change');
       expect(bob.state.spaces[spaceId]!.members).toContain(bob.userId);
+    });
+
+    it('tells someone joining with the link of an admin who has been removed that it is out of date', async () => {
+      const { alice, bob, carol, spaceId } = await trio();
+      await carol.joinWithInvite(await alice.shareInvite(spaceId));
+      await alice.updateSpace(spaceId, (b) => ({ ...b, admins: [carol.userId] }));
+      await waitFor(
+        () => carol.state.spaces[spaceId]?.admins.includes(carol.userId),
+        5000,
+        'carol is an admin',
+      );
+      const hers = await carol.createInvite(spaceId);
+      await alice.setAdmin(spaceId, carol.userId, false);
+      await waitFor(
+        () => !bob.state.spaces[spaceId] && !alice.state.spaces[spaceId]?.admins.length,
+        5000,
+        'carol is not an admin',
+      );
+      await expect(bob.joinWithInvite(hers)).rejects.toThrow(/maker can no longer invite/);
     });
 
     it('keeps the secret of its link across a restart, drops it when the link ends, and forgets it on signing out', async () => {

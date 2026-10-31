@@ -66,6 +66,14 @@ export function inviteCommitment(spaceId: string, code: string): string {
   return toB32(sha256(utf8.encode(`croc/v1/open-invite\n${spaceId}\n${code}`))).slice(0, 26);
 }
 
+/**
+ * What a space names its open link by: a link that is a ticket by its own name, an older one by a
+ * hash of its code (the code being a secret).
+ */
+export function openLinkName(spaceId: string, code: string, isTicket: boolean): string {
+  return isTicket ? code : inviteCommitment(spaceId, code);
+}
+
 /** Characters in the code of an open link (128 bits): too many to guess from the hash. */
 export const OPEN_CODE_LENGTH = 26;
 
@@ -321,7 +329,7 @@ export function validateRecord(input: unknown, ctx: ValidationContext): Validati
           )
             return reject('ticket does not match its invite');
           if (invite.body.revoked) return reject('invite was revoked');
-          if (space.body.publicInvite !== tid)
+          if (space.body.publicInvite !== openLinkName(body.spaceId, tid, true))
             return reject('this link has been replaced or turned off');
           if (invite.body.expiresAt === null)
             return reject('this link is out of date; make a new one');
@@ -345,7 +353,7 @@ export function validateRecord(input: unknown, ctx: ValidationContext): Validati
         // The open invite is the one the space names; a newer one has replaced the rest.
         if (
           invite.body.for === undefined &&
-          space.body.publicInvite !== inviteCommitment(body.spaceId, invite.body.code)
+          space.body.publicInvite !== openLinkName(body.spaceId, invite.body.code, false)
         )
           return reject('this link has been replaced or turned off');
         // Nor is one that never ends the open link, however the space came to name it.
@@ -517,10 +525,9 @@ function ticketIntact(spaceId: string, member: RecordBodies['member']) {
   if (spaceId !== member.spaceId) return { reason: 'invite is for another space', maker: '' };
   let found = ticketSigned.get(member);
   if (!found) {
-    found = {
-      reason: ticketBroken(spaceId, member),
-      maker: userIdFromKey(member.ticket!.invite.author),
-    };
+    const reason = ticketBroken(spaceId, member);
+    // (Who signed is looked for only in a ticket that is sound.)
+    found = { reason, maker: reason ? '' : userIdFromKey(member.ticket!.invite.author) };
     ticketSigned.set(member, found);
   }
   return found;
