@@ -86,7 +86,7 @@ Metadata lives in signed records (`packages/protocol/src/records.ts`):
 | space   | `space:<spaceId>`           | the owner, or an admin the owner signed for (see below)             |
 | roster  | `roster:<spaceId>`          | the space owner: who stays of those who joined by an older link     |
 | invite  | `invite:<code>`             | the space owner or an admin (a member, for one named person)        |
-| member  | `member:<spaceId>:<userId>` | the user, referencing a valid invite                                |
+| member  | `member:<spaceId>:<userId>` | the user, with a ticket proof or naming a valid invite              |
 | device  | `device:<userId>:<device>`  | the user (name, platform, current prekeys, revoked flag)            |
 | note    | `note:<userId>:<noteId>`    | anyone, once, with a one-time key; only the recipient may delete it |
 
@@ -110,21 +110,46 @@ to someone who left or was banned), whether asked by key, by list or by
 subscription. Servers still replicate invites and memberships among
 themselves, and the one that stores an invite can read it.
 
-**The open link.** A space has at most one invite anyone can join with. The
-space record names it (`publicInvite`, set by the owner or an admin) by a
-hash of its code and the space, since that record is readable by anyone who
-knows the space and the code must stay with those given the link (it has 128
-bits, so the hash cannot be turned back); a new link replaces it, and so ends
-the old one, and turning it off removes the name. A new space starts with one
-that lasts a week. A device that did not make the link cannot show it (the
-space names it only by the hash), and says so; making a new one replaces it.
-A link ends within 30 days (a server lets it run a day over, for a clock
-that is off) and cannot be made without an end. A server taking a join checks
-that the invite used is the one the space names now, has an end and has a
-code of the full length; memberships already made are not affected when the
-link changes. Invites made before this setting existed are not the open link
-of any space, so none of them works until an owner or admin makes a new
-link.
+**The open link.** A space has at most one invite anyone can join with. It is
+a ticket: the link holds a secret key (52 characters, `croc://join/<secret>`)
+that is never uploaded. Everything else is derived from it: the public half,
+and the ticket's name (a hash of the public half, the same shape as a user id).
+The maker signs an invite record `invite:<name>` that holds the public half
+and an end, and the space record names the live link (`publicInvite`, set by
+the owner or an admin) by that name, which is no secret. A new link replaces
+it, and so ends the old one; turning it off removes the name. A new space
+starts with one that lasts a week. A link ends within 30 days (a server lets
+it run a day over, for a clock that is off) and cannot be made without an end.
+
+To join, a user signs a member record that carries the maker's signed invite
+and a proof, made with the link's secret, for exactly that user id. Everything
+needed to check it travels in the record, so no server has to be asked and
+none can withhold it. Servers and clients check the same things on every
+path: the maker's signature; that the maker is the owner, an admin or a former
+admin under the owner's signed list (`formerAdmins`, which only grows, so those
+a removed admin let in stay); that the name is the hash of the public half;
+that the invite is for this space and not for a named person; and the proof.
+No server holds the secret, so no server, and nobody who only read the invite
+record, can make a membership. A server taking a new join also checks what
+only it can: that the space names this link now, that it has not ended or been
+revoked, that the maker is an admin now, and that the user is not banned.
+Memberships already made are not affected when the link changes. The device
+that made the link keeps the secret to show it again; another device cannot
+(the space names it only by the name), says so, and offers a new link.
+
+**Members of an older kind of link.** Before tickets, the code of an open link
+was the key of its invite record, which every server that stores it can read,
+so a membership made with one proves nothing. Links of that kind are no longer
+made, shown or joined with. Those who joined by one are listed on a `roster`
+record, signed by the owner alone: the owner's app asks them, once, to review
+who joined that way and who stays, and signs the list. The roster is a record
+of its own (it can be long), and the owner-signed space record carries only its
+hash, so an admin cannot change it, and once named it cannot be changed or
+taken off (a deleted space is the exception). A membership of the older kind
+counts only for someone on the roster, or whose invite was made for them by
+name. The roster lists members, so only the space's members and owner are
+given it. Until the owner has signed, memberships of the older kind count as
+before, so the hole they leave stays open in that space for as long.
 
 **Invitations to one person.** An invite may name a user (`for`); only that
 user can join with it, whoever holds the code, so reading it from a member

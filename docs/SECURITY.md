@@ -217,10 +217,38 @@ picture size.
   check it (they may not read a space's member list before joining). A server
   that lies about this can make a client show an invitation card that joining
   would then refuse.
-- The open link: only the servers that take a join check that the invite is the
-  one the space names, and that it has not ended; a client may show a card for
-  a link that has since been replaced until it asks again, and a server that
-  has not yet heard of a replacement still takes a join with the old link.
+- The open link is a ticket: its secret stays in the link and never reaches a
+  server, so no server and nobody who only read the invite record can make a
+  membership. What a ticket cannot do:
+  - A link that leaked works for whoever holds it, until a server that takes
+    joins has heard of the replacement or the end. Servers that only copy
+    records cannot know in what order a join and a revocation happened (the
+    joiner dates its own record), so they take a membership made with a link
+    that was good when it was made. Only the servers that take a join check
+    that the space names the link now and that it has not ended; a client may
+    show a card for a link that has since been replaced until it asks again,
+    and a server that has not yet heard of a replacement still takes a join
+    with the old link. To get rid of someone who joined with a leaked link,
+    ban them (bans are checked on every path).
+  - A removed admin who is on the owner's list of former admins can still make
+    tickets that servers copying records accept (members that admin let in
+    must stay, and no time of removal can be trusted); servers taking a new
+    join refuse them. This needs someone who was an admin and works at it,
+    not any observer. A ban is the remedy.
+  - Leaving is not a revocation: the link a member joined with, if it still
+    works, lets them join again. Banning is.
+  - Spaces made before tickets: a membership made with the older kind of link
+    counts as it did until the space's owner has signed the list of who stays
+    (the app asks them). Until then anyone who read such a link's code from a
+    server could make a membership in that space, and a space whose owner
+    never returns stays that way. After it, those on the list stay and others
+    need a new link; a membership forged before the owner signed is on the
+    list unless the owner takes it off when asked, so the owner has to
+    review it. The list names members, so it is given only to the space's
+    members and owner (servers that store it can read it).
+  - Old apps and servers do not know the list: they cannot verify the space
+    record of a space that names one. Update every app and server before an
+    owner signs.
 - Invites are never deleted, and a space takes at most 5000 invite records in
   all (50 from any one member). A space that invites very many people by name
   over its life can reach that; the owner or an admin can then no longer make
