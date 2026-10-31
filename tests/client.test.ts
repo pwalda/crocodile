@@ -487,6 +487,14 @@ describe('client', () => {
     await session.join();
     expect(joins.slice(retried).map((j) => j.hint)).toEqual([undefined, undefined]);
     expect(answers.slice(retried)).toEqual(['failed', 'ok']);
+
+    // A new connection starts from nothing: what it saw before is not what the room is now.
+    const reconnected = joins.length;
+    for (const c of coord.presence.localOf(bob.userId)) c.close(4000, 'going away');
+    await waitFor(() => bob.state.link !== 'connected', 3000, 'disconnected');
+    await waitFor(() => joins.length > reconnected, 8000, 'a join on the new connection');
+    expect(joins[reconnected]!.sessionId).toBe(sid);
+    expect(joins[reconnected]!.hint).toBeUndefined();
   });
 
   it('works across two coordination servers in a mesh', async () => {

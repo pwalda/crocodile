@@ -692,6 +692,11 @@ describe('events and session operations from other servers', () => {
     it('does not let a member of a room that stands move its host with a hint', async () => {
       const net = await conversation();
       const state = await joined(net);
+      // (The moment after a room is made, in which its members say what they saw, is over.)
+      const owned = (
+        net.victim.sessions as unknown as { owned: Map<string, { rebuildUntil: number }> }
+      ).owned.get(net.sessionId)!;
+      owned.rebuildUntil = 0;
       const before = { epoch: state().epoch, host: state().host };
       // (And it is not looked into: a room that stands would not take it, so nobody waits for the records.)
       const looked = vi.spyOn(
@@ -720,6 +725,32 @@ describe('events and session operations from other servers', () => {
       expect(state().host).toBe(before.host);
       expect(looked).not.toHaveBeenCalled();
       looked.mockRestore();
+    });
+
+    it('takes the hint of a member that comes a moment after the room was made without one', async () => {
+      const net = await conversation();
+      const state = () => net.victim.sessions.ownedState(net.sessionId);
+      const device = peerIds.device(net.alice.conn.peer);
+      net.toVictim.send(
+        presenceFrom(net.rogue, Date.now(), [entry(net.alice.identity.userId, [device])]),
+      );
+      const now = Date.now();
+      // A device that has seen nothing makes the room; one that has seen the call comes after it.
+      op(net, net.alice.conn.peer, { op: 'join', caps: caps() }, net.alice.identity, { at: now });
+      await waitFor(() => state()?.members.length === 1, 5000, 'the room');
+      op(
+        net,
+        net.alice.conn.peer,
+        {
+          op: 'join',
+          caps: caps(),
+          hint: { epoch: 1000, host: net.bob.conn.peer, backup: null },
+        },
+        net.alice.identity,
+        { at: now + 1 },
+      );
+      await waitFor(() => (state()?.epoch ?? 0) >= 1000, 5000, 'the hint');
+      expect(state()!.host).toBe(net.bob.conn.peer);
     });
 
     it('does not go back to an earlier epoch when a later join in the same moment names one', async () => {

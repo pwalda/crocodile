@@ -1060,10 +1060,12 @@ export class CrocodileClient extends Emitter<ClientEvents> {
       const sid = sessionIds.dm(me, other);
       if (this.outbox.forSession(sid).length) this.ensureSession(sid);
     }
-    for (const s of this.sessions.values())
+    for (const s of this.sessions.values()) {
+      s.forgetSeen();
       void s
         .join({ fresh: true })
         .catch((err) => this.log('join failed', { id: s.sessionId, err: String(err) }));
+    }
     this.fetchMail();
     this.scheduleMail();
   }

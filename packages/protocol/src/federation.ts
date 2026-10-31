@@ -272,6 +272,10 @@ const ReportOp = z.object({
 });
 const SignedSessionOpSchema = z.union([JoinOp, UpdateOp, ReportOp]);
 
+/** A join as a device signs it: where there is no hint there is no field, so that all build the same bytes. */
+export const joinOp = (caps: z.infer<typeof HostCaps>, hint?: SessionHint) =>
+  ({ op: 'join', caps, ...(hint ? { hint } : {}) }) as const;
+
 /** What a device signs of an operation (a join carries the hint of the device, if it has one). */
 export type SignedSessionOp = z.infer<typeof SignedSessionOpSchema>;
 

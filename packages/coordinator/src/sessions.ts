@@ -9,6 +9,7 @@ import {
 import {
   DEFAULT_RELAY_SLOTS,
   LIMITS,
+  joinOp,
   SIG_DOMAIN,
   parseSessionId,
   peerIds,
@@ -40,6 +41,8 @@ interface OwnedSession {
   signed: Map<string, { key: string; since: number; n: number }>;
   /** Host adopted from a hint whose member has not re-joined yet. */
   pendingHostUntil: number;
+  /** Until when members that have been in the room before (a new owner is putting it together) may say what they saw. */
+  rebuildUntil: number;
   timer?: ReturnType<typeof setTimeout>;
 }
 
@@ -60,6 +63,8 @@ class Refused extends Error {
 }
 
 const PENDING_HOST_GRACE_MS = 4000;
+/** How long after a room is made its members' devices may still say what they saw of it (they are asked at once; some are slower). */
+const REBUILD_MS = 10_000;
 const HOST_PENALTY_MS = 60_000;
 const OP_TIMEOUT_MS = 8000;
 /** How far the time on a signed join may be from ours (as for mailbox proofs). */
@@ -217,7 +222,7 @@ export class SessionService {
       op.op === 'report'
         ? { op: 'report', epoch: op.epoch, issue: op.issue }
         : op.op === 'join'
-          ? { op: 'join', caps: op.caps, ...(op.hint ? { hint: op.hint } : {}) }
+          ? joinOp(op.caps, op.hint)
           : { op: 'update', caps: op.caps };
     if (!verifySessionOp(key, sessionId, peer, signed, proof))
       throw new RpcFailure('forbidden', 'the signature on that operation is not valid');
@@ -432,7 +437,7 @@ export class SessionService {
       sessionId,
       client.peer,
       this.selfId,
-      { op: 'join', caps, ...(hint ? { hint } : {}) },
+      joinOp(caps, hint),
       proof,
     );
     // It answered, if it was asked to sign again (the wait starts again if what it sent is not taken).
@@ -486,7 +491,7 @@ export class SessionService {
       const state = (await this.submit(
         sessionId,
         client.peer,
-        { op: 'join', caps, ...(hint ? { hint } : {}) },
+        joinOp(caps, hint),
         proof,
         device,
         believed,
@@ -837,12 +842,14 @@ export class SessionService {
   }
 
   /**
-   * Whether a room takes a hint: only while it is being put together again (no member yet, or
-   * a host from an earlier hint still waited for), and only one that is later than what it has.
-   * A member of a room that stands cannot move its host by saying what it saw.
+   * Whether a room takes a hint: only while it is being put together again (a moment after it
+   * was made, or a host from an earlier hint still waited for), and only one that is later than
+   * what it has. A member of a room that stands cannot move its host by saying what it saw.
    */
   private mayTakeHint(s: OwnedSession, hint: SessionHint, now: number) {
-    return (s.state.members.length === 0 || s.pendingHostUntil > now) && hint.epoch > s.state.epoch;
+    const together =
+      s.state.members.length === 0 || now < s.rebuildUntil || s.pendingHostUntil > now;
+    return together && hint.epoch > s.state.epoch;
   }
 
   /** Whether a hint is worth looking into: the room is not ours yet, or would take it. */
@@ -910,6 +917,7 @@ export class SessionService {
           penalties: new Map(),
           reports: new Map(),
           pendingHostUntil: 0,
+          rebuildUntil: now + REBUILD_MS,
         };
         this.owned.set(sessionId, s);
       }

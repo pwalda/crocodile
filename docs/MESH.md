@@ -115,7 +115,8 @@ by name goes to `name:<name>`.
   another. The owner also admits a member only if the sending server has said
   that member's device is connected to it, checks again that the member may be in
   the session and that the device has a record on the member's account that has
-  not been removed, and believes a host hint only if the host and backup it names
+  not been removed, and believes the host hint a device signed into its join only while it is putting the
+  room together, and only if the host and backup it names
   may be in the session and are such devices too; afterwards it takes operations
   on that member only from the server it joined from (a leave, which the
   member's server sends when the device disconnects, is not signed). When a

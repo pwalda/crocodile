@@ -313,6 +313,11 @@ export class GroupSession extends Emitter<GroupSessionEvents> {
   /** The latest state of the room we were told of, since we last left it. */
   private lastSeen?: SessionState;
 
+  /** A new connection: what we saw before it is not what the room is now. */
+  forgetSeen() {
+    this.lastSeen = undefined;
+  }
+
   /**
    * Callers that join while a join is in flight share it. A join that has to
    * go out on a new connection (`fresh`) doesn't: the one in flight was sent
