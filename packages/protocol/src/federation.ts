@@ -253,8 +253,9 @@ export const SessionEpoch = z.number().int().safe().min(0);
 // signed), so that the two cannot come apart.
 /**
  * The last state of a session its device saw (the epoch, the host and the backup), so that a new
- * owner can keep the same host. An epoch that is no epoch is not a reason to drop the join (the
- * owner leaves such a hint out).
+ * owner can keep the same host. The owner leaves out a hint it does not take (an epoch beyond what
+ * it allows, a host that may not be there) without refusing the join; one that is not made of
+ * whole numbers and short ids is not read at all.
  */
 export const SessionHint = z.object({
   epoch: z.number().int(),

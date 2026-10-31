@@ -753,6 +753,34 @@ describe('events and session operations from other servers', () => {
       expect(state()!.host).toBe(net.bob.conn.peer);
     });
 
+    it('does not keep the moment open for hints by taking one', async () => {
+      const net = await conversation();
+      const state = () => net.victim.sessions.ownedState(net.sessionId);
+      const device = peerIds.device(net.alice.conn.peer);
+      net.toVictim.send(
+        presenceFrom(net.rogue, Date.now(), [entry(net.alice.identity.userId, [device])]),
+      );
+      const join = (epoch: number, at: number) =>
+        op(
+          net,
+          net.alice.conn.peer,
+          { op: 'join', caps: caps(), hint: { epoch, host: net.bob.conn.peer, backup: null } },
+          net.alice.identity,
+          { at },
+        );
+      const now = Date.now();
+      join(1000, now);
+      await waitFor(() => (state()?.epoch ?? 0) >= 1000, 5000, 'the first hint');
+      // The moment after the room was made is over; the host of the hint just taken is still waited for.
+      (
+        net.victim.sessions as unknown as { owned: Map<string, { rebuildUntil: number }> }
+      ).owned.get(net.sessionId)!.rebuildUntil = 0;
+      join(2000, now + 1);
+      await settled(net);
+      await new Promise((r) => setTimeout(r, 300));
+      expect(state()!.epoch).toBe(1000);
+    });
+
     it('does not go back to an earlier epoch when a later join in the same moment names one', async () => {
       const net = await conversation();
       const state = () => net.victim.sessions.ownedState(net.sessionId);

@@ -449,12 +449,13 @@ export class SessionService {
     const leavesBefore = wait.leaves;
     let vouched: HostCaps;
     let device: SignedRecord<'device'>;
-    // What the device says it saw is believed only as far as it can be (the owner looks at it when it is another server).
-    let believed: SessionHint | null | undefined;
+    // What the device says it saw is believed only as far as it can be (the owner looks at it again
+    // when it is another server).
+    let believed: SessionHint | null = null;
     try {
       await this.checkAccess(client.userId, sessionId);
       ({ caps: vouched, device } = await this.vouchOrDrop(client.peer, sessionId, caps, true));
-      if (hint && this.ownerOf(sessionId) === this.selfId && this.hintMatters(sessionId, hint))
+      if (hint && this.hintMatters(sessionId, hint))
         believed = await this.hintAllowed(sessionId, hint);
     } catch (err) {
       // No longer allowed in (left the space, say): asking again would only be refused again.
@@ -625,7 +626,7 @@ export class SessionService {
     proof?: SessionOpProof,
     /** The record of the device, for a join (we have already found it). */
     device?: SignedRecord<'device'>,
-    /** What of its hint we found to be believable, for a join we keep ourselves (null: none; not looked into: undefined). */
+    /** What of its hint we found to be believable, for a join we keep ourselves. */
     hint?: SessionHint | null,
   ): Promise<unknown> {
     const owner = this.ownerOf(sessionId);
@@ -640,22 +641,12 @@ export class SessionService {
           op,
           ...(proof ? { proof } : {}),
         };
-        const run = (believed?: SessionHint | null) =>
+        return Promise.resolve(
           this.runRemoteOp(this.selfId, frame, {
             ...(device ? { device } : {}),
-            ...(believed ? { hint: believed } : {}),
-          });
-        // The room became ours since the join was looked at: the hint has not been looked into yet.
-        if (
-          hint === undefined &&
-          op.op === 'join' &&
-          op.hint &&
-          this.hintMatters(sessionId, op.hint)
-        ) {
-          const named = op.hint;
-          return this.hintAllowed(sessionId, named).then(run);
-        }
-        return Promise.resolve(run(hint));
+            ...(hint ? { hint } : {}),
+          }),
+        );
       } catch (err) {
         return Promise.reject(err);
       }
@@ -842,14 +833,13 @@ export class SessionService {
   }
 
   /**
-   * Whether a room takes a hint: only while it is being put together again (a moment after it
-   * was made, or a host from an earlier hint still waited for), and only one that is later than
-   * what it has. A member of a room that stands cannot move its host by saying what it saw.
+   * Whether a room takes a hint: only while it is being put together again (it has no member
+   * yet, or was made a moment ago), and only one that is later than what it has. A member of a
+   * room that stands cannot move its host by saying what it saw, nor keep the moment open by
+   * doing so.
    */
   private mayTakeHint(s: OwnedSession, hint: SessionHint, now: number) {
-    const together =
-      s.state.members.length === 0 || now < s.rebuildUntil || s.pendingHostUntil > now;
-    return together && hint.epoch > s.state.epoch;
+    return (s.state.members.length === 0 || now < s.rebuildUntil) && hint.epoch > s.state.epoch;
   }
 
   /** Whether a hint is worth looking into: the room is not ours yet, or would take it. */
