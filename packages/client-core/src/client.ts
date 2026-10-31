@@ -444,6 +444,8 @@ const DAY_MS = 24 * 3600_000;
 const HOUR_MS = 3600_000;
 /** Secrets of links this device made that it keeps to show again. */
 const TICKETS_KEPT = 500;
+/** The most former admins a space can list (what the protocol allows). */
+const FORMER_ADMINS_MAX = 1000;
 /** How often the record of a link we made is asked for while we do not hold it. */
 const INVITE_ASK_MS = 10_000;
 /** How long an invite lasts unless asked otherwise, and an invitation to a named person can be accepted. */
@@ -2066,6 +2068,8 @@ export class CrocodileClient extends Emitter<ClientEvents> {
           ...r.body.admins.filter((u) => !admins.includes(u)),
         ]),
       ];
+      if (formerAdmins.length > FORMER_ADMINS_MAX)
+        throw new Error('Too many admins have been taken off this space to take off another.');
       const unchanged =
         !!r.body.authority &&
         signedInvitePolicy(r.body.invitePolicy) === signedInvitePolicy(body.invitePolicy) &&
@@ -2211,15 +2215,17 @@ export class CrocodileClient extends Emitter<ClientEvents> {
   }
 
   /**
-   * The state of the space's link, after asking for the record of a link we made if we do not hold
-   * it (this device's copy of the records may be behind), so that what is decided on it is right.
+   * The state of the space's link, after asking for its record if we do not hold it (this device's
+   * copy of the records may be behind, or the link was made by another admin), so that what is
+   * decided on it is right.
    */
   private async openLinkNow(spaceId: string) {
     const link = this.openLinkOf(spaceId);
     if (link.state !== 'elsewhere' || link.invite || !this.link) return link;
     const space = this.records.get(recordKey.space(spaceId)) as SignedRecord<'space'> | undefined;
     const named = space?.body.publicInvite;
-    if (!named || !this.tickets.has(named)) return link;
+    // (The record of a link is public, whoever made it: it is what a change to the link must end.)
+    if (!named) return link;
     // (If it cannot be asked for, nothing is decided on a guess: the action fails and can be tried again.)
     this.records.ingestAll(await fetchRecords(this.link, [recordKey.invite(named)]));
     return this.openLinkOf(spaceId);
@@ -2360,8 +2366,15 @@ export class CrocodileClient extends Emitter<ClientEvents> {
       }
       throw err;
     }
-    if ('invite' in previous && previous.invite && previous.state !== 'ended')
-      await this.revokeInvite(previous.invite.body.code).catch(() => {});
+    // The one it replaces ends with it. (Also one that had ended because its maker may no longer
+    // make it: it is still a record that counts and could be named again.)
+    const old = 'invite' in previous ? previous.invite : undefined;
+    if (
+      old &&
+      !old.body.revoked &&
+      (old.body.expiresAt === null || old.body.expiresAt > Date.now())
+    )
+      await this.revokeInvite(old.body.code).catch(() => {});
     return ticket.secret;
   }
 

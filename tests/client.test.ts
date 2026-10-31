@@ -20,7 +20,9 @@ import {
   linkNonce,
   sealLink,
   sign,
+  randomId,
   signRecord,
+  signSpaceAuthority,
   ticketFromSecret,
 } from '@crocodile/crypto';
 import {
@@ -1840,6 +1842,59 @@ describe('leaving', () => {
       await alice.updateSpace(spaceId, (b) => ({ ...b, name: 'Marsh' }));
       await waitFor(() => bob.state.spaces[spaceId]?.name === 'Marsh', 8000, 'bob sees the change');
       expect(bob.state.spaces[spaceId]!.members).toContain(bob.userId);
+    });
+
+    it('ends the link another admin made when it is replaced, though this device does not hold its record', async () => {
+      const { alice, carol, spaceId } = await trio();
+      await carol.joinWithInvite(await alice.shareInvite(spaceId));
+      await alice.updateSpace(spaceId, (b) => ({ ...b, admins: [carol.userId] }));
+      await waitFor(
+        () => carol.state.spaces[spaceId]?.admins.includes(carol.userId),
+        5000,
+        'carol is an admin',
+      );
+      const hers = ticketFromSecret(await carol.createInvite(spaceId))!.tid;
+      await waitFor(
+        () => alice.state.spaces[spaceId]?.publicInvite === hers,
+        5000,
+        'the space names her link',
+      );
+      expect(alice.records.get(`invite:${hers}`)).toBeUndefined();
+      await alice.createInvite(spaceId);
+      expect((alice.records.get(`invite:${hers}`) as SignedRecord<'invite'>).body.revoked).toBe(
+        true,
+      );
+    });
+
+    it('does not take another admin off the list when it has no room for a former one', async () => {
+      const { alice, carol, spaceId } = await trio();
+      await alice.updateSpace(spaceId, (b) => ({ ...b, admins: [carol.userId] }));
+      // A list as long as it can be.
+      const owner = alice as unknown as { identity: import('@crocodile/crypto').Identity };
+      const former = Array.from({ length: 1000 }, () => randomId(16));
+      const r = alice.records.get(`space:${spaceId}`) as SignedRecord<'space'>;
+      const full = signRecord(
+        owner.identity,
+        'space',
+        r.key,
+        {
+          ...r.body,
+          formerAdmins: former,
+          authority: signSpaceAuthority(
+            owner.identity,
+            spaceId,
+            r.body.admins,
+            (r.body.authority?.at ?? 0) + 1,
+            r.body.invitePolicy,
+            former,
+          ),
+        },
+        r.version + 1,
+      );
+      alice.records.ingest(full);
+      await expect(alice.setAdmin(spaceId, carol.userId, false)).rejects.toThrow(/Too many admins/);
+      // Other changes to the space still go through.
+      await alice.updateSpace(spaceId, (b) => ({ ...b, name: 'Marsh' }));
     });
 
     it('tells someone joining with the link of an admin who has been removed that it is out of date', async () => {
