@@ -593,3 +593,90 @@ export function SpaceSettingsModal({ spaceId }: { spaceId: string }) {
     </Modal>
   );
 }
+
+/**
+ * The owner looks through those who joined by an invite link of the older kind, which a record
+ * made to look like theirs could pass for, and says who stays. The others need a new link.
+ */
+export function RosterModal({ spaceId }: { spaceId: string }) {
+  const space = useCroc((s) => s.spaces[spaceId]);
+  const me = useCroc((s) => s.me?.userId);
+  const client = getClient();
+  // Those taken off the list here; everyone else is kept.
+  const [out, setOut] = useState<string[]>([]);
+  const [busy, setBusy] = useState(false);
+  const pending = space?.rosterToSign;
+  // Signed (here or on another device): there is nothing more to check.
+  useEffect(() => {
+    if (space && !pending) closeModal();
+  }, [space, pending]);
+  if (!space || !pending || space.owner !== me) return null;
+  // (Read again whenever the space's members change.)
+  const people = client.legacyMembers(spaceId);
+  const kept = people.filter((u) => !out.includes(u));
+  const confirm = async () => {
+    setBusy(true);
+    try {
+      await client.signRoster(spaceId, kept);
+      closeModal();
+    } catch (e) {
+      client.reportError((e as Error).message);
+      setBusy(false);
+    }
+  };
+  return (
+    <Modal
+      title="Check who stays"
+      onClose={closeModal}
+      wide
+      footer={
+        <>
+          <Button variant="ghost" onClick={closeModal}>
+            Later
+          </Button>
+          <Button disabled={busy} onClick={() => void confirm()}>
+            {kept.length === 0
+              ? 'Confirm'
+              : kept.length === 1
+                ? 'Confirm: 1 person stays'
+                : `Confirm: ${kept.length} people stay`}
+          </Button>
+        </>
+      }
+    >
+      <p className="text-sm text-muted">
+        These people joined {space.name} with an invite link of an older kind. Anyone who can read
+        the list of members could make a membership that looks like theirs, so please look through
+        it. Those you keep stay in the space. The others, and anyone who joins that way later, need
+        a new link. Until you confirm, they all count as they did before.
+      </p>
+      {people.length === 0 && (
+        <p className="mt-4 rounded-xl bg-field px-3 py-2 text-sm text-muted">
+          Nobody joined that way. Confirm to close the old way in for good.
+        </p>
+      )}
+      <section aria-label="Joined with an older link" className="mt-4">
+        {people.map((u) => {
+          const name = client.state.profiles[u]?.username ?? 'Member';
+          const stays = !out.includes(u);
+          return (
+            <div key={u} className="flex items-center gap-3 rounded-xl px-2 py-1.5 hover:bg-hover">
+              <Avatar userId={u} size={28} />
+              <UserName userId={u} className="flex-1 truncate text-sm font-semibold" />
+              <span className="text-xs text-muted">{stays ? 'stays' : 'needs a new link'}</span>
+              <Toggle
+                checked={stays}
+                label={`${name} stays`}
+                onChange={(v) => setOut(v ? out.filter((x) => x !== u) : [...out, u])}
+              />
+            </div>
+          );
+        })}
+      </section>
+      <p className="mt-4 text-xs text-muted">
+        To remove someone for good, ban them in the space settings first; a ban also stops a new
+        link from working for them.
+      </p>
+    </Modal>
+  );
+}

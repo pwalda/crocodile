@@ -84,6 +84,7 @@ Metadata lives in signed records (`packages/protocol/src/records.ts`):
 | profile | `profile:<userId>`          | the user (name, avatar, bio, X25519 key)                            |
 | friends | `friends:<userId>`          | the user; sealed, readable only by the user's devices (see below)   |
 | space   | `space:<spaceId>`           | the owner, or an admin the owner signed for (see below)             |
+| roster  | `roster:<spaceId>`          | the space owner: who stays of those who joined by an older link     |
 | invite  | `invite:<code>`             | the space owner or an admin (a member, for one named person)        |
 | member  | `member:<spaceId>:<userId>` | the user, referencing a valid invite                                |
 | device  | `device:<userId>:<device>`  | the user (name, platform, current prekeys, revoked flag)            |

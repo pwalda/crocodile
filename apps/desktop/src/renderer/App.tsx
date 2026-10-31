@@ -35,6 +35,7 @@ import {
   CreateChannelModal,
   InviteModal,
   InvitePersonModal,
+  RosterModal,
   SpaceSettingsModal,
 } from './modals/SpaceModals';
 import { ConfirmModal, NewDmModal, ProfileModal } from './modals/UserModals';
@@ -252,6 +253,8 @@ function Modals() {
       return <CreateChannelModal spaceId={modal.spaceId} />;
     case 'space-settings':
       return <SpaceSettingsModal spaceId={modal.spaceId} />;
+    case 'roster':
+      return <RosterModal spaceId={modal.spaceId} />;
     case 'settings':
       return <SettingsModal tab={modal.tab} />;
     case 'profile':

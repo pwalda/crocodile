@@ -9,6 +9,7 @@ import {
   utf8,
   type RecordBodies,
   type RecordKind,
+  type RosterBody,
   type SignedRecord,
   type SpaceBody,
   LIMITS,
@@ -222,9 +223,19 @@ export function validateRecord(input: unknown, ctx: ValidationContext): Validati
       if (body.formerAdmins?.length && !authority)
         return reject("former admins need the owner's signature on the admin list");
       // Those let in by an admin stay, so the admins the owner has removed are only added to.
+      // A space that is deleted stays so, and keeps nothing but what names it: nobody is let in.
+      if ((existing?.body as SpaceBody | undefined)?.deleted && !body.deleted)
+        return reject('a deleted space stays deleted');
       const kept = new Set(body.formerAdmins ?? []);
-      if ((existing?.body as SpaceBody | undefined)?.formerAdmins?.some((u) => !kept.has(u)))
+      if (
+        !body.deleted &&
+        (existing?.body as SpaceBody | undefined)?.formerAdmins?.some((u) => !kept.has(u))
+      )
         return reject('former admins cannot be taken off the list');
+      // Nor is the roster, once the owner has signed it: that would let in those it left out.
+      const rostered = (existing?.body as SpaceBody | undefined)?.authority?.roster;
+      if (!body.deleted && rostered && authority?.roster !== rostered)
+        return reject('the roster of a space cannot be changed or taken off');
       if (body.owner === authorId) {
         if (spaceIdFor(record.author, body.nonce) !== spaceId)
           return reject('space id does not match owner');
@@ -237,6 +248,20 @@ export function validateRecord(input: unknown, ctx: ValidationContext): Validati
         return reject('only the owner may delete a space');
       if (body.bans.some((u) => u === body.owner || body.admins.includes(u)))
         return reject('admins cannot ban the owner or other admins');
+      return { ok: true, authorId };
+    }
+    case 'roster': {
+      const body = record.body as RosterBody;
+      if (parts.length !== 2 || parts[1] !== body.spaceId) return reject('roster key mismatch');
+      const space = ctx.get(`space:${body.spaceId}`) as SignedRecord<'space'> | undefined;
+      if (!space) return reject('unknown space', true);
+      if (authorId !== space.body.owner) return reject('only the owner may sign a roster');
+      // In one order, each once: the hash the space names it by is then of one list only.
+      if (!body.members.every((u, i) => USER_ID.test(u) && (i === 0 || body.members[i - 1]! < u)))
+        return reject('a roster lists each member once, in order');
+      const named = space.body.authority?.roster;
+      if (named && named !== rosterHash(body.spaceId, body.members))
+        return reject('this is not the roster the space names');
       return { ok: true, authorId };
     }
     case 'invite': {
@@ -263,15 +288,15 @@ export function validateRecord(input: unknown, ctx: ValidationContext): Validati
         )
           return reject('an invitation to a person needs an end, within 30 days');
       } else if (ctx.fresh && !body.revoked) {
-        // The open invite too, when it is made (those already made, without an end, stay as they
-        // were, and so does their withdrawal).
+        // The open link is a ticket, whose secret no record holds; a code anyone could read in a
+        // member list is no longer made (those already made stay as they were, and so does their
+        // withdrawal).
+        if (body.tpub === undefined) return reject('an open link is made as a ticket');
         if (
           body.expiresAt === null ||
           body.expiresAt > ctx.now + INVITE_MAX_MS + INVITE_CLOCK_SLACK_MS
         )
           return reject('an invite needs an end, within 30 days');
-        if (body.code.length < OPEN_CODE_LENGTH)
-          return reject('the code of an open link is too short');
       }
       // The owner and current admins make and revoke invites. (A removed
       // admin's invites stop working anyway; see 'member' below.)
@@ -348,20 +373,14 @@ export function validateRecord(input: unknown, ctx: ValidationContext): Validati
       if (invite.body.tpub !== undefined) return reject('this invite is used with its ticket');
       if (invite.body.for !== undefined && invite.body.for !== authorId)
         return reject('invite is for somebody else');
+      // An open link of the older kind is read from a member list by anyone in the space, and
+      // so is no way in any more. (The members it let in stay if the owner's roster lists them.)
+      if (ctx.fresh && invite.body.for === undefined)
+        return reject('this link is out of date; ask for a new one');
+      const problem = legacyMembershipProblem(ctx, body.spaceId, space.body, body);
+      if (problem) return reject(problem.reason, problem.retryable && !ctx.fresh);
       if (ctx.fresh) {
         if (invite.body.revoked) return reject('invite was revoked');
-        // The open invite is the one the space names; a newer one has replaced the rest.
-        if (
-          invite.body.for === undefined &&
-          space.body.publicInvite !== openLinkName(body.spaceId, invite.body.code, false)
-        )
-          return reject('this link has been replaced or turned off');
-        // Nor is one that never ends the open link, however the space came to name it.
-        if (
-          invite.body.for === undefined &&
-          (invite.body.expiresAt === null || invite.body.code.length < OPEN_CODE_LENGTH)
-        )
-          return reject('this link is out of date; make a new one');
         // An invite from someone who may no longer make it stops working: an admin who was
         // removed, or, for a named person, a member where the space no longer allows that.
         const maker = userIdFromKey(invite.author);
@@ -423,6 +442,7 @@ function authorityPayload(
   at: number,
   invitePolicy?: SpaceBody['invitePolicy'],
   formerAdmins?: string[],
+  roster?: string,
 ) {
   // Members being let invite is the owner's to say, so it is in what the owner signs. (The
   // default is left out, which keeps what was signed before the setting existed valid.)
@@ -434,6 +454,7 @@ function authorityPayload(
     ...(policy ? { invitePolicy: policy } : {}),
     // (Also left out when there are none, so that what was signed before there were any stays valid.)
     ...(formerAdmins?.length ? { formerAdmins } : {}),
+    ...(roster ? { roster } : {}),
   };
 }
 
@@ -450,6 +471,7 @@ export function signSpaceAuthority(
   at: number,
   invitePolicy?: SpaceBody['invitePolicy'],
   formerAdmins?: string[],
+  roster?: string,
 ): NonNullable<SpaceBody['authority']> {
   return {
     ownerKey: owner.publicKey,
@@ -457,8 +479,9 @@ export function signSpaceAuthority(
     sig: sign(
       owner,
       SIG_DOMAIN.spaceAdmins,
-      authorityPayload(spaceId, admins, at, invitePolicy, formerAdmins),
+      authorityPayload(spaceId, admins, at, invitePolicy, formerAdmins, roster),
     ),
+    ...(roster ? { roster } : {}),
   };
 }
 
@@ -472,7 +495,7 @@ export function spaceAuthorityValid(spaceId: string, body: SpaceBody): boolean {
     return verifyPayload(
       a.ownerKey,
       SIG_DOMAIN.spaceAdmins,
-      authorityPayload(spaceId, body.admins, a.at, body.invitePolicy, body.formerAdmins),
+      authorityPayload(spaceId, body.admins, a.at, body.invitePolicy, body.formerAdmins, a.roster),
       a.sig,
     );
   } catch {
@@ -556,6 +579,108 @@ function ticketBroken(spaceId: string, member: RecordBodies['member']): string |
   return undefined;
 }
 
+/** What a roster is named by: a hash of who it lists, so that the space's signature covers the list. */
+export function rosterHash(spaceId: string, members: string[]): string {
+  return toB64u(sha256(utf8.encode(`croc/v1/roster\n${canonicalJson({ spaceId, members })}`)));
+}
+
+/** The owner's signed roster of those who stay (the members in order, each once). */
+export function signRoster(
+  owner: Identity,
+  spaceId: string,
+  members: string[],
+  at = Date.now(),
+): { record: SignedRecord<'roster'>; hash: string } {
+  const list = [...new Set(members)].sort();
+  return {
+    record: signRecord(owner, 'roster', recordKey.roster(spaceId), { spaceId, members: list, at }),
+    hash: rosterHash(spaceId, list),
+  };
+}
+
+const NOBODY: ReadonlySet<string> = new Set();
+const emptyRosters = new Map<string, string>();
+/** The hash a space names a roster of nobody by (which needs no record). */
+export function emptyRosterHash(spaceId: string): string {
+  let hash = emptyRosters.get(spaceId);
+  if (!hash) {
+    if (emptyRosters.size >= 1000) emptyRosters.clear();
+    hash = rosterHash(spaceId, []);
+    emptyRosters.set(spaceId, hash);
+  }
+  return hash;
+}
+
+// What a roster holds is worked out once for each roster, not for each question put to it (the
+// records held are taken from a store or a server afresh, so they are known by their signature;
+// those asked about have all been checked).
+const ROSTERS_KEPT = 100;
+const rosterMembers = new Map<string, { hash: string; members: Set<string>; owner: string }>();
+
+/**
+ * Who the roster the space names lists: undefined if it names none (older memberships count as
+ * they always did), nobody if it names the empty one, and `null` if it names one not held.
+ */
+export function rosterOf(
+  lookup: RecordLookup,
+  spaceId: string,
+  space: SpaceBody,
+): ReadonlySet<string> | null | undefined {
+  const named = space.authority?.roster;
+  if (!named) return undefined;
+  if (named === emptyRosterHash(spaceId)) return NOBODY;
+  const record = lookup.get(recordKey.roster(spaceId)) as SignedRecord<'roster'> | undefined;
+  if (!record || record.body.spaceId !== spaceId) return null;
+  let found = rosterMembers.get(record.sig);
+  if (!found) {
+    found = {
+      hash: rosterHash(spaceId, record.body.members),
+      members: new Set(record.body.members),
+      owner: userIdFromKey(record.author),
+    };
+    if (rosterMembers.size >= ROSTERS_KEPT) rosterMembers.clear();
+    rosterMembers.set(record.sig, found);
+  }
+  return found.hash === named && found.owner === space.owner ? found.members : null;
+}
+
+/**
+ * The key of the roster a membership of the older kind (a code, no ticket) is checked against, if
+ * the space it is for names one that is not empty (a roster of nobody needs no record).
+ */
+export function rosterKeyOf(
+  spaceId: string,
+  space: SpaceBody | undefined,
+  member: RecordBodies['member'],
+): string | undefined {
+  if (member.left || member.ticket) return undefined;
+  const named = space?.authority?.roster;
+  return named && named !== emptyRosterHash(spaceId) ? recordKey.roster(spaceId) : undefined;
+}
+
+/**
+ * Why a membership of the older kind (an invite code, no ticket) does not count, if it does not.
+ * A space whose owner has signed a roster takes it only for those on the roster, and for those
+ * a named invitation was made for; before that it counts as it always did.
+ */
+export function legacyMembershipProblem(
+  lookup: RecordLookup,
+  spaceId: string,
+  space: SpaceBody,
+  member: RecordBodies['member'],
+): { reason: string; retryable?: boolean } | undefined {
+  const roster = rosterOf(lookup, spaceId, space);
+  if (roster === undefined || roster?.has(member.userId)) return undefined;
+  // (A named invitation is a proof of its own: the invite is for this user and nobody else.)
+  const invite = member.inviteCode
+    ? (lookup.get(recordKey.invite(member.inviteCode)) as SignedRecord<'invite'> | undefined)
+    : undefined;
+  if (invite?.body.spaceId === spaceId && invite.body.for === member.userId) return undefined;
+  if (roster === null)
+    return { reason: "the owner's list of members is not here yet", retryable: true };
+  return { reason: 'this link is out of date; ask for a new one' };
+}
+
 /** True if the user currently belongs to the space (owner or active, non-banned member). */
 export function isSpaceMember(lookup: RecordLookup, spaceId: string, userId: string): boolean {
   const space = lookup.get(`space:${spaceId}`) as SignedRecord<'space'> | undefined;
@@ -564,7 +689,8 @@ export function isSpaceMember(lookup: RecordLookup, spaceId: string, userId: str
   if (space.body.bans.includes(userId)) return false;
   const member = lookup.get(`member:${spaceId}:${userId}`) as SignedRecord<'member'> | undefined;
   if (!member || member.body.left) return false;
-  if (!member.body.ticket) return true;
+  if (!member.body.ticket)
+    return !legacyMembershipProblem(lookup, spaceId, space.body, member.body);
   // Who may have made the ticket is the space's to say now, whatever it said when this was taken.
   return !ticketProblem(spaceId, space.body, member.body);
 }

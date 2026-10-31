@@ -1,3 +1,4 @@
+import { rosterKeyOf } from '@crocodile/crypto';
 import type { RecordBodies, SignedRecord } from '@crocodile/protocol';
 import { fnv1a } from './election';
 
@@ -116,6 +117,8 @@ export function shardsOf(record: SignedRecord): string[] {
       return [user(parts[1]!)];
     case 'space':
       return [`space:${parts[1]}`, user((record.body as RecordBodies['space']).owner)];
+    case 'roster':
+      return [`space:${parts[1]}`];
     case 'invite':
       return [`invite:${parts[1]}`, `space:${(record.body as RecordBodies['invite']).spaceId}`];
     case 'member':
@@ -152,6 +155,7 @@ export function shardOfKey(key: string): string | undefined {
     case 'note':
       return user(a);
     case 'space':
+    case 'roster':
       return b === undefined ? `space:${a}` : undefined;
     case 'member':
       return `space:${a}`;
@@ -168,7 +172,7 @@ export function shardOfPrefix(prefix: string): string | undefined {
   const m = /^(device|note|member):([a-z2-7]+):/.exec(prefix);
   if (m) return shardOfKey(`${m[1]}:${m[2]}:x`);
   // A whole key of the single-record kinds.
-  if (/^(profile|friends|space|invite):[a-z2-7]+$/.test(prefix)) return shardOfKey(prefix);
+  if (/^(profile|friends|space|roster|invite):[a-z2-7]+$/.test(prefix)) return shardOfKey(prefix);
   return undefined;
 }
 
@@ -202,6 +206,19 @@ export function inviteCodeOfMember(body: unknown): string | undefined {
   return undefined;
 }
 
+/**
+ * The roster a membership of the older kind (a code, no ticket) is checked against, if the space
+ * it is for names one that is not empty. (Not known without the space, so not in `dependenciesOf`.)
+ */
+export function rosterKeyOfMember(
+  record: SignedRecord,
+  space: SignedRecord | undefined,
+): string | undefined {
+  if (record.kind !== 'member') return undefined;
+  const member = record.body as RecordBodies['member'];
+  return rosterKeyOf(member.spaceId, space?.body as RecordBodies['space'] | undefined, member);
+}
+
 /** Records a record's checks look at, besides the record itself. */
 export function dependenciesOf(record: SignedRecord, authorId: string): string[] {
   const deps = record.kind === 'note' ? [] : [`profile:${authorId}`];
@@ -212,6 +229,7 @@ export function dependenciesOf(record: SignedRecord, authorId: string): string[]
     const code = inviteCodeOfMember(record.body);
     if (code) deps.push(`invite:${code}`);
   }
+  if (record.kind === 'roster') deps.push(`space:${body.spaceId}`);
   if (record.kind === 'note') deps.push(`profile:${record.key.split(':')[1]}`);
   // A profile's author is the profile itself: nothing to fetch for it.
   return deps.filter((k) => k !== record.key);

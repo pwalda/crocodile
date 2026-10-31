@@ -10,6 +10,7 @@ import {
   createIdentity,
   createLinkKem,
   createPrekey,
+  inviteCommitment,
   linkCommitment,
   linkNonce,
   newTicket,
@@ -19,6 +20,8 @@ import {
   sealToDevice,
   signMailProof,
   signRecord,
+  signRoster,
+  signSpaceAuthority,
   signTicketUse,
   spaceIdFor,
 } from '@crocodile/crypto';
@@ -136,11 +139,11 @@ describe('sharded records', () => {
   it('keeps each record on its owners, and every server can read it', async () => {
     const servers = await network(6);
     const alice = await user(servers[0]!, 'alice');
-    const { spaceId, space, code } = await createSpace(alice, 'Swamp');
+    const { spaceId, space, tid, code } = await createSpace(alice, 'Swamp');
     const readers = await Promise.all(servers.map((c) => user(c)));
     // Readable through any server, owner or not (the invite reaches the
     // owners of its code a moment after the owners of its space).
-    const keys = [space.key, `invite:${code}`].sort();
+    const keys = [space.key, `invite:${tid}`].sort();
     for (const r of readers) {
       let got: string[] = [];
       for (const start = Date.now(); Date.now() - start < 3000;) {
@@ -818,6 +821,86 @@ describe('the app across a sharded network', () => {
     // Presence across servers.
     await waitFor(() => alice.state.presence[bob.userId] === 'online', 8000, 'presence');
   });
+});
+
+describe('the roster of an owner', () => {
+  it('counts memberships of the older kind by the roster whichever server is asked, and fetches it to check a copy', async () => {
+    const servers = await network(5);
+    const owner = createIdentity();
+    const nonce = randomId();
+    const spaceId = spaceIdFor(owner.publicKey, nonce);
+    const code = randomId(16);
+    const bob = createIdentity();
+    const mallory = createIdentity();
+    const listed = signRoster(owner, spaceId, [bob.userId]);
+    const space = signRecord(owner, 'space', recordKey.space(spaceId), {
+      name: 'Swamp',
+      owner: owner.userId,
+      nonce,
+      admins: [],
+      bans: [],
+      publicInvite: inviteCommitment(spaceId, code),
+      channels: [{ id: randomId(), name: 'general', kind: 'text' }],
+      authority: signSpaceAuthority(
+        owner,
+        spaceId,
+        [],
+        Date.now(),
+        undefined,
+        undefined,
+        listed.hash,
+      ),
+    });
+    const join = (who: typeof bob) =>
+      signRecord(who, 'member', recordKey.member(spaceId, who.userId), {
+        spaceId,
+        userId: who.userId,
+        inviteCode: code,
+      });
+    const kept = [
+      space,
+      listed.record,
+      signRecord(owner, 'invite', recordKey.invite(code), { spaceId, code, expiresAt: null }),
+      signRecord(owner, 'member', recordKey.member(spaceId, owner.userId), {
+        spaceId,
+        userId: owner.userId,
+      }),
+    ];
+    // Held by the servers that own them, and by no one else.
+    const byId = new Map(servers.map((c) => [c.info.id, c]));
+    for (const r of kept)
+      for (const id of servers[0]!.membership.settled.placement(r))
+        expect(
+          (await byId.get(id)!.dist.putLocal(r, { fresh: false, origin: 'peer' })).accepted,
+        ).toBe(true);
+    const keepers = new Set(servers[0]!.membership.settled.placement(space));
+    const far = servers.find((c) => !keepers.has(c.info.id))!;
+    expect(far.store.get(space.key)).toBeUndefined();
+    // A copy of a membership checks against the roster, which this server has to go and get
+    // (asked again if the servers holding it are slow to answer).
+    const eventually = async (fn: () => Promise<boolean>) => {
+      for (const start = Date.now(); Date.now() - start < 15_000;) {
+        if (await fn()) return true;
+        await new Promise((done) => setTimeout(done, 200));
+      }
+      return false;
+    };
+    expect(
+      await eventually(
+        async () => (await far.dist.putLocal(join(bob), { fresh: false, origin: 'peer' })).accepted,
+      ),
+    ).toBe(true);
+    expect(
+      (await far.dist.putLocal(join(mallory), { fresh: false, origin: 'peer' })).accepted,
+    ).toBe(false);
+    // And whichever server is asked, the same goes for who is in.
+    for (const c of servers) {
+      expect(
+        await eventually(async () => (await c.areSpaceMember([spaceId], bob.userId))[0]!),
+      ).toBe(true);
+      expect(await c.areSpaceMember([spaceId], mallory.userId)).toEqual([false]);
+    }
+  }, 60_000);
 });
 
 describe('large records between servers', () => {

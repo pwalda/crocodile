@@ -768,10 +768,7 @@ export class Coordinator {
 
   /** `isSpaceMember` for several spaces at once, in one round of questions to the owners. */
   async areSpaceMember(spaceIds: string[], userId: string) {
-    const records = await this.dist.get(
-      spaceIds.flatMap((id) => [recordKey.space(id), recordKey.member(id, userId)]),
-    );
-    const byKey = new Map(records.map((r) => [r.key, r]));
+    const byKey = await this.dist.membershipRecords(spaceIds, userId);
     return spaceIds.map((id) => isSpaceMember({ get: (k) => byKey.get(k) }, id, userId));
   }
 
