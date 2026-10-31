@@ -612,8 +612,12 @@ export class CrocodileClient extends Emitter<ClientEvents> {
     };
     const dms = (await this.platform.kv.get<string[]>('dms')) ?? [];
     const dmRequests = (await this.platform.kv.get<string[]>('dm-requests')) ?? [];
+    // (Only what is a secret and the name that goes with it.)
+    const stored = await this.platform.kv.get<Record<string, string>>('invite-tickets');
     this.tickets = new Map(
-      Object.entries((await this.platform.kv.get<Record<string, string>>('invite-tickets')) ?? {}),
+      Object.entries(stored && typeof stored === 'object' ? stored : {}).filter(
+        ([tid, secret]) => typeof secret === 'string' && ticketFromSecret(secret)?.tid === tid,
+      ),
     );
     await this.loadDevice();
     await this.outbox.load();
@@ -817,6 +821,7 @@ export class CrocodileClient extends Emitter<ClientEvents> {
     await this.platform.kv.delete('dm-requests');
     // (What is waiting to be written is written empty, and then the key goes.)
     this.tickets.clear();
+    this.invitesAsked.clear();
     await this.ticketsSaved;
     await this.platform.kv.delete('invite-tickets');
     this.outbox = new Outbox(this.platform.kv);
@@ -1930,14 +1935,18 @@ export class CrocodileClient extends Emitter<ClientEvents> {
       ],
       ...(icon ? { icon } : {}),
     };
-    await this.putRecord(signRecord(id, 'space', recordKey.space(spaceId), body));
+    // (Kept before the space names the link: a link named and not kept could not be shown again.)
+    await this.keepTicket(ticket);
+    await this.putRecord(signRecord(id, 'space', recordKey.space(spaceId), body)).catch((err) => {
+      this.forgetTicket(ticket.tid);
+      throw err;
+    });
     await this.putRecord(
       signRecord(id, 'member', recordKey.member(spaceId, id.userId), {
         spaceId,
         userId: id.userId,
       }),
     );
-    await this.keepTicket(ticket);
     await this.putRecord(
       signRecord(id, 'invite', recordKey.invite(ticket.tid), {
         spaceId,
@@ -2211,9 +2220,8 @@ export class CrocodileClient extends Emitter<ClientEvents> {
     const space = this.records.get(recordKey.space(spaceId)) as SignedRecord<'space'> | undefined;
     const named = space?.body.publicInvite;
     if (!named || !this.tickets.has(named)) return link;
-    this.records.ingestAll(
-      await fetchRecords(this.link, [recordKey.invite(named)]).catch(() => []),
-    );
+    // (If it cannot be asked for, nothing is decided on a guess: the action fails and can be tried again.)
+    this.records.ingestAll(await fetchRecords(this.link, [recordKey.invite(named)]));
     return this.openLinkOf(spaceId);
   }
 
@@ -2362,7 +2370,7 @@ export class CrocodileClient extends Emitter<ClientEvents> {
   }
 
   private async stopLink(spaceId: string) {
-    const previous = this.openLinkOf(spaceId);
+    const previous = await this.openLinkNow(spaceId);
     if (previous.state === 'none') return;
     await this.updateSpace(spaceId, (b) => {
       const { publicInvite: _, ...rest } = b;

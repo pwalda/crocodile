@@ -1852,8 +1852,14 @@ describe('leaving', () => {
       const kept = async () =>
         Object.keys((await kv.get<Record<string, string>>('invite-tickets')) ?? {});
       expect(await kept()).toEqual([ticketFromSecret(first)!.tid]);
-      // The app is closed and opened again: the link can still be shown.
+      // The app is closed and opened again: the link can still be shown. (What is kept with it
+      // that is not a secret is not taken for one.)
       await alice.shutdown();
+      await kv.set('invite-tickets', {
+        ...(await kv.get<Record<string, string>>('invite-tickets')),
+        notasecret: 5,
+        abcdefgh: 'short',
+      });
       const again = new CrocodileClient(
         { ...alice.platform, kv },
         {
@@ -1918,9 +1924,9 @@ describe('leaving', () => {
       expect(await kept()).toEqual([]);
       // A short link, and the app closed while it runs out.
       const spaceId = await alice.createSpace('Marsh');
-      await alice.createInvite(spaceId, 300);
+      await alice.createInvite(spaceId, 2000);
       expect(await kept()).toHaveLength(1);
-      await new Promise((r) => setTimeout(r, 500));
+      await waitFor(() => alice.openLinkOf(spaceId).state === 'ended', 8000, 'the link to run out');
       await alice.shutdown();
       const again = new CrocodileClient(
         { ...alice.platform, kv },
@@ -1933,8 +1939,56 @@ describe('leaving', () => {
       cleanup.push(() => again.shutdown());
       await again.init();
       // (Written a moment after it starts.)
-      await new Promise((r) => setTimeout(r, 300));
+      for (const start = Date.now(); (await kept()).length && Date.now() - start < 5000;)
+        await new Promise((r) => setTimeout(r, 50));
       expect(await kept()).toEqual([]);
+    });
+
+    it('keeps the secret of the first link when the space names it, and works from the records it must ask for', async () => {
+      const coord = await server();
+      const net = new FakeRelayNetwork();
+      const alice = await signUp(makeClient(net, coord), 'alice');
+      const kv = alice.platform.kv as MemoryKeyValueStore;
+      const kept = async () =>
+        Object.keys((await kv.get<Record<string, string>>('invite-tickets')) ?? {});
+      const put = (alice as unknown as { putRecord(r: SignedRecord): Promise<unknown> }).putRecord;
+      const spy = vi
+        .spyOn(alice as unknown as { putRecord(r: SignedRecord): Promise<unknown> }, 'putRecord')
+        .mockImplementation(async function (this: unknown, r: SignedRecord) {
+          if (r.kind === 'member') throw new Error('offline');
+          return put.call(alice, r);
+        });
+      // The space is made and names its link; what follows fails.
+      await expect(alice.createSpace('Swamp')).rejects.toThrow(/offline/);
+      spy.mockRestore();
+      expect(await kept()).toHaveLength(1);
+
+      // Turning the link off ends it, also when this device does not hold its record just now.
+      const spaceId = await alice.createSpace('Marsh');
+      const link = await alice.shareInvite(spaceId);
+      const tid = ticketFromSecret(link)!.tid;
+      const forget = () =>
+        (alice.records as unknown as { map: Map<string, unknown> }).map.delete(`invite:${tid}`);
+      forget();
+      await alice.stopOpenInvite(spaceId);
+      expect((alice.records.get(`invite:${tid}`) as SignedRecord<'invite'>).body.revoked).toBe(
+        true,
+      );
+
+      // If the record cannot be asked for, nothing is decided on a guess.
+      const again = await alice.createInvite(spaceId);
+      (alice.records as unknown as { map: Map<string, unknown> }).map.delete(
+        `invite:${ticketFromSecret(again)!.tid}`,
+      );
+      const conn = alice.link!;
+      const real = conn.request.bind(conn) as (m: string, p: unknown) => Promise<unknown>;
+      const ask = vi.spyOn(conn, 'request').mockImplementation((async (m: string, p: unknown) => {
+        if (m === 'records.get') throw new Error('unreachable');
+        return real(m, p);
+      }) as never);
+      await expect(alice.shareInvite(spaceId)).rejects.toThrow(/unreachable/);
+      ask.mockRestore();
+      expect(await alice.shareInvite(spaceId)).toBe(again);
     });
 
     it('does not write the secrets back after signing out', async () => {
@@ -1955,7 +2009,7 @@ describe('leaving', () => {
       await (
         alice as unknown as { keepTicket(t: { tid: string; secret: string }): Promise<void> }
       ).keepTicket({ tid: 'abcdefgh', secret: 'secret' });
-      await new Promise((r) => setTimeout(r, 400));
+      await new Promise((r) => setTimeout(r, 800));
       expect(await kv.get('invite-tickets')).toBeUndefined();
     });
 
