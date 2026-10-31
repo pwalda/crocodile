@@ -422,11 +422,17 @@ describe('client', () => {
     const joins: { sessionId: string; hint?: unknown }[] = [];
     // How each was answered (a join the server finds not to be signed as it was sent is refused).
     const answers: string[] = [];
+    let failNext = false;
     const request = link.request.bind(link);
     link.request = (async (method: string, params: { sessionId: string; hint?: unknown }) => {
       if (method !== 'session.join') return request(method as never, params as never);
       joins.push(params);
       const at = joins.length - 1;
+      if (failNext) {
+        failNext = false;
+        answers[at] = 'failed';
+        throw Object.assign(new Error('the owner did not answer'), { code: 'unavailable' });
+      }
       return request(method as never, params as never).then(
         (res) => ((answers[at] = 'ok'), res),
         (err) => {
@@ -463,13 +469,24 @@ describe('client', () => {
 
     // After leaving, what it saw is no longer what the room is.
     const session = (
-      bob as unknown as { sessions: Map<string, { leave(): Promise<void>; join(): Promise<void> }> }
+      bob as unknown as {
+        sessions: Map<string, { leave(): Promise<void>; join(): Promise<void> }>;
+      }
     ).sessions.get(sid)!;
     await session.leave();
     const afterLeave = joins.length;
     await session.join();
     expect(joins[afterLeave]!.hint).toBeUndefined();
     expect(answers[afterLeave]).toBe('ok');
+
+    // Nor when the first join after leaving is not taken and it tries again.
+    await session.leave();
+    failNext = true;
+    const retried = joins.length;
+    await session.join().catch(() => {});
+    await session.join();
+    expect(joins.slice(retried).map((j) => j.hint)).toEqual([undefined, undefined]);
+    expect(answers.slice(retried)).toEqual(['failed', 'ok']);
   });
 
   it('works across two coordination servers in a mesh', async () => {

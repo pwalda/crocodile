@@ -310,6 +310,8 @@ export class GroupSession extends Emitter<GroupSessionEvents> {
   }
 
   private joining?: Promise<void>;
+  /** The latest state of the room we were told of, since we last left it. */
+  private lastSeen?: SessionState;
 
   /**
    * Callers that join while a join is in flight share it. A join that has to
@@ -326,13 +328,12 @@ export class GroupSession extends Emitter<GroupSessionEvents> {
   }
 
   private async sendJoin() {
-    // What we last saw of the room, for a new owner to keep the same host (signed with the join).
-    // None if we have not been in it (since the last leave): that is not what the room is now.
-    const seen = this.status === 'idle' || this.status === 'left' ? undefined : this.state;
     if (this.status === 'idle' || this.status === 'left') this.setStatus('joining');
     const caps = await this.ctx.caps();
     // Left meanwhile: a join now would come after the leave.
     if (this.left) return;
+    // What we last saw of the room, for a new owner to keep the same host (signed with the join).
+    const seen = this.lastSeen;
     const { state } = await this.ctx.link().request('session.join', {
       sessionId: this.sessionId,
       caps,
@@ -409,6 +410,8 @@ export class GroupSession extends Emitter<GroupSessionEvents> {
   async leave() {
     if (this.left) return;
     this.left = true;
+    // (What we saw of the room is not what it is by the time we join again.)
+    this.lastSeen = undefined;
     this.joining = undefined;
     clearTimeout(this.retryTimer);
     clearTimeout(this.renewTimer);
@@ -435,7 +438,7 @@ export class GroupSession extends Emitter<GroupSessionEvents> {
   applyState(state: SessionState) {
     if (this.left || state.id !== this.sessionId) return;
     if (this.state && state.epoch < this.state.epoch) return;
-    this.state = state;
+    this.state = this.lastSeen = state;
     if (state.host === this.me) {
       if (!this.hosting || this.hosting.epoch !== state.epoch) this.startHosting(state);
     } else if (this.hosting) {
