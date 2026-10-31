@@ -2114,6 +2114,9 @@ describe('leaving', () => {
       });
       void (alice as unknown as { saveTickets(): Promise<void> }).saveTickets();
       await alice.signOut();
+      // A write that was still to come, with nothing left to keep, leaves nothing either.
+      await (alice as unknown as { saveTickets(): Promise<void> }).saveTickets();
+      expect(await kv.get('invite-tickets')).toBeUndefined();
       // A link being made as the account goes does not leave its secret behind either.
       await (
         alice as unknown as { keepTicket(t: { tid: string; secret: string }): Promise<void> }

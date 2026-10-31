@@ -2259,7 +2259,12 @@ export class CrocodileClient extends Emitter<ClientEvents> {
   /** Writes what is kept as it is when its turn comes, one write at a time. */
   private saveTickets() {
     return (this.ticketsSaved = this.ticketsSaved
-      .then(() => this.platform.kv.set('invite-tickets', Object.fromEntries(this.tickets)))
+      .then(() =>
+        // (Nothing kept is nothing stored: a write after the account was erased leaves nothing behind.)
+        this.tickets.size
+          ? this.platform.kv.set('invite-tickets', Object.fromEntries(this.tickets))
+          : this.platform.kv.delete('invite-tickets'),
+      )
       .catch((err) => this.log('link secrets not saved', { err: String(err) })));
   }
 
