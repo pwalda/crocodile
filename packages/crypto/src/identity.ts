@@ -105,7 +105,10 @@ export function encodeRecoveryKey(seed: Uint8Array): string {
 }
 
 export function decodeRecoveryKey(text: string): Uint8Array {
-  const bytes = fromB32(text.replace(/[\s-]/g, ''));
+  const clean = text.replace(/[\s-]/g, '');
+  if (!/^[a-z2-7]*$/i.test(clean))
+    throw new Error('Recovery key is mistyped (it has a character that cannot be in one)');
+  const bytes = fromB32(clean);
   if (bytes.length !== 35) throw new Error('Recovery key has the wrong length');
   const seed = bytes.slice(0, 32);
   if (!bytesEqual(sha256(seed).slice(0, 3), bytes.slice(32))) {

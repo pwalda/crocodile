@@ -21,14 +21,40 @@ describe('encoding', () => {
     }
   });
 
-  it('accepts padding and rejects long padding runs in linear time', () => {
-    expect(fromB64u('YQ==')).toEqual(new TextEncoder().encode('a'));
+  it('takes one spelling of each value: no padding, unused bits zero', () => {
+    expect(fromB64u('YQ')).toEqual(new TextEncoder().encode('a'));
+    // 'YQ' is "a"; 'YR' has the same bytes with a bit set that carries nothing.
+    expect(() => fromB64u('YR')).toThrow(/padding bits/);
+    expect(() => fromB64u('YQ==')).toThrow(/character/);
+    // A 64-byte signature leaves 4 bits over: 16 spellings before, one now.
+    const sig = Uint8Array.from({ length: 64 }, (_, i) => i);
+    const text = toB64u(sig);
+    expect(fromB64u(text)).toEqual(sig);
+    const last = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_'.indexOf(
+      text[85]!,
+    );
+    const other = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_'[last ^ 1]!;
+    expect(() => fromB64u(text.slice(0, 85) + other)).toThrow(/padding bits/);
+  });
+
+  it('rejects hostile input quickly', () => {
     // Signatures and keys from the network reach this decoder before any length
-    // check; a run of '=' must not cost quadratic time (it once took ~30 s).
-    const hostile = '='.repeat(200_000) + '!';
+    // check; a run of '=' once cost quadratic time (it took ~30 s).
     const start = performance.now();
-    expect(() => fromB64u(hostile)).toThrow();
+    expect(() => fromB64u('='.repeat(200_000) + '!')).toThrow();
     expect(performance.now() - start).toBeLessThan(500);
+  });
+
+  it('takes one spelling of each base32 value, in either case', () => {
+    const bytes = Uint8Array.from({ length: 32 }, (_, i) => i * 7);
+    const text = toB32(bytes);
+    expect(text).toHaveLength(52);
+    expect(fromB32(text.toUpperCase())).toEqual(bytes);
+    // 52 characters hold 260 bits; the last 4 must be zero.
+    expect(() => fromB32(text.slice(0, 51) + 'b')).toThrow(/padding bits/);
+    expect(() => fromB32(text + '=')).toThrow(/character/);
+    expect(() => fromB32(text.slice(0, 10) + '-' + text.slice(10))).toThrow(/character/);
+    expect(() => fromB32('a1')).toThrow(/character/);
   });
 
   it('round-trips base32', () => {

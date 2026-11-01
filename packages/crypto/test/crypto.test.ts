@@ -101,6 +101,14 @@ describe('identity', () => {
     expect(() => decodeRecoveryKey(typo)).toThrow(/checksum/);
   });
 
+  it('rejects a recovery key with a character that cannot be in one', () => {
+    const key = encodeRecoveryKey(createIdentity().seed);
+    expect(() => decodeRecoveryKey('1' + key.slice(1))).toThrow(/mistyped/);
+    expect(() => decodeRecoveryKey(key + '=')).toThrow(/mistyped/);
+    // Separators and spaces are still fine.
+    expect(() => decodeRecoveryKey(key.replace(/-/g, ' '))).not.toThrow();
+  });
+
   it('safety numbers are symmetric', () => {
     const a = createIdentity();
     const b = createIdentity();

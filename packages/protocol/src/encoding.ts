@@ -27,27 +27,26 @@ export function toB64u(bytes: Uint8Array): string {
 }
 
 export function fromB64u(text: string): Uint8Array {
-  // Strip padding with a loop: the regex /=+$/ takes quadratic time on a long
-  // run of '=' that doesn't end the string, and this decodes network input.
-  let end = text.length;
-  while (end > 0 && text.charCodeAt(end - 1) === 61 /* = */) end--;
-  const clean = text.slice(0, end);
-  if (clean.length % 4 === 1) throw new Error('invalid base64url length');
-  const out = new Uint8Array(Math.floor((clean.length * 3) / 4));
+  // Only what toB64u writes: no padding, and the unused bits of the last character zero. Any
+  // other spelling of the same bytes would let one key or signature wear several names.
+  if (text.length % 4 === 1) throw new Error('invalid base64url length');
+  const out = new Uint8Array(Math.floor((text.length * 3) / 4));
   let buffer = 0;
   let bits = 0;
   let o = 0;
-  for (let i = 0; i < clean.length; i++) {
-    const code = clean.charCodeAt(i);
+  for (let i = 0; i < text.length; i++) {
+    const code = text.charCodeAt(i);
     const v = code < 128 ? B64URL_LOOKUP[code]! : -1;
     if (v < 0) throw new Error('invalid base64url character');
-    buffer = (buffer << 6) | v;
+    buffer = ((buffer << 6) | v) & 0xffff;
     bits += 6;
     if (bits >= 8) {
       bits -= 8;
       out[o++] = (buffer >> bits) & 0xff;
     }
   }
+  if (bits > 0 && (buffer & ((1 << bits) - 1)) !== 0)
+    throw new Error('invalid base64url padding bits');
   return out;
 }
 
@@ -70,20 +69,24 @@ export function toB32(bytes: Uint8Array): string {
   return out;
 }
 
+/** Case does not matter; anything but the 32 letters and digits, and unused bits that are not zero, is an error. */
 export function fromB32(text: string): Uint8Array {
-  const clean = text.toLowerCase().replace(/[^a-z2-7]/g, '');
-  const out = new Uint8Array(Math.floor((clean.length * 5) / 8));
+  const out = new Uint8Array(Math.floor((text.length * 5) / 8));
   let buffer = 0;
   let bits = 0;
   let o = 0;
-  for (const ch of clean) {
-    buffer = (buffer << 5) | B32.indexOf(ch);
+  for (const ch of text.toLowerCase()) {
+    const v = B32.indexOf(ch);
+    if (v < 0) throw new Error('invalid base32 character');
+    buffer = ((buffer << 5) | v) & 0xffff;
     bits += 5;
     if (bits >= 8) {
       bits -= 8;
       out[o++] = (buffer >> bits) & 0xff;
     }
   }
+  if (bits > 0 && (buffer & ((1 << bits) - 1)) !== 0)
+    throw new Error('invalid base32 padding bits');
   return out;
 }
 

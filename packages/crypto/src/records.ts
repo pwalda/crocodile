@@ -100,9 +100,14 @@ export function ticketIdOf(tpub: string): string {
 export function ticketFromSecret(secret: string): Ticket | null {
   const clean = secret.trim().toLowerCase();
   if (!/^[a-z2-7]+$/.test(clean) || clean.length !== TICKET_SECRET_LENGTH) return null;
-  const seed = fromB32(clean);
   // (52 characters hold 260 bits: the 4 that are over must be 0, or one secret has many spellings.)
-  if (seed.length !== 32 || toB32(seed) !== clean) return null;
+  let seed: Uint8Array;
+  try {
+    seed = fromB32(clean);
+  } catch {
+    return null;
+  }
+  if (seed.length !== 32) return null;
   const tpub = toB64u(ed25519.getPublicKey(seed));
   return { secret: clean, tpub, tid: ticketIdOf(tpub) };
 }
