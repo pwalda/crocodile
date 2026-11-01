@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   AnonBox,
   DELETED_PROFILE_NAME,
+  isCanonicalB64u,
   NOTE_TTL_MS,
   recordKey,
   SIG_DOMAIN,
@@ -105,6 +106,11 @@ describe('identity', () => {
     const key = encodeRecoveryKey(createIdentity().seed);
     expect(() => decodeRecoveryKey('1' + key.slice(1))).toThrow(/mistyped/);
     expect(() => decodeRecoveryKey(key + '=')).toThrow(/mistyped/);
+    // Separators and spaces are still fine, and so are the dashes and invisible marks that
+    // a document or chat app puts in their place.
+    expect(decodeRecoveryKey(key.replace(/-/g, '\u2013'))).toEqual(decodeRecoveryKey(key));
+    expect(decodeRecoveryKey(key.replace(/-/g, '\u2011\u200b'))).toEqual(decodeRecoveryKey(key));
+    expect(decodeRecoveryKey(` ${key}\n`)).toEqual(decodeRecoveryKey(key));
     // Separators and spaces are still fine.
     expect(() => decodeRecoveryKey(key.replace(/-/g, ' '))).not.toThrow();
   });
@@ -939,6 +945,23 @@ describe('open link tickets', () => {
       ok: false,
       reason: 'unknown invite',
     });
+  });
+
+  it('refuses, and does not fail on, a key in a spelling toB64u does not write', () => {
+    // The same 32 bytes with a bit set in the 4 that carry nothing.
+    const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_';
+    const lax = ticket.tpub.slice(0, 42) + alphabet[alphabet.indexOf(ticket.tpub[42]!) | 1]!;
+    expect(lax).not.toBe(ticket.tpub);
+    expect(isCanonicalB64u(ticket.tpub)).toBe(true);
+    expect(isCanonicalB64u(lax)).toBe(false);
+    const odd = signRecord(alice, 'invite', recordKey.invite(ticket.tid), {
+      spaceId,
+      code: ticket.tid,
+      tpub: lax,
+      expiresAt: now + week,
+    });
+    expect(() => validateRecord(odd, ctx([space()]))).not.toThrow();
+    expect(validateRecord(odd, ctx([space()])).ok).toBe(false);
   });
 
   it('is made only as the open link: named by the hash of its key, and not for a person', () => {

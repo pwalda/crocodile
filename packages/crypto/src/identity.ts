@@ -105,7 +105,8 @@ export function encodeRecoveryKey(seed: Uint8Array): string {
 }
 
 export function decodeRecoveryKey(text: string): Uint8Array {
-  const clean = text.replace(/[\s-]/g, '');
+  // Spaces and every kind of dash or invisible mark a word processor or chat app may put between groups.
+  const clean = text.replace(/[\s\-\u2010-\u2015\u2212\u00ad\u200b-\u200d\u2060\ufeff]/g, '');
   if (!/^[a-z2-7]*$/i.test(clean))
     throw new Error('Recovery key is mistyped (it has a character that cannot be in one)');
   const bytes = fromB32(clean);

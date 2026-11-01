@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { keyB64u, sigB64u } from './b64u';
 import { LIMITS } from './constants';
 import type { SignedRecord } from './records';
 import type { ServerInfo } from './rpc';
@@ -148,9 +149,9 @@ export interface FedLinkAnswer {
  * `sig` covers the request (see mailProofPayload) and `at`, its time.
  */
 export const MailProof = z.object({
-  key: z.string().regex(/^[A-Za-z0-9_-]{43}$/),
+  key: keyB64u,
   at: z.number().int(),
-  sig: z.string().max(200),
+  sig: sigB64u,
 });
 export type MailProof = z.infer<typeof MailProof>;
 
@@ -242,7 +243,7 @@ export const SessionOpProof = z.object({
     .min(0)
     .max(2 ** 31 - 1)
     .optional(),
-  sig: z.string().min(1).max(200),
+  sig: sigB64u,
 });
 export type SessionOpProof = z.infer<typeof SessionOpProof>;
 

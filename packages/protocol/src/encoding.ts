@@ -26,6 +26,19 @@ export function toB64u(bytes: Uint8Array): string {
   return out;
 }
 
+/** Whether `text` is exactly what toB64u would write for some bytes (what fromB64u accepts). */
+export function isCanonicalB64u(text: string): boolean {
+  if (text.length % 4 === 1) return false;
+  let last = 0;
+  for (let i = 0; i < text.length; i++) {
+    const code = text.charCodeAt(i);
+    last = code < 128 ? B64URL_LOOKUP[code]! : -1;
+    if (last < 0) return false;
+  }
+  const spare = (text.length * 6) % 8;
+  return spare === 0 || (last & ((1 << spare) - 1)) === 0;
+}
+
 export function fromB64u(text: string): Uint8Array {
   // Only what toB64u writes: no padding, and the unused bits of the last character zero. Any
   // other spelling of the same bytes would let one key or signature wear several names.
@@ -69,13 +82,13 @@ export function toB32(bytes: Uint8Array): string {
   return out;
 }
 
-/** Case does not matter; anything but the 32 letters and digits, and unused bits that are not zero, is an error. */
+/** ASCII case does not matter; anything but the 32 letters and digits, and unused bits that are not zero, is an error. */
 export function fromB32(text: string): Uint8Array {
   const out = new Uint8Array(Math.floor((text.length * 5) / 8));
   let buffer = 0;
   let bits = 0;
   let o = 0;
-  for (const ch of text.toLowerCase()) {
+  for (const ch of text.replace(/[A-Z]/g, (c) => String.fromCharCode(c.charCodeAt(0) + 32))) {
     const v = B32.indexOf(ch);
     if (v < 0) throw new Error('invalid base32 character');
     buffer = ((buffer << 5) | v) & 0xffff;

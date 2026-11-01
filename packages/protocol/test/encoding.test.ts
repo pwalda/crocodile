@@ -55,6 +55,9 @@ describe('encoding', () => {
     expect(() => fromB32(text + '=')).toThrow(/character/);
     expect(() => fromB32(text.slice(0, 10) + '-' + text.slice(10))).toThrow(/character/);
     expect(() => fromB32('a1')).toThrow(/character/);
+    // U+212A (Kelvin sign) lowercases to 'k': not a second spelling of it.
+    expect(() => fromB32('\u212aa')).toThrow(/character/);
+    expect(fromB32('KA')).toEqual(fromB32('ka'));
   });
 
   it('round-trips base32', () => {

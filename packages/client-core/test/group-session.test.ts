@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createIdentity } from '@crocodile/crypto';
 import { GroupKeyring } from '../src/keyring';
+import { toB64u } from '@crocodile/protocol';
 import type { RelayGrant, SealedBox, SessionState } from '@crocodile/protocol';
 import { Emitter } from '../src/emitter';
 import {
@@ -35,17 +36,23 @@ class StuckTransport extends Emitter<RelayLinkEvents> implements RelayTransport 
 }
 
 /** A box that opens to its text for anyone: `epk` carries who sent it, `ct` what it holds. */
-const box = (from: string, to: string, text: string): SealedBox => ({
-  v: 3,
-  to,
-  pk: 0,
-  epk: from,
-  kem: '',
-  ct: text,
-  from: '',
-  fromDevice: 'aaaaaaaa',
-  sig: '',
-});
+/** A sealed box of the right shape, whose sender the test's `open` finds again by its key. */
+const senders = new Map<string, string>();
+const box = (from: string, to: string, text: string): SealedBox => {
+  const epk = toB64u(Uint8Array.from({ length: 32 }, (_, i) => from.charCodeAt(i % from.length)));
+  senders.set(epk, from);
+  return {
+    v: 3,
+    to,
+    pk: 0,
+    epk,
+    kem: toB64u(new Uint8Array(1088)),
+    ct: text,
+    from: toB64u(new Uint8Array(32)),
+    fromDevice: 'aaaaaaaa',
+    sig: toB64u(new Uint8Array(64)),
+  };
+};
 
 /** A connection that is up: it keeps what the session sends over it. */
 class OpenTransport extends StuckTransport {
@@ -555,7 +562,7 @@ describe('group session', () => {
       admits: () => true,
       seal: async (to: string, plaintext: Uint8Array) =>
         box(self, to, new TextDecoder().decode(plaintext)),
-      open: (b: SealedBox) => ({ from: b.epk, plaintext: enc.encode(b.ct) }),
+      open: (b: SealedBox) => ({ from: senders.get(b.epk)!, plaintext: enc.encode(b.ct) }),
       log: () => {},
     } as unknown as SessionContext;
     const s = new GroupSession('dm:a:b', ctx, () => (transport = new OpenTransport(sent)));

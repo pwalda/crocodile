@@ -29,6 +29,7 @@ import {
   peerIds,
   recordKey,
   sessionIds,
+  toB64u,
   utf8,
   type PrekeyBundle,
   type ProfileBody,
@@ -577,13 +578,20 @@ describe('client sign-in', () => {
     // Opens, but is not a sign-in.
     const wrong = await answerWith(c, (hello) => sealedWith(hello, { hello: 'world' }));
     expect(wrong.code).toBe(4002);
-    // A key exchange that is not one.
+    // A key exchange that is not the shape of one is refused as a message.
     const garbage = await answerWith(c, () => ({
       t: 'auth',
       channel: { epk: 'AAAA', kem: 'AAAA' },
       sealed: { n: 0, c: 'AAAA' },
     }));
-    expect(garbage.code).toBe(4003);
+    expect(garbage.code).toBe(4002);
+    // One of the right shape that opens to nothing.
+    const shaped = await answerWith(c, () => ({
+      t: 'auth',
+      channel: { epk: toB64u(new Uint8Array(32)), kem: toB64u(new Uint8Array(1088)) },
+      sealed: { n: 0, c: 'AAAA' },
+    }));
+    expect(shaped.code).toBe(4003);
   });
 
   it('tells a deleted account so only in a sealed frame', async () => {
