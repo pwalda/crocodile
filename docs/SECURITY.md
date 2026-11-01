@@ -264,6 +264,29 @@ picture size.
 - The host peer and relay operators see traffic metadata (sizes, timing,
   speaking activity); for video the host also sees frame sizes, key frames and
   picture sizes.
+- Session operations are signed by the device they are for, so a server
+  cannot, on its own, make a device that is on another server join, change
+  or vote. What that does not cover:
+  - The server a device is connected to can still drop its operations, hold
+    them back or say the device is not there. A signed join is only taken
+    within five minutes of when it was made, but an update or a report is not
+    dated: it is taken for as long as the join it belongs to stands and it is
+    the next in line. A device's own server is trusted with availability,
+    not with what the device says.
+  - Presence is not signed by the device: a server can still claim that a user
+    is connected through it, and the events routed to that user go to it (see
+    [docs/MESH.md](MESH.md)). A leave is not signed either; the server that
+    took the join sends it when the device disconnects.
+  - A member can choose the host of a room while it is being put together
+    (the first ten seconds after it is made, or while it has no member), by
+    the host it signs into its join, if its epoch is later than the room's.
+    The host must be a real device that may be in the session; one that does
+    not turn up is replaced after a few seconds. A room with members that is
+    older than that ignores hints.
+  - Old apps and servers do not sign these operations or the hint: an updated
+    server refuses their joins, so they cannot take part in its rooms, and
+    servers on a lower protocol cannot link to it. Update apps and
+    coordination servers together (protocol 4).
 - The command line tool keeps the account's keys in a file only its user can
   read (mode 600), not in an OS keychain; anyone with that user's access, or
   root, can use the account. One process at a time may hold the file (a lock

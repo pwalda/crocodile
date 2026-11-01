@@ -182,7 +182,11 @@ by name goes to `name:<name>`.
   its own users. A server can sign that any user is connected through it, and
   then the events routed to that user (signalling, session invites, mail) go to
   it. That is the same as the server dropping them. Closing it would take the
-  user's device proving which server it connected to.
+  user's device proving which server it connected to; only its join, update
+  and report do that so far. The server a device is on can also drop or hold
+  back those operations (a join is only taken within five minutes of being made;
+  an update or report is not dated), and the leave
+  it sends when the device disconnects is not signed.
 - Every server still hears every beacon and every presence change; that is
   fine for thousands of servers but not for millions of users online at once.
   Presence would then move to the owners of each user's shard.
