@@ -249,9 +249,22 @@ export type SessionOpProof = z.infer<typeof SessionOpProof>;
 /** A session's epoch (it counts up from 0 with each change of host). */
 export const SessionEpoch = z.number().int().safe().min(0);
 
-// The parts of an operation a device signs; the wire form below adds to them (a hint) or takes
-// from them (a leave is not signed), so that the two cannot come apart.
-const JoinOp = z.object({ op: z.literal('join'), caps: HostCaps });
+// The parts of an operation a device signs; the wire form below takes from them (a leave is not
+// signed), so that the two cannot come apart.
+/**
+ * The last state of a session its device saw (the epoch, the host and the backup), so that a new
+ * owner can keep the same host. The owner leaves out a hint it does not take (an epoch beyond what
+ * it allows, a host that may not be there) without refusing the join; one that is not made of
+ * whole numbers and short ids is not read at all.
+ */
+export const SessionHint = z.object({
+  epoch: z.number().int(),
+  host: z.string().max(200).nullable(),
+  backup: z.string().max(200).nullable(),
+});
+export type SessionHint = z.infer<typeof SessionHint>;
+
+const JoinOp = z.object({ op: z.literal('join'), caps: HostCaps, hint: SessionHint.optional() });
 const UpdateOp = z.object({ op: z.literal('update'), caps: HostCaps });
 const ReportOp = z.object({
   op: z.literal('report'),
@@ -260,7 +273,11 @@ const ReportOp = z.object({
 });
 const SignedSessionOpSchema = z.union([JoinOp, UpdateOp, ReportOp]);
 
-/** What a device signs of an operation (the hint that a server adds to a join is not part of it, yet). */
+/** A join as a device signs it: where there is no hint there is no field, so that all build the same bytes. */
+export const joinOp = (caps: z.infer<typeof HostCaps>, hint?: SessionHint) =>
+  ({ op: 'join', caps, ...(hint ? { hint } : {}) }) as const;
+
+/** What a device signs of an operation (a join carries the hint of the device, if it has one). */
 export type SignedSessionOp = z.infer<typeof SignedSessionOpSchema>;
 
 /**
@@ -298,7 +315,7 @@ export function sessionOpPayload(
   };
 }
 
-/** What a member asks of a session; a join may come with the server's hint. */
+/** What a member asks of a session; a join may come with the hint of the device. */
 export type SessionOp = z.infer<typeof SessionOpSchema>;
 
 /** A session operation forwarded to the server that owns the session. */
@@ -401,13 +418,7 @@ const VoiceOccupancySchema = z.object({
 });
 
 const SessionOpSchema = z.discriminatedUnion('op', [
-  JoinOp.extend({
-    // The last state the member's server saw, so that a new owner can keep the same host.
-    // An epoch that is no epoch is not a reason to drop the join (the owner leaves such a hint out).
-    hint: z
-      .object({ epoch: z.number().int(), host: id.nullable(), backup: id.nullable() })
-      .optional(),
-  }),
+  JoinOp,
   UpdateOp,
   z.object({ op: z.literal('leave') }),
   ReportOp,

@@ -558,7 +558,6 @@ export class Coordinator {
       ? [this.presence.localPeer(to)].filter((c): c is NonNullable<typeof c> => !!c)
       : this.presence.localOf(to);
     if (targets.length === 0) return false;
-    if (ev === 'session') this.sessions.noteState((d as ServerEvents['session']).state);
     for (const client of targets) client.send(ev, d);
     return true;
   }

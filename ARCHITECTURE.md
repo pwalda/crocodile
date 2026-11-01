@@ -258,9 +258,11 @@ join, update and report with its account's key, for the server it is connected
 to, and the owner checks the signature against the key in the device's record,
 so a server cannot speak for a device that is on another. When the mesh changes
 and ownership moves, each member server asks its devices to sign a new join and
-sends it with a hint of the last known host, so the new owner rebuilds the same
-state without interrupting the call. A device that does not answer is taken out
-of the session.
+sends it. A join carries the host the device last saw (epoch, host and backup,
+signed with the rest, so no server can add or change it), so the new owner
+rebuilds the same state without interrupting the call; the owner takes such a
+hint only while it is putting the room together, never from a member of a room
+that stands. A device that does not answer is taken out of the session.
 
 **Storage.** SQLite (`node:sqlite`) with secondary indexes, or a
 JSON-snapshotted memory store where SQLite is unavailable.

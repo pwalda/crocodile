@@ -47,6 +47,22 @@ describe('session operation proofs', () => {
     expect(RpcParams['session.join'].safeParse({ sessionId, caps }).success).toBe(true);
   });
 
+  it('carry the hint of a join, with an epoch that is a number a signature can be made over', () => {
+    const hint = { epoch: 7, host: peer, backup: null };
+    expect(RpcParams['session.join'].safeParse({ sessionId, caps, hint }).data?.hint).toEqual(hint);
+    const op = { op: 'join', caps, hint };
+    const frame = (o: unknown) =>
+      FedFrameSchema.safeParse({ t: 'session_op', opId: 'x', sessionId, peer, op: o }).success;
+    expect(frame(op)).toBe(true);
+    for (const epoch of [1e300, 2 ** 53, 1.5]) {
+      const bad = { epoch, host: peer, backup: null };
+      expect(RpcParams['session.join'].safeParse({ sessionId, caps, hint: bad }).success).toBe(
+        false,
+      );
+      expect(frame({ op: 'join', caps, hint: bad })).toBe(false);
+    }
+  });
+
   it('are bounded', () => {
     for (const bad of [
       { ...proof, sig: 'x'.repeat(201) },

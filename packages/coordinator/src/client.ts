@@ -28,6 +28,7 @@ import {
   type ServerFrame,
   type SignedRecord,
   type MailProof,
+  type SessionHint,
   type SessionOpProof,
 } from '@crocodile/protocol';
 import type { Coordinator } from './coordinator';
@@ -444,12 +445,13 @@ export class ClientConnection implements ClientHandle {
         return {};
       }
       case 'session.join': {
-        const { sessionId, caps, proof } = p as unknown as {
+        const { sessionId, caps, hint, proof } = p as unknown as {
           sessionId: string;
           caps: never;
+          hint?: SessionHint;
           proof?: SessionOpProof;
         };
-        return { state: await hub.sessions.join(this, sessionId, caps, proof) };
+        return { state: await hub.sessions.join(this, sessionId, caps, hint, proof) };
       }
       case 'session.leave': {
         const { sessionId } = p as unknown as { sessionId: string };

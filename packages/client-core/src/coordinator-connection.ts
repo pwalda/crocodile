@@ -9,6 +9,7 @@ import {
 } from '@crocodile/crypto';
 import {
   OperatorInfo,
+  joinOp,
   SIG_DOMAIN,
   helloFullPayload,
   type ClientAuthBody,
@@ -316,13 +317,10 @@ export class CoordinatorConnection extends Emitter<ConnectionEvents> {
       // Of no use once it is too old for a join to be taken after it anyway (by our own clock, which
       // is the only one all of them were seen by).
       for (const [k, v] of joined) if (v.seen < now - 15 * 60_000) joined.delete(k);
-      proof = signSessionOp(
-        this.signer,
-        sessionId,
-        this.peer,
-        { op: 'join', caps: p.caps },
-        { server: this.server.id, at },
-      );
+      proof = signSessionOp(this.signer, sessionId, this.peer, joinOp(p.caps, p.hint), {
+        server: this.server.id,
+        at,
+      });
       const joining: Promise<unknown> = this.send(method, { ...p, proof }, timeoutMs);
       const entry = {
         ...this.signing.get(sessionId),

@@ -12,7 +12,7 @@ import {
 import { DeviceId } from './records';
 import type { PublicServerInfo } from './directory';
 import { SealedBox } from './relay';
-import { MailProof, SessionEpoch, SessionOpProof } from './federation';
+import { MailProof, SessionEpoch, SessionHint, SessionOpProof } from './federation';
 
 /** Public identity of a coordination server. */
 export const ServerInfo = z.object({
@@ -286,6 +286,7 @@ export const RpcParams = {
   'session.join': z.object({
     sessionId: SessionId,
     caps: HostCaps,
+    hint: SessionHint.optional(),
     proof: SessionOpProof.optional(),
   }),
   'session.leave': z.object({ sessionId: SessionId }),
