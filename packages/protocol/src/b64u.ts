@@ -5,8 +5,10 @@ import { isCanonicalB64u } from './encoding';
 export const b64uBytes = (bytes: number) =>
   z
     .string()
-    .length(Math.ceil((bytes * 4) / 3))
-    .refine(isCanonicalB64u, 'not base64url as written by toB64u');
+    .check(
+      z.length(Math.ceil((bytes * 4) / 3), { abort: true }),
+      z.refine(isCanonicalB64u, 'not base64url as written by toB64u'),
+    );
 
 /** Ed25519 public key. */
 export const keyB64u = b64uBytes(32);

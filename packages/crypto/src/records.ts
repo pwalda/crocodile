@@ -99,8 +99,10 @@ export function ticketIdOf(tpub: string): string {
 
 /** The ticket a link's secret stands for, or null if it is not one. */
 export function ticketFromSecret(secret: string): Ticket | null {
-  const clean = secret.trim().toLowerCase();
-  if (!/^[a-z2-7]+$/.test(clean) || clean.length !== TICKET_SECRET_LENGTH) return null;
+  // (Case is folded after the letters are checked, so nothing but ASCII is taken for a letter.)
+  const trimmed = secret.trim();
+  if (!/^[a-zA-Z2-7]+$/.test(trimmed) || trimmed.length !== TICKET_SECRET_LENGTH) return null;
+  const clean = trimmed.toLowerCase();
   // (52 characters hold 260 bits: the 4 that are over must be 0, or one secret has many spellings.)
   if (!isCanonicalB32(clean)) return null;
   const seed = fromB32(clean);

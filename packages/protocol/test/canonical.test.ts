@@ -3,9 +3,12 @@ import {
   AnonBox,
   FedFrameSchema,
   MemberBody,
+  ClientAuth,
+  fromB32,
   isCanonicalB32,
   toB32,
   b64uText,
+  keyB64u,
   ChatMessage,
   E2EEnvelope,
   FileManifest,
@@ -130,6 +133,7 @@ describe('keys and signatures between servers', () => {
       key,
       sig,
     },
+    x: { t: 'x', n: 1, c: bytes(5) },
     link_answer: {
       t: 'flood',
       id: 'abcdefgh',
@@ -168,6 +172,7 @@ describe('keys and signatures between servers', () => {
     ['link_answer', ['f', 'found', 'encKey']],
     ['link_answer', ['f', 'found', 'kemKey']],
     ['link_answer', ['f', 'found', 'commit']],
+    ['x', ['c']],
   ];
 
   it('takes each frame as the servers write it, and refuses another spelling of a field', () => {
@@ -178,6 +183,24 @@ describe('keys and signatures between servers', () => {
         FedFrameSchema.safeParse(changed(frames[name], path)).success,
         `${name} ${path.join('.')}`,
       ).toBe(false);
+  });
+
+  it('refuses a sign-in whose sealed frame is in another spelling', () => {
+    const auth = {
+      t: 'auth',
+      channel: { epk: key, kem: bytes(1088) },
+      sealed: { n: 0, c: bytes(5) },
+    };
+    expect(ClientAuth.safeParse(auth).success).toBe(true);
+    expect(ClientAuth.safeParse({ ...auth, sealed: { n: 0, c: lax(bytes(5)) } }).success).toBe(
+      false,
+    );
+  });
+
+  it('refuses a key that is too long without scanning it', () => {
+    const result = keyB64u.safeParse('!'.repeat(1000));
+    expect(result.success).toBe(false);
+    expect(result.error!.issues).toHaveLength(1);
   });
 
   it('refuses a ticket proof in another spelling', () => {
@@ -196,8 +219,14 @@ describe('base32 and long ciphertexts', () => {
     }
     expect(isCanonicalB32('ab-')).toBe(false);
     expect(isCanonicalB32('\u212aa')).toBe(false);
-    expect(isCanonicalB32('b')).toBe(false); // 5 bits that carry nothing, set
-    expect(isCanonicalB32('a')).toBe(true);
+    // A length toB32 never writes (1, 3 or 6 of 8 characters hold bits that make no byte), and
+    // 2 characters with a bit set that carries nothing.
+    for (const odd of ['a', 'b', 'aaa', 'aaaaaa']) {
+      expect(isCanonicalB32(odd)).toBe(false);
+      expect(() => fromB32(odd)).toThrow(/invalid base32/);
+    }
+    expect(isCanonicalB32('aa')).toBe(true);
+    expect(isCanonicalB32('ab')).toBe(false);
   });
 
   it('refuses a ciphertext that is too long without reading it', () => {

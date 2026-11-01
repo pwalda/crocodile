@@ -99,8 +99,10 @@ function b32Problem(text: string): string | null {
     last = b32Value(text.charCodeAt(i));
     if (last < 0) return 'invalid base32 character';
   }
-  // The bits of the last character that carry nothing must be zero, or one value has many spellings.
+  // 5 or more bits left over is a character toB32 would not have written (as a length of 1 mod 4 is
+  // in base64url); fewer must be zero, or one value has many spellings.
   const spare = (text.length * 5) % 8;
+  if (spare >= 5) return 'invalid base32 length';
   return spare === 0 || (last & ((1 << spare) - 1)) === 0 ? null : 'invalid base32 padding bits';
 }
 

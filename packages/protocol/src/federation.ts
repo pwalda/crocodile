@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { b64uBytes, keyB64u, sigB64u } from './b64u';
+import { b64uBytes, b64uText, keyB64u, sigB64u } from './b64u';
 import { LIMITS } from './constants';
 import type { SignedRecord } from './records';
 import type { ServerInfo } from './rpc';
@@ -528,7 +528,7 @@ export const FedFrameSchema = z.discriminatedUnion('t', [
   }),
   // Sent directly as well as flooded.
   ...FloodBody.options,
-  z.object({ t: z.literal('x'), n: z.number().int(), c: z.string() }),
+  z.object({ t: z.literal('x'), n: z.number().int(), c: b64uText(LIMITS.wsMessageMaxBytes) }),
   z.object({ t: z.literal('ping') }),
   z.object({ t: z.literal('pong') }),
 ]);

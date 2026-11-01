@@ -689,6 +689,10 @@ describe('open link tickets', () => {
     const last = alphabet.indexOf(ticket.secret.at(-1)!);
     expect(ticketFromSecret(ticket.secret.slice(0, -1) + alphabet[last ^ 1])).toBeNull();
     expect(ticketFromSecret('1'.repeat(52))).toBeNull();
+    // Kelvin sign (U+212A) lowercases to a 'k', but it is not a letter of the secret.
+    const rest = ticket.secret.slice(1);
+    expect(ticketFromSecret('k' + rest)).not.toBeNull();
+    expect(ticketFromSecret('\u212a' + rest)).toBeNull();
     expect(newTicket().secret).not.toBe(ticket.secret);
   });
 

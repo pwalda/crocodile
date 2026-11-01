@@ -123,7 +123,7 @@ export const ClientAuth = z.object({
   /** Client's half of the channel: ephemeral X25519 key and ML-KEM ciphertext. */
   channel: z.object({ epk: b64uBytes(32), kem: b64uBytes(1088) }),
   /** A `ClientAuthBody`, sealed as the first frame (`n` 0) of a channel used for it alone. */
-  sealed: z.object({ n: z.literal(0), c: z.string().max(8000) }),
+  sealed: z.object({ n: z.literal(0), c: b64uText(8000) }),
 });
 export type ClientAuth = z.infer<typeof ClientAuth>;
 

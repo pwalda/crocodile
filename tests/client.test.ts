@@ -1401,6 +1401,36 @@ describe('multiple devices', () => {
     expect(fresh.identity).toBeNull();
   });
 
+  it('refuses a link value in another spelling before its own nonce goes out', async () => {
+    const coord = await server();
+    const net = new FakeRelayNetwork();
+    const alice = await signUp(makeClient(net, coord), 'alice');
+    const fresh = makeClient(net, coord);
+    await fresh.init();
+    await fresh.startDeviceLink();
+    const code = await waitFor(
+      () => (fresh.state.linking?.role === 'new' ? fresh.state.linking.code : undefined),
+      5000,
+    );
+    // The same 32 bytes of the new device's commit, with a bit set that carries nothing: it
+    // would be hashed as another text and the two devices would show different codes.
+    const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_';
+    const lax = (s: string) => s.slice(0, -1) + alphabet[alphabet.indexOf(s.at(-1)!) | 1]!;
+    const link = alice.link!;
+    const request = link.request.bind(link);
+    const sent: string[] = [];
+    link.request = (async (method: string, params: unknown) => {
+      sent.push(method);
+      const res = (await request(method as never, params as never)) as { commit: string };
+      return method === 'link.claim' ? { ...res, commit: lax(res.commit) } : res;
+    }) as typeof link.request;
+
+    await expect(alice.claimDeviceLink(code)).rejects.toThrow(/could not be verified/);
+    expect(sent).toContain('link.claim');
+    expect(sent).not.toContain('link.nonce');
+    fresh.cancelDeviceLink();
+  });
+
   it('refuses the link when the server swaps only the ML-KEM key', async () => {
     const coord = await server();
     const net = new FakeRelayNetwork();
