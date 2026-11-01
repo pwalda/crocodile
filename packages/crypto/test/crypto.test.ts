@@ -113,6 +113,8 @@ describe('identity', () => {
     // Spaces, line ends, and the dashes and invisible marks a document or chat app puts between groups.
     expect(decodeRecoveryKey(key.replace(/-/g, '\u2013'))).toEqual(seed);
     expect(decodeRecoveryKey(key.replace(/-/g, '\u2011\u200b'))).toEqual(seed);
+    expect(decodeRecoveryKey(key.replace(/-/g, '\uff0d'))).toEqual(seed);
+    expect(decodeRecoveryKey(key.replace(/-/g, '\u200e-\u200f'))).toEqual(seed);
     expect(decodeRecoveryKey(key.replace(/-/g, ' '))).toEqual(seed);
     expect(decodeRecoveryKey(` ${key}\n`)).toEqual(seed);
   });

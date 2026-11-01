@@ -83,24 +83,48 @@ export function toB32(bytes: Uint8Array): string {
   return out;
 }
 
+const B32_LOOKUP = new Int8Array(128).fill(-1);
+for (let i = 0; i < B32.length; i++) B32_LOOKUP[B32.charCodeAt(i)] = i;
+
+/** The value of a base32 character, upper or lower case (ASCII only), or -1. */
+function b32Value(code: number) {
+  if (code >= 65 && code <= 90) code += 32;
+  return code < 128 ? B32_LOOKUP[code]! : -1;
+}
+
+/** Why `text` is not what toB32 would write for some bytes (in either case), or null if it is. */
+function b32Problem(text: string): string | null {
+  let last = 0;
+  for (let i = 0; i < text.length; i++) {
+    last = b32Value(text.charCodeAt(i));
+    if (last < 0) return 'invalid base32 character';
+  }
+  // The bits of the last character that carry nothing must be zero, or one value has many spellings.
+  const spare = (text.length * 5) % 8;
+  return spare === 0 || (last & ((1 << spare) - 1)) === 0 ? null : 'invalid base32 padding bits';
+}
+
+/** Whether `text` is what toB32 would write for some bytes, in either case. */
+export function isCanonicalB32(text: string): boolean {
+  return b32Problem(text) === null;
+}
+
 /** ASCII case does not matter; anything but the 32 letters and digits, and unused bits that are not zero, is an error. */
 export function fromB32(text: string): Uint8Array {
+  const problem = b32Problem(text);
+  if (problem) throw new Error(problem);
   const out = new Uint8Array(Math.floor((text.length * 5) / 8));
   let buffer = 0;
   let bits = 0;
   let o = 0;
-  for (const ch of text.replace(/[A-Z]/g, (c) => String.fromCharCode(c.charCodeAt(0) + 32))) {
-    const v = B32.indexOf(ch);
-    if (v < 0) throw new Error('invalid base32 character');
-    buffer = ((buffer << 5) | v) & 0xffff;
+  for (let i = 0; i < text.length; i++) {
+    buffer = ((buffer << 5) | b32Value(text.charCodeAt(i))) & 0xffff;
     bits += 5;
     if (bits >= 8) {
       bits -= 8;
       out[o++] = (buffer >> bits) & 0xff;
     }
   }
-  if (bits > 0 && (buffer & ((1 << bits) - 1)) !== 0)
-    throw new Error('invalid base32 padding bits');
   return out;
 }
 

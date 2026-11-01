@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { keyB64u, sigB64u } from './b64u';
+import { b64uBytes, keyB64u, sigB64u } from './b64u';
 import { LIMITS } from './constants';
 import type { SignedRecord } from './records';
 import type { ServerInfo } from './rpc';
@@ -391,7 +391,13 @@ const FloodBody = z.discriminatedUnion('t', [
     t: z.literal('link_answer'),
     qid: id,
     found: z
-      .object({ peer: PeerId, key: str(64), encKey: str(64), kemKey: str(1600), commit: str(64) })
+      .object({
+        peer: PeerId,
+        key: keyB64u,
+        encKey: b64uBytes(32),
+        kemKey: b64uBytes(1184),
+        commit: b64uBytes(32),
+      })
       .optional(),
   }),
   z.object({ t: z.literal('mail_query'), peer: PeerId, proof: MailProof.optional() }),
@@ -438,13 +444,13 @@ export const FedFrameSchema = z.discriminatedUnion('t', [
     // Checked (ServerInfo) where used; left as sent so signatures still verify.
     server: anyJson,
     challenge: str(200),
-    channel: z.object({ x25519: str(100), mlkem: str(4000) }),
+    channel: z.object({ x25519: b64uBytes(32), mlkem: b64uBytes(1184) }),
     protocol: z.number().int().optional(),
   }),
   z.object({
     t: z.literal('fed_auth'),
-    answer: z.object({ epk: str(100), kem: str(4000) }),
-    sig: str(200),
+    answer: z.object({ epk: b64uBytes(32), kem: b64uBytes(1088) }),
+    sig: sigB64u,
     cursor: z.number().int().min(0),
   }),
   z.object({
@@ -454,7 +460,7 @@ export const FedFrameSchema = z.discriminatedUnion('t', [
     seq: z.number(),
     full: z.boolean(),
     presence: z.number().optional(),
-    sig: str(200),
+    sig: sigB64u,
   }),
   z.object({
     t: z.literal('flood'),
@@ -492,8 +498,8 @@ export const FedFrameSchema = z.discriminatedUnion('t', [
     seq: z.number(),
     full: z.boolean(),
     entries: z.array(PresenceEntry).max(100_000),
-    key: str(64),
-    sig: str(200),
+    key: keyB64u,
+    sig: sigB64u,
   }),
   z.object({ t: z.literal('route'), to: str(200), ev: z.enum(ROUTED_EVENTS), d: anyJson }),
   z.object({
@@ -517,8 +523,8 @@ export const FedFrameSchema = z.discriminatedUnion('t', [
     occ: VoiceOccupancySchema,
     owner: id,
     at: z.number(),
-    key: str(64),
-    sig: str(200),
+    key: keyB64u,
+    sig: sigB64u,
   }),
   // Sent directly as well as flooded.
   ...FloodBody.options,

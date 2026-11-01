@@ -7,6 +7,7 @@ import {
 } from '@crocodile/client-core';
 import type { Coordinator, CoordinatorConfig } from '@crocodile/coordinator';
 import {
+  createChannelKeys,
   createIdentity,
   createLinkKem,
   createPrekey,
@@ -462,7 +463,7 @@ describe('sharded records', () => {
           t: 'fed_hello',
           server: { ...a.info, id: old.userId, key: old.publicKey, url: 'http://127.0.0.1:1' },
           challenge: 'c',
-          channel: { x25519: '', mlkem: '' },
+          channel: createChannelKeys().offer,
           ...(protocol ? { protocol } : {}),
         }),
       );

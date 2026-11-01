@@ -98,7 +98,7 @@ export type LegacyFriendsBody = z.infer<typeof LegacyFriendsBody>;
  * learns about it from sealed notes (see NoteBody).
  */
 export const SealedFriendsBody = z.object({
-  sealed: b64uText.max(LIMITS.recordMaxBytes),
+  sealed: b64uText(LIMITS.recordMaxBytes),
 });
 export type SealedFriendsBody = z.infer<typeof SealedFriendsBody>;
 
@@ -124,7 +124,7 @@ export const AnonBox = z.object({
   epk: pubKey,
   /** ML-KEM-768 ciphertext (1088 bytes). */
   kem: b64uBytes(1088),
-  ct: b64uText.max(8192),
+  ct: b64uText(8192),
 });
 export type AnonBox = z.infer<typeof AnonBox>;
 
@@ -284,7 +284,7 @@ export const MemberBody = z.object({
    * Joined with an open link that is a ticket: the maker's signed invite, and the signature of
    * this user by the secret in the link. (Instead of `inviteCode`, not with it.)
    */
-  ticket: z.object({ invite: TicketInvite, proof: z.string().min(1).max(200) }).optional(),
+  ticket: z.object({ invite: TicketInvite, proof: sigB64u }).optional(),
   left: z.boolean().optional(),
 });
 export type MemberBody = z.infer<typeof MemberBody>;

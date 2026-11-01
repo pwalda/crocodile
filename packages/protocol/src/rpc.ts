@@ -205,7 +205,7 @@ export const LinkBox = z.object({
   epk: b64uBytes(32),
   /** ML-KEM-768 ciphertext, base64url (1088 bytes). */
   kem: b64uBytes(1088),
-  ct: b64uText.max(4000),
+  ct: b64uText(4000),
   from: keyB64u,
   sig: sigB64u,
 });

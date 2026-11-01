@@ -1,6 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import {
   AnonBox,
+  FedFrameSchema,
+  MemberBody,
+  isCanonicalB32,
+  toB32,
+  b64uText,
   ChatMessage,
   E2EEnvelope,
   FileManifest,
@@ -101,5 +106,106 @@ describe('keys and signatures in messages', () => {
       expect(schema.safeParse({ ...good, ct: lax(ct) }).success).toBe(false);
       expect(schema.safeParse({ ...good, ct: ct + '=' }).success).toBe(false);
     }
+  });
+});
+
+describe('keys and signatures between servers', () => {
+  const key = bytes(32);
+  const sig = bytes(64);
+  const frames: Record<string, object> = {
+    beacon: { t: 'beacon', server: {}, seq: 1, full: false, sig },
+    presence: { t: 'presence', origin: 'abcdefgh', seq: 1, full: false, entries: [], key, sig },
+    fed_auth: {
+      t: 'fed_auth',
+      answer: { epk: key, kem: bytes(1088) },
+      sig,
+      cursor: 0,
+    },
+    voice: {
+      t: 'voice',
+      sessionId: 'voice:abcdefgh:abcdefgh',
+      occ: { spaceId: 'abcdefgh', channelId: 'abcdefgh', members: [], host: null },
+      owner: 'abcdefgh',
+      at: 1,
+      key,
+      sig,
+    },
+    link_answer: {
+      t: 'flood',
+      id: 'abcdefgh',
+      origin: 'abcdefgh',
+      hops: 1,
+      f: {
+        t: 'link_answer',
+        qid: 'abcdefgh',
+        found: {
+          peer: 'abcdefghij.klmnopqrst',
+          key,
+          encKey: key,
+          kemKey: bytes(1184),
+          commit: key,
+        },
+      },
+    },
+  };
+  const changed = (value: unknown, path: string[]): unknown => {
+    if (path.length === 0) return typeof value === 'string' ? lax(value) : value;
+    const [head, ...rest] = path;
+    return {
+      ...(value as object),
+      [head!]: changed((value as Record<string, unknown>)[head!], rest),
+    };
+  };
+  const fields: [string, string[]][] = [
+    ['beacon', ['sig']],
+    ['presence', ['key']],
+    ['presence', ['sig']],
+    ['fed_auth', ['sig']],
+    ['fed_auth', ['answer', 'epk']],
+    ['voice', ['key']],
+    ['voice', ['sig']],
+    ['link_answer', ['f', 'found', 'key']],
+    ['link_answer', ['f', 'found', 'encKey']],
+    ['link_answer', ['f', 'found', 'kemKey']],
+    ['link_answer', ['f', 'found', 'commit']],
+  ];
+
+  it('takes each frame as the servers write it, and refuses another spelling of a field', () => {
+    for (const [name, frame] of Object.entries(frames))
+      expect(FedFrameSchema.safeParse(frame).success, name).toBe(true);
+    for (const [name, path] of fields)
+      expect(
+        FedFrameSchema.safeParse(changed(frames[name], path)).success,
+        `${name} ${path.join('.')}`,
+      ).toBe(false);
+  });
+
+  it('refuses a ticket proof in another spelling', () => {
+    const proofOnly = MemberBody.shape.ticket.unwrap().shape.proof;
+    expect(proofOnly.safeParse(sig).success).toBe(true);
+    expect(proofOnly.safeParse(lax(sig)).success).toBe(false);
+  });
+});
+
+describe('base32 and long ciphertexts', () => {
+  it('tells a canonical base32 text from another, in either case', () => {
+    for (let n = 0; n < 40; n++) {
+      const text = toB32(Uint8Array.from({ length: n }, (_, i) => (i * 29 + 5) & 0xff));
+      expect(isCanonicalB32(text)).toBe(true);
+      expect(isCanonicalB32(text.toUpperCase())).toBe(true);
+    }
+    expect(isCanonicalB32('ab-')).toBe(false);
+    expect(isCanonicalB32('\u212aa')).toBe(false);
+    expect(isCanonicalB32('b')).toBe(false); // 5 bits that carry nothing, set
+    expect(isCanonicalB32('a')).toBe(true);
+  });
+
+  it('refuses a ciphertext that is too long without reading it', () => {
+    // A string that is too long and also not base64url fails on its length alone.
+    const result = b64uText(8).safeParse('!'.repeat(1000));
+    expect(result.success).toBe(false);
+    expect(result.error!.issues.map((i) => i.code)).toEqual(['too_big']);
+    expect(b64uText(8).safeParse('YQ').success).toBe(true);
+    expect(b64uText().safeParse('YQ').success).toBe(true);
   });
 });

@@ -3,6 +3,7 @@ import {
   SIG_DOMAIN,
   SignedRecordEnvelope,
   fromB32,
+  isCanonicalB32,
   fromB64u,
   toB32,
   toB64u,
@@ -101,13 +102,8 @@ export function ticketFromSecret(secret: string): Ticket | null {
   const clean = secret.trim().toLowerCase();
   if (!/^[a-z2-7]+$/.test(clean) || clean.length !== TICKET_SECRET_LENGTH) return null;
   // (52 characters hold 260 bits: the 4 that are over must be 0, or one secret has many spellings.)
-  let seed: Uint8Array;
-  try {
-    seed = fromB32(clean);
-  } catch {
-    return null;
-  }
-  if (seed.length !== 32) return null;
+  if (!isCanonicalB32(clean)) return null;
+  const seed = fromB32(clean);
   const tpub = toB64u(ed25519.getPublicKey(seed));
   return { secret: clean, tpub, tid: ticketIdOf(tpub) };
 }
