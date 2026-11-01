@@ -182,8 +182,8 @@ by name goes to `name:<name>`.
   its own users. A server can sign that any user is connected through it, and
   then the events routed to that user (signalling, session invites, mail) go to
   it. That is the same as the server dropping them. Closing it would take the
-  user's device proving which server it connected to; only its session
-  operations do that so far. The server a device is on can also drop or hold
+  user's device proving which server it connected to; only its join, update
+  and report do that so far. The server a device is on can also drop or hold
   back those operations (a signed join is good for five minutes), and the leave
   it sends when the device disconnects is not signed.
 - Every server still hears every beacon and every presence change; that is
