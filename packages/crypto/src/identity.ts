@@ -109,6 +109,8 @@ export function decodeRecoveryKey(text: string): Uint8Array {
   const clean = text.replace(/[\s\-\u2010-\u2015\u2212\u00ad\u200b-\u200d\u2060\ufeff]/g, '');
   if (!/^[a-z2-7]*$/i.test(clean))
     throw new Error('Recovery key is mistyped (it has a character that cannot be in one)');
+  // (A key is 56 characters exactly; a 57th that is an 'a' would carry no bits, but is another spelling.)
+  if (clean.length !== 56) throw new Error('Recovery key has the wrong length');
   const bytes = fromB32(clean);
   if (bytes.length !== 35) throw new Error('Recovery key has the wrong length');
   const seed = bytes.slice(0, 32);

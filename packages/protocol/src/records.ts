@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { b64uBytes, keyB64u, sigB64u } from './b64u';
+import { b64uBytes, b64uText, keyB64u, sigB64u } from './b64u';
 import { LIMITS } from './constants';
 
 /**
@@ -23,7 +23,6 @@ export type RecordKind = (typeof RECORD_KINDS)[number];
 
 const id = z.string().regex(/^[a-z2-7]{8,64}$/);
 const pubKey = keyB64u;
-const b64u = /^[A-Za-z0-9_-]*$/;
 export const DeviceId = z.string().regex(/^[a-z2-7]{8,32}$/);
 const peerId = z.string().regex(/^[a-z2-7]{8,64}\.[a-z2-7]{8,32}$/);
 
@@ -99,7 +98,7 @@ export type LegacyFriendsBody = z.infer<typeof LegacyFriendsBody>;
  * learns about it from sealed notes (see NoteBody).
  */
 export const SealedFriendsBody = z.object({
-  sealed: z.string().regex(b64u).max(LIMITS.recordMaxBytes),
+  sealed: b64uText.max(LIMITS.recordMaxBytes),
 });
 export type SealedFriendsBody = z.infer<typeof SealedFriendsBody>;
 
@@ -125,7 +124,7 @@ export const AnonBox = z.object({
   epk: pubKey,
   /** ML-KEM-768 ciphertext (1088 bytes). */
   kem: b64uBytes(1088),
-  ct: z.string().regex(b64u).max(8192),
+  ct: b64uText.max(8192),
 });
 export type AnonBox = z.infer<typeof AnonBox>;
 

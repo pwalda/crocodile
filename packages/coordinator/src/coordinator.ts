@@ -235,7 +235,14 @@ export class Coordinator {
       seed = toB64u(randomBytes(32));
       this.store.setMeta('server-seed', seed);
     }
-    this.identity = identityFromSeed(fromB64u(seed));
+    let seedBytes: Uint8Array;
+    try {
+      seedBytes = fromB64u(seed);
+    } catch (e) {
+      // (A seed is 32 bytes as the server writes them: base64url, without padding.)
+      throw new Error(`the server seed is not valid: ${(e as Error).message}`, { cause: e });
+    }
+    this.identity = identityFromSeed(seedBytes);
     this.records = new RecordService(this.store, this.log, {
       ...defaultRecordQuotas,
       ...this.config.quotas,

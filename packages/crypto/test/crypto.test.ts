@@ -102,17 +102,19 @@ describe('identity', () => {
     expect(() => decodeRecoveryKey(typo)).toThrow(/checksum/);
   });
 
-  it('rejects a recovery key with a character that cannot be in one', () => {
+  it('takes a recovery key in one spelling, with the separators a document puts in', () => {
     const key = encodeRecoveryKey(createIdentity().seed);
+    const seed = decodeRecoveryKey(key);
+    // A character that cannot be in one, padding, and a 57th character that would carry no bits.
     expect(() => decodeRecoveryKey('1' + key.slice(1))).toThrow(/mistyped/);
     expect(() => decodeRecoveryKey(key + '=')).toThrow(/mistyped/);
-    // Separators and spaces are still fine, and so are the dashes and invisible marks that
-    // a document or chat app puts in their place.
-    expect(decodeRecoveryKey(key.replace(/-/g, '\u2013'))).toEqual(decodeRecoveryKey(key));
-    expect(decodeRecoveryKey(key.replace(/-/g, '\u2011\u200b'))).toEqual(decodeRecoveryKey(key));
-    expect(decodeRecoveryKey(` ${key}\n`)).toEqual(decodeRecoveryKey(key));
-    // Separators and spaces are still fine.
-    expect(() => decodeRecoveryKey(key.replace(/-/g, ' '))).not.toThrow();
+    expect(() => decodeRecoveryKey(key + 'a')).toThrow(/wrong length/);
+    expect(() => decodeRecoveryKey(key.slice(0, -1))).toThrow(/wrong length/);
+    // Spaces, line ends, and the dashes and invisible marks a document or chat app puts between groups.
+    expect(decodeRecoveryKey(key.replace(/-/g, '\u2013'))).toEqual(seed);
+    expect(decodeRecoveryKey(key.replace(/-/g, '\u2011\u200b'))).toEqual(seed);
+    expect(decodeRecoveryKey(key.replace(/-/g, ' '))).toEqual(seed);
+    expect(decodeRecoveryKey(` ${key}\n`)).toEqual(seed);
   });
 
   it('safety numbers are symmetric', () => {

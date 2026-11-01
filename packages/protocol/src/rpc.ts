@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { b64uBytes, keyB64u, sigB64u } from './b64u';
+import { b64uBytes, b64uText, keyB64u, sigB64u } from './b64u';
 import type { SignedRecord } from './records';
 import { SignedRecordEnvelope } from './records';
 import {
@@ -205,7 +205,7 @@ export const LinkBox = z.object({
   epk: b64uBytes(32),
   /** ML-KEM-768 ciphertext, base64url (1088 bytes). */
   kem: b64uBytes(1088),
-  ct: z.string().max(4000),
+  ct: b64uText.max(4000),
   from: keyB64u,
   sig: sigB64u,
 });

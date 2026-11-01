@@ -2372,6 +2372,15 @@ describe('abuse limits', () => {
         /positive whole number/,
       );
   });
+
+  it('says what is wrong with a seed that is not as the server writes it', () => {
+    const good = toB64u(new Uint8Array(32).fill(3));
+    expect(() => new Coordinator({ name: 'x', storage: 'memory', seed: good })).not.toThrow();
+    for (const bad of [good + '=', good.slice(0, 42) + 'B', 'not a seed!'])
+      expect(() => new Coordinator({ name: 'x', storage: 'memory', seed: bad })).toThrow(
+        /the server seed is not valid: invalid base64url/,
+      );
+  });
 });
 
 describe('record quotas', () => {

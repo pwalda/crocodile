@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import {
+  AnonBox,
   ChatMessage,
+  E2EEnvelope,
   FileManifest,
   LinkBox,
   SealedBox,
@@ -60,12 +62,12 @@ describe('keys and signatures in messages', () => {
     pk: 0,
     epk: key,
     kem: bytes(1088),
-    ct: 'x',
+    ct: bytes(5),
     from: key,
     fromDevice: 'abcdefgh',
     sig,
   };
-  const link = { epk: key, kem: bytes(1088), ct: 'x', from: key, sig };
+  const link = { epk: key, kem: bytes(1088), ct: bytes(5), from: key, sig };
 
   const cases: [string, { safeParse: (v: unknown) => { success: boolean } }, object, string[]][] = [
     ['chat message', ChatMessage, message, ['key', 'sig']],
@@ -86,4 +88,18 @@ describe('keys and signatures in messages', () => {
       }
     });
   }
+
+  it('takes one spelling of a ciphertext, of any length', () => {
+    const ct = bytes(5);
+    for (const [schema, good] of [
+      [SealedBox, sealed],
+      [LinkBox, link],
+      [E2EEnvelope, { k: 'group', kid: 1, g: 0, ct }],
+      [AnonBox, { v: 3, to: sealed.to, pk: 0, epk: key, kem: bytes(1088), ct }],
+    ] as const) {
+      expect(schema.safeParse({ ...good, ct }).success).toBe(true);
+      expect(schema.safeParse({ ...good, ct: lax(ct) }).success).toBe(false);
+      expect(schema.safeParse({ ...good, ct: ct + '=' }).success).toBe(false);
+    }
+  });
 });

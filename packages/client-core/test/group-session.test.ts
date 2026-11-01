@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createIdentity } from '@crocodile/crypto';
 import { GroupKeyring } from '../src/keyring';
-import { toB64u } from '@crocodile/protocol';
+import { fromB64u, toB64u } from '@crocodile/protocol';
 import type { RelayGrant, SealedBox, SessionState } from '@crocodile/protocol';
 import { Emitter } from '../src/emitter';
 import {
@@ -35,19 +35,23 @@ class StuckTransport extends Emitter<RelayLinkEvents> implements RelayTransport 
   }
 }
 
-/** A box that opens to its text for anyone: `epk` carries who sent it, `ct` what it holds. */
-/** A sealed box of the right shape, whose sender the test's `open` finds again by its key. */
+/** A sealed box of the right shape that opens to its text for anyone: its `epk` stands for who sent it. */
+const epks = new Map<string, string>();
 const senders = new Map<string, string>();
 const box = (from: string, to: string, text: string): SealedBox => {
-  const epk = toB64u(Uint8Array.from({ length: 32 }, (_, i) => from.charCodeAt(i % from.length)));
-  senders.set(epk, from);
+  let epk = epks.get(from);
+  if (!epk) {
+    epk = toB64u(Uint8Array.from({ length: 32 }, (_, i) => (i === 0 ? epks.size + 1 : 0)));
+    epks.set(from, epk);
+    senders.set(epk, from);
+  }
   return {
     v: 3,
     to,
     pk: 0,
     epk,
     kem: toB64u(new Uint8Array(1088)),
-    ct: text,
+    ct: toB64u(new TextEncoder().encode(text)),
     from: toB64u(new Uint8Array(32)),
     fromDevice: 'aaaaaaaa',
     sig: toB64u(new Uint8Array(64)),
@@ -64,7 +68,10 @@ class OpenTransport extends StuckTransport {
   override send(msg: unknown) {
     const m = msg as { to?: string; d?: { k?: string; box?: SealedBox } };
     if (m.d?.k === 'sealed') {
-      const payload = JSON.parse(m.d.box!.ct) as { type: string; since?: Record<string, number> };
+      const payload = JSON.parse(new TextDecoder().decode(fromB64u(m.d.box!.ct))) as {
+        type: string;
+        since?: Record<string, number>;
+      };
       this.sent.push(payload.type);
       this.requests.push({ to: m.to!, type: payload.type, since: payload.since });
     }
@@ -562,7 +569,7 @@ describe('group session', () => {
       admits: () => true,
       seal: async (to: string, plaintext: Uint8Array) =>
         box(self, to, new TextDecoder().decode(plaintext)),
-      open: (b: SealedBox) => ({ from: senders.get(b.epk)!, plaintext: enc.encode(b.ct) }),
+      open: (b: SealedBox) => ({ from: senders.get(b.epk)!, plaintext: fromB64u(b.ct) }),
       log: () => {},
     } as unknown as SessionContext;
     const s = new GroupSession('dm:a:b', ctx, () => (transport = new OpenTransport(sent)));

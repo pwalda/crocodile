@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { b64uBytes, keyB64u, sigB64u } from './b64u';
+import { b64uBytes, b64uText, keyB64u, sigB64u } from './b64u';
 import { FileId, FileManifest } from './files';
 
 /**
@@ -113,7 +113,7 @@ export const SealedBox = z.object({
   epk: b64uBytes(32),
   /** ML-KEM-768 ciphertext. */
   kem: b64uBytes(1088),
-  ct: z.string(),
+  ct: b64uText,
   /** Sender's Ed25519 identity key. */
   from: keyB64u,
   /** Sender's device id. */
@@ -130,7 +130,7 @@ export const E2EEnvelope = z.discriminatedUnion('k', [
     k: z.literal('group'),
     kid: z.number().int().min(0).max(0xffffffff),
     g: z.number().int().min(0),
-    ct: z.string(),
+    ct: b64uText,
   }),
 ]);
 export type E2EEnvelope = z.infer<typeof E2EEnvelope>;
