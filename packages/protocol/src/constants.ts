@@ -29,6 +29,10 @@ export const LIMITS = {
   /** Members a roster can hold (a user id is about 29 bytes of a record). */
   rosterMax: 10_000,
   wsMessageMaxBytes: 1024 * 1024,
+  /** A data channel message (werift's limit, which host relays use): nothing larger crosses one. */
+  dataChannelMaxBytes: 64 * 1024,
+  /** Ciphertext of a sealed box: what a mailbox holds for one (the most anything legitimate needs). */
+  sealedBoxMaxChars: 96 * 1024,
   sessionMembersMax: 100,
   /** Unread notes a server holds for one user. */
   notesPerUser: 200,

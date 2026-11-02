@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { b64uBytes, b64uText, keyB64u, sigB64u } from './b64u';
 import { FileId, FileManifest } from './files';
+import { LIMITS } from './constants';
 
 /**
  * Messages on the reliable data channel between a member and the host relay.
@@ -113,7 +114,7 @@ export const SealedBox = z.object({
   epk: b64uBytes(32),
   /** ML-KEM-768 ciphertext. */
   kem: b64uBytes(1088),
-  ct: b64uText(),
+  ct: b64uText(LIMITS.sealedBoxMaxChars),
   /** Sender's Ed25519 identity key. */
   from: keyB64u,
   /** Sender's device id. */
@@ -130,7 +131,7 @@ export const E2EEnvelope = z.discriminatedUnion('k', [
     k: z.literal('group'),
     kid: z.number().int().min(0).max(0xffffffff),
     g: z.number().int().min(0),
-    ct: b64uText(),
+    ct: b64uText(LIMITS.dataChannelMaxBytes),
   }),
 ]);
 export type E2EEnvelope = z.infer<typeof E2EEnvelope>;
@@ -183,8 +184,16 @@ export const SealedPayload = z.discriminatedUnion('type', [
   }),
   z.object({
     type: z.literal('history_req'),
-    /** channelId -> newest timestamp the requester already has. */
-    since: z.record(z.string(), z.number()),
+    /**
+     * channelId -> newest timestamp the requester already has. A session has at most
+     * `channelsPerSpace` channels (a direct message has one), and a channel id is at most
+     * as long as a message names one.
+     */
+    since: z
+      .record(z.string().max(200), z.number().int())
+      .refine((since) => Object.keys(since).length <= LIMITS.channelsPerSpace, {
+        message: 'too many channels',
+      }),
   }),
   z.object({
     type: z.literal('history'),
