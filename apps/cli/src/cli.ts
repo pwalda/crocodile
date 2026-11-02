@@ -145,7 +145,7 @@ accept). Without --from, only friends and existing conversations are heard.
 
 Files are saved readable by you only. A file bigger than the free space in
 the folder is skipped, and so is one over --max-size (like 500MB or 2GB);
-it then goes on waiting for the next one.`,
+without --keep it then stops, with exit code 3.`,
   whoami: `crocodile whoami
 
 Shows the account this computer uses (name#tag and user id).`,
@@ -387,6 +387,12 @@ const me = (ctx: Ctx) => {
   return p ? tagOf(p) : ctx.client.userId;
 };
 
+/** This account's "name#1234" exactly as it is, for a script to read back (`--to`, `--from`). */
+const identity = (ctx: Ctx) => {
+  const p = ctx.client.state.me;
+  return p ? `${p.username}#${p.tag}` : ctx.client.userId;
+};
+
 /** "name#1234" for a profile, as shown to people. */
 const tagOf = (p: { username: string; tag: string }) => inline(`${p.username}#${p.tag}`);
 
@@ -403,7 +409,7 @@ async function init(ctx: Ctx, name: string) {
   ctx.io.err(
     `\nRecovery key (the only way to restore this account elsewhere; keep it safe):\n\n  ${ctx.client.recoveryKey()}\n`,
   );
-  ctx.io.out(me(ctx));
+  ctx.io.out(identity(ctx));
   return 0;
 }
 
@@ -462,14 +468,14 @@ async function link(ctx: Ctx) {
   await connected(ctx);
   await until(ctx, () => ctx.client.state.me, 15_000);
   io.err(`Linked: this computer is now one of ${me(ctx)}'s devices.`);
-  io.out(me(ctx));
+  io.out(identity(ctx));
   return 0;
 }
 
 async function whoami(ctx: Ctx) {
   needAccount(ctx);
   await until(ctx, () => ctx.client.state.me, 10_000);
-  ctx.io.out(`${me(ctx)} ${ctx.client.userId}`);
+  ctx.io.out(`${identity(ctx)} ${ctx.client.userId}`);
   return 0;
 }
 
@@ -590,11 +596,12 @@ async function get(
   client.on('message', ({ message: m }) => {
     if (m.file && !m.deleted && m.ch.startsWith('dm:')) add(m.author, m.file);
   });
-  // Files that arrived before (a download stopped half way, or sent while
-  // this wasn't running): their messages won't come again.
+  // Files that arrived before (a download stopped half way, one that finished but could not be
+  // saved, or sent while this wasn't running): their messages won't come again. A saved file
+  // is not kept in the profile any more, and is in `saved` anyway.
   for (const f of client.files?.list() ?? []) {
     const file = client.files!.manifest(f.id);
-    if (file && !f.complete && !f.mine && f.sessionId.startsWith('dm:')) add(f.author, file);
+    if (file && !f.mine && f.sessionId.startsWith('dm:')) add(f.author, file);
   }
   // Naming the sender is asking to hear from them: a conversation they start is taken up while
   // this runs (the app would wait for an answer). Without a name, only people already known.
@@ -637,12 +644,14 @@ async function get(
     const refusal = tooBig
       ? `it is over --max-size ${formatBytes(opts.maxSize!)}`
       : free !== undefined
-        ? `it needs ${formatBytes(free.needed)} of room${free.needed > file.size ? ' (the download is kept in the profile as well)' : ''} and ${formatBytes(free.free)} is free`
+        ? `it needs ${formatBytes(free.needed)} of room ${free.where === 'profile' ? 'in the profile (it keeps the download first)' : free.needed > file.size ? 'in the folder (the profile keeps a copy as well, on the same disk)' : 'in the folder'} and ${formatBytes(free.free)} is free`
         : '';
     if (refusal) {
       io.err(
-        `Not taking ${name} (${formatBytes(file.size)}) from ${who}: ${refusal}. Still waiting for the next one.`,
+        `Not taking ${name} (${formatBytes(file.size)}) from ${who}: ${refusal}.${opts.keep ? ' Still waiting for the next one.' : ''}`,
       );
+      // Taking the next file is what a one-file `get` is for; a script is told it did not.
+      if (!opts.keep) return 3;
       continue;
     }
     io.err(`Receiving ${name} (${formatBytes(file.size)}) from ${who}…`);

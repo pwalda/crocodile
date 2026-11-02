@@ -5,7 +5,7 @@ import { join } from 'node:path';
 
 // A file system that can't make hard links (some network and removable drives): the file is moved
 // into place instead. Other failures are not taken for that.
-const linkFails = vi.hoisted(() => ({ code: 'EPERM', plant: '', copyFails: '' }));
+const linkFails = vi.hoisted(() => ({ code: 'EPERM', plant: '', copyFails: '', syncFails: '' }));
 // Disks that are not the machine's: free space and device number by path, where set.
 const disks = vi.hoisted(() => ({
   free: new Map<string, number>(),
@@ -32,6 +32,15 @@ vi.mock('node:fs/promises', async (importOriginal) => {
         throw Object.assign(new Error('copy failed'), { code: linkFails.copyFails });
       }
       return actual.copyFile(from, to, mode);
+    },
+    // A file system that cannot flush, or a disk that fails while flushing.
+    open: async (...args: Parameters<typeof actual.open>) => {
+      const handle = await actual.open(...args);
+      if (linkFails.syncFails)
+        handle.sync = async () => {
+          throw Object.assign(new Error('sync failed'), { code: linkFails.syncFails });
+        };
+      return handle;
     },
     statfs: async (path: string) =>
       disks.free.has(path) ? { bavail: disks.free.get(path)!, bsize: 1 } : actual.statfs(path),
@@ -88,6 +97,32 @@ describe('saving where there are no hard links', () => {
     expect(readdirSync(dir)).toEqual([]);
   });
 
+  it('goes on where the file system has nothing to flush to', async () => {
+    linkFails.code = 'EPERM';
+    linkFails.syncFails = 'ENOTSUP';
+    const dir = folder();
+    try {
+      const path = await saveFile(dir, 'a.txt', async (out) => void (await out.write('new')));
+      expect(readFileSync(path, 'utf8')).toBe('new');
+    } finally {
+      linkFails.syncFails = '';
+    }
+  });
+
+  it('stops, leaving nothing, when flushing fails for real', async () => {
+    linkFails.code = 'EPERM';
+    linkFails.syncFails = 'EIO';
+    const dir = folder();
+    try {
+      await expect(
+        saveFile(dir, 'a.txt', async (out) => void (await out.write('new'))),
+      ).rejects.toThrow(/sync failed/);
+    } finally {
+      linkFails.syncFails = '';
+    }
+    expect(readdirSync(dir)).toEqual([]);
+  });
+
   it('gives up, leaving nothing, on any other failure', async () => {
     linkFails.code = 'EACCES';
     const dir = folder();
@@ -114,11 +149,19 @@ describe('room on the disks involved', () => {
     disks.free.set(dir, 100);
     disks.free.set(profile, 10);
     // The download is kept in the profile first: 50 bytes do not fit there.
-    expect(await spaceProblem(dir, profile, 50)).toEqual({ free: 10, needed: 50 });
+    expect(await spaceProblem(dir, profile, 50)).toEqual({
+      free: 10,
+      needed: 50,
+      where: 'profile',
+    });
     // Most of it is there already.
     expect(await spaceProblem(dir, profile, 50, 45)).toBeUndefined();
     // And the folder itself too small.
-    expect(await spaceProblem(dir, profile, 150, 145)).toEqual({ free: 100, needed: 150 });
+    expect(await spaceProblem(dir, profile, 150, 145)).toEqual({
+      free: 100,
+      needed: 150,
+      where: 'folder',
+    });
   });
 
   it('is found once, doubled, on one disk', async () => {
@@ -126,7 +169,11 @@ describe('room on the disks involved', () => {
     disk(dir, profile, 1, 1);
     disks.free.set(dir, 100);
     disks.free.set(profile, 5);
-    expect(await spaceProblem(dir, profile, 60)).toEqual({ free: 100, needed: 120 });
+    expect(await spaceProblem(dir, profile, 60)).toEqual({
+      free: 100,
+      needed: 120,
+      where: 'folder',
+    });
     expect(await spaceProblem(dir, profile, 40)).toBeUndefined();
     expect(await spaceProblem(dir, profile, 60, 30)).toBeUndefined();
   });

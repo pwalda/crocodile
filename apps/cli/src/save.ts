@@ -48,6 +48,9 @@ export function freePath(dir: string, name: string) {
   }
 }
 
+/** What `sync` fails with where the file system has nothing to flush to. */
+const NO_SYNC = new Set(['EINVAL', 'ENOTSUP', 'EOPNOTSUPP', 'ENOSYS']);
+
 /** What `link` fails with where the file system can't make hard links. */
 const NO_LINKS = new Set(['EPERM', 'ENOTSUP', 'EOPNOTSUPP', 'ENOSYS', 'EXDEV']);
 
@@ -67,7 +70,10 @@ export async function saveFile(
     try {
       await write(out);
       // On disk before the name shows it: a crash must not leave a short file under the real name.
-      await out.sync();
+      await out.sync().catch((err) => {
+        // Some file systems (FUSE, shares) can't; that is no reason to lose the file.
+        if (!NO_SYNC.has((err as NodeJS.ErrnoException).code ?? '')) throw err;
+      });
     } finally {
       await out.close();
     }
@@ -102,7 +108,7 @@ export async function saveFile(
  * there once for the copy kept in the profile while it downloads and once more for the saved
  * file, and those are one pool when both are on the same disk (less what a download stopped
  * earlier has kept already). Returns the free space and the space needed on the disk that falls short
- * (the one with less, if both do); nothing when there is room, or when the free space can't be read.
+ * (the one with less, if both do), and which of the two it is; nothing when there is room, or when the free space can't be read.
  */
 export async function spaceProblem(dir: string, profileDir: string, size: number, held = 0) {
   const freeIn = async (path: string) => {
@@ -114,12 +120,15 @@ export async function spaceProblem(dir: string, profileDir: string, size: number
   // has its own to find.
   const needs =
     here && there && here.dev === there.dev
-      ? [[dir, size * 2 - held] as const]
-      : [[dir, size] as const, [profileDir, size - held] as const];
-  let short: { free: number; needed: number } | undefined;
-  for (const [path, needed] of needs) {
+      ? ([[dir, size * 2 - held, 'folder']] as const)
+      : ([
+          [dir, size, 'folder'],
+          [profileDir, size - held, 'profile'],
+        ] as const);
+  let short: { free: number; needed: number; where: 'folder' | 'profile' } | undefined;
+  for (const [path, needed, where] of needs) {
     const free = await freeIn(path);
-    if (needed > free && (!short || free < short.free)) short = { free, needed };
+    if (needed > free && (!short || free < short.free)) short = { free, needed, where };
   }
   return short;
 }
