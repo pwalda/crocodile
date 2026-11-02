@@ -53,7 +53,7 @@ import {
   FileThumb,
   LIMITS,
   LinkKemKey,
-  keyB64u,
+  LinkValue,
   fileMediaKind,
   NotePayload,
   fromB64u,
@@ -3239,7 +3239,7 @@ export class CrocodileClient extends Emitter<ClientEvents> {
       // could make us take another nonce could choose one to match the codes.
       const t = this.linkTemp;
       if (!t || t.claimedBy || !keyMatchesUserId(key, userId)) return;
-      if (!keyB64u.safeParse(theirNonce).success) return;
+      if (!LinkValue.safeParse(theirNonce).success) return;
       t.claimedBy = userId;
       const securityCode = linkSecurityCode(
         temp.publicKey,
@@ -3323,7 +3323,7 @@ export class CrocodileClient extends Emitter<ClientEvents> {
     const res = await link.request('link.claim', { code });
     // These go into newline-separated hash inputs, so hold them to one encoding.
     if (
-      ![res.key, res.encKey, res.commit].every((s) => keyB64u.safeParse(s).success) ||
+      ![res.key, res.encKey, res.commit].every((s) => LinkValue.safeParse(s).success) ||
       !LinkKemKey.safeParse(res.kemKey).success
     )
       throw new Error('The new device could not be verified. Start again on both devices.');

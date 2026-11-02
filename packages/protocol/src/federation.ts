@@ -528,7 +528,7 @@ export const FedFrameSchema = z.discriminatedUnion('t', [
   }),
   // Sent directly as well as flooded.
   ...FloodBody.options,
-  z.object({ t: z.literal('x'), n: z.number().int(), c: b64uText(LIMITS.wsMessageMaxBytes) }),
+  z.object({ t: z.literal('x'), n: z.number().int(), c: b64uText(LIMITS.wsMessageMaxBytes * 8) }),
   z.object({ t: z.literal('ping') }),
   z.object({ t: z.literal('pong') }),
 ]);

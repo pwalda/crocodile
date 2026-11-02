@@ -196,7 +196,8 @@ export type ServerFrame =
 export type ClientFrame = ClientAuth | RpcRequest;
 
 /** 32 bytes, base64url: link keys, nonces and commitments. */
-const linkB64 = b64uBytes(32);
+export const LinkValue = b64uBytes(32);
+const linkB64 = LinkValue;
 /** ML-KEM-768 encapsulation key, base64url (1184 bytes). */
 export const LinkKemKey = b64uBytes(1184);
 

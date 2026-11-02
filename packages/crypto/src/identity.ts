@@ -108,8 +108,11 @@ export function decodeRecoveryKey(text: string): Uint8Array {
   // Spaces, and any dash or invisible mark (zero-width, direction marks) a word processor, chat app
   // or input method may put between the groups.
   const clean = text.replace(/[\s\p{Pd}\p{Cf}]/gu, '');
-  if (!/^[a-z2-7]*$/i.test(clean))
-    throw new Error('Recovery key is mistyped (it has a character that cannot be in one)');
+  const bad = clean.search(/[^a-z2-7]/i);
+  if (bad >= 0)
+    throw new Error(
+      `Recovery key is mistyped (character ${bad + 1}, ${JSON.stringify(clean[bad])}, cannot be in one)`,
+    );
   // (A key is 56 characters exactly; a 57th that is an 'a' would carry no bits, but is another spelling.)
   if (clean.length !== 56) throw new Error('Recovery key has the wrong length');
   const bytes = fromB32(clean);

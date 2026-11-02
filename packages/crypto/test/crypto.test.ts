@@ -106,7 +106,10 @@ describe('identity', () => {
     const key = encodeRecoveryKey(createIdentity().seed);
     const seed = decodeRecoveryKey(key);
     // A character that cannot be in one, padding, and a 57th character that would carry no bits.
-    expect(() => decodeRecoveryKey('1' + key.slice(1))).toThrow(/mistyped/);
+    expect(() => decodeRecoveryKey('1' + key.slice(1))).toThrow(/mistyped \(character 1, "1"/);
+    expect(() => decodeRecoveryKey(key.slice(0, 5) + '\u00b7' + key.slice(6))).toThrow(
+      /character 5/,
+    );
     expect(() => decodeRecoveryKey(key + '=')).toThrow(/mistyped/);
     expect(() => decodeRecoveryKey(key + 'a')).toThrow(/wrong length/);
     expect(() => decodeRecoveryKey(key.slice(0, -1))).toThrow(/wrong length/);
