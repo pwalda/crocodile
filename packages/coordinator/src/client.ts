@@ -4,6 +4,7 @@ import {
   signInChannelContext,
   createChannelKeys,
   isSpaceMember,
+  peekFrameNumber,
   randomId,
   SecureChannel,
   sign,
@@ -139,6 +140,15 @@ export class ClientConnection implements ClientHandle {
 
     ws.on('message', (raw) => {
       if (!this.limiter.take()) {
+        // A frame dropped unread still has its place in the order of the channel, which the next
+        // frame follows. Its number is read from the first bytes, where `seal` writes it (the
+        // frame is not decoded: refusing a flood has to stay cheap). A frame that does not begin
+        // like one `seal` made leaves a gap nobody can close, so the connection ends.
+        if (this.channel) {
+          const head = Buffer.isBuffer(raw) ? raw.subarray(0, 40).toString('latin1') : '';
+          const n = peekFrameNumber(head);
+          if (n === undefined || !this.channel.skip(n)) return ws.close(1008, 'slow down');
+        }
         this.frame({ t: 'error', err: { code: 'rate_limited', message: 'slow down' } });
         return;
       }

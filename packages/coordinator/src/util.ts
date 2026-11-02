@@ -54,6 +54,14 @@ export function sendJson(ws: WebSocket, value: unknown): boolean {
   return true;
 }
 
+/** An address as other servers take it: no stray space, no slash at the end, and its http or
+ * https scheme in lower case. */
+export const cleanUrl = (url: string) =>
+  url
+    .trim()
+    .replace(/\/$/, '')
+    .replace(/^https?(?=:\/\/)/i, (scheme) => scheme.toLowerCase());
+
 export function toWsUrl(httpUrl: string, path: string): string {
   const u = new URL(httpUrl);
   u.protocol = u.protocol === 'https:' ? 'wss:' : 'ws:';

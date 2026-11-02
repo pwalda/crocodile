@@ -2265,6 +2265,65 @@ describe('encrypted client channel', () => {
     raw.send(JSON.stringify({ t: 'req', id: 99, m: 'servers.list', p: {} }));
     expect(await closed).toBe(1008);
   });
+
+  it('keeps a client that is told to slow down: what was dropped unread does not break the order', async () => {
+    const c = await server();
+    const alice = await user(c);
+    const inner = alice.conn as unknown as {
+      ws: WebSocket;
+      channel: { seal(v: unknown): unknown };
+    };
+    let closed = false;
+    inner.ws.addEventListener('close', () => (closed = true));
+    // Far more than a client may send at once: those past the limit are dropped unread.
+    for (let i = 0; i < 300; i++)
+      inner.ws.send(
+        JSON.stringify(
+          inner.channel.seal({ t: 'req', id: 100_000 + i, m: 'friends.incoming', p: {} }),
+        ),
+      );
+    await new Promise((resolve) => setTimeout(resolve, 1500));
+    // The next one still follows the last, and is answered.
+    expect(await alice.conn.request('friends.incoming', {})).toBeDefined();
+    expect(closed).toBe(false);
+  });
+
+  it('ends a connection that sends a frame past the limit in a form it cannot pass over', async () => {
+    const c = await server();
+    const alice = await user(c);
+    const inner = alice.conn as unknown as {
+      ws: WebSocket;
+      channel: { seal(v: unknown): { t: string; n: number; c: string } };
+    };
+    const closed = new Promise<number>((r) => inner.ws.addEventListener('close', (e) => r(e.code)));
+    for (let i = 0; i < 300; i++)
+      inner.ws.send(
+        JSON.stringify(inner.channel.seal({ t: 'req', id: 200_000 + i, m: 'x', p: {} })),
+      );
+    // The same kind of frame with its parts in another order.
+    const { t, n, c: ct } = inner.channel.seal({ t: 'req', id: 1, m: 'friends.incoming', p: {} });
+    // (Twice: one that happens to be let through by the limiter is the next frame, the second is not.)
+    for (let i = 0; i < 2; i++) inner.ws.send(JSON.stringify({ c: ct, n, t }));
+    expect(await closed).toBe(1008);
+  });
+
+  it('ends a connection that repeats a frame past the limit, which is not the next', async () => {
+    const c = await server();
+    const alice = await user(c);
+    const inner = alice.conn as unknown as {
+      ws: WebSocket;
+      channel: { seal(v: unknown): unknown };
+    };
+    const closed = new Promise<number>((r) => inner.ws.addEventListener('close', (e) => r(e.code)));
+    const first = JSON.stringify(inner.channel.seal({ t: 'req', id: 300_000, m: 'x', p: {} }));
+    inner.ws.send(first);
+    for (let i = 1; i < 300; i++)
+      inner.ws.send(
+        JSON.stringify(inner.channel.seal({ t: 'req', id: 300_000 + i, m: 'x', p: {} })),
+      );
+    inner.ws.send(first);
+    expect(await closed).toBe(1008);
+  });
 });
 
 describe('opt-in mailbox', () => {
@@ -2364,6 +2423,23 @@ describe('abuse limits', () => {
     for (const r of results) if (r.status === 'fulfilled') cleanup.push(() => r.value.conn.close());
     expect(results.filter((r) => r.status === 'fulfilled')).toHaveLength(2);
     expect(c.presence.localCount).toBe(2);
+  });
+
+  it('says its address as other servers take it', async () => {
+    expect(() => new Coordinator({ name: 'x', storage: 'memory', publicUrl: 'ws://x' })).toThrow(
+      /must be an http/,
+    );
+    for (const bad of ['x.example', 'https://', 'https://x y', 'http:example.org'])
+      expect(() => new Coordinator({ name: 'x', storage: 'memory', publicUrl: bad }), bad).toThrow(
+        /must be an http/,
+      );
+    const c = await server({ publicUrl: ' HTTPS://Croc.Example.org/\n' });
+    expect(c.info.url).toBe('https://Croc.Example.org');
+    // Empty, as a container's environment leaves it, is none.
+    for (const none of ['', '  ']) {
+      const d = await server({ publicUrl: none });
+      expect(d.info.url).toMatch(/^http:\/\/[\d.]+:\d+$/);
+    }
   });
 
   it('refuses to start with a limit that would switch a protection off', () => {

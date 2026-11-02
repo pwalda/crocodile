@@ -72,7 +72,7 @@ async function server(name: string, overrides: Partial<CoordinatorConfig> = {}) 
   return c;
 }
 
-/** n servers that each know only the one before; they find the rest through gossip. */
+/** n servers that each know only the one before; they find the rest through each other's beacons. */
 async function network(n: number, overrides: Partial<CoordinatorConfig> = {}) {
   const servers = [await server('S0', overrides)];
   for (let i = 1; i < n; i++)

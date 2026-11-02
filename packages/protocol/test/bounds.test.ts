@@ -8,6 +8,7 @@ import {
   MemberBody,
   SealedBox,
   SealedPayload,
+  ServerInfo,
   toB64u,
 } from '../src';
 
@@ -189,5 +190,27 @@ describe('file names', () => {
       expect(named(good), good).toBe(true);
     expect(named('')).toBe(false);
     expect(named('a'.repeat(256))).toBe(false);
+  });
+});
+
+describe('where a server says it is', () => {
+  const info = { id: 'abcdefgh', key, name: 'a', version: '1' };
+  const at = (url: string) => ServerInfo.safeParse({ ...info, url }).success;
+
+  it('is an http or https address, and nothing else', () => {
+    for (const good of ['https://croc.example.org', 'http://203.0.113.4:7443'])
+      expect(at(good), good).toBe(true);
+    for (const bad of [
+      'file:///etc/passwd',
+      'ftp://example.org',
+      // (As the directory spells an address: the scheme in lower case.)
+      'HTTPS://example.org',
+      'ws://example.org',
+      'javascript:alert(1)',
+      'data:text/plain,a',
+      'not a url',
+      '',
+    ])
+      expect(at(bad), bad).toBe(false);
   });
 });

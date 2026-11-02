@@ -20,6 +20,7 @@ import {
   AudioSender,
   PREKEY_LIFETIME_MS,
   SecureChannel,
+  peekFrameNumber,
   TextReceiver,
   VIDEO_MAX_CLEAR,
   VideoReceiver,
@@ -383,6 +384,48 @@ describe('records', () => {
         ok: false,
         reason: 'the admin list has changed',
       });
+    });
+
+    it('does not let the owner start the count again, which would take an older list back', () => {
+      const without = signRecord(
+        alice,
+        'space',
+        key,
+        { ...base, admins: [], authority: signSpaceAuthority(alice, spaceId, [], now - 500) },
+        now - 500,
+      );
+      // A record of the owner's with no list at all is refused over one with a list...
+      const bare = signRecord(
+        alice,
+        'space',
+        key,
+        { ...base, admins: [], name: 'Bare' },
+        now - 400,
+      );
+      expect(validateRecord(bare, ctx([without]))).toMatchObject({
+        ok: false,
+        reason: 'the admin list cannot be taken off a space',
+      });
+      // ...so the count stays, and Bob's older list is still refused.
+      const late = signRecord(bob, 'space', key, { ...withBob.body, name: 'Still mine' }, now);
+      expect(validateRecord(late, ctx([without]))).toMatchObject({
+        reason: 'the admin list has changed',
+      });
+      // A space with no list yet may be given one, and a deleted one needs none.
+      expect(
+        validateRecord(
+          without,
+          ctx([signRecord(alice, 'space', key, { ...base, admins: [] }, now - 900)]),
+        ).ok,
+      ).toBe(true);
+      const deleted = signRecord(
+        alice,
+        'space',
+        key,
+        { ...base, admins: [], deleted: true },
+        now - 400,
+      );
+      expect(validateRecord(deleted, ctx([without])).ok).toBe(true);
     });
 
     describe('private invites', () => {
@@ -1747,7 +1790,52 @@ describe('secure channel', () => {
     expect(server.open(f1)).toBeUndefined();
     const back = server.seal({ ok: true });
     expect(client.open(back)).toEqual({ ok: true });
-    expect(new SecureChannel(secret, 'other', false).open(client.seal({ x: 1 }))).toBeUndefined();
+    const other = new SecureChannel(secret, 'other', true);
+    expect(new SecureChannel(secret, 'ctx', false).open(other.seal({ x: 1 }))).toBeUndefined();
+  });
+
+  it('takes frames in the order they were sealed, and refuses one that follows a gap', () => {
+    const keys = createChannelKeys();
+    const { answer, secret } = answerChannel(keys.offer);
+    const server = new SecureChannel(acceptChannel(keys, answer), 'ctx', false);
+    const client = new SecureChannel(secret, 'ctx', true);
+    const frames = [1, 2, 3, 4].map((i) => client.seal({ i }));
+    expect(server.open(frames[0]!)).toEqual({ i: 1 });
+    // The second is held back or dropped on the way: the third cannot stand in for it.
+    expect(server.open(frames[2]!)).toBeUndefined();
+    expect(server.open(frames[3]!)).toBeUndefined();
+    // (A frame refused leaves the place it was at.)
+    expect(server.open(frames[1]!)).toEqual({ i: 2 });
+    expect(server.open(frames[2]!)).toEqual({ i: 3 });
+    // A first frame that is not the first is refused too, as is a counter that is not whole.
+    const late = new SecureChannel(acceptChannel(keys, answer), 'ctx', false);
+    expect(late.open(frames[1]!)).toBeUndefined();
+    expect(late.open({ ...frames[0]!, n: 0.5 })).toBeUndefined();
+    expect(late.open({ ...frames[0]!, n: -1 })).toBeUndefined();
+  });
+
+  it('leaves no gap when a frame cannot be made, and passes over one that is dropped unread', () => {
+    const keys = createChannelKeys();
+    const { answer, secret } = answerChannel(keys.offer);
+    const server = new SecureChannel(acceptChannel(keys, answer), 'ctx', false);
+    const client = new SecureChannel(secret, 'ctx', true);
+    expect(server.open(client.seal({ i: 0 }))).toEqual({ i: 0 });
+    // A value that cannot be written as JSON: nothing is sealed, and the count has not moved.
+    expect(() => client.seal({ big: 1n })).toThrow();
+    expect(server.open(client.seal({ i: 1 }))).toEqual({ i: 1 });
+    // One the server drops without reading, as a rate limit does: the one after it follows.
+    const dropped = client.seal({ i: 2 });
+    expect(server.skip(dropped.n)).toBe(true);
+    expect(server.open(client.seal({ i: 3 }))).toEqual({ i: 3 });
+    // The number can be read from the text of a frame without decoding it, as `seal` writes it.
+    const text = JSON.stringify(new SecureChannel(secret, 'ctx', true).seal({ i: 5 }));
+    expect(peekFrameNumber(text)).toBe(JSON.parse(text).n);
+    expect(peekFrameNumber(JSON.stringify({ n: 7, t: 'x', c: 'AA' }))).toBeUndefined();
+    expect(peekFrameNumber('{"t":"x","n":1234567890123456,')).toBeUndefined();
+    // A frame that is not the next is not passed over, and the same one cannot be twice.
+    expect(server.skip(99)).toBe(false);
+    expect(server.skip(dropped.n)).toBe(false);
+    expect(server.open(client.seal({ i: 4 }))).toEqual({ i: 4 });
   });
 
   it('padme buckets', () => {

@@ -25,7 +25,7 @@ import {
 import type { Coordinator } from './coordinator';
 import { fnv1a } from './election';
 import { routedEvent } from './routes';
-import { RateLimiter, RpcFailure, chunkByBytes, sendJson, toWsUrl } from './util';
+import { RateLimiter, RpcFailure, chunkByBytes, cleanUrl, sendJson, toWsUrl } from './util';
 
 /** A device-link code's new device, as another server reports it. */
 type LinkTarget = { peer: string; key: string; encKey: string; kemKey: string; commit: string };
@@ -147,7 +147,7 @@ export class Mesh {
   }
 
   start(staticPeers: string[]) {
-    this.staticUrls = staticPeers.filter((u) => u !== this.hub.info.url);
+    this.staticUrls = staticPeers.map(cleanUrl).filter((u) => u !== this.hub.info.url);
     for (const url of this.staticUrls) this.ensureDial(url);
     this.pingTimer = setInterval(() => this.heartbeat(), PING_INTERVAL_MS);
     this.pingTimer.unref?.();
@@ -167,7 +167,7 @@ export class Mesh {
     return [...this.known.values()];
   }
 
-  /** Learn about servers (from the directory, gossip or beacons). */
+  /** Learn about servers (from the directory and config, or from beacons the servers signed). */
   addKnown(servers: ServerInfo[]) {
     let added = false;
     for (const s of servers) {
@@ -439,7 +439,10 @@ export class Mesh {
   private ensureDial(url: string) {
     if (this.closed || url === this.hub.info.url) return;
     for (const l of [...this.links.values(), ...this.pendingLinks]) {
-      if (l.url === url || l.peer?.url === url) return;
+      // (Where a link says it is, in a hello, counts only once it has authenticated, and then as
+      // far as we know it: a hello is not signed, and one that named another server's address would
+      // keep us from dialling it.)
+      if (l.url === url || (l.peerId && this.known.get(l.peerId)?.url === url)) return;
     }
     const d = this.dialing.get(url);
     if (d?.timer) return;
@@ -586,7 +589,8 @@ export class Mesh {
         if (s && this.queued.get(peerId)?.length && !this.closed) this.ensureDial(s.url);
       }
       if (link.replaced || link.idle || code === IDLE_CLOSE || this.closed) return;
-      const redialUrl = link.initiator ? url : link.peer?.url;
+      // (Where a peer that came to us is, is what we know of it: not what its hello says.)
+      const redialUrl = link.initiator ? url : link.peerId && this.known.get(link.peerId)?.url;
       if (redialUrl) this.scheduleRedial(redialUrl);
     });
     return link;
@@ -766,7 +770,8 @@ export class Mesh {
         this.hub.sessions.handleRemoteResult(frame.opId, frame.ok, frame.err);
         return;
       case 'servers':
-        this.addKnown(frame.servers);
+        // Older servers send a list of the servers they know of. It says nothing a server signed,
+        // so it cannot tell where another server is: beacons do (see Membership.onBeacon).
         return;
       case 'ping':
         this.send(link, { t: 'pong' });
@@ -838,13 +843,18 @@ export class Mesh {
       existing.ws.close(1000, 'duplicate link');
     }
     this.links.set(peer.id, link);
-    this.known.set(peer.id, peer);
-    this.dialing.delete(peer.url);
+    // The address in a hello is not signed, so it is not where a server is taken to be: one we
+    // dialled is where we dialled it, and one we know is where we know it. A server that came to
+    // us and is not known is not added (its beacon will do it, which a link may introduce only so
+    // fast).
+    const known = this.known.get(peer.id);
+    if (!known && link.initiator && link.url && this.known.size < KNOWN_MAX)
+      this.known.set(peer.id, { ...peer, url: link.url });
+    if (known) this.dialing.delete(known.url);
     if (link.url) this.dialing.delete(link.url);
     this.hub.log.info('mesh link up', { peer: peer.id, name: peer.name, url: peer.url });
     this.hub.membership.linkUp(peer.id);
 
-    this.send(link, { t: 'servers', servers: [this.hub.info, ...this.knownServers()] });
     for (const b of this.hub.membership.freshBeacons()) this.send(link, b);
     for (const p of this.hub.presence.snapshot()) this.send(link, p);
     for (const v of this.hub.sessions.voiceFrames()) this.send(link, v);

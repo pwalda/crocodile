@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { randomBytes } from 'node:crypto';
+import { createServer } from 'node:net';
 import {
   createChannelKeys,
   createIdentity,
@@ -1132,5 +1133,212 @@ describe('events and session operations from other servers', () => {
         await waitFor(() => state.epoch > epoch, 3000, 'the vote');
       });
     });
+  });
+});
+
+describe('where a server is, as other servers tell it', () => {
+  /** A listener that counts who dials it: what a server made to look somewhere would reach. */
+  async function listener() {
+    let dialled = 0;
+    const net = createServer((socket) => {
+      dialled++;
+      socket.destroy();
+    });
+    await new Promise<void>((resolve) => net.listen(0, '127.0.0.1', resolve));
+    cleanup.push(() => new Promise<void>((resolve) => net.close(() => resolve())));
+    const { port } = net.address() as { port: number };
+    return { url: `http://127.0.0.1:${port}`, dialled: () => dialled };
+  }
+  const pause = (ms = 400) => new Promise((resolve) => setTimeout(resolve, ms));
+
+  it('is not taken from a list of servers a peer sends, which no server signed', async () => {
+    const { victim, honest, rogue } = await threeServers();
+    const target = await listener();
+    const made = createIdentity();
+    const link = meshLinkTo(rogue, victim.info.id);
+    link.send({
+      t: 'servers',
+      servers: [
+        // A server it knows, said to be somewhere else, and one that only the rogue says exists.
+        { ...honest.info, url: target.url },
+        { id: made.userId, key: made.publicKey, name: 'made up', url: target.url, version: 'x' },
+      ],
+    });
+    await pause();
+    const known = victim.mesh.knownServers();
+    expect(known.find((s) => s.id === honest.info.id)?.url).toBe(honest.info.url);
+    expect(known.some((s) => s.id === made.userId)).toBe(false);
+    expect(target.dialled()).toBe(0);
+    expect(victim.mesh.peerIds()).toContain(honest.info.id);
+  });
+
+  it('is not taken from the hello of a server that came to us and is not known', async () => {
+    const victim = await server({ name: 'victim' });
+    const target = await listener();
+    const who = createIdentity();
+    const named = (id: Identity) => ({
+      id: id.userId,
+      key: id.publicKey,
+      name: 'new',
+      url: target.url,
+      version: 'x',
+    });
+    type Internals = { onAuthed(link: unknown, cursor: number): void };
+    const authed = (id: Identity, initiator: boolean) =>
+      (victim.mesh as unknown as Internals).onAuthed(
+        {
+          peer: named(id),
+          initiator,
+          url: initiator ? target.url : undefined,
+          // A socket that is not open: nothing is written to it.
+          ws: { readyState: 3, close() {}, terminate() {}, on() {} },
+          channel: { seal: () => ({}) },
+          inbox: Promise.resolve(),
+          authed: false,
+          lastUsed: 0,
+          sentUpTo: 0,
+        },
+        0,
+      );
+    authed(who, false);
+    expect(victim.mesh.knownServers().some((s) => s.id === who.userId)).toBe(false);
+    // One we dialled is where we dialled it.
+    const dialled = createIdentity();
+    authed(dialled, true);
+    expect(victim.mesh.knownServers().find((s) => s.id === dialled.userId)?.url).toBe(target.url);
+  });
+
+  it('is where it is known to be, not where the hello of a link says', async () => {
+    const victim = await server({ name: 'victim' });
+    const target = await listener();
+    const who = createIdentity();
+    const info = (url: string) => ({
+      id: who.userId,
+      key: who.publicKey,
+      name: 'known',
+      url,
+      version: 'x',
+    });
+    victim.mesh.addKnown([info(target.url)]);
+    (victim.mesh as unknown as { onAuthed(link: unknown, cursor: number): void }).onAuthed(
+      {
+        peer: { ...info('http://203.0.113.9:7443'), name: 'from the hello' },
+        initiator: true,
+        url: target.url,
+        ws: { readyState: 3, close() {}, terminate() {}, on() {} },
+        channel: { seal: () => ({}) },
+        inbox: Promise.resolve(),
+        authed: false,
+        lastUsed: 0,
+        sentUpTo: 0,
+      },
+      0,
+    );
+    // Nothing of it is taken from the hello: that is not signed.
+    expect(victim.mesh.knownServers().find((s) => s.id === who.userId)).toMatchObject({
+      url: target.url,
+      name: 'known',
+    });
+  });
+
+  it('is dialled although a link that has not authenticated says in its hello that it is there', async () => {
+    const victim = await server({ name: 'victim' });
+    const rogue = await server({ name: 'rogue' });
+    const target = await listener();
+    const ws = new WebSocket(victim.url.replace(/^http/, 'ws') + '/v1/federation');
+    cleanup.push(() => ws.close());
+    const received: string[] = [];
+    ws.addEventListener('message', (e) => received.push(JSON.parse(String(e.data)).t));
+    await new Promise((r) => ws.addEventListener('open', r, { once: true }));
+    ws.send(
+      JSON.stringify({
+        t: 'fed_hello',
+        server: { ...rogue.info, url: target.url },
+        challenge: 'c',
+        channel: createChannelKeys().offer,
+        protocol: PROTOCOL_VERSION,
+      }),
+    );
+    await waitFor(() => received.includes('fed_auth'), 3000, 'the answer to the hello');
+    (victim.mesh as unknown as { ensureDial(url: string): void }).ensureDial(target.url);
+    await waitFor(() => target.dialled() > 0, 3000, 'the dial');
+  });
+
+  it('does not try again to reach an address a server gave in a hello and left', async () => {
+    const victim = await server({ name: 'victim' });
+    const honest = await server({ name: 'honest' });
+    const url = 'http://203.0.113.77:1';
+    const ws = new WebSocket(victim.url.replace(/^http/, 'ws') + '/v1/federation');
+    const received: string[] = [];
+    ws.addEventListener('message', (e) => received.push(JSON.parse(String(e.data)).t));
+    await new Promise((r) => ws.addEventListener('open', r, { once: true }));
+    ws.send(
+      JSON.stringify({
+        t: 'fed_hello',
+        server: { ...honest.info, url },
+        challenge: 'c',
+        channel: createChannelKeys().offer,
+        protocol: PROTOCOL_VERSION,
+      }),
+    );
+    await waitFor(() => received.includes('fed_auth'), 3000, 'the answer to the hello');
+    ws.close();
+    await pause();
+    const dialing = (victim.mesh as unknown as { dialing: Map<string, unknown> }).dialing;
+    expect(dialing.has(url)).toBe(false);
+  });
+
+  it('is written as other servers take it when a static peer is given another way', async () => {
+    const a = await server({ name: 'a' });
+    const written = a.url.replace(/^http/, 'HTTP') + '/ ';
+    const b = await server({ name: 'b', meshPeers: [written] });
+    expect((b.mesh as unknown as { staticUrls: string[] }).staticUrls).toEqual([a.url]);
+    await waitFor(() => b.mesh.peerIds().includes(a.info.id), 5000, 'the link');
+    expect(b.mesh.knownServers().find((s) => s.id === a.info.id)?.url).toBe(a.url);
+  });
+
+  it('is taken from a beacon the server itself signed', async () => {
+    const victim = await server({ name: 'victim' });
+    const target = await listener();
+    const who = createIdentity();
+    const info = {
+      id: who.userId,
+      key: who.publicKey,
+      name: 'beacon',
+      url: target.url,
+      version: 'x',
+    };
+    const seq = Date.now();
+    const accepted = victim.membership.onBeacon(
+      {
+        t: 'beacon',
+        server: info,
+        seq,
+        full: false,
+        sig: sign(who, SIG_DOMAIN.beacon, { server: info, seq, full: false, presence: undefined }),
+      } as never,
+      'link',
+    );
+    expect(accepted).toBe(true);
+    await waitFor(() => target.dialled() > 0, 3000, 'the dial');
+  });
+
+  it('is not told to a server that links, which is what an unsigned list was for', async () => {
+    const victim = await server({ name: 'victim' });
+    const seen: string[] = [];
+    const send = (victim.mesh as unknown as { send(l: unknown, f: { t: string }): boolean }).send;
+    (victim.mesh as unknown as { send: unknown }).send = function (
+      this: unknown,
+      l: unknown,
+      f: { t: string },
+    ) {
+      seen.push(f.t);
+      return send.call(this, l, f);
+    };
+    await server({ name: 'joiner', meshPeers: [victim.url] });
+    await waitFor(() => victim.mesh.peerIds().length === 1, 5000, 'the link');
+    await pause(200);
+    expect(seen.length).toBeGreaterThan(0);
+    expect(seen).not.toContain('servers');
   });
 });

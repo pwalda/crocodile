@@ -56,6 +56,15 @@ export function acceptChannel(keys: ChannelKeys, answer: { epk: string; kem: str
 export const signInChannelContext = (challenge: string, serverId: string) =>
   `${challenge}|${serverId}|auth`;
 
+/**
+ * The number of a frame `seal` made, read from the first bytes of its text without decoding it
+ * (for a frame that is dropped unread). Undefined if the text does not begin as `seal` writes one.
+ */
+export function peekFrameNumber(head: string): number | undefined {
+  const n = /^\{"t":"x","n":(\d{1,15}),/.exec(head.slice(0, 40))?.[1];
+  return n === undefined ? undefined : Number(n);
+}
+
 export class SecureChannel {
   private sendN = 0;
   private recvN = -1;
@@ -84,18 +93,35 @@ export class SecureChannel {
   }
 
   seal(value: unknown): { t: 'x'; n: number; c: string } {
-    const n = this.sendN++;
+    const n = this.sendN;
     const ct = aesGcmEncrypt(
       this.sendKey,
       SecureChannel.nonce(n),
       pad(utf8.encode(JSON.stringify(value))),
     );
+    // (Taken only once there is a frame, so one that cannot be made leaves no gap.)
+    this.sendN = n + 1;
     return { t: 'x', n, c: toB64u(ct) };
   }
 
-  /** Returns the decoded value, or undefined for forged/replayed frames. */
+  /**
+   * Passes over a frame that is dropped unread, as one a rate limit refuses, so that the next one
+   * still follows it. Nothing is checked of it: only the place it holds moves on. False if the
+   * frame is not the next, which is a gap nothing can close.
+   */
+  skip(n: number): boolean {
+    if (n !== this.recvN + 1) return false;
+    this.recvN = n;
+    return true;
+  }
+
+  /**
+   * Returns the decoded value, or undefined for a forged, replayed or out of order frame. A
+   * WebSocket delivers in order, so each frame is the one after the last: a missing one means a
+   * frame was held back or dropped, and nothing after it is taken.
+   */
   open(frame: { n: number; c: string }): unknown {
-    if (!Number.isSafeInteger(frame.n) || frame.n <= this.recvN) return undefined;
+    if (frame.n !== this.recvN + 1) return undefined;
     let bytes: Uint8Array | null;
     try {
       bytes = aesGcmDecrypt(this.recvKey, SecureChannel.nonce(frame.n), fromB64u(frame.c));

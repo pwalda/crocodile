@@ -176,6 +176,11 @@ picture size.
 
 ## Known gaps
 
+- A server takes the address another server gives in its own signed beacon, and
+  dials it. Any server that joins the mesh can therefore make the others try to
+  connect to an http or https address it chooses (a home or internal one too:
+  servers on a private network are allowed). A link may tell another of only a
+  limited number of new servers a second.
 - Space admins: a removed admin's change made just before the removal
   reaches a server can stay on that server until the owner's next change
   (versions are last-writer-wins, and a record may be dated up to 5 minutes

@@ -338,10 +338,14 @@ export interface FedSessionOpResult {
   err?: { code: string; message: string };
 }
 
-/** Known-server gossip so meshes converge even if the directory is down. */
+/**
+ * A list of the servers a server knows of. Nothing in it is signed, so servers no longer send it
+ * or act on one (a server's address comes from its beacon); it is still read, to be ignored, from
+ * older servers.
+ */
 export interface FedServers {
   t: 'servers';
-  servers: ServerInfo[];
+  servers: unknown[];
 }
 
 /** Voice channel occupancy announced by the session owner to every server. */
@@ -516,7 +520,7 @@ export const FedFrameSchema = z.discriminatedUnion('t', [
     ok: anyJson.optional(),
     err: errorBody,
   }),
-  z.object({ t: z.literal('servers'), servers: z.array(anyJson).max(5000) }),
+  z.object({ t: z.literal('servers'), servers: z.array(z.unknown()).max(5000) }),
   z.object({
     t: z.literal('voice'),
     sessionId: SessionId,
