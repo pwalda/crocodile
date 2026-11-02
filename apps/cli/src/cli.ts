@@ -1,5 +1,4 @@
-import { open, stat } from 'node:fs/promises';
-import { existsSync } from 'node:fs';
+import { open, stat, statfs } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { basename, extname, join, resolve } from 'node:path';
 import { parseArgs } from 'node:util';
@@ -11,6 +10,7 @@ import {
 } from '@crocodile/client-core';
 import type { FileManifest } from '@crocodile/protocol';
 import { createCliPlatform, type CliFileStore, type JsonFileStore } from './platform';
+import { saveFile } from './save';
 
 /** What the commands need from the outside world; tests pass their own. */
 export interface Io {
@@ -31,6 +31,44 @@ export interface Io {
 export const VERSION = process.env.CROC_CLI_VERSION ?? '0.0.0-dev';
 const DEFAULT_DIRECTORIES = 'https://crocodilechat.com';
 
+/**
+ * Text for a terminal, with what a terminal would act on taken out: escape sequences can move the
+ * cursor, rewrite the screen or the window title, so a name someone else chose could hide or fake
+ * what the user reads. Line breaks and tabs stay.
+ */
+export function plain(text: string) {
+  // eslint-disable-next-line no-control-regex
+  return text.replace(/[\u0000-\u0008\u000b-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]/g, '?');
+}
+
+/** The same Io, with everything printed made safe for a terminal. */
+function terminalSafe(io: Io): Io {
+  const { status } = io;
+  return {
+    ...io,
+    out: (line) => io.out(plain(line)),
+    err: (line) => io.err(plain(line)),
+    ...(status ? { status: (line: string) => status(plain(line)) } : {}),
+  };
+}
+
+const SIZE_UNITS: Record<string, number> = {
+  '': 1,
+  B: 1,
+  KB: 1024,
+  MB: 1024 ** 2,
+  GB: 1024 ** 3,
+  TB: 1024 ** 4,
+};
+
+/** "500", "20MB", "1.5 GB" as bytes (powers of 1024, as the sizes shown). */
+export function parseSize(text: string) {
+  const m = /^\s*(\d+(?:\.\d+)?)\s*([kmgt]?b?)\s*$/i.exec(text);
+  const unit = m && SIZE_UNITS[m[2]!.toUpperCase().replace(/^([KMGT])$/, '$1B')];
+  if (!m || !unit) throw new UsageError(`"${text}" isn't a size, like 500MB or 2GB.`);
+  return Math.floor(Number(m[1]) * unit);
+}
+
 const HELP = `crocodile: send and receive files with Crocodile, peer-to-peer and end-to-end encrypted.
 
 Set up (once per computer):
@@ -48,6 +86,7 @@ Options:
   --from <name#1234>   only accept files from this person
   -d, --dir <folder>   where received files go (default: here)
   --keep               keep receiving after the first file
+  --max-size <size>    don't take files over this size, like 500MB or 2GB (get)
   --profile <name>     a separate account on this computer
   --server <url>       use this coordination server first
   --directory <url>    find servers through this directory (default: ${DEFAULT_DIRECTORIES})
@@ -78,7 +117,7 @@ app like any file; a command line receiver gets them with \`crocodile get\`.
 The files go from this computer to theirs, so this keeps running until
 they have downloaded every one (Ctrl+C stops it; files not yet downloaded
 can't be fetched after that).`,
-  get: `crocodile get [--from <name#1234>] [-d <folder>] [--keep]
+  get: `crocodile get [--from <name#1234>] [-d <folder>] [--keep] [--max-size <size>]
 
 Waits for a file sent to you in a direct conversation (including ones sent
 while this computer was off, if the sender is still online), downloads it
@@ -87,7 +126,10 @@ it goes on receiving until you stop it.
 
 With --from it also takes up a conversation that person starts while it
 runs, even if they aren't a friend yet (the app would show a request to
-accept). Without --from, only friends and existing conversations are heard.`,
+accept). Without --from, only friends and existing conversations are heard.
+
+Files are saved readable by you only. A file bigger than the free space in
+the folder is skipped, and so is one over --max-size (like 500MB or 2GB).`,
   whoami: `crocodile whoami
 
 Shows the account this computer uses (name#tag and user id).`,
@@ -96,7 +138,8 @@ Shows the account this computer uses (name#tag and user id).`,
 class UsageError extends Error {}
 
 /** Runs one command; resolves to the exit code. */
-export async function run(argv: string[], io: Io): Promise<number> {
+export async function run(argv: string[], terminal: Io): Promise<number> {
+  const io = terminalSafe(terminal);
   let args;
   try {
     args = parseArgs({
@@ -108,6 +151,7 @@ export async function run(argv: string[], io: Io): Promise<number> {
         message: { type: 'string', short: 'm' },
         dir: { type: 'string', short: 'd' },
         keep: { type: 'boolean' },
+        'max-size': { type: 'string' },
         profile: { type: 'string' },
         server: { type: 'string' },
         directory: { type: 'string' },
@@ -169,7 +213,14 @@ async function runCommand(
   ctx: Ctx,
   command: string,
   rest: string[],
-  opts: { to?: string; message?: string; dir?: string; from?: string; keep?: boolean },
+  opts: {
+    to?: string;
+    message?: string;
+    dir?: string;
+    from?: string;
+    keep?: boolean;
+    'max-size'?: string;
+  },
 ): Promise<number> {
   switch (command) {
     case 'init':
@@ -181,7 +232,12 @@ async function runCommand(
     case 'send':
       return await send(ctx, rest, opts.to, opts.message);
     case 'get':
-      return await get(ctx, { from: opts.from, dir: opts.dir, keep: !!opts.keep });
+      return await get(ctx, {
+        from: opts.from,
+        dir: opts.dir,
+        keep: !!opts.keep,
+        maxSize: opts['max-size'] === undefined ? undefined : parseSize(opts['max-size']),
+      });
   }
   return 2;
 }
@@ -479,17 +535,20 @@ async function send(ctx: Ctx, paths: string[], to: string | undefined, message?:
 
 const SAVED_KEY = 'cli-saved-files';
 
-/** A path in `dir` for `name` that doesn't exist yet: "a.txt", "a (1).txt"… */
-function freePath(dir: string, name: string) {
-  const ext = extname(name);
-  const stem = name.slice(0, name.length - ext.length);
-  for (let i = 0; ; i++) {
-    const p = join(dir, i === 0 ? name : `${stem} (${i})${ext}`);
-    if (!existsSync(p)) return p;
-  }
+/** Why a file of `size` bytes shouldn't be taken into `dir`, if it shouldn't. */
+async function refuse(dir: string, size: number, maxSize?: number) {
+  if (maxSize !== undefined && size > maxSize)
+    return `it is over --max-size ${formatBytes(maxSize)}`;
+  const space = await statfs(dir).catch(() => null);
+  if (space && size > space.bavail * space.bsize)
+    return `only ${formatBytes(space.bavail * space.bsize)} is free there`;
+  return '';
 }
 
-async function get(ctx: Ctx, opts: { from?: string; dir?: string; keep: boolean }) {
+async function get(
+  ctx: Ctx,
+  opts: { from?: string; dir?: string; keep: boolean; maxSize?: number },
+) {
   needAccount(ctx);
   const io = ctx.io;
   const dir = resolve(io.cwd, opts.dir ?? '.');
@@ -549,6 +608,11 @@ async function get(ctx: Ctx, opts: { from?: string; dir?: string; keep: boolean 
     const name = cleanFileName(file.name);
     const sender = client.state.profiles[m.author];
     const who = sender ? `${sender.username}#${sender.tag}` : m.author;
+    const refusal = await refuse(dir, file.size, opts.maxSize);
+    if (refusal) {
+      io.err(`Not taking ${name} (${formatBytes(file.size)}) from ${who}: ${refusal}.`);
+      continue;
+    }
     io.err(`Receiving ${name} (${formatBytes(file.size)}) from ${who}…`);
     await client.downloadFile(file.id);
     let said = '';
@@ -578,13 +642,9 @@ async function get(ctx: Ctx, opts: { from?: string; dir?: string; keep: boolean 
     );
     if (!end) break;
     io.status?.('');
-    const path = freePath(dir, name);
-    const out = await open(path, 'wx', 0o644);
-    try {
+    const path = await saveFile(dir, name, async (out) => {
       await client.readFile(file.id, async (plain) => void (await out.write(plain)));
-    } finally {
-      await out.close();
-    }
+    });
     // Remember not to fetch it again; the copy in the profile isn't needed any more.
     saved.add(file.id);
     await ctx.kv.set(SAVED_KEY, [...saved].slice(-5000));

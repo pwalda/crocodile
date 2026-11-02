@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest';
-import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { CrocodileClient } from '@crocodile/client-core';
@@ -121,7 +121,65 @@ describe('crocodile (command line)', () => {
     expect(saved).toBe(join(bob.cwd, 'report.bin'));
     expect(readFileSync(saved).equals(data)).toBe(true);
     expect(alice.err.join('\n')).toMatch(new RegExp(`${bobTag} has report.bin`));
+    // Nothing else is left in the folder, and the file is for this user only.
+    expect(readdirSync(bob.cwd)).toEqual(['report.bin']);
+    if (process.platform !== 'win32') expect(statSync(saved).mode & 0o777).toBe(0o600);
   }, 120_000);
+
+  it('shows a name someone chose without the escape sequences in it', async () => {
+    const coord = await startCoordinator({ stunPort: 0 });
+    stops.push(() => coord.stop());
+    // A colour, a window title and a bell inside the name.
+    const alice = person('alice', coord.url);
+    const bob = person('bob', coord.url);
+    expect(await alice.cmd('init', 'al\x1b[31m\x1b]0;pwned\x07ice')).toBe(0);
+    expect(await bob.cmd('init', 'bob')).toBe(0);
+    const bobTag = bob.out.at(-1)!;
+    writeFileSync(join(alice.cwd, 'note.txt'), 'hello');
+
+    const waiting = bob.cmd('get');
+    const sending = alice.cmd('send', 'note.txt', '--to', bobTag);
+    await waitFor(
+      () => bob.err.some((l) => l.includes('wants to send you something')),
+      30_000,
+      'a hint',
+    );
+    bob.stop();
+    alice.stop();
+    await Promise.all([waiting, sending]);
+    expect(await alice.cmd('whoami')).toBe(0);
+    const shown = [...alice.out, ...alice.err, ...bob.out, ...bob.err].join('\n');
+    // eslint-disable-next-line no-control-regex
+    expect(shown).not.toMatch(/[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/);
+    expect(bob.err.join('\n')).toContain('al?[31m?]0;pwned?ice#');
+  }, 60_000);
+
+  it('leaves a file over --max-size alone and takes the next', async () => {
+    const coord = await startCoordinator({ stunPort: 0 });
+    stops.push(() => coord.stop());
+    const alice = person('alice', coord.url);
+    const bob = person('bob', coord.url);
+    expect(await alice.cmd('init', 'alice')).toBe(0);
+    expect(await bob.cmd('init', 'bob')).toBe(0);
+    const aliceTag = alice.out.at(-1)!;
+    const bobTag = bob.out.at(-1)!;
+    writeFileSync(join(alice.cwd, 'big.bin'), Buffer.alloc(200 * 1024, 7));
+    writeFileSync(join(alice.cwd, 'small.txt'), 'hello');
+
+    const receiving = bob.cmd('get', '--from', aliceTag, '--keep', '--max-size', '10KB');
+    const sending = alice.cmd('send', 'big.bin', 'small.txt', '--to', bobTag);
+    const small = join(bob.cwd, 'small.txt');
+    await waitFor(() => bob.out.includes(small), 60_000, 'the small file');
+    bob.stop();
+    alice.stop();
+    await Promise.all([receiving, sending]);
+    expect(bob.out.slice(1)).toEqual([small]);
+    expect(bob.err.join('\n')).toMatch(
+      /Not taking big.bin \(200 KB\) from alice#\d{4}: it is over --max-size 10 KB/,
+    );
+    expect(bob.err.join('\n')).not.toMatch(/Receiving big.bin/);
+    expect(readdirSync(bob.cwd)).toEqual(['small.txt']);
+  }, 90_000);
 
   it('says who wants to send something when get was not told whose files to take', async () => {
     const coord = await startCoordinator({ stunPort: 0 });
@@ -232,6 +290,8 @@ describe('crocodile (command line)', () => {
     expect(await run(['--version'], carol.io)).toBe(0);
     expect(await carol.cmd('init', 'carol')).toBe(0);
     expect(await carol.cmd('init', 'carol')).toBe(2);
+    expect(await carol.cmd('get', '--max-size', 'lots')).toBe(2);
+    expect(carol.err.at(-1)).toMatch(/isn't a size/);
     expect(await carol.cmd('send', 'missing.txt', '--to', 'bob#1234')).toBe(2);
     writeFileSync(join(carol.cwd, 'a.txt'), 'hi');
     expect(await carol.cmd('send', 'a.txt', '--to', 'bob')).toBe(2);

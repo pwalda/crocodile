@@ -60,7 +60,11 @@ crocodile get --from bob#5678 -d ~/Downloads --keep
 
 Waits for a file sent to you in a direct conversation, downloads it straight
 from the sender, checks it and saves it, then prints the path (so scripts can
-use it). `--keep` goes on receiving until you stop it.
+use it). `--keep` goes on receiving until you stop it. A file is saved only
+once it is whole (a download that fails leaves nothing behind), readable by you
+only. One bigger than the free space in the folder is skipped, and so is one
+over `--max-size` (like `500MB` or `2GB`). Names and other text from the people
+you talk to are shown without their control characters.
 
 Run `crocodile help <command>` for details. Other options: `--profile <name>`
 for a separate account on the same computer, `--server <url>` to use a
