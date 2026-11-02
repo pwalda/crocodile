@@ -139,6 +139,10 @@ export class ClientConnection implements ClientHandle {
 
     ws.on('message', (raw) => {
       if (!this.limiter.take()) {
+        // A frame dropped unread still has its place in the order of the channel, which the next
+        // frame follows. (Its counter is read from the start of the text, where `seal` puts it.)
+        const n = /^\{"t":"x","n":(\d{1,15}),/.exec(raw.toString().slice(0, 40))?.[1];
+        if (n !== undefined) this.channel?.skip(Number(n));
         this.frame({ t: 'error', err: { code: 'rate_limited', message: 'slow down' } });
         return;
       }

@@ -84,13 +84,23 @@ export class SecureChannel {
   }
 
   seal(value: unknown): { t: 'x'; n: number; c: string } {
-    const n = this.sendN++;
+    const n = this.sendN;
     const ct = aesGcmEncrypt(
       this.sendKey,
       SecureChannel.nonce(n),
       pad(utf8.encode(JSON.stringify(value))),
     );
+    // (Taken only once there is a frame, so one that cannot be made leaves no gap.)
+    this.sendN = n + 1;
     return { t: 'x', n, c: toB64u(ct) };
+  }
+
+  /**
+   * Passes over a frame that is dropped unread, as one a rate limit refuses, so that the next one
+   * still follows it. Nothing is checked of it: only the place it holds moves on.
+   */
+  skip(n: number): void {
+    if (n === this.recvN + 1) this.recvN = n;
   }
 
   /**

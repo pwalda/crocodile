@@ -2265,6 +2265,28 @@ describe('encrypted client channel', () => {
     raw.send(JSON.stringify({ t: 'req', id: 99, m: 'servers.list', p: {} }));
     expect(await closed).toBe(1008);
   });
+
+  it('keeps a client that is told to slow down: what was dropped unread does not break the order', async () => {
+    const c = await server();
+    const alice = await user(c);
+    const inner = alice.conn as unknown as {
+      ws: WebSocket;
+      channel: { seal(v: unknown): unknown };
+    };
+    let closed = false;
+    inner.ws.addEventListener('close', () => (closed = true));
+    // Far more than a client may send at once: those past the limit are dropped unread.
+    for (let i = 0; i < 300; i++)
+      inner.ws.send(
+        JSON.stringify(
+          inner.channel.seal({ t: 'req', id: 100_000 + i, m: 'friends.incoming', p: {} }),
+        ),
+      );
+    await new Promise((resolve) => setTimeout(resolve, 1500));
+    // The next one still follows the last, and is answered.
+    expect(await alice.conn.request('friends.incoming', {})).toBeDefined();
+    expect(closed).toBe(false);
+  });
 });
 
 describe('opt-in mailbox', () => {

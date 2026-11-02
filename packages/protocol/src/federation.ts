@@ -338,7 +338,11 @@ export interface FedSessionOpResult {
   err?: { code: string; message: string };
 }
 
-/** Known-server gossip so meshes converge even if the directory is down. */
+/**
+ * A list of the servers a server knows of. Nothing in it is signed, so servers no longer send it
+ * or act on one (a server's address comes from its beacon); it is still read, to be ignored, from
+ * older servers.
+ */
 export interface FedServers {
   t: 'servers';
   servers: ServerInfo[];

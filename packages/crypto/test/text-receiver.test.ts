@@ -15,13 +15,18 @@ describe('a text receiver given a message that does not open', () => {
     const sk = createSenderKey();
     const rx = new TextReceiver(sk.kid, importChain(exportChains(sk).text));
     const real = encryptText(sk, utf8.encode('hello'));
-    const before = derivations();
-    // Two thousand ahead, again and again, and then a little further on, and then nearer.
+    // The first, two thousand ahead, goes the whole way: a step for each generation.
+    const start = derivations();
+    expect(rx.decrypt(real.g + 2000, real.ct)).toBeNull();
+    expect(derivations() - start).toBeLessThanOrEqual(2000 + 2);
+    // The same again, and a little further on, and nearer: a few steps from a place kept.
+    const again = derivations();
     for (let i = 0; i < 50; i++) expect(rx.decrypt(real.g + 2000, real.ct)).toBeNull();
     expect(rx.decrypt(real.g + 2001, real.ct)).toBeNull();
+    expect(rx.decrypt(real.g + 1000, real.ct)).toBeNull();
     expect(rx.decrypt(real.g + 10, real.ct)).toBeNull();
-    // A key and a step for each generation, once: about 2 x 2,001, not 51 times that.
-    expect(derivations() - before).toBeLessThanOrEqual(2 * 2001 + 4);
+    // (Each a key for the generation and up to 15 steps to it, not 2,000.)
+    expect(derivations() - again).toBeLessThanOrEqual(53 * 17);
     // Past the limit is refused without any work.
     const refused = derivations();
     expect(rx.decrypt(real.g + 2002, real.ct)).toBeNull();

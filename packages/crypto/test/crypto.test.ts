@@ -1813,6 +1813,25 @@ describe('secure channel', () => {
     expect(late.open({ ...frames[0]!, n: -1 })).toBeUndefined();
   });
 
+  it('leaves no gap when a frame cannot be made, and passes over one that is dropped unread', () => {
+    const keys = createChannelKeys();
+    const { answer, secret } = answerChannel(keys.offer);
+    const server = new SecureChannel(acceptChannel(keys, answer), 'ctx', false);
+    const client = new SecureChannel(secret, 'ctx', true);
+    expect(server.open(client.seal({ i: 0 }))).toEqual({ i: 0 });
+    // A value that cannot be written as JSON: nothing is sealed, and the count has not moved.
+    expect(() => client.seal({ big: 1n })).toThrow();
+    expect(server.open(client.seal({ i: 1 }))).toEqual({ i: 1 });
+    // One the server drops without reading, as a rate limit does: the one after it follows.
+    const dropped = client.seal({ i: 2 });
+    server.skip(dropped.n);
+    expect(server.open(client.seal({ i: 3 }))).toEqual({ i: 3 });
+    // A frame that is not the next is not passed over, and the same one cannot be twice.
+    server.skip(99);
+    server.skip(dropped.n);
+    expect(server.open(client.seal({ i: 4 }))).toEqual({ i: 4 });
+  });
+
   it('padme buckets', () => {
     expect(padmeLength(10)).toBe(64);
     expect(padmeLength(1000)).toBeGreaterThanOrEqual(1000);

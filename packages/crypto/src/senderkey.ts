@@ -35,6 +35,8 @@ export const AUDIO_EPOCH_MS = 30_000;
 const TAG_BYTES = 16;
 const MAX_TEXT_SKIP = 2000;
 const MAX_SKIPPED_KEYS = 256;
+/** How far apart the places a text receiver keeps its chain at are. */
+const CHECKPOINT_EVERY = 16;
 const MAX_AUDIO_SKIP = 16;
 /**
  * Frames a receiver remembers having taken, counting back from the newest. The counter is shared
@@ -131,16 +133,18 @@ export function encryptText(
   return { kid: sk.kid, g, ct: toB64u(ct) };
 }
 
-/** Receiving side of one sender's text chain, tolerant of small reordering. */
+/**
+ * Receiving side of one sender's text chain, tolerant of small reordering.
+ *
+ * A message is not known to be real until it opens, and getting to the key for a generation
+ * ahead costs a derivation for each one it skips. So that a made-up generation costs that once and
+ * not each time it is sent, the chain is kept at every CHECKPOINT_EVERY generations it has been
+ * taken through (at most MAX_TEXT_SKIP / CHECKPOINT_EVERY of them): a message goes on from the
+ * nearest one, in a few steps.
+ */
 export class TextReceiver {
   private skipped = new Map<number, MessageKey>();
-  /**
-   * What has been worked out ahead of the chain for a message that did not open: the chain and
-   * message key of each generation from `chain.gen` on. A message is not known to be real until
-   * it opens, so what a made-up generation costs (a derivation for each one it skips) is kept,
-   * and the next costs only what it goes further.
-   */
-  private ahead: { chain: ChainState; key: MessageKey }[] = [];
+  private checkpoints = new Map<number, ChainState>();
   constructor(
     readonly kid: number,
     private chain: ChainState,
@@ -148,6 +152,23 @@ export class TextReceiver {
 
   get gen() {
     return this.chain.gen;
+  }
+
+  /** The chain at generation `g` (not before the current one), from the nearest place kept. */
+  private chainAt(g: number): ChainState {
+    let chain = this.chain;
+    for (let at = g - (g % CHECKPOINT_EVERY); at > chain.gen; at -= CHECKPOINT_EVERY) {
+      const kept = this.checkpoints.get(at);
+      if (kept) {
+        chain = kept;
+        break;
+      }
+    }
+    while (chain.gen < g) {
+      chain = ratchet(chain);
+      if (chain.gen % CHECKPOINT_EVERY === 0) this.checkpoints.set(chain.gen, chain);
+    }
+    return chain;
   }
 
   decrypt(g: number, ct: string): Uint8Array | null {
@@ -166,22 +187,20 @@ export class TextReceiver {
       if (out) this.skipped.delete(g);
       return out && unpad(out);
     }
-    const n = g - this.chain.gen;
-    if (n > MAX_TEXT_SKIP) return null;
-    while (this.ahead.length <= n) {
-      const last = this.ahead[this.ahead.length - 1];
-      const chain = last ? ratchet(last.chain) : this.chain;
-      this.ahead.push({ chain, key: messageKey(chain, this.kid, 'text') });
-    }
-    const { chain, key: mk } = this.ahead[n]!;
+    if (g - this.chain.gen > MAX_TEXT_SKIP) return null;
+    const chain = this.chainAt(g);
+    const mk = messageKey(chain, this.kid, 'text');
     // Only a message that opens moves the chain on.
     const out = aesGcmDecrypt(mk.key, mk.salt, data, aad);
     if (!out) return null;
-    for (let i = 0; i < n; i++) this.skipped.set(this.chain.gen + i, this.ahead[i]!.key);
+    // The keys of those it skips are kept for when they come (the last MAX_SKIPPED_KEYS of them).
+    let skip = this.chainAt(Math.max(this.chain.gen, g - MAX_SKIPPED_KEYS));
+    for (; skip.gen < g; skip = ratchet(skip))
+      this.skipped.set(skip.gen, messageKey(skip, this.kid, 'text'));
     while (this.skipped.size > MAX_SKIPPED_KEYS)
       this.skipped.delete(this.skipped.keys().next().value!);
     this.chain = ratchet(chain);
-    this.ahead = this.ahead.slice(n + 1);
+    for (const at of this.checkpoints.keys()) if (at < this.chain.gen) this.checkpoints.delete(at);
     return unpad(out);
   }
 }
