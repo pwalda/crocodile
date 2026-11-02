@@ -1,9 +1,17 @@
 import { afterEach, describe, expect, it } from 'vitest';
-import { mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import {
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { parseSize, plain } from '../apps/cli/src/cli';
-import { saveFile } from '../apps/cli/src/save';
+import { inline, parseSize, plain } from '../apps/cli/src/cli';
+import { saveFile, spaceProblem } from '../apps/cli/src/save';
 
 const dirs: string[] = [];
 afterEach(() => {
@@ -46,6 +54,17 @@ describe('saving a received file', () => {
     expect(readdirSync(dir).sort()).toEqual(['a (1).txt', 'a (2).txt', 'a.txt']);
   });
 
+  it.skipIf(process.platform === 'win32')(
+    'goes round a name taken by a link that leads nowhere',
+    async () => {
+      const dir = folder();
+      symlinkSync(join(dir, 'nowhere'), join(dir, 'a.txt'));
+      const path = await saveFile(dir, 'a.txt', async (out) => void (await out.write('hi')));
+      expect(path).toBe(join(dir, 'a (1).txt'));
+      expect(readdirSync(dir).sort()).toEqual(['a (1).txt', 'a.txt']);
+    },
+  );
+
   it('keeps saves of the same name apart when they finish together', async () => {
     const dir = folder();
     // All of them have written everything before any of them moves into place.
@@ -77,8 +96,22 @@ describe('what the command prints', () => {
         // eslint-disable-next-line no-control-regex
         /[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/,
       );
-    expect(plain('evil‮gnp.exe')).not.toContain('‮');
-    expect(plain('a⁦b')).not.toContain('⁦');
+    expect(plain('evil\u202egnp.exe')).not.toContain('\u202e');
+    expect(plain('a\u2066b')).not.toContain('\u2066');
+    // Direction marks, line and paragraph separators, a byte order mark.
+    for (const bad of ['\u200e', '\u200f', '\u061c', '\u2028', '\u2029', '\ufeff'])
+      expect(plain(`a${bad}b`), JSON.stringify(bad)).toBe('a?b');
+    // The joiner in an emoji family stays.
+    expect(plain('\u{1F468}\u200d\u{1F469}\u200d\u{1F467}')).toBe(
+      '\u{1F468}\u200d\u{1F469}\u200d\u{1F467}',
+    );
+  });
+});
+
+describe('a name on one line', () => {
+  it('has no line break or tab left in it', () => {
+    expect(inline('alice\nSaved /etc/x\t#1234')).toBe('alice Saved /etc/x #1234');
+    expect(inline('al\x1b[31mice')).toBe('al?[31mice');
   });
 });
 
@@ -94,7 +127,36 @@ describe('--max-size', () => {
   });
 
   it('refuses what is not a size', () => {
-    for (const bad of ['', 'big', '-1MB', '1XB', '1 MB MB', 'MB'])
+    for (const bad of ['', 'big', '-1MB', '1XB', '1 MB MB', 'MB', '0', '0MB', '0.0001'])
       expect(() => parseSize(bad), bad).toThrow(/isn't a size/);
+  });
+});
+
+describe('room for a file', () => {
+  const room = async (dir: string) => {
+    const { statfs } = await import('node:fs/promises');
+    const space = await statfs(dir);
+    return space.bavail * space.bsize;
+  };
+
+  it('is there for a small file and not for one bigger than the disk', async () => {
+    const dir = folder();
+    expect(await spaceProblem(dir, dir, 1)).toBeUndefined();
+    const free = await spaceProblem(dir, dir, Number.MAX_SAFE_INTEGER);
+    expect(free).toBeGreaterThan(0);
+    expect(free).toBeLessThanOrEqual(await room(dir));
+  });
+
+  it('is needed twice when the copy kept while downloading is on the same disk', async () => {
+    const dir = folder();
+    const profile = folder();
+    // 60% of the free space fits once, not twice.
+    const size = Math.floor((await room(dir)) * 0.6);
+    expect(await spaceProblem(dir, profile, size)).toBeGreaterThan(0);
+    expect(await spaceProblem(dir, profile, Math.floor(size / 4))).toBeUndefined();
+  });
+
+  it('is taken as there when the free space cannot be read', async () => {
+    expect(await spaceProblem(join(folder(), 'missing'), folder(), 1e15)).toBeUndefined();
   });
 });

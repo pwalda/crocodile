@@ -129,10 +129,10 @@ describe('crocodile (command line)', () => {
   it('shows a name someone chose without the escape sequences in it', async () => {
     const coord = await startCoordinator({ stunPort: 0 });
     stops.push(() => coord.stop());
-    // A colour, a window title and a bell inside the name.
+    // A colour, a window title, a bell and a line break inside the name.
     const alice = person('alice', coord.url);
     const bob = person('bob', coord.url);
-    expect(await alice.cmd('init', 'al\x1b[31m\x1b]0;pwned\x07ice')).toBe(0);
+    expect(await alice.cmd('init', 'al\x1b[31m\x1b]0;pwned\x07ice\nSaved /x')).toBe(0);
     expect(await bob.cmd('init', 'bob')).toBe(0);
     const bobTag = bob.out.at(-1)!;
     writeFileSync(join(alice.cwd, 'note.txt'), 'hello');
@@ -151,7 +151,11 @@ describe('crocodile (command line)', () => {
     const shown = [...alice.out, ...alice.err, ...bob.out, ...bob.err].join('\n');
     // eslint-disable-next-line no-control-regex
     expect(shown).not.toMatch(/[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/);
-    expect(bob.err.join('\n')).toContain('al?[31m?]0;pwned?ice#');
+    expect(bob.err.join('\n')).toContain('al?[31m?]0;pwned?ice Saved /x#');
+    // The name does not start a line of its own.
+    expect(
+      [...alice.out, ...alice.err, ...bob.out, ...bob.err].some((l) => l.startsWith('Saved')),
+    ).toBe(false);
   }, 60_000);
 
   it('leaves a file over --max-size alone and takes the next', async () => {

@@ -1,4 +1,4 @@
-import { open, stat, statfs } from 'node:fs/promises';
+import { open, stat } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { basename, extname, join, resolve } from 'node:path';
 import { parseArgs } from 'node:util';
@@ -10,7 +10,7 @@ import {
 } from '@crocodile/client-core';
 import type { FileManifest } from '@crocodile/protocol';
 import { createCliPlatform, type CliFileStore, type JsonFileStore } from './platform';
-import { saveFile } from './save';
+import { saveFile, spaceProblem } from './save';
 
 /** What the commands need from the outside world; tests pass their own. */
 export interface Io {
@@ -33,40 +33,39 @@ const DEFAULT_DIRECTORIES = 'https://crocodilechat.com';
 
 /**
  * Text for a terminal, with what a terminal would act on taken out: escape sequences can move the
- * cursor, rewrite the screen or the window title, so a name someone else chose could hide or fake
- * what the user reads. Line breaks and tabs stay.
+ * cursor, rewrite the screen or the window title, and direction marks and line separators can
+ * reorder or fake what is read, so a name someone else chose could hide or fake what the user
+ * reads. Line breaks and tabs stay (see `inline` for text that must stay on its line). Not
+ * `cleanFileName`'s list: that one keeps a line break out of a name, this one keeps it in text.
+ * The zero-width joiners stay, because emoji and some scripts are written with them.
  */
 export function plain(text: string) {
-  // eslint-disable-next-line no-control-regex
-  return text.replace(/[\u0000-\u0008\u000b-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]/g, '?');
+  return text.replace(
+    // eslint-disable-next-line no-control-regex
+    /[\u0000-\u0008\u000b-\u001f\u007f-\u009f\u061c\u200e\u200f\u2028\u2029\u202a-\u202e\u2066-\u2069\ufeff]/g,
+    '?',
+  );
 }
 
-/** The same Io, with everything printed made safe for a terminal. */
+/** A name or message someone else wrote, for the middle of a line: no line breaks either. */
+export const inline = (text: string) => plain(text).replace(/[\n\t]/g, ' ');
+
+/** The same Io, with the text printed for people made safe for a terminal. */
 function terminalSafe(io: Io): Io {
   const { status } = io;
   return {
     ...io,
-    out: (line) => io.out(plain(line)),
     err: (line) => io.err(plain(line)),
     ...(status ? { status: (line: string) => status(plain(line)) } : {}),
   };
 }
 
-const SIZE_UNITS: Record<string, number> = {
-  '': 1,
-  B: 1,
-  KB: 1024,
-  MB: 1024 ** 2,
-  GB: 1024 ** 3,
-  TB: 1024 ** 4,
-};
-
 /** "500", "20MB", "1.5 GB" as bytes (powers of 1024, as the sizes shown). */
 export function parseSize(text: string) {
-  const m = /^\s*(\d+(?:\.\d+)?)\s*([kmgt]?b?)\s*$/i.exec(text);
-  const unit = m && SIZE_UNITS[m[2]!.toUpperCase().replace(/^([KMGT])$/, '$1B')];
-  if (!m || !unit) throw new UsageError(`"${text}" isn't a size, like 500MB or 2GB.`);
-  return Math.floor(Number(m[1]) * unit);
+  const m = /^\s*(\d+(?:\.\d+)?)\s*([kmgt]?)b?\s*$/i.exec(text);
+  const size = m && Math.floor(Number(m[1]) * 1024 ** '_kmgt'.indexOf(m[2]!.toLowerCase() || '_'));
+  if (!size) throw new UsageError(`"${text}" isn't a size, like 500MB or 2GB.`);
+  return size;
 }
 
 const HELP = `crocodile: send and receive files with Crocodile, peer-to-peer and end-to-end encrypted.
@@ -129,7 +128,8 @@ runs, even if they aren't a friend yet (the app would show a request to
 accept). Without --from, only friends and existing conversations are heard.
 
 Files are saved readable by you only. A file bigger than the free space in
-the folder is skipped, and so is one over --max-size (like 500MB or 2GB).`,
+the folder is skipped, and so is one over --max-size (like 500MB or 2GB);
+it then goes on waiting for the next one.`,
   whoami: `crocodile whoami
 
 Shows the account this computer uses (name#tag and user id).`,
@@ -184,7 +184,7 @@ export async function run(argv: string[], terminal: Io): Promise<number> {
   try {
     ctx = await start(io, opts);
   } catch (err) {
-    io.err(`Error: ${(err as Error).message}`);
+    io.err(`Error: ${inline((err as Error).message)}`);
     return 1;
   }
   let code: number;
@@ -195,7 +195,7 @@ export async function run(argv: string[], terminal: Io): Promise<number> {
       io.err(err.message);
       code = 2;
     } else {
-      io.err(`Error: ${(err as Error).message}`);
+      io.err(`Error: ${inline((err as Error).message)}`);
       code = 1;
     }
   }
@@ -244,6 +244,8 @@ async function runCommand(
 
 interface Ctx {
   io: Io;
+  /** Where this account's keys and downloads are kept. */
+  profileDir: string;
   client: CrocodileClient;
   kv: JsonFileStore;
   files: CliFileStore;
@@ -275,7 +277,7 @@ async function start(
     stun: () => ref.client?.stunUrls ?? [],
   });
   try {
-    return await startClient(io, opts, { platform, kv, files, ref });
+    return await startClient(io, opts, { platform, kv, files, ref, dir });
   } catch (err) {
     try {
       kv.close();
@@ -294,9 +296,10 @@ async function startClient(
     kv: JsonFileStore;
     files: CliFileStore;
     ref: { client?: CrocodileClient };
+    dir: string;
   },
 ): Promise<Ctx> {
-  const { platform, kv, files, ref } = parts;
+  const { platform, kv, files, ref, dir } = parts;
   const directories = (opts.directory ?? io.env.CROCODILE_DIRECTORIES ?? DEFAULT_DIRECTORIES)
     .split(',')
     .map((s) => s.trim())
@@ -311,6 +314,7 @@ async function startClient(
   await client.init();
   return {
     io,
+    profileDir: dir,
     client,
     kv,
     files,
@@ -354,8 +358,11 @@ function needAccount(ctx: Ctx) {
 
 const me = (ctx: Ctx) => {
   const p = ctx.client.state.me;
-  return p ? `${p.username}#${p.tag}` : ctx.client.userId;
+  return p ? tagOf(p) : ctx.client.userId;
 };
+
+/** "name#1234" for a profile, as shown to people. */
+const tagOf = (p: { username: string; tag: string }) => inline(`${p.username}#${p.tag}`);
 
 async function init(ctx: Ctx, name: string) {
   if (ctx.client.state.phase === 'ready')
@@ -535,16 +542,6 @@ async function send(ctx: Ctx, paths: string[], to: string | undefined, message?:
 
 const SAVED_KEY = 'cli-saved-files';
 
-/** Why a file of `size` bytes shouldn't be taken into `dir`, if it shouldn't. */
-async function refuse(dir: string, size: number, maxSize?: number) {
-  if (maxSize !== undefined && size > maxSize)
-    return `it is over --max-size ${formatBytes(maxSize)}`;
-  const space = await statfs(dir).catch(() => null);
-  if (space && size > space.bavail * space.bsize)
-    return `only ${formatBytes(space.bavail * space.bsize)} is free there`;
-  return '';
-}
-
 async function get(
   ctx: Ctx,
   opts: { from?: string; dir?: string; keep: boolean; maxSize?: number },
@@ -580,14 +577,12 @@ async function get(
     if (from && client.state.dmRequests.includes(from))
       void client
         .acceptDmRequest(from)
-        .catch((e) => io.err(`Could not take up the conversation: ${e.message}`));
+        .catch((e) => io.err(`Could not take up the conversation: ${inline(e.message)}`));
     for (const u of client.state.dmRequests) {
       const p = client.state.profiles[u];
       if (u === from || told.has(u) || !p) continue;
       told.add(u);
-      io.err(
-        `${p.username}#${p.tag} wants to send you something. Run: get --from ${p.username}#${p.tag}`,
-      );
+      io.err(`${tagOf(p)} wants to send you something. Run: get --from ${tagOf(p)}`);
     }
   };
   takeRequests();
@@ -607,10 +602,18 @@ async function get(
     const file = m.file;
     const name = cleanFileName(file.name);
     const sender = client.state.profiles[m.author];
-    const who = sender ? `${sender.username}#${sender.tag}` : m.author;
-    const refusal = await refuse(dir, file.size, opts.maxSize);
+    const who = sender ? tagOf(sender) : m.author;
+    const tooBig = opts.maxSize !== undefined && file.size > opts.maxSize;
+    const free = tooBig ? undefined : await spaceProblem(dir, ctx.profileDir, file.size);
+    const refusal = tooBig
+      ? `it is over --max-size ${formatBytes(opts.maxSize!)}`
+      : free !== undefined
+        ? `only ${formatBytes(free)} is free there`
+        : '';
     if (refusal) {
-      io.err(`Not taking ${name} (${formatBytes(file.size)}) from ${who}: ${refusal}.`);
+      io.err(
+        `Not taking ${name} (${formatBytes(file.size)}) from ${who}: ${refusal}. Still waiting for the next one.`,
+      );
       continue;
     }
     io.err(`Receiving ${name} (${formatBytes(file.size)}) from ${who}…`);
