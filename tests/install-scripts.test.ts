@@ -161,6 +161,17 @@ describe.skipIf(process.platform === 'win32')('install.sh --cli', () => {
     for (const call of calls) expect(call).toMatch(/^--proto =https --proto-redir =https /);
   });
 
+  it('has no download that skips that', () => {
+    // The run above takes one path; the others (the app for each system) are read here.
+    const script = readFileSync(resolve('scripts/install.sh'), 'utf8');
+    const downloads = script.split('\n').filter((l) => /\bcurl\b/.test(l) && !/^\s*#/.test(l));
+    expect(downloads.map((l) => l.trim())).toEqual([
+      "fetch() { curl --proto '=https' --proto-redir '=https' \"$@\"; }",
+      'need curl',
+    ]);
+    expect(script.match(/\bfetch -f/g)?.length).toBe(6);
+  });
+
   it('points to npm when there is no build for the processor', () => {
     expect(() => installUnix(['--cli'], { os: 'Darwin', arch: 'x86_64' }, CLI_ASSETS)).toThrow(
       /npm install -g crocodile-cli/,
@@ -190,7 +201,10 @@ describe('release workflow', () => {
     expect(secrets.map((l) => l.trim().split(':')[0])).toEqual(
       expect.arrayContaining(['CSC_LINK', 'APPLE_TEAM_ID', 'AZURE_CLIENT_SECRET']),
     );
+    // A platform that is not given a secret gets an empty value, which the step unsets.
+    const unset = lines.find((l) => l.includes('for v in '));
     for (const line of secrets) {
+      expect(unset, line).toMatch(new RegExp(`\\b${line.trim().split(':')[0]}\\b`));
       const os = /secrets\.AZURE_/.test(line) ? 'Windows' : 'macOS';
       expect(line, line).toContain(`\${{ runner.os == '${os}' && secrets.`);
     }

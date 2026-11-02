@@ -69,9 +69,13 @@ and route `coord.DOMAIN` to `http://172.18.0.1:7443` (Caddy:
 proxy puts in `X-Forwarded-For`, and every container on that network can reach
 the gateway's port 7443 too, so keep other containers off the proxy's network.
 The directory is published on the host's `127.0.0.1:7400`, which a container
-can't reach either: join the proxy to the compose project's network (named
-after its folder, such as `main_default`; `docker network ls` shows it) and
-route `DOMAIN/v1/*` to `http://directory:7400`. If the host firewall
+can't reach either. With a proxy that serves only this server, join it to the
+compose project's network (named after its folder, such as `main_default`;
+`docker network ls` shows it) and route `DOMAIN/v1/*` to `http://directory:7400`.
+With a proxy shared with other sites, don't: everything behind it would reach
+the directory, which trusts `X-Forwarded-For`. Change the `ports` line of
+`directory` in the compose file to `'172.18.0.1:7400:7400'` (the gateway, as
+above) and route to `http://172.18.0.1:7400` instead. If the host firewall
 (ufw) drops traffic from containers to the host, allow TCP 7443 on that
 network's bridge interface (`ip -4 addr` shows which `br-…` has the gateway).
 
