@@ -1825,7 +1825,7 @@ describe('secure channel', () => {
     expect(server.open(client.seal({ i: 1 }))).toEqual({ i: 1 });
     // One the server drops without reading, as a rate limit does: the one after it follows.
     const dropped = client.seal({ i: 2 });
-    server.skip(dropped.n);
+    expect(server.skip(dropped.n)).toBe(true);
     expect(server.open(client.seal({ i: 3 }))).toEqual({ i: 3 });
     // The number can be read from the text of a frame without decoding it, as `seal` writes it.
     const text = JSON.stringify(new SecureChannel(secret, 'ctx', true).seal({ i: 5 }));
@@ -1833,8 +1833,8 @@ describe('secure channel', () => {
     expect(peekFrameNumber(JSON.stringify({ n: 7, t: 'x', c: 'AA' }))).toBeUndefined();
     expect(peekFrameNumber('{"t":"x","n":1234567890123456,')).toBeUndefined();
     // A frame that is not the next is not passed over, and the same one cannot be twice.
-    server.skip(99);
-    server.skip(dropped.n);
+    expect(server.skip(99)).toBe(false);
+    expect(server.skip(dropped.n)).toBe(false);
     expect(server.open(client.seal({ i: 4 }))).toEqual({ i: 4 });
   });
 

@@ -237,8 +237,8 @@ A coordinator (`packages/coordinator`) offers a WebSocket JSON-RPC API:
 **Mesh.** Servers learn about each other from the directory, the configured
 peers and signed beacons that every server floods through the overlay (a
 server's address is believed only from the directory, the configuration, its own
-beacon, or where we dialled it); a server is live while it is linked or its beacon is recent. Links are mutually authenticated
-WebSocket connections. In a small network every server links to every other;
+beacon, or where we dialled it); a server is live while it is linked or its
+beacon is recent. Links are mutually authenticated WebSocket connections. In a small network every server links to every other;
 in a larger one each keeps a few **overlay** links (ring neighbours and
 fingers) and opens **direct** links to the servers it needs, closing them when
 idle. Each record lives on its **owners**: the first few servers on a

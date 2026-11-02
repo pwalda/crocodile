@@ -2305,6 +2305,24 @@ describe('encrypted client channel', () => {
     inner.ws.send(JSON.stringify({ c: ct, n, t }));
     expect(await closed).toBe(1008);
   });
+
+  it('ends a connection that repeats a frame past the limit, which is not the next', async () => {
+    const c = await server();
+    const alice = await user(c);
+    const inner = alice.conn as unknown as {
+      ws: WebSocket;
+      channel: { seal(v: unknown): unknown };
+    };
+    const closed = new Promise<number>((r) => inner.ws.addEventListener('close', (e) => r(e.code)));
+    const first = JSON.stringify(inner.channel.seal({ t: 'req', id: 300_000, m: 'x', p: {} }));
+    inner.ws.send(first);
+    for (let i = 1; i < 300; i++)
+      inner.ws.send(
+        JSON.stringify(inner.channel.seal({ t: 'req', id: 300_000 + i, m: 'x', p: {} })),
+      );
+    inner.ws.send(first);
+    expect(await closed).toBe(1008);
+  });
 });
 
 describe('opt-in mailbox', () => {

@@ -106,10 +106,13 @@ export class SecureChannel {
 
   /**
    * Passes over a frame that is dropped unread, as one a rate limit refuses, so that the next one
-   * still follows it. Nothing is checked of it: only the place it holds moves on.
+   * still follows it. Nothing is checked of it: only the place it holds moves on. False if the
+   * frame is not the next, which is a gap nothing can close.
    */
-  skip(n: number): void {
-    if (n === this.recvN + 1) this.recvN = n;
+  skip(n: number): boolean {
+    if (n !== this.recvN + 1) return false;
+    this.recvN = n;
+    return true;
   }
 
   /**

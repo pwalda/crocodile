@@ -147,8 +147,7 @@ export class ClientConnection implements ClientHandle {
         if (this.channel) {
           const head = Buffer.isBuffer(raw) ? raw.subarray(0, 40).toString('latin1') : '';
           const n = peekFrameNumber(head);
-          if (n === undefined) return ws.close(1008, 'slow down');
-          this.channel.skip(n);
+          if (n === undefined || !this.channel.skip(n)) return ws.close(1008, 'slow down');
         }
         this.frame({ t: 'error', err: { code: 'rate_limited', message: 'slow down' } });
         return;
