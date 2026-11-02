@@ -167,7 +167,7 @@ export class Mesh {
     return [...this.known.values()];
   }
 
-  /** Learn about servers (from the directory, gossip or beacons). */
+  /** Learn about servers (from the directory and config, or from beacons the servers signed). */
   addKnown(servers: ServerInfo[]) {
     let added = false;
     for (const s of servers) {
@@ -766,7 +766,8 @@ export class Mesh {
         this.hub.sessions.handleRemoteResult(frame.opId, frame.ok, frame.err);
         return;
       case 'servers':
-        this.addKnown(frame.servers);
+        // Older servers send a list of the servers they know of. It says nothing a server signed,
+        // so it cannot tell where another server is: beacons do (see Membership.onBeacon).
         return;
       case 'ping':
         this.send(link, { t: 'pong' });
@@ -844,7 +845,6 @@ export class Mesh {
     this.hub.log.info('mesh link up', { peer: peer.id, name: peer.name, url: peer.url });
     this.hub.membership.linkUp(peer.id);
 
-    this.send(link, { t: 'servers', servers: [this.hub.info, ...this.knownServers()] });
     for (const b of this.hub.membership.freshBeacons()) this.send(link, b);
     for (const p of this.hub.presence.snapshot()) this.send(link, p);
     for (const v of this.hub.sessions.voiceFrames()) this.send(link, v);

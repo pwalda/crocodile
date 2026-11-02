@@ -23,7 +23,10 @@ export const ServerInfo = z.object({
   key: keyB64u,
   name: z.string().max(64),
   /** Public base URL, e.g. https://croc.example.org or http://203.0.113.4:7443 */
-  url: z.string().url(),
+  url: z
+    .string()
+    .url()
+    .refine((u) => /^https?:\/\//i.test(u), { message: 'a server is at an http or https address' }),
   version: z.string().max(32),
   region: z.string().max(32).optional(),
 });

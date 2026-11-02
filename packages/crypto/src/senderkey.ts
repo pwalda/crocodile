@@ -134,6 +134,13 @@ export function encryptText(
 /** Receiving side of one sender's text chain, tolerant of small reordering. */
 export class TextReceiver {
   private skipped = new Map<number, MessageKey>();
+  /**
+   * What has been worked out ahead of the chain for a message that did not open: the chain and
+   * message key of each generation from `chain.gen` on. A message is not known to be real until
+   * it opens, so what a made-up generation costs (a derivation for each one it skips) is kept,
+   * and the next costs only what it goes further.
+   */
+  private ahead: { chain: ChainState; key: MessageKey }[] = [];
   constructor(
     readonly kid: number,
     private chain: ChainState,
@@ -144,6 +151,7 @@ export class TextReceiver {
   }
 
   decrypt(g: number, ct: string): Uint8Array | null {
+    if (!Number.isSafeInteger(g)) return null;
     let data: Uint8Array;
     try {
       data = fromB64u(ct);
@@ -158,21 +166,22 @@ export class TextReceiver {
       if (out) this.skipped.delete(g);
       return out && unpad(out);
     }
-    if (g - this.chain.gen > MAX_TEXT_SKIP) return null;
-    // Work on a copy; only commit if the message authenticates.
-    let chain = this.chain;
-    const skipped: [number, MessageKey][] = [];
-    while (chain.gen < g) {
-      skipped.push([chain.gen, messageKey(chain, this.kid, 'text')]);
-      chain = ratchet(chain);
+    const n = g - this.chain.gen;
+    if (n > MAX_TEXT_SKIP) return null;
+    while (this.ahead.length <= n) {
+      const last = this.ahead[this.ahead.length - 1];
+      const chain = last ? ratchet(last.chain) : this.chain;
+      this.ahead.push({ chain, key: messageKey(chain, this.kid, 'text') });
     }
-    const mk = messageKey(chain, this.kid, 'text');
+    const { chain, key: mk } = this.ahead[n]!;
+    // Only a message that opens moves the chain on.
     const out = aesGcmDecrypt(mk.key, mk.salt, data, aad);
     if (!out) return null;
-    for (const [gen, k] of skipped) this.skipped.set(gen, k);
+    for (let i = 0; i < n; i++) this.skipped.set(this.chain.gen + i, this.ahead[i]!.key);
     while (this.skipped.size > MAX_SKIPPED_KEYS)
       this.skipped.delete(this.skipped.keys().next().value!);
     this.chain = ratchet(chain);
+    this.ahead = this.ahead.slice(n + 1);
     return unpad(out);
   }
 }

@@ -239,6 +239,10 @@ export function validateRecord(input: unknown, ctx: ValidationContext): Validati
       const rostered = (existing?.body as SpaceBody | undefined)?.authority?.roster;
       if (!body.deleted && rostered && authority?.roster !== rostered)
         return reject('the roster of a space cannot be changed or taken off');
+      // Nor does the count start again from nothing: that would take an older list back. (A
+      // space that is deleted needs none, and nobody can change it.)
+      if ((existing?.body as SpaceBody | undefined)?.authority && !authority && !body.deleted)
+        return reject('the admin list cannot be taken off a space');
       if (body.owner === authorId) {
         if (spaceIdFor(record.author, body.nonce) !== spaceId)
           return reject('space id does not match owner');

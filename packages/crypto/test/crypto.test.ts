@@ -385,6 +385,48 @@ describe('records', () => {
       });
     });
 
+    it('does not let the owner start the count again, which would take an older list back', () => {
+      const without = signRecord(
+        alice,
+        'space',
+        key,
+        { ...base, admins: [], authority: signSpaceAuthority(alice, spaceId, [], now - 500) },
+        now - 500,
+      );
+      // A record of the owner's with no list at all is refused over one with a list...
+      const bare = signRecord(
+        alice,
+        'space',
+        key,
+        { ...base, admins: [], name: 'Bare' },
+        now - 400,
+      );
+      expect(validateRecord(bare, ctx([without]))).toMatchObject({
+        ok: false,
+        reason: 'the admin list cannot be taken off a space',
+      });
+      // ...so the count stays, and Bob's older list is still refused.
+      const late = signRecord(bob, 'space', key, { ...withBob.body, name: 'Still mine' }, now);
+      expect(validateRecord(late, ctx([without]))).toMatchObject({
+        reason: 'the admin list has changed',
+      });
+      // A space with no list yet may be given one, and a deleted one needs none.
+      expect(
+        validateRecord(
+          without,
+          ctx([signRecord(alice, 'space', key, { ...base, admins: [] }, now - 900)]),
+        ).ok,
+      ).toBe(true);
+      const deleted = signRecord(
+        alice,
+        'space',
+        key,
+        { ...base, admins: [], deleted: true },
+        now - 400,
+      );
+      expect(validateRecord(deleted, ctx([without])).ok).toBe(true);
+    });
+
     describe('private invites', () => {
       const dave = createIdentity();
       const eve = createIdentity();
@@ -1747,7 +1789,28 @@ describe('secure channel', () => {
     expect(server.open(f1)).toBeUndefined();
     const back = server.seal({ ok: true });
     expect(client.open(back)).toEqual({ ok: true });
-    expect(new SecureChannel(secret, 'other', false).open(client.seal({ x: 1 }))).toBeUndefined();
+    const other = new SecureChannel(secret, 'other', true);
+    expect(new SecureChannel(secret, 'ctx', false).open(other.seal({ x: 1 }))).toBeUndefined();
+  });
+
+  it('takes frames in the order they were sealed, and refuses one that follows a gap', () => {
+    const keys = createChannelKeys();
+    const { answer, secret } = answerChannel(keys.offer);
+    const server = new SecureChannel(acceptChannel(keys, answer), 'ctx', false);
+    const client = new SecureChannel(secret, 'ctx', true);
+    const frames = [1, 2, 3, 4].map((i) => client.seal({ i }));
+    expect(server.open(frames[0]!)).toEqual({ i: 1 });
+    // The second is held back or dropped on the way: the third cannot stand in for it.
+    expect(server.open(frames[2]!)).toBeUndefined();
+    expect(server.open(frames[3]!)).toBeUndefined();
+    // (A frame refused leaves the place it was at.)
+    expect(server.open(frames[1]!)).toEqual({ i: 2 });
+    expect(server.open(frames[2]!)).toEqual({ i: 3 });
+    // A first frame that is not the first is refused too, as is a counter that is not whole.
+    const late = new SecureChannel(acceptChannel(keys, answer), 'ctx', false);
+    expect(late.open(frames[1]!)).toBeUndefined();
+    expect(late.open({ ...frames[0]!, n: 0.5 })).toBeUndefined();
+    expect(late.open({ ...frames[0]!, n: -1 })).toBeUndefined();
   });
 
   it('padme buckets', () => {

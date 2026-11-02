@@ -93,9 +93,13 @@ export class SecureChannel {
     return { t: 'x', n, c: toB64u(ct) };
   }
 
-  /** Returns the decoded value, or undefined for forged/replayed frames. */
+  /**
+   * Returns the decoded value, or undefined for a forged, replayed or out of order frame. A
+   * WebSocket delivers in order, so each frame is the one after the last: a missing one means a
+   * frame was held back or dropped, and nothing after it is taken.
+   */
   open(frame: { n: number; c: string }): unknown {
-    if (!Number.isSafeInteger(frame.n) || frame.n <= this.recvN) return undefined;
+    if (frame.n !== this.recvN + 1) return undefined;
     let bytes: Uint8Array | null;
     try {
       bytes = aesGcmDecrypt(this.recvKey, SecureChannel.nonce(frame.n), fromB64u(frame.c));
