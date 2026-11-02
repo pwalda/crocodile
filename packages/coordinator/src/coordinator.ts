@@ -23,7 +23,7 @@ import {
   type LinkBox,
   type RelayGrant,
   type ServerEvents,
-  type ServerInfo,
+  ServerInfo,
   type SignedRecord,
   type OperatorInfo,
   isOperatorContact,
@@ -164,6 +164,11 @@ export const defaultConfig: CoordinatorConfig = {
 /** A relay grant asked for again in its last minutes is extended (see requestRelay). */
 export const RELAY_RENEW_WINDOW_MS = 10 * 60_000;
 
+/** An address without stray space, and with its http or https scheme in lower case (which is how
+ * other servers take it). */
+const cleanUrl = (url: string) =>
+  url.trim().replace(/^https?(?=:\/\/)/i, (scheme) => scheme.toLowerCase());
+
 export class Coordinator {
   readonly config: CoordinatorConfig;
   readonly log: Logger;
@@ -208,17 +213,13 @@ export class Coordinator {
 
   constructor(config: Partial<CoordinatorConfig> & Pick<CoordinatorConfig, 'name'>) {
     this.config = { ...defaultConfig, ...config };
-    // Other servers refuse an address that is not an http or https one.
-    if (this.config.publicUrl !== undefined) {
-      let url: URL | undefined;
-      try {
-        url = new URL(this.config.publicUrl);
-      } catch {
-        // (not an address at all)
-      }
-      if (!url || !/^https?:\/\//i.test(this.config.publicUrl) || !url.hostname)
-        throw new Error('the public URL must be an http:// or https:// address');
-    }
+    // Other servers refuse an address they do not take as a server's (the scheme is put in lower
+    // case when it is published).
+    if (
+      this.config.publicUrl !== undefined &&
+      !ServerInfo.shape.url.safeParse(cleanUrl(this.config.publicUrl)).success
+    )
+      throw new Error('the public URL must be an http:// or https:// address');
     // A typo (NaN) or zero here would silently switch a protection off.
     for (const [name, n] of [
       ['capacity', this.config.capacity],
@@ -395,10 +396,9 @@ export class Coordinator {
 
     await app.listen({ host: this.config.host, port: this.config.port });
     const port = (app.server.address() as AddressInfo).port;
-    // (The scheme in lower case, which is how other servers and the directory take it.)
-    const publicUrl = (this.config.publicUrl ?? `http://${hostForUrl(this.config.host)}:${port}`)
-      .replace(/\/$/, '')
-      .replace(/^https?(?=:)/i, (scheme) => scheme.toLowerCase());
+    const publicUrl = cleanUrl(
+      this.config.publicUrl ?? `http://${hostForUrl(this.config.host)}:${port}`,
+    ).replace(/\/$/, '');
     this._info = {
       id: this.identity.userId,
       key: this.identity.publicKey,

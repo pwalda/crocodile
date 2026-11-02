@@ -2302,7 +2302,8 @@ describe('encrypted client channel', () => {
       );
     // The same kind of frame with its parts in another order.
     const { t, n, c: ct } = inner.channel.seal({ t: 'req', id: 1, m: 'friends.incoming', p: {} });
-    inner.ws.send(JSON.stringify({ c: ct, n, t }));
+    // (Twice: one that happens to be let through by the limiter is the next frame, the second is not.)
+    for (let i = 0; i < 2; i++) inner.ws.send(JSON.stringify({ c: ct, n, t }));
     expect(await closed).toBe(1008);
   });
 
@@ -2428,17 +2429,11 @@ describe('abuse limits', () => {
     expect(() => new Coordinator({ name: 'x', storage: 'memory', publicUrl: 'ws://x' })).toThrow(
       /must be an http/,
     );
-    for (const bad of [
-      'x.example',
-      'https://',
-      'https://x y',
-      'http:example.org',
-      ' https://example.org',
-    ])
+    for (const bad of ['x.example', 'https://', 'https://x y', 'http:example.org'])
       expect(() => new Coordinator({ name: 'x', storage: 'memory', publicUrl: bad }), bad).toThrow(
         /must be an http/,
       );
-    const c = await server({ publicUrl: 'HTTPS://Croc.Example.org/' });
+    const c = await server({ publicUrl: ' HTTPS://Croc.Example.org/\n' });
     expect(c.info.url).toBe('https://Croc.Example.org');
   });
 
