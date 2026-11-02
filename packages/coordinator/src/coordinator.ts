@@ -395,7 +395,7 @@ export class Coordinator {
     const port = (app.server.address() as AddressInfo).port;
     const publicUrl = cleanUrl(
       this.config.publicUrl ?? `http://${hostForUrl(this.config.host)}:${port}`,
-    ).replace(/\/$/, '');
+    );
     this._info = {
       id: this.identity.userId,
       key: this.identity.publicKey,

@@ -54,10 +54,13 @@ export function sendJson(ws: WebSocket, value: unknown): boolean {
   return true;
 }
 
-/** An address without stray space, and with its http or https scheme in lower case (which is how
- * other servers take it). */
+/** An address as other servers take it: no stray space, no slash at the end, and its http or
+ * https scheme in lower case. */
 export const cleanUrl = (url: string) =>
-  url.trim().replace(/^https?(?=:\/\/)/i, (scheme) => scheme.toLowerCase());
+  url
+    .trim()
+    .replace(/\/$/, '')
+    .replace(/^https?(?=:\/\/)/i, (scheme) => scheme.toLowerCase());
 
 export function toWsUrl(httpUrl: string, path: string): string {
   const u = new URL(httpUrl);

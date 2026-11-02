@@ -1290,7 +1290,7 @@ describe('where a server is, as other servers tell it', () => {
 
   it('is written as other servers take it when a static peer is given another way', async () => {
     const a = await server({ name: 'a' });
-    const written = a.url.replace(/^http/, 'HTTP') + ' ';
+    const written = a.url.replace(/^http/, 'HTTP') + '/ ';
     const b = await server({ name: 'b', meshPeers: [written] });
     expect((b.mesh as unknown as { staticUrls: string[] }).staticUrls).toEqual([a.url]);
     await waitFor(() => b.mesh.peerIds().includes(a.info.id), 5000, 'the link');
