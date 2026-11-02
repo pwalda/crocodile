@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { b64uBytes, b64uText, keyB64u, sigB64u } from './b64u';
 import { FileId, FileManifest } from './files';
 
 /**
@@ -109,15 +110,15 @@ export const SealedBox = z.object({
   /** Recipient prekey id. */
   pk: z.number().int().min(0).max(0xffffffff),
   /** Ephemeral X25519 public key. */
-  epk: z.string(),
+  epk: b64uBytes(32),
   /** ML-KEM-768 ciphertext. */
-  kem: z.string(),
-  ct: z.string(),
+  kem: b64uBytes(1088),
+  ct: b64uText(),
   /** Sender's Ed25519 identity key. */
-  from: z.string(),
+  from: keyB64u,
   /** Sender's device id. */
   fromDevice: z.string().regex(/^[a-z2-7]{8,32}$/),
-  sig: z.string(),
+  sig: sigB64u,
 });
 export type SealedBox = z.infer<typeof SealedBox>;
 
@@ -129,7 +130,7 @@ export const E2EEnvelope = z.discriminatedUnion('k', [
     k: z.literal('group'),
     kid: z.number().int().min(0).max(0xffffffff),
     g: z.number().int().min(0),
-    ct: z.string(),
+    ct: b64uText(),
   }),
 ]);
 export type E2EEnvelope = z.infer<typeof E2EEnvelope>;
@@ -147,7 +148,7 @@ export const ChatMessage = z.object({
   sid: z.string().max(200).optional(),
   author: userId,
   /** Author's Ed25519 key; userId must equal hash(key). */
-  key: z.string(),
+  key: keyB64u,
   ts: z.number().int(),
   body: z.string().max(4000),
   replyTo: z.string().max(40).optional(),
@@ -156,7 +157,7 @@ export const ChatMessage = z.object({
   deleted: z.boolean().optional(),
   /** A file posted with the message (the body is its caption). */
   file: FileManifest.optional(),
-  sig: z.string(),
+  sig: sigB64u,
 });
 export type ChatMessage = z.infer<typeof ChatMessage>;
 
@@ -175,8 +176,8 @@ export const SealedPayload = z.discriminatedUnion('type', [
     at: z.number().int().min(0),
     kid: z.number().int().min(0).max(0xffffffff),
     /** Current state of the sender's ratcheting chains (never earlier ones). */
-    text: z.object({ gen: z.number().int().min(0), key: z.string() }),
-    audio: z.object({ gen: z.number().int().min(0), key: z.string() }),
+    text: z.object({ gen: z.number().int().min(0), key: b64uBytes(32) }),
+    audio: z.object({ gen: z.number().int().min(0), key: b64uBytes(32) }),
     /** The sender holds no key of the receiver's (it let go of it), and asks for it. */
     want: z.boolean().optional(),
   }),

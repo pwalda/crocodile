@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { b64uBytes, b64uText, keyB64u, sigB64u } from './b64u';
 import { LIMITS } from './constants';
 
 /**
@@ -21,8 +22,7 @@ export const RECORD_KINDS = [
 export type RecordKind = (typeof RECORD_KINDS)[number];
 
 const id = z.string().regex(/^[a-z2-7]{8,64}$/);
-const pubKey = z.string().regex(/^[A-Za-z0-9_-]{43}$/);
-const b64u = /^[A-Za-z0-9_-]*$/;
+const pubKey = keyB64u;
 export const DeviceId = z.string().regex(/^[a-z2-7]{8,32}$/);
 const peerId = z.string().regex(/^[a-z2-7]{8,64}\.[a-z2-7]{8,32}$/);
 
@@ -35,7 +35,7 @@ export const PrekeyBundle = z.object({
   id: z.number().int().min(0).max(0xffffffff),
   x25519: pubKey,
   /** ML-KEM-768 encapsulation key, base64url (1184 bytes). */
-  mlkem: z.string().regex(/^[A-Za-z0-9_-]{1579}$/),
+  mlkem: b64uBytes(1184),
   expiresAt: z.number().int(),
 });
 export type PrekeyBundle = z.infer<typeof PrekeyBundle>;
@@ -98,7 +98,7 @@ export type LegacyFriendsBody = z.infer<typeof LegacyFriendsBody>;
  * learns about it from sealed notes (see NoteBody).
  */
 export const SealedFriendsBody = z.object({
-  sealed: z.string().regex(b64u).max(LIMITS.recordMaxBytes),
+  sealed: b64uText(LIMITS.recordMaxBytes),
 });
 export type SealedFriendsBody = z.infer<typeof SealedFriendsBody>;
 
@@ -123,8 +123,8 @@ export const AnonBox = z.object({
   /** Ephemeral X25519 public key. */
   epk: pubKey,
   /** ML-KEM-768 ciphertext (1088 bytes). */
-  kem: z.string().regex(/^[A-Za-z0-9_-]{1451}$/),
-  ct: z.string().regex(b64u).max(8192),
+  kem: b64uBytes(1088),
+  ct: b64uText(8192),
 });
 export type AnonBox = z.infer<typeof AnonBox>;
 
@@ -213,18 +213,15 @@ export const SpaceBody = z.object({
    */
   authority: z
     .object({
-      ownerKey: z.string().max(64),
+      ownerKey: keyB64u,
       at: z.number().int().min(0),
-      sig: z.string().max(200),
+      sig: sigB64u,
       /**
        * The hash of the roster the owner has signed (see RosterBody): who joined by a link of the
        * older kind and stays. Once a space names one, memberships of that kind count only for
        * those on it. Signed with the admin list, and never changed or taken off.
        */
-      roster: z
-        .string()
-        .regex(/^[A-Za-z0-9_-]{43}$/)
-        .optional(),
+      roster: b64uBytes(32).optional(),
     })
     .optional(),
 });
@@ -268,7 +265,7 @@ export const SignedRecordEnvelope = z.object({
   author: pubKey,
   version: z.number().int().positive(),
   body: z.unknown(),
-  sig: z.string().regex(/^[A-Za-z0-9_-]{86}$/),
+  sig: sigB64u,
 });
 
 /** The invite record a ticket carries, as signed by its maker. */
@@ -287,7 +284,7 @@ export const MemberBody = z.object({
    * Joined with an open link that is a ticket: the maker's signed invite, and the signature of
    * this user by the secret in the link. (Instead of `inviteCode`, not with it.)
    */
-  ticket: z.object({ invite: TicketInvite, proof: z.string().min(1).max(200) }).optional(),
+  ticket: z.object({ invite: TicketInvite, proof: sigB64u }).optional(),
   left: z.boolean().optional(),
 });
 export type MemberBody = z.infer<typeof MemberBody>;

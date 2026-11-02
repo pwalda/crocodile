@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { FedFrameSchema, RpcParams, canonicalJson, sessionOpPayload } from '../src';
+import { FedFrameSchema, RpcParams, canonicalJson, sessionOpPayload, toB64u } from '../src';
 
 const caps = { canHost: true, platform: 'desktop', nat: 'open' } as const;
 const proof = {
@@ -7,7 +7,7 @@ const proof = {
   at: 1_700_000_000_000,
   since: 1_699_999_990_000,
   n: 2,
-  sig: 'c2ln',
+  sig: toB64u(new Uint8Array(64).fill(7)),
 };
 const peer = 'abcdefghij.klmnopqrst';
 const sessionId = 'space:abcdefgh';
@@ -77,6 +77,8 @@ describe('session operation proofs', () => {
       { server: 'server-one', at: 1 },
       { ...proof, server: '' },
       { ...proof, sig: '' },
+      { ...proof, sig: proof.sig.slice(0, 85) },
+      { ...proof, sig: proof.sig.slice(0, 85) + 'B' },
     ])
       expect(RpcParams['session.join'].safeParse({ sessionId, caps, proof: bad }).success).toBe(
         false,

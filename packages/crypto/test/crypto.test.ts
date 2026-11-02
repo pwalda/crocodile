@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   AnonBox,
   DELETED_PROFILE_NAME,
+  isCanonicalB64u,
   NOTE_TTL_MS,
   recordKey,
   SIG_DOMAIN,
@@ -99,6 +100,26 @@ describe('identity', () => {
     const key = encodeRecoveryKey(createIdentity().seed);
     const typo = (key[0] === 'A' ? 'B' : 'A') + key.slice(1);
     expect(() => decodeRecoveryKey(typo)).toThrow(/checksum/);
+  });
+
+  it('takes a recovery key in one spelling, with the separators a document puts in', () => {
+    const key = encodeRecoveryKey(createIdentity().seed);
+    const seed = decodeRecoveryKey(key);
+    // A character that cannot be in one, padding, and a 57th character that would carry no bits.
+    expect(() => decodeRecoveryKey('1' + key.slice(1))).toThrow(/mistyped \(character 1, "1"/);
+    expect(() => decodeRecoveryKey(key.slice(0, 5) + '\u00b7' + key.slice(6))).toThrow(
+      /character 5/,
+    );
+    expect(() => decodeRecoveryKey(key + '=')).toThrow(/mistyped/);
+    expect(() => decodeRecoveryKey(key + 'a')).toThrow(/wrong length/);
+    expect(() => decodeRecoveryKey(key.slice(0, -1))).toThrow(/wrong length/);
+    // Spaces, line ends, and the dashes and invisible marks a document or chat app puts between groups.
+    expect(decodeRecoveryKey(key.replace(/-/g, '\u2013'))).toEqual(seed);
+    expect(decodeRecoveryKey(key.replace(/-/g, '\u2011\u200b'))).toEqual(seed);
+    expect(decodeRecoveryKey(key.replace(/-/g, '\uff0d'))).toEqual(seed);
+    expect(decodeRecoveryKey(key.replace(/-/g, '\u200e-\u200f'))).toEqual(seed);
+    expect(decodeRecoveryKey(key.replace(/-/g, ' '))).toEqual(seed);
+    expect(decodeRecoveryKey(` ${key}\n`)).toEqual(seed);
   });
 
   it('safety numbers are symmetric', () => {
@@ -671,6 +692,10 @@ describe('open link tickets', () => {
     const last = alphabet.indexOf(ticket.secret.at(-1)!);
     expect(ticketFromSecret(ticket.secret.slice(0, -1) + alphabet[last ^ 1])).toBeNull();
     expect(ticketFromSecret('1'.repeat(52))).toBeNull();
+    // Kelvin sign (U+212A) lowercases to a 'k', but it is not a letter of the secret.
+    const rest = ticket.secret.slice(1);
+    expect(ticketFromSecret('k' + rest)).not.toBeNull();
+    expect(ticketFromSecret('\u212a' + rest)).toBeNull();
     expect(newTicket().secret).not.toBe(ticket.secret);
   });
 
@@ -931,6 +956,23 @@ describe('open link tickets', () => {
       ok: false,
       reason: 'unknown invite',
     });
+  });
+
+  it('refuses, and does not fail on, a key in a spelling toB64u does not write', () => {
+    // The same 32 bytes with a bit set in the 4 that carry nothing.
+    const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_';
+    const lax = ticket.tpub.slice(0, 42) + alphabet[alphabet.indexOf(ticket.tpub[42]!) | 1]!;
+    expect(lax).not.toBe(ticket.tpub);
+    expect(isCanonicalB64u(ticket.tpub)).toBe(true);
+    expect(isCanonicalB64u(lax)).toBe(false);
+    const odd = signRecord(alice, 'invite', recordKey.invite(ticket.tid), {
+      spaceId,
+      code: ticket.tid,
+      tpub: lax,
+      expiresAt: now + week,
+    });
+    expect(() => validateRecord(odd, ctx([space()]))).not.toThrow();
+    expect(validateRecord(odd, ctx([space()])).ok).toBe(false);
   });
 
   it('is made only as the open link: named by the hash of its key, and not for a person', () => {

@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { b64uBytes } from './b64u';
 
 /**
  * File transfers (ARCHITECTURE.md §8a).
@@ -24,10 +25,7 @@ export const FILE_MAX_SIZE = 2 ** 40;
 /** Data channel label for file links. */
 export const FILE_CHANNEL_LABEL = 'croc-file';
 
-const b64u = (bytes: number) =>
-  z.string().regex(new RegExp(`^[A-Za-z0-9_-]{${Math.ceil((bytes * 4) / 3)}}$`));
-
-export const FileId = b64u(16);
+export const FileId = b64uBytes(16);
 
 /**
  * A small preview the sender makes of a picture or video, shown blurred until
@@ -47,9 +45,9 @@ export const FileManifest = z.object({
   /** MIME type as the sender's system reported it; only a hint. */
   type: z.string().max(127),
   /** Key the blocks are encrypted with (32 bytes). */
-  key: b64u(32),
+  key: b64uBytes(32),
   /** SHA-256 over the SHA-256 hashes of every encrypted block, in order. */
-  root: b64u(32),
+  root: b64uBytes(32),
   thumb: FileThumb.optional(),
   /** Pixel size of a picture or video. */
   w: z.number().int().min(1).max(100_000).optional(),

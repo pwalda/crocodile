@@ -65,7 +65,7 @@ describe('a mesh link keeps the identity it authenticated with', () => {
   it('closes a link that sends a second hello and credits nothing to the identity in it', async () => {
     const { victim, honest, rogue } = await threeServers();
     const toVictim = meshLinkTo(rogue, victim.info.id);
-    const offer = { x25519: 'a'.repeat(43), mlkem: 'b'.repeat(100) };
+    const offer = createChannelKeys().offer;
 
     toVictim.send({
       t: 'fed_hello',
