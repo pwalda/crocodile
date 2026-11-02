@@ -217,31 +217,28 @@ export function validateRecord(input: unknown, ctx: ValidationContext): Validati
       const spaceId = parts[1]!;
       if (parts.length !== 2) return reject('bad space key');
       const authority = body.authority;
+      const prior = existing?.body as SpaceBody | undefined;
       if (authority && !spaceAuthorityValid(spaceId, body))
         return reject('bad admin list signature');
       // An edit made under an admin list the owner has since replaced.
-      const before = (existing?.body as SpaceBody | undefined)?.authority?.at ?? 0;
+      const before = prior?.authority?.at ?? 0;
       if (authority && authority.at < before) return reject('the admin list has changed');
       // The list means something only under the owner's signature.
       if (body.formerAdmins?.length && !authority)
         return reject("former admins need the owner's signature on the admin list");
       // Those let in by an admin stay, so the admins the owner has removed are only added to.
       // A space that is deleted stays so, and keeps nothing but what names it: nobody is let in.
-      if ((existing?.body as SpaceBody | undefined)?.deleted && !body.deleted)
-        return reject('a deleted space stays deleted');
+      if (prior?.deleted && !body.deleted) return reject('a deleted space stays deleted');
       const kept = new Set(body.formerAdmins ?? []);
-      if (
-        !body.deleted &&
-        (existing?.body as SpaceBody | undefined)?.formerAdmins?.some((u) => !kept.has(u))
-      )
+      if (!body.deleted && prior?.formerAdmins?.some((u) => !kept.has(u)))
         return reject('former admins cannot be taken off the list');
       // Nor is the roster, once the owner has signed it: that would let in those it left out.
-      const rostered = (existing?.body as SpaceBody | undefined)?.authority?.roster;
+      const rostered = prior?.authority?.roster;
       if (!body.deleted && rostered && authority?.roster !== rostered)
         return reject('the roster of a space cannot be changed or taken off');
       // Nor does the count start again from nothing: that would take an older list back. (A
       // space that is deleted needs none, and nobody can change it.)
-      if ((existing?.body as SpaceBody | undefined)?.authority && !authority && !body.deleted)
+      if (prior?.authority && !authority && !body.deleted)
         return reject('the admin list cannot be taken off a space');
       if (body.owner === authorId) {
         if (spaceIdFor(record.author, body.nonce) !== spaceId)
@@ -251,8 +248,7 @@ export function validateRecord(input: unknown, ctx: ValidationContext): Validati
       // An admin: allowed by the owner's signed list, carried in the record itself.
       if (!authority || !body.admins.includes(authorId))
         return reject('only the owner or an admin may change a space');
-      if (body.deleted || (existing?.body as SpaceBody | undefined)?.deleted)
-        return reject('only the owner may delete a space');
+      if (body.deleted || prior?.deleted) return reject('only the owner may delete a space');
       if (body.bans.some((u) => u === body.owner || body.admins.includes(u)))
         return reject('admins cannot ban the owner or other admins');
       return { ok: true, authorId };

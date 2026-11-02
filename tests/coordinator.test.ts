@@ -2287,6 +2287,24 @@ describe('encrypted client channel', () => {
     expect(await alice.conn.request('friends.incoming', {})).toBeDefined();
     expect(closed).toBe(false);
   });
+
+  it('ends a connection that sends a frame past the limit in a form it cannot pass over', async () => {
+    const c = await server();
+    const alice = await user(c);
+    const inner = alice.conn as unknown as {
+      ws: WebSocket;
+      channel: { seal(v: unknown): { t: string; n: number; c: string } };
+    };
+    const closed = new Promise<number>((r) => inner.ws.addEventListener('close', (e) => r(e.code)));
+    for (let i = 0; i < 300; i++)
+      inner.ws.send(
+        JSON.stringify(inner.channel.seal({ t: 'req', id: 200_000 + i, m: 'x', p: {} })),
+      );
+    // The same kind of frame with its parts in another order.
+    const { t, n, c: ct } = inner.channel.seal({ t: 'req', id: 1, m: 'friends.incoming', p: {} });
+    inner.ws.send(JSON.stringify({ c: ct, n, t }));
+    expect(await closed).toBe(1008);
+  });
 });
 
 describe('opt-in mailbox', () => {
