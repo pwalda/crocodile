@@ -2426,11 +2426,12 @@ describe('abuse limits', () => {
 
   it('says its address as other servers take it', async () => {
     expect(() => new Coordinator({ name: 'x', storage: 'memory', publicUrl: 'ws://x' })).toThrow(
-      /must begin with http/,
+      /must be an http/,
     );
-    expect(() => new Coordinator({ name: 'x', storage: 'memory', publicUrl: 'x.example' })).toThrow(
-      /must begin with http/,
-    );
+    for (const bad of ['x.example', 'https://', 'https://x y'])
+      expect(() => new Coordinator({ name: 'x', storage: 'memory', publicUrl: bad }), bad).toThrow(
+        /must be an http/,
+      );
     const c = await server({ publicUrl: 'HTTPS://Croc.Example.org/' });
     expect(c.info.url).toBe('https://Croc.Example.org');
   });

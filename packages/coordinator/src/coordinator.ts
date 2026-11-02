@@ -209,8 +209,16 @@ export class Coordinator {
   constructor(config: Partial<CoordinatorConfig> & Pick<CoordinatorConfig, 'name'>) {
     this.config = { ...defaultConfig, ...config };
     // Other servers refuse an address that is not an http or https one.
-    if (this.config.publicUrl !== undefined && !/^https?:\/\//i.test(this.config.publicUrl))
-      throw new Error('the public URL must begin with http:// or https://');
+    if (this.config.publicUrl !== undefined) {
+      let url: URL | undefined;
+      try {
+        url = new URL(this.config.publicUrl);
+      } catch {
+        // (not an address at all)
+      }
+      if (!url || !/^https?:$/.test(url.protocol) || !url.hostname)
+        throw new Error('the public URL must be an http:// or https:// address');
+    }
     // A typo (NaN) or zero here would silently switch a protection off.
     for (const [name, n] of [
       ['capacity', this.config.capacity],

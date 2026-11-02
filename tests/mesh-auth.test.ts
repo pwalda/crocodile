@@ -1222,7 +1222,7 @@ describe('where a server is, as other servers tell it', () => {
     victim.mesh.addKnown([info(target.url)]);
     (victim.mesh as unknown as { onAuthed(link: unknown, cursor: number): void }).onAuthed(
       {
-        peer: info('http://203.0.113.9:7443'),
+        peer: { ...info('http://203.0.113.9:7443'), name: 'from the hello' },
         initiator: true,
         url: target.url,
         ws: { readyState: 3, close() {}, terminate() {}, on() {} },
@@ -1234,7 +1234,11 @@ describe('where a server is, as other servers tell it', () => {
       },
       0,
     );
-    expect(victim.mesh.knownServers().find((s) => s.id === who.userId)?.url).toBe(target.url);
+    // Nothing of it is taken from the hello: that is not signed.
+    expect(victim.mesh.knownServers().find((s) => s.id === who.userId)).toMatchObject({
+      url: target.url,
+      name: 'known',
+    });
   });
 
   it('is dialled although a link that has not authenticated says in its hello that it is there', async () => {

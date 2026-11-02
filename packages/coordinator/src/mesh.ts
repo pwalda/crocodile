@@ -848,9 +848,8 @@ export class Mesh {
     // us and is not known is not added (its beacon will do it, which a link may introduce only so
     // fast).
     const known = this.known.get(peer.id);
-    const where = known?.url ?? (link.initiator ? link.url : undefined);
-    if (where && (known || this.known.size < KNOWN_MAX))
-      this.known.set(peer.id, { ...peer, url: where });
+    if (!known && link.initiator && link.url && this.known.size < KNOWN_MAX)
+      this.known.set(peer.id, { ...peer, url: link.url });
     if (known) this.dialing.delete(known.url);
     if (link.url) this.dialing.delete(link.url);
     this.hub.log.info('mesh link up', { peer: peer.id, name: peer.name, url: peer.url });
