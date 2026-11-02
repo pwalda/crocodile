@@ -14,7 +14,10 @@ import { saveFile, spaceProblem } from './save';
 
 /** What the commands need from the outside world; tests pass their own. */
 export interface Io {
-  /** Results (saved paths, ids): what a script reads. */
+  /**
+   * Results (saved paths, ids): what a script reads, so they are printed as they are. Anything
+   * another person wrote must be made safe where it goes in (`tagOf`, `receivedName`).
+   */
   out(line: string): void;
   /** Everything for people: progress, questions, problems. */
   err(line: string): void;
@@ -37,12 +40,15 @@ const DEFAULT_DIRECTORIES = 'https://crocodilechat.com';
  * reorder or fake what is read, so a name someone else chose could hide or fake what the user
  * reads. Line breaks and tabs stay (see `inline` for text that must stay on its line). Not
  * `cleanFileName`'s list: that one keeps a line break out of a name, this one keeps it in text.
- * The zero-width joiners stay, because emoji and some scripts are written with them.
+ * The zero-width joiner and non-joiner stay, because emoji and some scripts are written with
+ * them. (A flag of England or Scotland, which is written with tag characters, shows as a black
+ * flag.)
  */
 export function plain(text: string) {
   return text.replace(
-    // eslint-disable-next-line no-control-regex
-    /[\u0000-\u0008\u000b-\u001f\u007f-\u009f\u061c\u200e\u200f\u2028\u2029\u202a-\u202e\u2066-\u2069\ufeff]/g,
+    // Control and format characters (escape sequences, direction marks, zero-width and invisible
+    // characters, tag characters), and the line and paragraph separators; not what stays.
+    /(?![\n\t\u200c\u200d])[\p{Cc}\p{Cf}\u2028\u2029]/gu,
     '?',
   );
 }

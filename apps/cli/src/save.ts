@@ -18,9 +18,10 @@ const NAME_MAX_BYTES = 255;
 
 /** `text` cut to at most `bytes` bytes of UTF-8, whole characters only. */
 function fit(text: string, bytes: number) {
-  let out = text;
-  while (Buffer.byteLength(out) > bytes) out = out.slice(0, -1);
-  return out;
+  const chars = Array.from(text);
+  let size = Buffer.byteLength(text);
+  while (chars.length > 0 && size > bytes) size -= Buffer.byteLength(chars.pop()!);
+  return chars.join('');
 }
 
 /** A path in `dir` for `name` that doesn't exist yet: "a.txt", "a (1).txt"… */
@@ -29,9 +30,16 @@ export function freePath(dir: string, name: string) {
   const stem = name.slice(0, name.length - ext.length);
   for (let i = 0; ; i++) {
     const suffix = i === 0 ? '' : ` (${i})`;
-    // A name that fills the limit gives up some of its stem to the number.
+    // A name that fills the limit gives up some of its stem to the number, and an extension too
+    // long to leave room for one is cut with it.
     const room = NAME_MAX_BYTES - Buffer.byteLength(suffix) - Buffer.byteLength(ext);
-    const p = join(dir, i === 0 ? name : `${fit(stem, room)}${suffix}${ext}`);
+    const numbered =
+      i === 0
+        ? name
+        : room > 0
+          ? `${fit(stem, room)}${suffix}${ext}`
+          : `${fit(name, NAME_MAX_BYTES - Buffer.byteLength(suffix))}${suffix}`;
+    const p = join(dir, numbered);
     if (!taken(p)) return p;
   }
 }
@@ -74,6 +82,8 @@ export async function saveFile(
           return path;
         } catch (copyErr) {
           if ((copyErr as NodeJS.ErrnoException).code === 'EEXIST') continue;
+          // The copy made the file and did not finish it: not under the real name.
+          await unlink(path).catch(() => {});
           throw copyErr;
         }
       }
@@ -87,14 +97,25 @@ export async function saveFile(
  * Why a file of `size` bytes shouldn't be taken into `dir`, if it shouldn't: the space it needs is
  * there once for the copy kept in the profile while it downloads and once more for the saved
  * file, and those are one pool when both are on the same disk (less what a download stopped
- * earlier has kept already). The free space when there is not
- * enough; nothing when there is, or when it can't be read.
+ * earlier has kept already). Returns the free space of the disk that falls short (the smaller, if
+ * both do); nothing when there is room, or when the free space can't be read.
  */
 export async function spaceProblem(dir: string, profileDir: string, size: number, held = 0) {
-  const space = await statfs(dir).catch(() => null);
-  if (!space) return undefined;
+  const freeIn = async (path: string) => {
+    const space = await statfs(path).catch(() => null);
+    return space ? space.bavail * space.bsize : Number.POSITIVE_INFINITY;
+  };
   const [here, there] = await Promise.all([stat(dir), stat(profileDir)]).catch(() => []);
-  const free = space.bavail * space.bsize;
-  const needed = here && there && here.dev === there.dev ? size * 2 - held : size;
-  return needed > free ? free : undefined;
+  // One disk: the copy in the profile and the saved file draw on the same space. Two disks: each
+  // has its own to find.
+  const needs =
+    here && there && here.dev === there.dev
+      ? [[dir, size * 2 - held] as const]
+      : [[dir, size] as const, [profileDir, size - held] as const];
+  let short: number | undefined;
+  for (const [path, needed] of needs) {
+    const free = await freeIn(path);
+    if (needed > free) short = Math.min(short ?? free, free);
+  }
+  return short;
 }

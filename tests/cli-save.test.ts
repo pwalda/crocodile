@@ -82,6 +82,20 @@ describe('saving a received file', () => {
     }
   });
 
+  it('numbers a name whose extension takes all the room', async () => {
+    const dir = folder();
+    // 254 bytes, nearly all of it extension: no room for a number beside the extension.
+    for (const name of [`a.${'b'.repeat(252)}`, `${'é'.repeat(4)}.${'ü'.repeat(120)}`]) {
+      writeFileSync(join(dir, name), 'first');
+      const path = await saveFile(dir, name, async (out) => void (await out.write('again')));
+      const saved = path.slice(dir.length + 1);
+      expect(saved).not.toBe(name);
+      expect(Buffer.byteLength(saved)).toBeLessThanOrEqual(255);
+      expect(saved).toContain(' (1)');
+      expect(readFileSync(path, 'utf8')).toBe('again');
+    }
+  });
+
   it('keeps saves of the same name apart when they finish together', async () => {
     const dir = folder();
     // All of them have written everything before any of them moves into place.
@@ -118,6 +132,11 @@ describe('what the command prints', () => {
     // Direction marks, line and paragraph separators, a byte order mark.
     for (const bad of ['\u200e', '\u200f', '\u061c', '\u2028', '\u2029', '\ufeff'])
       expect(plain(`a${bad}b`), JSON.stringify(bad)).toBe('a?b');
+    // Zero-width and invisible characters, a soft hyphen, tag characters (hidden text).
+    for (const bad of ['\u200b', '\u2060', '\u2064', '\u00ad', '\u{e0041}', '\u180e'])
+      expect(plain(`a${bad}b`), JSON.stringify(bad)).toBe('a?b');
+    // The non-joiner Persian is written with stays too.
+    expect(plain('\u0645\u06cc\u200c\u062e\u0648\u0627\u0647\u0645')).toContain('\u200c');
     // The joiner in an emoji family stays.
     expect(plain('\u{1F468}\u200d\u{1F469}\u200d\u{1F467}')).toBe(
       '\u{1F468}\u200d\u{1F469}\u200d\u{1F467}',
@@ -194,6 +213,8 @@ describe('room for a file', () => {
   });
 
   it('is taken as there when the free space cannot be read', async () => {
-    expect(await spaceProblem(join(folder(), 'missing'), folder(), 1e15)).toBeUndefined();
+    expect(
+      await spaceProblem(join(folder(), 'missing'), join(folder(), 'gone'), 1e15),
+    ).toBeUndefined();
   });
 });
