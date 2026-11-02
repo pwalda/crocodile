@@ -738,9 +738,10 @@ describe('file names', () => {
       'ż'.repeat(300),
       '😀'.repeat(300),
     ];
-    // Every character that is a control or a direction mark, and the ends of the ranges around.
-    for (let c = 0; c < 0x2100; c++)
-      odd.push(`a${String.fromCharCode(c)}b`, String.fromCharCode(c));
+    // Every UTF-16 code unit between two letters (so every control character, direction mark and
+    // separator there is), and characters from outside the first plane.
+    for (let c = 0; c < 0x10000; c++) odd.push(`a${String.fromCharCode(c)}b`);
+    odd.push('a\u{1F600}b', '\u{E0001}a');
     for (const name of odd) {
       const clean = cleanFileName(name);
       const parsed = FileManifest.safeParse({

@@ -131,7 +131,7 @@ export const E2EEnvelope = z.discriminatedUnion('k', [
     k: z.literal('group'),
     kid: z.number().int().min(0).max(0xffffffff),
     g: z.number().int().min(0),
-    ct: b64uText(LIMITS.dataChannelMaxBytes),
+    ct: b64uText(LIMITS.groupCiphertextMaxChars),
   }),
 ]);
 export type E2EEnvelope = z.infer<typeof E2EEnvelope>;
@@ -165,6 +165,21 @@ export type ChatMessage = z.infer<typeof ChatMessage>;
 /** The session a message belongs to: the space's, or for a direct message its own `ch`. */
 export const messageSession = (m: Pick<ChatMessage, 'ch' | 'sid'>): string => m.sid ?? m.ch;
 
+/**
+ * Messages in one reply, of which the ones that do not pass the message schema are left out: one
+ * the schema refuses (a message kept from before a rule was added, say) must not cost the others.
+ */
+const chatMessages = (max: number) =>
+  z
+    .array(z.unknown())
+    .max(max)
+    .transform((items) =>
+      items.flatMap((item) => {
+        const parsed = ChatMessage.safeParse(item);
+        return parsed.success ? [parsed.data] : [];
+      }),
+    );
+
 /** Plaintext of a sealed envelope. */
 export const SealedPayload = z.discriminatedUnion('type', [
   z.object({
@@ -197,14 +212,14 @@ export const SealedPayload = z.discriminatedUnion('type', [
   }),
   z.object({
     type: z.literal('history'),
-    messages: z.array(ChatMessage).max(500),
+    messages: chatMessages(500),
     done: z.boolean(),
   }),
   z.object({ type: z.literal('message'), message: ChatMessage }),
   /** Outbox delivery confirmations: the sender may forget these message ids. */
   z.object({ type: z.literal('ack'), ids: z.array(z.string().max(40)).max(500) }),
   /** Messages delivered through a server mailbox while the recipient was offline. */
-  z.object({ type: z.literal('mail'), messages: z.array(ChatMessage).max(50) }),
+  z.object({ type: z.literal('mail'), messages: chatMessages(50) }),
   /** Answer to `file_want`: this device has the whole file and will serve it. */
   z.object({ type: z.literal('file_have'), file: FileId }),
   /**

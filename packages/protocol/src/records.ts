@@ -242,7 +242,7 @@ export const RosterBody = z.object({
 export type RosterBody = z.infer<typeof RosterBody>;
 
 /** What a space's invite is called: 8 to 32 base32 characters (an open link's is 26). */
-export const inviteCode = z.string().regex(/^[a-z2-7]{8,32}$/);
+const inviteCode = z.string().regex(/^[a-z2-7]{8,32}$/);
 
 export const InviteBody = z.object({
   spaceId: id,

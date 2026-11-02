@@ -42,7 +42,7 @@ describe('how long a ciphertext may be', () => {
   });
 
   it('a group message takes what a data channel message holds, and no more', () => {
-    const limit = LIMITS.dataChannelMaxBytes;
+    const limit = LIMITS.groupCiphertextMaxChars;
     const envelope = (ct: string) => ({ k: 'group', kid: 1, g: 0, ct });
     expect(E2EEnvelope.safeParse(envelope(ctOf(limit))).success).toBe(true);
     expect(E2EEnvelope.safeParse(envelope(ctOf(limit + 1))).success).toBe(false);
@@ -71,7 +71,36 @@ describe('how long a ciphertext may be', () => {
       },
     });
     const plain = new TextEncoder().encode(JSON.stringify({ k: 'message', message: worst })).length;
-    expect(chars(plain)).toBeLessThan(LIMITS.dataChannelMaxBytes);
+    expect(chars(plain)).toBeLessThan(LIMITS.groupCiphertextMaxChars);
+  });
+});
+
+describe('messages in a reply', () => {
+  const bad = { ...message, file: { ...manifest, name: 'a/b' } };
+  const good = { ...message, id: 'bcdefghijkl' };
+
+  it('leaves out one the schema refuses and keeps the others', () => {
+    for (const type of ['history', 'mail'] as const) {
+      const parsed = SealedPayload.parse({
+        type,
+        messages: [good, bad, { nonsense: true }, null, good],
+        ...(type === 'history' ? { done: true } : {}),
+      });
+      expect(parsed.type === 'history' || parsed.type === 'mail').toBe(true);
+      const kept = (parsed as { messages: { id: string }[] }).messages;
+      expect(kept.map((m) => m.id)).toEqual([good.id, good.id]);
+    }
+  });
+
+  it('still takes only so many, and only a list', () => {
+    const many = (n: number) => Array.from({ length: n }, () => good);
+    const history = (messages: unknown) =>
+      SealedPayload.safeParse({ type: 'history', messages, done: true }).success;
+    expect(history(many(500))).toBe(true);
+    expect(history(many(501))).toBe(false);
+    expect(history('nope')).toBe(false);
+    expect(history({ 0: good })).toBe(false);
+    expect(SealedPayload.safeParse({ type: 'mail', messages: many(51) }).success).toBe(false);
   });
 });
 

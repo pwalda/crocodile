@@ -29,9 +29,15 @@ export const LIMITS = {
   /** Members a roster can hold (a user id is about 29 bytes of a record). */
   rosterMax: 10_000,
   wsMessageMaxBytes: 1024 * 1024,
-  /** A data channel message (werift's limit, which host relays use): nothing larger crosses one. */
-  dataChannelMaxBytes: 64 * 1024,
-  /** Ciphertext of a sealed box: what a mailbox holds for one (the most anything legitimate needs). */
+  /**
+   * The most characters a group message's ciphertext may have: what fits in one data channel
+   * message (the frame around it takes a little more, so a real one is smaller still).
+   */
+  groupCiphertextMaxChars: 64 * 1024,
+  /**
+   * A mailbox holds a sealed box (its keys and signature included) of up to this many characters,
+   * so the ciphertext of one is a little less. The schema takes this as the longest.
+   */
   sealedBoxMaxChars: 96 * 1024,
   sessionMembersMax: 100,
   /** Unread notes a server holds for one user. */
