@@ -26,7 +26,7 @@ export const ServerInfo = z.object({
   url: z
     .string()
     .url()
-    .refine((u) => /^https?:\/\//i.test(u), { message: 'a server is at an http or https address' }),
+    .refine((u) => /^https?:\/\//.test(u), { message: 'a server is at an http or https address' }),
   version: z.string().max(32),
   region: z.string().max(32).optional(),
 });

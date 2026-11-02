@@ -345,7 +345,7 @@ export interface FedSessionOpResult {
  */
 export interface FedServers {
   t: 'servers';
-  servers: ServerInfo[];
+  servers: unknown[];
 }
 
 /** Voice channel occupancy announced by the session owner to every server. */
