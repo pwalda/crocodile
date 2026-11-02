@@ -27,6 +27,8 @@ done
 say() { printf '\033[1;32m==>\033[0m %s\n' "$*"; }
 die() { printf '\033[1;31merror:\033[0m %s\n' "$*" >&2; exit 1; }
 need() { command -v "$1" >/dev/null 2>&1 || die "$1 is required"; }
+# Everything is fetched over https, and a redirect may not leave it either.
+fetch() { curl --proto '=https' --proto-redir '=https' "$@"; }
 
 need curl
 os=$(uname -s)
@@ -38,7 +40,7 @@ case "$arch" in
 esac
 
 say "Looking up the latest Crocodile release"
-assets=$(curl -fsSL "$API" | grep -o '"browser_download_url": *"[^"]*"' | sed 's/.*"\(https[^"]*\)"/\1/')
+assets=$(fetch -fsSL "$API" | grep -o '"browser_download_url": *"[^"]*"' | sed 's/.*"\(https[^"]*\)"/\1/')
 [ -n "$assets" ] || die "could not read the release list from GitHub"
 
 pick() { printf '%s\n' "$assets" | grep -E -e "$1" | grep -v '\.blockmap$' | head -n 1; }
@@ -59,7 +61,7 @@ if [ "$WHAT" = cli ]; then
   url=$(pick "/$name\.tar\.gz$")
   [ -n "$url" ] || die "no command line build for $cli_os $cli_arch; with Node.js 22 or newer: npm install -g crocodile-cli"
   say "Downloading $(basename "$url")"
-  curl -fL --progress-bar "$url" -o "$tmp/cli.tar.gz"
+  fetch -fL --progress-bar "$url" -o "$tmp/cli.tar.gz"
   tar -xzf "$tmp/cli.tar.gz" -C "$tmp"
   mkdir -p "$HOME/.local/bin"
   cp "$tmp/$name" "$HOME/.local/bin/crocodile"
@@ -78,7 +80,7 @@ case "$os" in
     url=$(pick '-mac-(universal|'"${arch_re#(}"'\.zip$')
     [ -n "$url" ] || die "no macOS download found"
     say "Downloading $(basename "$url")"
-    curl -fL --progress-bar "$url" -o "$tmp/croc.zip"
+    fetch -fL --progress-bar "$url" -o "$tmp/croc.zip"
     dest=/Applications
     [ -w "$dest" ] || { dest="$HOME/Applications"; mkdir -p "$dest"; }
     rm -rf "$dest/Crocodile.app"
@@ -89,13 +91,13 @@ case "$os" in
   Linux)
     if command -v apt-get >/dev/null 2>&1 && url=$(pick "$arch_re"'\.deb$') && [ -n "$url" ]; then
       say "Downloading $(basename "$url")"
-      curl -fL --progress-bar "$url" -o "$tmp/crocodile.deb"
+      fetch -fL --progress-bar "$url" -o "$tmp/crocodile.deb"
       say "Installing (you may be asked for your password)"
       sudo apt-get install -y "$tmp/crocodile.deb"
     elif { command -v dnf >/dev/null 2>&1 || command -v zypper >/dev/null 2>&1; } &&
       url=$(pick "$arch_re"'\.rpm$') && [ -n "$url" ]; then
       say "Downloading $(basename "$url")"
-      curl -fL --progress-bar "$url" -o "$tmp/crocodile.rpm"
+      fetch -fL --progress-bar "$url" -o "$tmp/crocodile.rpm"
       say "Installing (you may be asked for your password)"
       if command -v dnf >/dev/null 2>&1; then sudo dnf install -y "$tmp/crocodile.rpm"; else sudo zypper --non-interactive install --allow-unsigned-rpm "$tmp/crocodile.rpm"; fi
     else
@@ -103,7 +105,7 @@ case "$os" in
       [ -n "$url" ] || die "no Linux download found for $arch"
       mkdir -p "$HOME/.local/bin" "$HOME/.local/share/applications"
       say "Downloading $(basename "$url")"
-      curl -fL --progress-bar "$url" -o "$HOME/.local/bin/Crocodile.AppImage"
+      fetch -fL --progress-bar "$url" -o "$HOME/.local/bin/Crocodile.AppImage"
       chmod +x "$HOME/.local/bin/Crocodile.AppImage"
       cat >"$HOME/.local/share/applications/crocodile.desktop" <<DESKTOP
 [Desktop Entry]

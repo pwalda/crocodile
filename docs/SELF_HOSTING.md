@@ -223,10 +223,11 @@ the website. See
 ## Running a directory
 
 The directory is tiny: `docker compose --profile directory up -d directory`
-(port 7400). Point coordinators at it with `CROC_DIRECTORY` and build the app
-with `CROC_DIRECTORIES=https://your-directory` to make it the default.
-Directories verify that each registered server is reachable at its advertised
-URL, and drop servers that stop sending heartbeats. A public directory refuses
+(port 7400, on the machine's own address only: put a reverse proxy in front of
+it, or set `CROC_DIR_BIND=0.0.0.0` to publish it). Point coordinators at it
+with `CROC_DIRECTORY` and build the app with
+`CROC_DIRECTORIES=https://your-directory` to make it the default. Directories
+verify that each registered server is reachable at its advertised URL, and drop servers that stop sending heartbeats. A public directory refuses
 URLs whose name resolves to a private address, connects only to the address it
 checked, and does not follow redirects. One address may register
 20 times a minute, and a directory lists at most 5000 servers. Behind a

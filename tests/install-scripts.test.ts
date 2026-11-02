@@ -111,6 +111,7 @@ function installUnix(args: string[], system: { os: string; arch: string }, asset
   writeFileSync(
     join(bin, 'curl'),
     `#!/bin/sh
+printf '%s\\n' "$*" >> "${join(temp, 'curl.log')}"
 out=""; url=""
 while [ $# -gt 0 ]; do case "$1" in -o) out="$2"; shift ;; http*) url="$1" ;; esac; shift; done
 if [ -z "$out" ]; then printf '%s\\n' '${listing}'; exit 0; fi
@@ -129,7 +130,8 @@ tar -czf "$out" -C "${fixture}" "$name"
     env: { PATH: `${bin}:/usr/bin:/bin`, HOME: home },
   });
   const installed = join(home, '.local/bin/crocodile');
-  return { out, program: execFileSync(installed, { encoding: 'utf8' }).trim(), installed };
+  const calls = readFileSync(join(temp, 'curl.log'), 'utf8').trim().split('\n');
+  return { out, calls, program: execFileSync(installed, { encoding: 'utf8' }).trim(), installed };
 }
 
 const CLI_ASSETS = [
@@ -152,6 +154,24 @@ describe.skipIf(process.platform === 'win32')('install.sh --cli', () => {
     expect(readFileSync(mac.installed, 'utf8')).toMatch(/^#!\/bin\/sh/);
   });
 
+  it('fetches over https only, redirects included', () => {
+    const { calls } = installUnix(['--cli'], { os: 'Linux', arch: 'x86_64' }, CLI_ASSETS);
+    // The release list and the program.
+    expect(calls).toHaveLength(2);
+    for (const call of calls) expect(call).toMatch(/^--proto =https --proto-redir =https /);
+  });
+
+  it('has no download that skips that', () => {
+    // The run above takes one path; the others (the app for each system) are read here.
+    const script = readFileSync(resolve('scripts/install.sh'), 'utf8');
+    const downloads = script.split('\n').filter((l) => /\bcurl\b/.test(l) && !/^\s*#/.test(l));
+    expect(downloads.map((l) => l.trim())).toEqual([
+      "fetch() { curl --proto '=https' --proto-redir '=https' \"$@\"; }",
+      'need curl',
+    ]);
+    expect(script.match(/\bfetch -f/g)?.length).toBe(6);
+  });
+
   it('points to npm when there is no build for the processor', () => {
     expect(() => installUnix(['--cli'], { os: 'Darwin', arch: 'x86_64' }, CLI_ASSETS)).toThrow(
       /npm install -g crocodile-cli/,
@@ -171,5 +191,30 @@ describe('release workflow', () => {
     expect(needs?.split(',').map((s) => s.trim())).toEqual(
       expect.arrayContaining(['installers', 'cli']),
     );
+  });
+
+  const yml = () => readFileSync(resolve(__dirname, '../.github/workflows/release.yml'), 'utf8');
+
+  it('gives a platform only its own signing secrets', () => {
+    const lines = yml().split('\n');
+    const secrets = lines.filter((l) => /secrets\.(CSC_|APPLE_|AZURE_)/.test(l));
+    expect(secrets.map((l) => l.trim().split(':')[0])).toEqual(
+      expect.arrayContaining(['CSC_LINK', 'APPLE_TEAM_ID', 'AZURE_CLIENT_SECRET']),
+    );
+    // A platform that is not given a secret gets an empty value, which the step unsets.
+    const unset = lines.find((l) => l.includes('for v in '));
+    for (const line of secrets) {
+      expect(unset, line).toMatch(new RegExp(`\\b${line.trim().split(':')[0]}\\b`));
+      const os = /secrets\.AZURE_/.test(line) ? 'Windows' : 'macOS';
+      expect(line, line).toContain(`\${{ runner.os == '${os}' && secrets.`);
+    }
+  });
+
+  it('keeps no credentials in the checkouts and no cache in the jobs', () => {
+    const text = yml();
+    const checkouts = text.match(/uses: actions\/checkout@/g)?.length ?? 0;
+    expect(checkouts).toBeGreaterThan(0);
+    expect(text.match(/persist-credentials: false/g)?.length).toBe(checkouts);
+    expect(text).not.toMatch(/^\s+cache:/m);
   });
 });

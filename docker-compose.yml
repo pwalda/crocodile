@@ -4,7 +4,14 @@
 #
 # The coordinator needs TCP 7443 (HTTP/WebSocket), UDP 7443 and 7444 (STUN and
 # the relay) and UDP 49160-49259 (relayed traffic). Put TCP 7443 behind a
-# TLS-terminating reverse proxy for https/wss, or expose it directly.
+# TLS-terminating reverse proxy for https/wss, or expose it directly. Behind a
+# proxy, set CROC_HOST=127.0.0.1 and CROC_TRUST_PROXY=1 (the proxy must be the
+# only way to reach the port, because the server then believes the client
+# address the proxy puts in X-Forwarded-For).
+#
+# The directory (docker compose --profile directory up -d directory) listens
+# on 127.0.0.1:7400, for a reverse proxy on the same machine. To publish it
+# directly, set CROC_DIR_BIND=0.0.0.0.
 services:
   coordinator:
     build:
@@ -17,11 +24,18 @@ services:
     # and publishing a hundred ports would start a proxy process for each.
     network_mode: host
     environment:
+      CROC_HOST: ${CROC_HOST:-0.0.0.0}
       CROC_NAME: ${CROC_NAME:-My Crocodile coordinator}
       CROC_PUBLIC_URL: ${CROC_PUBLIC_URL:-}
       CROC_REGION: ${CROC_REGION:-}
       CROC_DIRECTORY: ${CROC_DIRECTORY:-}
       CROC_PEERS: ${CROC_PEERS:-}
+      # The address the relay hands out when it cannot tell its own (a server
+      # behind NAT or a CDN), and how people reach whoever runs this server.
+      CROC_RELAY_IP: ${CROC_RELAY_IP:-}
+      CROC_CONTACT: ${CROC_CONTACT:-}
+      # Set to 1 only behind a reverse proxy (see above).
+      CROC_TRUST_PROXY: ${CROC_TRUST_PROXY:-}
     volumes:
       - coordinator-data:/data
 
@@ -33,7 +47,11 @@ services:
     image: ghcr.io/pwalda/crocodile-directory:latest
     restart: unless-stopped
     ports:
-      - '7400:7400'
+      - '${CROC_DIR_BIND:-127.0.0.1}:7400:7400'
+    environment:
+      # Set to 1 behind a reverse proxy, so each server gets its own
+      # registration limit (and keep port 7400 off the internet).
+      CROC_DIR_TRUST_PROXY: ${CROC_DIR_TRUST_PROXY:-}
     volumes:
       - directory-data:/data
 
