@@ -65,8 +65,13 @@ docker compose up -d coordinator
 ```
 
 and route `coord.DOMAIN` to `http://172.18.0.1:7443` (Caddy:
-`reverse_proxy 172.18.0.1:7443`). The directory doesn't change: it stays on
-the Docker network and the proxy reaches it by name. If the host firewall
+`reverse_proxy 172.18.0.1:7443`). The coordinator trusts the address the
+proxy puts in `X-Forwarded-For`, and every container on that network can reach
+the gateway's port 7443 too, so keep other containers off the proxy's network.
+The directory is published on the host's `127.0.0.1:7400`, which a container
+can't reach either: join the proxy to the compose project's network (named
+after its folder, such as `main_default`; `docker network ls` shows it) and
+route `DOMAIN/v1/*` to `http://directory:7400`. If the host firewall
 (ufw) drops traffic from containers to the host, allow TCP 7443 on that
 network's bridge interface (`ip -4 addr` shows which `br-…` has the gateway).
 
