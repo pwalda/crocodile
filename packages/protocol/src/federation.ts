@@ -520,7 +520,7 @@ export const FedFrameSchema = z.discriminatedUnion('t', [
     ok: anyJson.optional(),
     err: errorBody,
   }),
-  z.object({ t: z.literal('servers'), servers: z.array(anyJson).max(5000) }),
+  z.object({ t: z.literal('servers'), servers: z.array(z.unknown()).max(5000) }),
   z.object({
     t: z.literal('voice'),
     sessionId: SessionId,

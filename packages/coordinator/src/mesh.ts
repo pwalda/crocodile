@@ -439,7 +439,10 @@ export class Mesh {
   private ensureDial(url: string) {
     if (this.closed || url === this.hub.info.url) return;
     for (const l of [...this.links.values(), ...this.pendingLinks]) {
-      if (l.url === url || l.peer?.url === url) return;
+      // (Where a link says it is, in a hello, counts only once it has authenticated, and then as
+      // far as we know it: a hello is not signed, and one that named another server's address would
+      // keep us from dialling it.)
+      if (l.url === url || (l.peerId && this.known.get(l.peerId)?.url === url)) return;
     }
     const d = this.dialing.get(url);
     if (d?.timer) return;
@@ -845,8 +848,9 @@ export class Mesh {
     // us and is not known is not added (its beacon will do it, which a link may introduce only so
     // fast).
     const known = this.known.get(peer.id);
-    if (known || (link.initiator && this.known.size < KNOWN_MAX))
-      this.known.set(peer.id, { ...peer, url: known?.url ?? link.url ?? peer.url });
+    const where = known?.url ?? (link.initiator ? link.url : undefined);
+    if (where && (known || this.known.size < KNOWN_MAX))
+      this.known.set(peer.id, { ...peer, url: where });
     if (known) this.dialing.delete(known.url);
     if (link.url) this.dialing.delete(link.url);
     this.hub.log.info('mesh link up', { peer: peer.id, name: peer.name, url: peer.url });

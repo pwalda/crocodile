@@ -1189,6 +1189,7 @@ describe('where a server is, as other servers tell it', () => {
         {
           peer: named(id),
           initiator,
+          url: initiator ? target.url : undefined,
           // A socket that is not open: nothing is written to it.
           ws: { readyState: 3, close() {}, terminate() {}, on() {} },
           channel: { seal: () => ({}) },
@@ -1234,6 +1235,29 @@ describe('where a server is, as other servers tell it', () => {
       0,
     );
     expect(victim.mesh.knownServers().find((s) => s.id === who.userId)?.url).toBe(target.url);
+  });
+
+  it('is dialled although a link that has not authenticated says in its hello that it is there', async () => {
+    const victim = await server({ name: 'victim' });
+    const rogue = await server({ name: 'rogue' });
+    const target = await listener();
+    const ws = new WebSocket(victim.url.replace(/^http/, 'ws') + '/v1/federation');
+    cleanup.push(() => ws.close());
+    const received: string[] = [];
+    ws.addEventListener('message', (e) => received.push(JSON.parse(String(e.data)).t));
+    await new Promise((r) => ws.addEventListener('open', r, { once: true }));
+    ws.send(
+      JSON.stringify({
+        t: 'fed_hello',
+        server: { ...rogue.info, url: target.url },
+        challenge: 'c',
+        channel: createChannelKeys().offer,
+        protocol: PROTOCOL_VERSION,
+      }),
+    );
+    await waitFor(() => received.includes('fed_auth'), 3000, 'the answer to the hello');
+    (victim.mesh as unknown as { ensureDial(url: string): void }).ensureDial(target.url);
+    await waitFor(() => target.dialled() > 0, 3000, 'the dial');
   });
 
   it('does not try again to reach an address a server gave in a hello and left', async () => {
