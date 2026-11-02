@@ -32,6 +32,9 @@ describe('a text receiver given a message that does not open', () => {
     expect(rx.decrypt(real.g + 2002, real.ct)).toBeNull();
     expect(derivations()).toBe(refused);
     expect(rx.gen).toBe(0);
+    // What is kept to make that cheap is bounded: one place in sixteen, over what can be skipped.
+    const kept = (rx as unknown as { checkpoints: Map<number, unknown> }).checkpoints;
+    expect(kept.size).toBeLessThanOrEqual(2000 / 16 + 1);
   });
 
   it('still opens what is real, in any order, after it has been asked for the same', () => {

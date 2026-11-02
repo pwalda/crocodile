@@ -2424,6 +2424,17 @@ describe('abuse limits', () => {
     expect(c.presence.localCount).toBe(2);
   });
 
+  it('says its address as other servers take it', async () => {
+    expect(() => new Coordinator({ name: 'x', storage: 'memory', publicUrl: 'ws://x' })).toThrow(
+      /must begin with http/,
+    );
+    expect(() => new Coordinator({ name: 'x', storage: 'memory', publicUrl: 'x.example' })).toThrow(
+      /must begin with http/,
+    );
+    const c = await server({ publicUrl: 'HTTPS://Croc.Example.org/' });
+    expect(c.info.url).toBe('https://Croc.Example.org');
+  });
+
   it('refuses to start with a limit that would switch a protection off', () => {
     for (const bad of [{ maxConnectionsPerIp: NaN }, { capacity: 0 }, { maxConnectionsPerIp: 1.5 }])
       expect(() => new Coordinator({ name: 'x', storage: 'memory', ...bad })).toThrow(

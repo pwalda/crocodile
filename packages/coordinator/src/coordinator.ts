@@ -208,6 +208,9 @@ export class Coordinator {
 
   constructor(config: Partial<CoordinatorConfig> & Pick<CoordinatorConfig, 'name'>) {
     this.config = { ...defaultConfig, ...config };
+    // Other servers refuse an address that is not an http or https one.
+    if (this.config.publicUrl !== undefined && !/^https?:\/\//i.test(this.config.publicUrl))
+      throw new Error('the public URL must begin with http:// or https://');
     // A typo (NaN) or zero here would silently switch a protection off.
     for (const [name, n] of [
       ['capacity', this.config.capacity],
@@ -384,9 +387,10 @@ export class Coordinator {
 
     await app.listen({ host: this.config.host, port: this.config.port });
     const port = (app.server.address() as AddressInfo).port;
-    const publicUrl = (
-      this.config.publicUrl ?? `http://${hostForUrl(this.config.host)}:${port}`
-    ).replace(/\/$/, '');
+    // (The scheme in lower case, which is how other servers and the directory take it.)
+    const publicUrl = (this.config.publicUrl ?? `http://${hostForUrl(this.config.host)}:${port}`)
+      .replace(/\/$/, '')
+      .replace(/^https?(?=:)/i, (scheme) => scheme.toLowerCase());
     this._info = {
       id: this.identity.userId,
       key: this.identity.publicKey,
