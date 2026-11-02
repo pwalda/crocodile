@@ -200,7 +200,9 @@ export class TextReceiver {
     while (this.skipped.size > MAX_SKIPPED_KEYS)
       this.skipped.delete(this.skipped.keys().next().value!);
     this.chain = ratchet(chain);
-    for (const at of this.checkpoints.keys()) if (at < this.chain.gen) this.checkpoints.delete(at);
+    if (this.checkpoints.size)
+      for (const at of this.checkpoints.keys())
+        if (at < this.chain.gen) this.checkpoints.delete(at);
     return unpad(out);
   }
 }

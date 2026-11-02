@@ -4,6 +4,7 @@ import {
   signInChannelContext,
   createChannelKeys,
   isSpaceMember,
+  peekFrameNumber,
   randomId,
   SecureChannel,
   sign,
@@ -145,9 +146,9 @@ export class ClientConnection implements ClientHandle {
         // like one `seal` made leaves a gap nobody can close, so the connection ends.
         if (this.channel) {
           const head = Buffer.isBuffer(raw) ? raw.subarray(0, 40).toString('latin1') : '';
-          const n = /^\{"t":"x","n":(\d{1,15}),/.exec(head)?.[1];
+          const n = peekFrameNumber(head);
           if (n === undefined) return ws.close(1008, 'slow down');
-          this.channel.skip(Number(n));
+          this.channel.skip(n);
         }
         this.frame({ t: 'error', err: { code: 'rate_limited', message: 'slow down' } });
         return;

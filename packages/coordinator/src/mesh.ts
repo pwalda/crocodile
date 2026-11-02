@@ -839,7 +839,11 @@ export class Mesh {
       existing.ws.close(1000, 'duplicate link');
     }
     this.links.set(peer.id, link);
-    this.known.set(peer.id, peer);
+    // A server that came to us and is not known is not added from its hello: the address in it is
+    // not signed, and a server it names is only learned from its beacon, which a link may
+    // introduce only so fast. (One we dialled, or know already, is the key's holder saying where
+    // it is.)
+    if (link.initiator || this.known.has(peer.id)) this.known.set(peer.id, peer);
     this.dialing.delete(peer.url);
     if (link.url) this.dialing.delete(link.url);
     this.hub.log.info('mesh link up', { peer: peer.id, name: peer.name, url: peer.url });

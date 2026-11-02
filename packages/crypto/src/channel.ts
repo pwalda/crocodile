@@ -56,6 +56,15 @@ export function acceptChannel(keys: ChannelKeys, answer: { epk: string; kem: str
 export const signInChannelContext = (challenge: string, serverId: string) =>
   `${challenge}|${serverId}|auth`;
 
+/**
+ * The number of a frame `seal` made, read from the first bytes of its text without decoding it
+ * (for a frame that is dropped unread). Undefined if the text does not begin as `seal` writes one.
+ */
+export function peekFrameNumber(head: string): number | undefined {
+  const n = /^\{"t":"x","n":(\d{1,15}),/.exec(head.slice(0, 40))?.[1];
+  return n === undefined ? undefined : Number(n);
+}
+
 export class SecureChannel {
   private sendN = 0;
   private recvN = -1;

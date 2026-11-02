@@ -1172,6 +1172,41 @@ describe('where a server is, as other servers tell it', () => {
     expect(victim.mesh.peerIds()).toContain(honest.info.id);
   });
 
+  it('is not taken from the hello of a server that came to us and is not known', async () => {
+    const victim = await server({ name: 'victim' });
+    const target = await listener();
+    const who = createIdentity();
+    const named = (id: Identity) => ({
+      id: id.userId,
+      key: id.publicKey,
+      name: 'new',
+      url: target.url,
+      version: 'x',
+    });
+    type Internals = { onAuthed(link: unknown, cursor: number): void };
+    const authed = (id: Identity, initiator: boolean) =>
+      (victim.mesh as unknown as Internals).onAuthed(
+        {
+          peer: named(id),
+          initiator,
+          // A socket that is not open: nothing is written to it.
+          ws: { readyState: 3, close() {}, terminate() {}, on() {} },
+          channel: { seal: () => ({}) },
+          inbox: Promise.resolve(),
+          authed: false,
+          lastUsed: 0,
+          sentUpTo: 0,
+        },
+        0,
+      );
+    authed(who, false);
+    expect(victim.mesh.knownServers().some((s) => s.id === who.userId)).toBe(false);
+    // One we dialled is where we dialled it.
+    const dialled = createIdentity();
+    authed(dialled, true);
+    expect(victim.mesh.knownServers().find((s) => s.id === dialled.userId)?.url).toBe(target.url);
+  });
+
   it('is taken from a beacon the server itself signed', async () => {
     const victim = await server({ name: 'victim' });
     const target = await listener();
