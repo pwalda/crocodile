@@ -216,7 +216,7 @@ export class Coordinator {
       } catch {
         // (not an address at all)
       }
-      if (!url || !/^https?:$/.test(url.protocol) || !url.hostname)
+      if (!url || !/^https?:\/\//i.test(this.config.publicUrl) || !url.hostname)
         throw new Error('the public URL must be an http:// or https:// address');
     }
     // A typo (NaN) or zero here would silently switch a protection off.

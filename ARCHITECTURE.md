@@ -238,18 +238,18 @@ A coordinator (`packages/coordinator`) offers a WebSocket JSON-RPC API:
 peers and signed beacons that every server floods through the overlay (a
 server's address is believed only from the directory, the configuration, its own
 beacon, or where we dialled it); a server is live while it is linked or its
-beacon is recent. Links are mutually authenticated WebSocket connections. In a small network every server links to every other;
-in a larger one each keeps a few **overlay** links (ring neighbours and
-fingers) and opens **direct** links to the servers it needs, closing them when
-idle. Each record lives on its **owners**: the first few servers on a
-consistent-hash ring for each of its shards (a user, a space, an invite code,
-a name), plus servers that keep a full copy (`--store-all`). A server answers
-from its store for shards it owns and asks their owners otherwise; it asks
-owners to push changes its clients follow. Owners copy writes to each other,
-catch up by per-peer sequence cursors when a link comes up, hand records to
-new owners when servers join or leave, and drop copies they no longer own.
-Presence, voice-room occupancy and mailbox and device-link queries are
-flooded. See [docs/MESH.md](docs/MESH.md).
+beacon is recent. Links are mutually authenticated WebSocket connections. In a
+small network every server links to every other; in a larger one each keeps a
+few **overlay** links (ring neighbours and fingers) and opens **direct** links
+to the servers it needs, closing them when idle. Each record lives on its
+**owners**: the first few servers on a consistent-hash ring for each of its
+shards (a user, a space, an invite code, a name), plus servers that keep a full
+copy (`--store-all`). A server answers from its store for shards it owns and
+asks their owners otherwise; it asks owners to push changes its clients follow.
+Owners copy writes to each other, catch up by per-peer sequence cursors when a
+link comes up, hand records to new owners when servers join or leave, and drop
+copies they no longer own. Presence, voice-room occupancy and mailbox and
+device-link queries are flooded. See [docs/MESH.md](docs/MESH.md).
 
 **Sessions.** Each session (a space's text mesh, a voice channel, a DM) is
 owned by one server chosen by rendezvous hashing over the live servers, so every

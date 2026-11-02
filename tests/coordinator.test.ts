@@ -2428,7 +2428,13 @@ describe('abuse limits', () => {
     expect(() => new Coordinator({ name: 'x', storage: 'memory', publicUrl: 'ws://x' })).toThrow(
       /must be an http/,
     );
-    for (const bad of ['x.example', 'https://', 'https://x y'])
+    for (const bad of [
+      'x.example',
+      'https://',
+      'https://x y',
+      'http:example.org',
+      ' https://example.org',
+    ])
       expect(() => new Coordinator({ name: 'x', storage: 'memory', publicUrl: bad }), bad).toThrow(
         /must be an http/,
       );
