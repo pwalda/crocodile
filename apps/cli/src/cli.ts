@@ -50,6 +50,13 @@ export function plain(text: string) {
 /** A name or message someone else wrote, for the middle of a line: no line breaks either. */
 export const inline = (text: string) => plain(text).replace(/[\n\t]/g, ' ');
 
+/**
+ * The name a received file is saved under: the name as sent, without what `cleanFileName` takes
+ * out and without what `plain` takes out of text (it comes back as `_`), because the saved path is
+ * printed for a script to read, and so must be safe to print.
+ */
+export const receivedName = (name: string) => cleanFileName(plain(name));
+
 /** The same Io, with the text printed for people made safe for a terminal. */
 function terminalSafe(io: Io): Io {
   const { status } = io;
@@ -180,6 +187,13 @@ export async function run(argv: string[], terminal: Io): Promise<number> {
     return 2;
   }
 
+  let maxSize: number | undefined;
+  try {
+    if (opts['max-size'] !== undefined) maxSize = parseSize(opts['max-size']);
+  } catch (err) {
+    io.err((err as Error).message);
+    return 2;
+  }
   let ctx: Ctx;
   try {
     ctx = await start(io, opts);
@@ -189,7 +203,7 @@ export async function run(argv: string[], terminal: Io): Promise<number> {
   }
   let code: number;
   try {
-    code = await runCommand(ctx, command, rest, opts);
+    code = await runCommand(ctx, command, rest, { ...opts, maxSize });
   } catch (err) {
     if (err instanceof UsageError) {
       io.err(err.message);
@@ -219,7 +233,7 @@ async function runCommand(
     dir?: string;
     from?: string;
     keep?: boolean;
-    'max-size'?: string;
+    maxSize?: number;
   },
 ): Promise<number> {
   switch (command) {
@@ -236,7 +250,7 @@ async function runCommand(
         from: opts.from,
         dir: opts.dir,
         keep: !!opts.keep,
-        maxSize: opts['max-size'] === undefined ? undefined : parseSize(opts['max-size']),
+        maxSize: opts.maxSize,
       });
   }
   return 2;
@@ -582,7 +596,9 @@ async function get(
       const p = client.state.profiles[u];
       if (u === from || told.has(u) || !p) continue;
       told.add(u);
-      io.err(`${tagOf(p)} wants to send you something. Run: get --from ${tagOf(p)}`);
+      // A name that had to be cleaned would not be found again: point to the account instead.
+      const ref = tagOf(p) === `${p.username}#${p.tag}` ? tagOf(p) : u;
+      io.err(`${tagOf(p)} wants to send you something. Run: get --from ${ref}`);
     }
   };
   takeRequests();
@@ -600,11 +616,12 @@ async function get(
     if (!next) break;
     const m = queue.shift()!;
     const file = m.file;
-    const name = cleanFileName(file.name);
+    const name = receivedName(file.name);
     const sender = client.state.profiles[m.author];
     const who = sender ? tagOf(sender) : m.author;
     const tooBig = opts.maxSize !== undefined && file.size > opts.maxSize;
-    const free = tooBig ? undefined : await spaceProblem(dir, ctx.profileDir, file.size);
+    const held = client.state.files[file.id]?.done ?? 0;
+    const free = tooBig ? undefined : await spaceProblem(dir, ctx.profileDir, file.size, held);
     const refusal = tooBig
       ? `it is over --max-size ${formatBytes(opts.maxSize!)}`
       : free !== undefined
@@ -646,7 +663,7 @@ async function get(
     if (!end) break;
     io.status?.('');
     const path = await saveFile(dir, name, async (out) => {
-      await client.readFile(file.id, async (plain) => void (await out.write(plain)));
+      await client.readFile(file.id, async (chunk) => void (await out.write(chunk)));
     });
     // Remember not to fetch it again; the copy in the profile isn't needed any more.
     saved.add(file.id);

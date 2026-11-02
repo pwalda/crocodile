@@ -152,6 +152,10 @@ describe('crocodile (command line)', () => {
     // eslint-disable-next-line no-control-regex
     expect(shown).not.toMatch(/[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/);
     expect(bob.err.join('\n')).toContain('al?[31m?]0;pwned?ice Saved /x#');
+    // Its name would not be found again as shown, so the hint names the account instead.
+    expect(bob.err.join('\n')).toMatch(
+      /Run: get --from [a-z2-7]{26}\n|Run: get --from [a-z2-7]{26}$/,
+    );
     // The name does not start a line of its own.
     expect(
       [...alice.out, ...alice.err, ...bob.out, ...bob.err].some((l) => l.startsWith('Saved')),
@@ -168,11 +172,12 @@ describe('crocodile (command line)', () => {
     const aliceTag = alice.out.at(-1)!;
     const bobTag = bob.out.at(-1)!;
     writeFileSync(join(alice.cwd, 'big.bin'), Buffer.alloc(200 * 1024, 7));
-    writeFileSync(join(alice.cwd, 'small.txt'), 'hello');
+    // A direction mark in the name: it is not saved under that name.
+    writeFileSync(join(alice.cwd, 'small\u200f.txt'), 'hello');
 
     const receiving = bob.cmd('get', '--from', aliceTag, '--keep', '--max-size', '10KB');
-    const sending = alice.cmd('send', 'big.bin', 'small.txt', '--to', bobTag);
-    const small = join(bob.cwd, 'small.txt');
+    const sending = alice.cmd('send', 'big.bin', 'small\u200f.txt', '--to', bobTag);
+    const small = join(bob.cwd, 'small_.txt');
     await waitFor(() => bob.out.includes(small), 60_000, 'the small file');
     bob.stop();
     alice.stop();
@@ -182,7 +187,7 @@ describe('crocodile (command line)', () => {
       /Not taking big.bin \(200 KB\) from alice#\d{4}: it is over --max-size 10 KB/,
     );
     expect(bob.err.join('\n')).not.toMatch(/Receiving big.bin/);
-    expect(readdirSync(bob.cwd)).toEqual(['small.txt']);
+    expect(readdirSync(bob.cwd)).toEqual(['small_.txt']);
   }, 90_000);
 
   it('says who wants to send something when get was not told whose files to take', async () => {
@@ -294,8 +299,11 @@ describe('crocodile (command line)', () => {
     expect(await run(['--version'], carol.io)).toBe(0);
     expect(await carol.cmd('init', 'carol')).toBe(0);
     expect(await carol.cmd('init', 'carol')).toBe(2);
-    expect(await carol.cmd('get', '--max-size', 'lots')).toBe(2);
-    expect(carol.err.at(-1)).toMatch(/isn't a size/);
+    // Before anything is started, and with or without an account.
+    const nobody = person('nobody', coord.url);
+    expect(await nobody.cmd('get', '--max-size', 'lots')).toBe(2);
+    expect(nobody.err.at(-1)).toMatch(/isn't a size/);
+    expect(readdirSync(nobody.home)).toEqual([]);
     expect(await carol.cmd('send', 'missing.txt', '--to', 'bob#1234')).toBe(2);
     writeFileSync(join(carol.cwd, 'a.txt'), 'hi');
     expect(await carol.cmd('send', 'a.txt', '--to', 'bob')).toBe(2);

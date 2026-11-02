@@ -62,8 +62,8 @@ Waits for a file sent to you in a direct conversation, downloads it straight
 from the sender, checks it and saves it, then prints the path (so scripts can
 use it). `--keep` goes on receiving until you stop it. A file is saved only
 once it is whole, readable by you only: a download that fails leaves nothing
-behind (if the program is killed outright, a hidden file ending in `.part` can
-stay in the folder; delete it). A file bigger than the free space (counted
+behind (if the program is killed outright, a file named like
+`.crocodile-0123456789abcdef.part` can stay in the folder; delete it). A file bigger than the free space (counted
 twice if the profile is on the same disk, which holds a copy while it
 downloads) is skipped, and so is one over `--max-size` (like `500MB` or `2GB`);
 `get` then goes on waiting for the next file. Names and messages from other

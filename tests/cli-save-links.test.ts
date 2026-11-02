@@ -5,10 +5,16 @@ import { join } from 'node:path';
 
 // A file system that can't make hard links (some network and removable drives): the file is moved
 // into place instead. Other failures are not taken for that.
-const linkFails = vi.hoisted(() => ({ code: 'EPERM' }));
+const linkFails = vi.hoisted(() => ({ code: 'EPERM', plant: '' }));
 vi.mock('node:fs/promises', async (importOriginal) => ({
   ...(await importOriginal<typeof import('node:fs/promises')>()),
-  link: async () => {
+  link: async (_from: string, to: string) => {
+    // Someone else takes the name just before the file would.
+    if (linkFails.plant) {
+      const { writeFileSync } = await import('node:fs');
+      writeFileSync(to, linkFails.plant);
+      linkFails.plant = '';
+    }
     throw Object.assign(new Error('link failed'), { code: linkFails.code });
   },
 }));
@@ -33,6 +39,17 @@ describe('saving where there are no hard links', () => {
     expect(path).toBe(join(dir, 'a (1).txt'));
     expect(readFileSync(path, 'utf8')).toBe('new');
     expect(readFileSync(join(dir, 'a.txt'), 'utf8')).toBe('mine');
+    expect(readdirSync(dir).sort()).toEqual(['a (1).txt', 'a.txt']);
+  });
+
+  it('does not take over a name that is taken at the last moment', async () => {
+    linkFails.code = 'EPERM';
+    linkFails.plant = 'theirs';
+    const dir = folder();
+    const path = await saveFile(dir, 'a.txt', async (out) => void (await out.write('new')));
+    expect(path).toBe(join(dir, 'a (1).txt'));
+    expect(readFileSync(join(dir, 'a.txt'), 'utf8')).toBe('theirs');
+    expect(readFileSync(path, 'utf8')).toBe('new');
     expect(readdirSync(dir).sort()).toEqual(['a (1).txt', 'a.txt']);
   });
 

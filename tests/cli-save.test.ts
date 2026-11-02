@@ -10,7 +10,7 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { inline, parseSize, plain } from '../apps/cli/src/cli';
+import { inline, parseSize, plain, receivedName } from '../apps/cli/src/cli';
 import { saveFile, spaceProblem } from '../apps/cli/src/save';
 
 const dirs: string[] = [];
@@ -65,6 +65,23 @@ describe('saving a received file', () => {
     },
   );
 
+  it('numbers a name that already fills the limit without going over it', async () => {
+    const dir = folder();
+    const name = `${'a'.repeat(251)}.txt`;
+    const second = `${'é'.repeat(125)}.txt`; // 250 + 4 bytes
+    for (const n of [name, second]) {
+      expect(Buffer.byteLength(n)).toBeLessThanOrEqual(255);
+      writeFileSync(join(dir, n), 'first');
+      const path = await saveFile(dir, n, async (out) => void (await out.write('again')));
+      expect(path).not.toBe(join(dir, n));
+      const saved = path.slice(dir.length + 1);
+      expect(Buffer.byteLength(saved)).toBeLessThanOrEqual(255);
+      expect(saved).toMatch(/ \(1\)\.txt$/);
+      expect(readFileSync(path, 'utf8')).toBe('again');
+      expect(readFileSync(join(dir, n), 'utf8')).toBe('first');
+    }
+  });
+
   it('keeps saves of the same name apart when they finish together', async () => {
     const dir = folder();
     // All of them have written everything before any of them moves into place.
@@ -105,6 +122,17 @@ describe('what the command prints', () => {
     expect(plain('\u{1F468}\u200d\u{1F469}\u200d\u{1F467}')).toBe(
       '\u{1F468}\u200d\u{1F469}\u200d\u{1F467}',
     );
+  });
+});
+
+describe('the name a received file gets', () => {
+  it('has nothing in it a terminal would act on, nor a direction mark', () => {
+    expect(receivedName('report.pdf')).toBe('report.pdf');
+    expect(receivedName('日本語 ż.txt')).toBe('日本語 ż.txt');
+    expect(receivedName('x\u009by.txt')).toBe('x_y.txt');
+    expect(receivedName('a\u2028Saved passwd')).toBe('a_Saved passwd');
+    expect(receivedName('a\u200fb\u061cc\ufeffd')).toBe('a_b_c_d');
+    expect(receivedName('../../x\x1b[2J')).toBe('x_[2J');
   });
 });
 
@@ -154,6 +182,15 @@ describe('room for a file', () => {
     const size = Math.floor((await room(dir)) * 0.6);
     expect(await spaceProblem(dir, profile, size)).toBeGreaterThan(0);
     expect(await spaceProblem(dir, profile, Math.floor(size / 4))).toBeUndefined();
+  });
+
+  it('counts what a stopped download has kept already', async () => {
+    const dir = folder();
+    const profile = folder();
+    const size = Math.floor((await room(dir)) * 0.6);
+    expect(await spaceProblem(dir, profile, size, 0)).toBeGreaterThan(0);
+    // Most of it is in the profile: little more is needed.
+    expect(await spaceProblem(dir, profile, size, Math.floor(size * 0.9))).toBeUndefined();
   });
 
   it('is taken as there when the free space cannot be read', async () => {
