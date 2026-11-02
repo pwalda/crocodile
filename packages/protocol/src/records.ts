@@ -241,9 +241,12 @@ export const RosterBody = z.object({
 });
 export type RosterBody = z.infer<typeof RosterBody>;
 
+/** What a space's invite is called: 8 to 32 base32 characters (an open link's is 26). */
+const inviteCode = z.string().regex(/^[a-z2-7]{8,32}$/);
+
 export const InviteBody = z.object({
   spaceId: id,
-  code: z.string().regex(/^[a-z2-7]{8,32}$/),
+  code: inviteCode,
   /** Epoch ms, or null for never. */
   expiresAt: z.number().int().nullable(),
   revoked: z.boolean().optional(),
@@ -279,7 +282,7 @@ export const MemberBody = z.object({
   spaceId: id,
   userId: id,
   /** Invite used to join; the space owner and admins may omit it. */
-  inviteCode: z.string().optional(),
+  inviteCode: inviteCode.optional(),
   /**
    * Joined with an open link that is a ticket: the maker's signed invite, and the signature of
    * this user by the secret in the link. (Instead of `inviteCode`, not with it.)

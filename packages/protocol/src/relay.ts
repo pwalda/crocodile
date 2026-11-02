@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { b64uBytes, b64uText, keyB64u, sigB64u } from './b64u';
 import { FileId, FileManifest } from './files';
+import { LIMITS } from './constants';
 
 /**
  * Messages on the reliable data channel between a member and the host relay.
@@ -113,7 +114,7 @@ export const SealedBox = z.object({
   epk: b64uBytes(32),
   /** ML-KEM-768 ciphertext. */
   kem: b64uBytes(1088),
-  ct: b64uText(),
+  ct: b64uText(LIMITS.sealedBoxMaxChars),
   /** Sender's Ed25519 identity key. */
   from: keyB64u,
   /** Sender's device id. */
@@ -130,7 +131,7 @@ export const E2EEnvelope = z.discriminatedUnion('k', [
     k: z.literal('group'),
     kid: z.number().int().min(0).max(0xffffffff),
     g: z.number().int().min(0),
-    ct: b64uText(),
+    ct: b64uText(LIMITS.groupCiphertextMaxChars),
   }),
 ]);
 export type E2EEnvelope = z.infer<typeof E2EEnvelope>;
@@ -164,6 +165,21 @@ export type ChatMessage = z.infer<typeof ChatMessage>;
 /** The session a message belongs to: the space's, or for a direct message its own `ch`. */
 export const messageSession = (m: Pick<ChatMessage, 'ch' | 'sid'>): string => m.sid ?? m.ch;
 
+/**
+ * Messages in one reply, of which the ones that do not pass the message schema are left out: one
+ * the schema refuses (a message kept from before a rule was added, say) must not cost the others.
+ */
+const chatMessages = (max: number) =>
+  z
+    .array(z.unknown())
+    .max(max)
+    .transform((items) =>
+      items.flatMap((item) => {
+        const parsed = ChatMessage.safeParse(item);
+        return parsed.success ? [parsed.data] : [];
+      }),
+    );
+
 /** Plaintext of a sealed envelope. */
 export const SealedPayload = z.discriminatedUnion('type', [
   z.object({
@@ -183,19 +199,27 @@ export const SealedPayload = z.discriminatedUnion('type', [
   }),
   z.object({
     type: z.literal('history_req'),
-    /** channelId -> newest timestamp the requester already has. */
-    since: z.record(z.string(), z.number()),
+    /**
+     * channelId -> newest timestamp the requester already has. A session has at most
+     * `channelsPerSpace` channels (a direct message has one), and a channel id is at most
+     * as long as a message names one.
+     */
+    since: z
+      .record(z.string().max(200), z.number().int())
+      .refine((since) => Object.keys(since).length <= LIMITS.channelsPerSpace, {
+        message: 'too many channels',
+      }),
   }),
   z.object({
     type: z.literal('history'),
-    messages: z.array(ChatMessage).max(500),
+    messages: chatMessages(500),
     done: z.boolean(),
   }),
   z.object({ type: z.literal('message'), message: ChatMessage }),
   /** Outbox delivery confirmations: the sender may forget these message ids. */
   z.object({ type: z.literal('ack'), ids: z.array(z.string().max(40)).max(500) }),
   /** Messages delivered through a server mailbox while the recipient was offline. */
-  z.object({ type: z.literal('mail'), messages: z.array(ChatMessage).max(50) }),
+  z.object({ type: z.literal('mail'), messages: chatMessages(50) }),
   /** Answer to `file_want`: this device has the whole file and will serve it. */
   z.object({ type: z.literal('file_have'), file: FileId }),
   /**

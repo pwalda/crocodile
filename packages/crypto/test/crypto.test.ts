@@ -3,8 +3,10 @@ import {
   AnonBox,
   DELETED_PROFILE_NAME,
   isCanonicalB64u,
+  LIMITS,
   NOTE_TTL_MS,
   recordKey,
+  SealedBox,
   SIG_DOMAIN,
   sessionOpPayload,
   type HostCaps,
@@ -1408,6 +1410,18 @@ describe('hybrid post-quantum sealed boxes', () => {
       utf8.encode('x'.repeat(40)),
     );
     expect(small.ct.length).toBe(medium.ct.length);
+  });
+
+  it('a box of the most a client puts in one is within what the schema takes', () => {
+    const alice = createIdentity();
+    const bob = createIdentity();
+    const pk = createPrekey();
+    const target = { peer: `${bob.userId}.bobdevice2`, prekey: pk.bundle };
+    // A full mailbox chunk of messages (client-core's MAIL_BOX_BYTES), sealed and padded.
+    const box = sealToDevice(alice, 'alicedev2', target, utf8.encode('x'.repeat(48 * 1024)));
+    expect(SealedBox.safeParse(box).success).toBe(true);
+    expect(box.ct.length).toBeLessThan(LIMITS.sealedBoxMaxChars);
+    expect(JSON.stringify(box).length).toBeLessThan(LIMITS.sealedBoxMaxChars);
   });
 
   it("a box carried to its recipient cannot be signed over as someone else's", () => {

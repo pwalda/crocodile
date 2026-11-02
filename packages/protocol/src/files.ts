@@ -27,6 +27,10 @@ export const FILE_CHANNEL_LABEL = 'croc-file';
 
 export const FileId = b64uBytes(16);
 
+/** What a file name may not hold: a folder separator, a control character, a direction override. */
+// eslint-disable-next-line no-control-regex
+const FILE_NAME_CHARS = /^[^\\/\u0000-\u001f\u007f\u202a-\u202e\u2066-\u2069]*$/;
+
 /**
  * A small preview the sender makes of a picture or video, shown blurred until
  * the file itself arrives. Only still-image data URLs are accepted.
@@ -38,8 +42,12 @@ export const FileThumb = z
 
 export const FileManifest = z.object({
   id: FileId,
-  /** Shown to people and offered when saving; never used as a path as is. */
-  name: z.string().min(1).max(255),
+  /**
+   * Shown to people and offered when saving; never used as a path as is. A sender's app writes it
+   * without folders, control characters or text direction overrides, so a name with any is
+   * refused (a receiver cleans a name anyway before showing or saving it).
+   */
+  name: z.string().min(1).max(255).regex(FILE_NAME_CHARS),
   /** Up to 1 TiB: a size beyond what anyone sends would only waste memory. */
   size: z.number().int().min(0).max(FILE_MAX_SIZE),
   /** MIME type as the sender's system reported it; only a hint. */

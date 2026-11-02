@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createIdentity } from '@crocodile/crypto';
 import { GroupKeyring } from '../src/keyring';
-import { fromB64u, toB64u } from '@crocodile/protocol';
+import { ChatMessage, E2EEnvelope, LIMITS, fromB64u, toB64u } from '@crocodile/protocol';
 import type { RelayGrant, SealedBox, SessionState } from '@crocodile/protocol';
 import { Emitter } from '../src/emitter';
 import {
@@ -133,6 +133,39 @@ const grant = (ms: number): RelayGrant => ({
 });
 
 const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+describe('group message size', () => {
+  it('the longest message the schema admits, encrypted, is within what an envelope takes', () => {
+    const key = toB64u(new Uint8Array(32).fill(1));
+    const worst = ChatMessage.parse({
+      id: 'x'.repeat(40),
+      ch: 'c'.repeat(200),
+      sid: 's'.repeat(200),
+      author: 'abcdefgh',
+      key,
+      ts: 1,
+      // Written as \u0000, six bytes of JSON each.
+      body: '\u0000'.repeat(LIMITS.messageMaxChars),
+      replyTo: 'r'.repeat(40),
+      edits: 'e'.repeat(40),
+      file: {
+        id: toB64u(new Uint8Array(16)),
+        name: '\u0100'.repeat(255),
+        size: 1,
+        type: 't'.repeat(127),
+        key,
+        root: key,
+        thumb: 'data:image/png;base64,' + 'A'.repeat(3978),
+      },
+      sig: toB64u(new Uint8Array(64)),
+    });
+    const keyring = new GroupKeyring({ autoRatchet: false });
+    const plaintext = new TextEncoder().encode(JSON.stringify({ type: 'message', message: worst }));
+    const env = keyring.encrypt(plaintext);
+    expect(E2EEnvelope.safeParse({ k: 'group', ...env }).success).toBe(true);
+    expect(env.ct.length).toBeLessThan(LIMITS.groupCiphertextMaxChars);
+  });
+});
 
 describe('group session', () => {
   it('ends an attempt the session moved on from, instead of leaving it "trying"', () => {
