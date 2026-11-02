@@ -586,7 +586,8 @@ export class Mesh {
         if (s && this.queued.get(peerId)?.length && !this.closed) this.ensureDial(s.url);
       }
       if (link.replaced || link.idle || code === IDLE_CLOSE || this.closed) return;
-      const redialUrl = link.initiator ? url : link.peer?.url;
+      // (Where a peer that came to us is, is what we know of it: not what its hello says.)
+      const redialUrl = link.initiator ? url : link.peerId && this.known.get(link.peerId)?.url;
       if (redialUrl) this.scheduleRedial(redialUrl);
     });
     return link;
@@ -839,12 +840,14 @@ export class Mesh {
       existing.ws.close(1000, 'duplicate link');
     }
     this.links.set(peer.id, link);
-    // A server that came to us and is not known is not added from its hello: the address in it is
-    // not signed, and a server it names is only learned from its beacon, which a link may
-    // introduce only so fast. (One we dialled, or know already, is the key's holder saying where
-    // it is.)
-    if (link.initiator || this.known.has(peer.id)) this.known.set(peer.id, peer);
-    this.dialing.delete(peer.url);
+    // The address in a hello is not signed, so it is not where a server is taken to be: one we
+    // dialled is where we dialled it, and one we know is where we know it. A server that came to
+    // us and is not known is not added (its beacon will do it, which a link may introduce only so
+    // fast).
+    const known = this.known.get(peer.id);
+    if (known || (link.initiator && this.known.size < KNOWN_MAX))
+      this.known.set(peer.id, { ...peer, url: known?.url ?? link.url ?? peer.url });
+    if (known) this.dialing.delete(known.url);
     if (link.url) this.dialing.delete(link.url);
     this.hub.log.info('mesh link up', { peer: peer.id, name: peer.name, url: peer.url });
     this.hub.membership.linkUp(peer.id);

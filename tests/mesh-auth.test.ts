@@ -1207,6 +1207,59 @@ describe('where a server is, as other servers tell it', () => {
     expect(victim.mesh.knownServers().find((s) => s.id === dialled.userId)?.url).toBe(target.url);
   });
 
+  it('is where it is known to be, not where the hello of a link says', async () => {
+    const victim = await server({ name: 'victim' });
+    const target = await listener();
+    const who = createIdentity();
+    const info = (url: string) => ({
+      id: who.userId,
+      key: who.publicKey,
+      name: 'known',
+      url,
+      version: 'x',
+    });
+    victim.mesh.addKnown([info(target.url)]);
+    (victim.mesh as unknown as { onAuthed(link: unknown, cursor: number): void }).onAuthed(
+      {
+        peer: info('http://203.0.113.9:7443'),
+        initiator: true,
+        url: target.url,
+        ws: { readyState: 3, close() {}, terminate() {}, on() {} },
+        channel: { seal: () => ({}) },
+        inbox: Promise.resolve(),
+        authed: false,
+        lastUsed: 0,
+        sentUpTo: 0,
+      },
+      0,
+    );
+    expect(victim.mesh.knownServers().find((s) => s.id === who.userId)?.url).toBe(target.url);
+  });
+
+  it('does not try again to reach an address a server gave in a hello and left', async () => {
+    const victim = await server({ name: 'victim' });
+    const honest = await server({ name: 'honest' });
+    const url = 'http://203.0.113.77:1';
+    const ws = new WebSocket(victim.url.replace(/^http/, 'ws') + '/v1/federation');
+    const received: string[] = [];
+    ws.addEventListener('message', (e) => received.push(JSON.parse(String(e.data)).t));
+    await new Promise((r) => ws.addEventListener('open', r, { once: true }));
+    ws.send(
+      JSON.stringify({
+        t: 'fed_hello',
+        server: { ...honest.info, url },
+        challenge: 'c',
+        channel: createChannelKeys().offer,
+        protocol: PROTOCOL_VERSION,
+      }),
+    );
+    await waitFor(() => received.includes('fed_auth'), 3000, 'the answer to the hello');
+    ws.close();
+    await pause();
+    const dialing = (victim.mesh as unknown as { dialing: Map<string, unknown> }).dialing;
+    expect(dialing.has(url)).toBe(false);
+  });
+
   it('is taken from a beacon the server itself signed', async () => {
     const victim = await server({ name: 'victim' });
     const target = await listener();

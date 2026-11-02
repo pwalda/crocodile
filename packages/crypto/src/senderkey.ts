@@ -202,7 +202,7 @@ export class TextReceiver {
     this.chain = ratchet(chain);
     if (this.checkpoints.size)
       for (const at of this.checkpoints.keys())
-        if (at < this.chain.gen) this.checkpoints.delete(at);
+        if (at <= this.chain.gen) this.checkpoints.delete(at);
     return unpad(out);
   }
 }

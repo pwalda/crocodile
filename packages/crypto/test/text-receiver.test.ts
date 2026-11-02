@@ -37,13 +37,16 @@ describe('a text receiver given a message that does not open', () => {
   it('still opens what is real, in any order, after it has been asked for the same', () => {
     const sk = createSenderKey();
     const rx = new TextReceiver(sk.kid, importChain(exportChains(sk).text));
-    const sent = Array.from({ length: 300 }, (_, i) => encryptText(sk, utf8.encode(`m${i}`)));
-    const last = sent[299]!;
+    const sent = Array.from({ length: 304 }, (_, i) => encryptText(sk, utf8.encode(`m${i}`)));
+    const last = sent[303]!;
     // Warmed by a message that is not real, then by one that is: the cache is not what is kept.
     expect(rx.decrypt(last.g, sent[0]!.ct)).toBeNull();
     expect(rx.decrypt(last.g + 100, last.ct)).toBeNull();
-    expect(utf8.decode(rx.decrypt(last.g, last.ct)!)).toBe('m299');
-    expect(rx.gen).toBe(300);
+    expect(utf8.decode(rx.decrypt(last.g, last.ct)!)).toBe('m303');
+    expect(rx.gen).toBe(304);
+    // Nothing is kept at or before where the chain is now (304 is a place that is kept).
+    const kept = (rx as unknown as { checkpoints: Map<number, unknown> }).checkpoints;
+    expect([...kept.keys()].every((at) => at > rx.gen)).toBe(true);
     // Those before it that are still kept open once each (the most that are kept is 256).
     expect(utf8.decode(rx.decrypt(sent[100]!.g, sent[100]!.ct)!)).toBe('m100');
     expect(rx.decrypt(sent[100]!.g, sent[100]!.ct)).toBeNull();
