@@ -63,12 +63,15 @@ from the sender, checks it and saves it, then prints the path (so scripts can
 use it). `--keep` goes on receiving until you stop it. A file is saved only
 once it is whole, readable by you only: a download that fails leaves nothing
 behind (if the program is killed outright, a file named like
-`.crocodile-0123456789abcdef.part` can stay in the folder; delete it). A file that does not fit is skipped (the folder needs room for it, and so does the
-profile, which holds a copy while it downloads: on one disk, room for both), and
-so is one over `--max-size` (like `500MB` or `2GB`);
-`get` then goes on waiting for the next file. Names and messages from other
-people are shown without their control characters, and a name stays on its
-line.
+`.crocodile-0123456789abcdef.part` can stay in the folder; delete it). On a
+drive that cannot link files (FAT, exFAT, some network shares) the finished
+file is copied into place, which needs room for it twice there, and a kill
+during that copy can leave a short file under its name. A file that does not
+fit is skipped (the folder needs room for it, and so does the profile, which
+holds a copy while it downloads: on one disk, room for both), and so is one
+over `--max-size` (like `500MB` or `2GB`); `get` then goes on waiting for the
+next file. Names and messages from other people are shown without their
+control characters, and a name stays on its line.
 
 Run `crocodile help <command>` for details. Other options: `--profile <name>`
 for a separate account on the same computer, `--server <url>` to use a

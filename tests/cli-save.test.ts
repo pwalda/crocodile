@@ -1,5 +1,7 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import {
+  chmodSync,
+  mkdirSync,
   mkdtempSync,
   readdirSync,
   readFileSync,
@@ -11,7 +13,7 @@ import {
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { inline, parseSize, plain, receivedName } from '../apps/cli/src/cli';
-import { saveFile, spaceProblem } from '../apps/cli/src/save';
+import { freePath, saveFile, spaceProblem } from '../apps/cli/src/save';
 
 const dirs: string[] = [];
 afterEach(() => {
@@ -82,6 +84,21 @@ describe('saving a received file', () => {
     }
   });
 
+  it.skipIf(process.platform === 'win32' || process.getuid?.() === 0)(
+    'does not take a name it cannot look up for a free one',
+    () => {
+      const dir = folder();
+      const sealed = join(dir, 'sealed');
+      mkdirSync(sealed);
+      chmodSync(sealed, 0o000);
+      try {
+        expect(() => freePath(sealed, 'a.txt')).toThrow(/EACCES/);
+      } finally {
+        chmodSync(sealed, 0o700);
+      }
+    },
+  );
+
   it('numbers a name whose extension takes all the room', async () => {
     const dir = folder();
     // 254 bytes, nearly all of it extension: no room for a number beside the extension.
@@ -92,8 +109,22 @@ describe('saving a received file', () => {
       expect(saved).not.toBe(name);
       expect(Buffer.byteLength(saved)).toBeLessThanOrEqual(255);
       expect(saved).toContain(' (1)');
+      expect(saved.startsWith(' ')).toBe(false);
       expect(readFileSync(path, 'utf8')).toBe('again');
     }
+  });
+
+  it('does not number a name from nothing when its extension leaves one byte', async () => {
+    const dir = folder();
+    // A two-byte stem and 252 bytes of extension: one byte left for the stem, which is not a whole
+    // character.
+    const name = `\u00e9.${'b'.repeat(251)}`;
+    writeFileSync(join(dir, name), 'first');
+    const path = await saveFile(dir, name, async (out) => void (await out.write('again')));
+    const saved = path.slice(dir.length + 1);
+    expect(saved.startsWith(' ')).toBe(false);
+    expect(Buffer.byteLength(saved)).toBeLessThanOrEqual(255);
+    expect(saved).toContain(' (1)');
   });
 
   it('keeps saves of the same name apart when they finish together', async () => {
@@ -152,6 +183,8 @@ describe('the name a received file gets', () => {
     expect(receivedName('a\u2028Saved passwd')).toBe('a_Saved passwd');
     expect(receivedName('a\u200fb\u061cc\ufeffd')).toBe('a_b_c_d');
     expect(receivedName('../../x\x1b[2J')).toBe('x_[2J');
+    // Invisible characters that words are written with stay.
+    expect(receivedName('a\u200bb\u00adc\u0e01.txt')).toBe('a\u200bb\u00adc\u0e01.txt');
   });
 });
 
@@ -174,7 +207,18 @@ describe('--max-size', () => {
   });
 
   it('refuses what is not a size', () => {
-    for (const bad of ['', 'big', '-1MB', '1XB', '1 MB MB', 'MB', '0', '0MB', '0.0001'])
+    for (const bad of [
+      '',
+      'big',
+      '-1MB',
+      '1XB',
+      '1 MB MB',
+      'MB',
+      '0',
+      '0MB',
+      '0.0001',
+      `1${'0'.repeat(400)}`,
+    ])
       expect(() => parseSize(bad), bad).toThrow(/isn't a size/);
   });
 });
@@ -189,9 +233,10 @@ describe('room for a file', () => {
   it('is there for a small file and not for one bigger than the disk', async () => {
     const dir = folder();
     expect(await spaceProblem(dir, dir, 1)).toBeUndefined();
-    const free = await spaceProblem(dir, dir, Number.MAX_SAFE_INTEGER);
-    expect(free).toBeGreaterThan(0);
-    expect(free).toBeLessThanOrEqual(await room(dir));
+    const short = await spaceProblem(dir, dir, Number.MAX_SAFE_INTEGER);
+    expect(short?.free).toBeGreaterThan(0);
+    expect(short!.free).toBeLessThanOrEqual(await room(dir));
+    expect(short!.needed).toBe(2 * Number.MAX_SAFE_INTEGER);
   });
 
   it('is needed twice when the copy kept while downloading is on the same disk', async () => {
@@ -199,7 +244,7 @@ describe('room for a file', () => {
     const profile = folder();
     // 60% of the free space fits once, not twice.
     const size = Math.floor((await room(dir)) * 0.6);
-    expect(await spaceProblem(dir, profile, size)).toBeGreaterThan(0);
+    expect((await spaceProblem(dir, profile, size))?.free).toBeGreaterThan(0);
     expect(await spaceProblem(dir, profile, Math.floor(size / 4))).toBeUndefined();
   });
 
@@ -207,7 +252,7 @@ describe('room for a file', () => {
     const dir = folder();
     const profile = folder();
     const size = Math.floor((await room(dir)) * 0.6);
-    expect(await spaceProblem(dir, profile, size, 0)).toBeGreaterThan(0);
+    expect((await spaceProblem(dir, profile, size, 0))?.free).toBeGreaterThan(0);
     // Most of it is in the profile: little more is needed.
     expect(await spaceProblem(dir, profile, size, Math.floor(size * 0.9))).toBeUndefined();
   });

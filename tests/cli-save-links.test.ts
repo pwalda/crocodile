@@ -114,11 +114,11 @@ describe('room on the disks involved', () => {
     disks.free.set(dir, 100);
     disks.free.set(profile, 10);
     // The download is kept in the profile first: 50 bytes do not fit there.
-    expect(await spaceProblem(dir, profile, 50)).toBe(10);
+    expect(await spaceProblem(dir, profile, 50)).toEqual({ free: 10, needed: 50 });
     // Most of it is there already.
     expect(await spaceProblem(dir, profile, 50, 45)).toBeUndefined();
     // And the folder itself too small.
-    expect(await spaceProblem(dir, profile, 150, 145)).toBe(100);
+    expect(await spaceProblem(dir, profile, 150, 145)).toEqual({ free: 100, needed: 150 });
   });
 
   it('is found once, doubled, on one disk', async () => {
@@ -126,7 +126,7 @@ describe('room on the disks involved', () => {
     disk(dir, profile, 1, 1);
     disks.free.set(dir, 100);
     disks.free.set(profile, 5);
-    expect(await spaceProblem(dir, profile, 60)).toBe(100);
+    expect(await spaceProblem(dir, profile, 60)).toEqual({ free: 100, needed: 120 });
     expect(await spaceProblem(dir, profile, 40)).toBeUndefined();
     expect(await spaceProblem(dir, profile, 60, 30)).toBeUndefined();
   });

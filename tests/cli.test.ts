@@ -303,6 +303,8 @@ describe('crocodile (command line)', () => {
     const nobody = person('nobody', coord.url);
     expect(await nobody.cmd('get', '--max-size', 'lots')).toBe(2);
     expect(nobody.err.at(-1)).toMatch(/isn't a size/);
+    expect(await nobody.cmd('send', 'x', '--to', 'bob#1234', '--max-size', '10MB')).toBe(2);
+    expect(nobody.err.at(-1)).toMatch(/--max-size is for/);
     expect(readdirSync(nobody.home)).toEqual([]);
     expect(await carol.cmd('send', 'missing.txt', '--to', 'bob#1234')).toBe(2);
     writeFileSync(join(carol.cwd, 'a.txt'), 'hi');

@@ -58,10 +58,12 @@ export const inline = (text: string) => plain(text).replace(/[\n\t]/g, ' ');
 
 /**
  * The name a received file is saved under: the name as sent, without what `cleanFileName` takes
- * out and without what `plain` takes out of text (it comes back as `_`), because the saved path is
- * printed for a script to read, and so must be safe to print.
+ * out and without control characters, direction marks and line separators (each becomes `_`),
+ * because the saved path is printed for a script to read, and so must be safe to print. Other
+ * invisible characters stay, as some scripts use them in words.
  */
-export const receivedName = (name: string) => cleanFileName(plain(name));
+export const receivedName = (name: string) =>
+  cleanFileName(name.replace(/[\p{Cc}\u061c\u200e\u200f\u2028\u2029\ufeff]/gu, '_'));
 
 /** The same Io, with the text printed for people made safe for a terminal. */
 function terminalSafe(io: Io): Io {
@@ -77,7 +79,8 @@ function terminalSafe(io: Io): Io {
 export function parseSize(text: string) {
   const m = /^\s*(\d+(?:\.\d+)?)\s*([kmgt]?)b?\s*$/i.exec(text);
   const size = m && Math.floor(Number(m[1]) * 1024 ** '_kmgt'.indexOf(m[2]!.toLowerCase() || '_'));
-  if (!size) throw new UsageError(`"${text}" isn't a size, like 500MB or 2GB.`);
+  if (!size || !Number.isSafeInteger(size))
+    throw new UsageError(`"${text}" isn't a size, like 500MB or 2GB.`);
   return size;
 }
 
@@ -195,7 +198,10 @@ export async function run(argv: string[], terminal: Io): Promise<number> {
 
   let maxSize: number | undefined;
   try {
-    if (opts['max-size'] !== undefined) maxSize = parseSize(opts['max-size']);
+    if (opts['max-size'] !== undefined) {
+      if (command !== 'get') throw new UsageError('--max-size is for `crocodile get`.');
+      maxSize = parseSize(opts['max-size']);
+    }
   } catch (err) {
     io.err((err as Error).message);
     return 2;
@@ -631,7 +637,7 @@ async function get(
     const refusal = tooBig
       ? `it is over --max-size ${formatBytes(opts.maxSize!)}`
       : free !== undefined
-        ? `only ${formatBytes(free)} is free there`
+        ? `it needs ${formatBytes(free.needed)} of room${free.needed > file.size ? ' (the download is kept in the profile as well)' : ''} and ${formatBytes(free.free)} is free`
         : '';
     if (refusal) {
       io.err(

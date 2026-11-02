@@ -8,8 +8,11 @@ const taken = (path: string) => {
   try {
     lstatSync(path);
     return true;
-  } catch {
-    return false;
+  } catch (err) {
+    // Not there is a free name; not being able to tell (no access, a drive that went away) is not.
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code === 'ENOENT' || code === 'ENOTDIR') return false;
+    throw err;
   }
 };
 
@@ -33,11 +36,12 @@ export function freePath(dir: string, name: string) {
     // A name that fills the limit gives up some of its stem to the number, and an extension too
     // long to leave room for one is cut with it.
     const room = NAME_MAX_BYTES - Buffer.byteLength(suffix) - Buffer.byteLength(ext);
+    const cut = i === 0 ? '' : fit(stem, room);
     const numbered =
       i === 0
         ? name
-        : room > 0
-          ? `${fit(stem, room)}${suffix}${ext}`
+        : cut
+          ? `${cut}${suffix}${ext}`
           : `${fit(name, NAME_MAX_BYTES - Buffer.byteLength(suffix))}${suffix}`;
     const p = join(dir, numbered);
     if (!taken(p)) return p;
@@ -97,8 +101,8 @@ export async function saveFile(
  * Why a file of `size` bytes shouldn't be taken into `dir`, if it shouldn't: the space it needs is
  * there once for the copy kept in the profile while it downloads and once more for the saved
  * file, and those are one pool when both are on the same disk (less what a download stopped
- * earlier has kept already). Returns the free space of the disk that falls short (the smaller, if
- * both do); nothing when there is room, or when the free space can't be read.
+ * earlier has kept already). Returns the free space and the space needed on the disk that falls short
+ * (the one with less, if both do); nothing when there is room, or when the free space can't be read.
  */
 export async function spaceProblem(dir: string, profileDir: string, size: number, held = 0) {
   const freeIn = async (path: string) => {
@@ -112,10 +116,10 @@ export async function spaceProblem(dir: string, profileDir: string, size: number
     here && there && here.dev === there.dev
       ? [[dir, size * 2 - held] as const]
       : [[dir, size] as const, [profileDir, size - held] as const];
-  let short: number | undefined;
+  let short: { free: number; needed: number } | undefined;
   for (const [path, needed] of needs) {
     const free = await freeIn(path);
-    if (needed > free) short = Math.min(short ?? free, free);
+    if (needed > free && (!short || free < short.free)) short = { free, needed };
   }
   return short;
 }
