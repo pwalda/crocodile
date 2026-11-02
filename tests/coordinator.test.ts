@@ -2435,6 +2435,11 @@ describe('abuse limits', () => {
       );
     const c = await server({ publicUrl: ' HTTPS://Croc.Example.org/\n' });
     expect(c.info.url).toBe('https://Croc.Example.org');
+    // Empty, as a container's environment leaves it, is none.
+    for (const none of ['', '  ']) {
+      const d = await server({ publicUrl: none });
+      expect(d.info.url).toMatch(/^http:\/\/[\d.]+:\d+$/);
+    }
   });
 
   it('refuses to start with a limit that would switch a protection off', () => {

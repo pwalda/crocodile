@@ -41,7 +41,7 @@ import { TurnServer } from './turn';
 import { startStunServer } from './stun';
 import type { Socket } from 'node:dgram';
 import { MailboxService, defaultMailboxConfig, type MailboxConfig } from './mailbox';
-import { consoleLogger, RpcFailure, type Logger } from './util';
+import { cleanUrl, consoleLogger, RpcFailure, type Logger } from './util';
 import { isIP } from 'node:net';
 import { networkInterfaces } from 'node:os';
 import { lookup } from 'node:dns/promises';
@@ -164,11 +164,6 @@ export const defaultConfig: CoordinatorConfig = {
 /** A relay grant asked for again in its last minutes is extended (see requestRelay). */
 export const RELAY_RENEW_WINDOW_MS = 10 * 60_000;
 
-/** An address without stray space, and with its http or https scheme in lower case (which is how
- * other servers take it). */
-const cleanUrl = (url: string) =>
-  url.trim().replace(/^https?(?=:\/\/)/i, (scheme) => scheme.toLowerCase());
-
 export class Coordinator {
   readonly config: CoordinatorConfig;
   readonly log: Logger;
@@ -213,11 +208,13 @@ export class Coordinator {
 
   constructor(config: Partial<CoordinatorConfig> & Pick<CoordinatorConfig, 'name'>) {
     this.config = { ...defaultConfig, ...config };
-    // Other servers refuse an address they do not take as a server's (the scheme is put in lower
-    // case when it is published).
+    // An address that is empty (as a container's environment leaves it) is none. Other servers
+    // refuse one they do not take as a server's; the scheme is put in lower case when it is published.
+    this.config.publicUrl = this.config.publicUrl && cleanUrl(this.config.publicUrl);
+    if (this.config.publicUrl === '') this.config.publicUrl = undefined;
     if (
       this.config.publicUrl !== undefined &&
-      !ServerInfo.shape.url.safeParse(cleanUrl(this.config.publicUrl)).success
+      !ServerInfo.shape.url.safeParse(this.config.publicUrl).success
     )
       throw new Error('the public URL must be an http:// or https:// address');
     // A typo (NaN) or zero here would silently switch a protection off.

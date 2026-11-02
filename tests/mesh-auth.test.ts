@@ -1288,6 +1288,15 @@ describe('where a server is, as other servers tell it', () => {
     expect(dialing.has(url)).toBe(false);
   });
 
+  it('is written as other servers take it when a static peer is given another way', async () => {
+    const a = await server({ name: 'a' });
+    const written = a.url.replace(/^http/, 'HTTP') + ' ';
+    const b = await server({ name: 'b', meshPeers: [written] });
+    expect((b.mesh as unknown as { staticUrls: string[] }).staticUrls).toEqual([a.url]);
+    await waitFor(() => b.mesh.peerIds().includes(a.info.id), 5000, 'the link');
+    expect(b.mesh.knownServers().find((s) => s.id === a.info.id)?.url).toBe(a.url);
+  });
+
   it('is taken from a beacon the server itself signed', async () => {
     const victim = await server({ name: 'victim' });
     const target = await listener();

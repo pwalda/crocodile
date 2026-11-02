@@ -25,7 +25,7 @@ import {
 import type { Coordinator } from './coordinator';
 import { fnv1a } from './election';
 import { routedEvent } from './routes';
-import { RateLimiter, RpcFailure, chunkByBytes, sendJson, toWsUrl } from './util';
+import { RateLimiter, RpcFailure, chunkByBytes, cleanUrl, sendJson, toWsUrl } from './util';
 
 /** A device-link code's new device, as another server reports it. */
 type LinkTarget = { peer: string; key: string; encKey: string; kemKey: string; commit: string };
@@ -147,7 +147,7 @@ export class Mesh {
   }
 
   start(staticPeers: string[]) {
-    this.staticUrls = staticPeers.filter((u) => u !== this.hub.info.url);
+    this.staticUrls = staticPeers.map(cleanUrl).filter((u) => u !== this.hub.info.url);
     for (const url of this.staticUrls) this.ensureDial(url);
     this.pingTimer = setInterval(() => this.heartbeat(), PING_INTERVAL_MS);
     this.pingTimer.unref?.();
