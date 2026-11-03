@@ -27,6 +27,6 @@
   "devDependencies": {
     "@types/ws": "^8.18.2",
     "esbuild": "^0.28.2",
-    "werift": "0.25.0"
+    "werift": "0.25.2"
   }
 }
