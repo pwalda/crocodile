@@ -7,6 +7,7 @@ import {
   canonicalIp,
   encodeStun,
   isForbiddenPeerAddress,
+  parseAddressList,
   parseStun,
   parseXorAddress,
   xorAddress,
@@ -676,7 +677,7 @@ describe('TURN relay', () => {
     const inner = turn as unknown as { nonceValid(nonce: string, address: string): string };
     expect(inner.nonceValid(nonce, '127.0.0.1')).toBe('ok');
     // The port may change behind a NAT, the address does not.
-    expect(inner.nonceValid(nonce, '127.0.0.2')).toBe('bad');
+    expect(inner.nonceValid(nonce, '127.0.0.2')).toBe('stale');
     expect(inner.nonceValid(nonce, '::ffff:127.0.0.1')).toBe('ok');
     // Sent from here, the Allocate is served.
     expect(await allocate(c)).toBe(0);
@@ -731,5 +732,75 @@ describe('TURN relay', () => {
         resolve();
       }, 20),
     );
+  });
+
+  it('still answers a signed request whose nonce ran out, however busy its address is', async () => {
+    // One answer for an address, and no more: the client's first challenge takes it.
+    const turn = await limitedTurn({ answerBurst: 1, answerPerSecond: 0.001 });
+    const c = await turnClient(turn);
+    const inner = turn as unknown as { nonceMac(ts: string, address: string): string };
+    const old = Math.floor(Date.now() / 1000 - 700).toString(16);
+    const stale = { type: 0x0015, value: Buffer.from(`${old}${inner.nonceMac(old, '127.0.0.1')}`) };
+    const signed = (nonce: { type: number; value: Buffer }, key = c.key) => {
+      const tx = randomBytes(12);
+      c.send(0x003, tx, [c.transport, ...c.auth.filter((a) => a.type !== 0x0015), nonce], key);
+      return c.answer(tx);
+    };
+    const code = (m: { attrs: { type: number; value: Buffer }[] }) => {
+      const err = m.attrs.find((a) => a.type === 0x0009)?.value;
+      return err ? err[2]! * 100 + err[3]! : 0;
+    };
+    // Signed, with a nonce that ran out, or one that was never given: told to take a new one.
+    const answered = await signed(stale);
+    expect(code(answered)).toBe(438);
+    expect(answered.attrs.some((a) => a.type === 0x0015)).toBe(true);
+    expect(code(await signed({ type: 0x0015, value: Buffer.from('x'.repeat(30)) }))).toBe(438);
+    // With the new nonce it is served.
+    const fresh = answered.attrs.find((a) => a.type === 0x0015)!;
+    expect(code(await signed(fresh))).toBe(0);
+    // Not signed by the user, it is one of the answers counted, and there are none left.
+    const before = c.replies.length;
+    const wrong = createHash('md5').update('not the key').digest();
+    for (let i = 0; i < 5; i++) {
+      const tx = randomBytes(12);
+      c.send(0x003, tx, [c.transport, ...c.auth.filter((a) => a.type !== 0x0015), fresh], wrong);
+    }
+    await new Promise((r) => setTimeout(r, 300));
+    expect(c.replies.length).toBe(before);
+  });
+
+  it('refuses an address list that has anything but addresses in it', () => {
+    expect(
+      parseAddressList(['203.0.113.7', '2001:DB8::1', '[2001:db8::2]', '::ffff:198.51.100.1']),
+    ).toEqual(['203.0.113.7', '2001:db8::1', '2001:db8::2', '198.51.100.1']);
+    for (const bad of [
+      '203.0.113.0/24',
+      'router.example.org',
+      '203.0.113',
+      '',
+      ' ',
+      '2001:db8::/32',
+    ])
+      expect(() => parseAddressList([bad]), bad).toThrow(/not an IP address/);
+    // A server given one does not start with a protection that would do nothing.
+    return expect(
+      new TurnServer({
+        port: 0,
+        host: '127.0.0.1',
+        relayIp: '127.0.0.1',
+        secret: randomBytes(32),
+        ownAddresses: ['203.0.113.0/24'],
+      }).start(),
+    ).rejects.toThrow(/not an IP address/);
+  });
+
+  it('spells an address the same however often and however many it has been asked about', () => {
+    expect(canonicalIp('2001:DB8:0:0:0:0:0:1')).toBe('2001:db8::1');
+    for (let i = 0; i < 5000; i++) canonicalIp(`2001:db8:${i.toString(16)}::1`);
+    expect(canonicalIp('2001:db8:0:0:0:0:0:1')).toBe('2001:db8::1');
+    expect(canonicalIp('2001:DB8:0:0:0:0:0:1')).toBe('2001:db8::1');
+    expect(canonicalIp('::ffff:8.8.8.8')).toBe('8.8.8.8');
+    expect(canonicalIp('not-an-ip')).toBeNull();
+    expect(canonicalIp('not-an-ip')).toBeNull();
   });
 });

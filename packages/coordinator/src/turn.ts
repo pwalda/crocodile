@@ -355,6 +355,19 @@ export interface TurnServerOptions {
   log?: (msg: string, extra?: Record<string, unknown>) => void;
 }
 
+/**
+ * `"203.0.113.7, 2001:db8::1"` → the addresses, one spelling each; throws on anything that is not
+ * an address (a typo, a network written with `/`, a name): it would otherwise protect nothing.
+ */
+export function parseAddressList(entries: string[]): string[] {
+  return entries.map((entry) => {
+    const addr = canonicalIp(entry);
+    if (!addr)
+      throw new Error(`"${entry}" is not an IP address (one address, not a network or a name)`);
+    return addr;
+  });
+}
+
 /** `"49160-49259"` → `{ min: 49160, max: 49259 }`; throws on anything else. */
 export function parsePortRange(text: string): { min: number; max: number } {
   const m = text.trim().match(/^(\d{1,5})\s*-\s*(\d{1,5})$/);
@@ -413,6 +426,19 @@ const FORBIDDEN_PEERS = (() => {
  * IPv6), everything else as compressed lowercase IPv6. Null if not an IP.
  */
 export function canonicalIp(address: string): string | null {
+  if (isIPv4(address)) return address;
+  const kept = canonicalCache.get(address);
+  if (kept !== undefined) return kept;
+  const out = canonicalIpUncached(address);
+  if (canonicalCache.size >= 2048) canonicalCache.clear();
+  canonicalCache.set(address, out);
+  return out;
+}
+
+/** What `canonicalIp` found for addresses it has been asked about lately (it is on the path of every packet). */
+const canonicalCache = new Map<string, string | null>();
+
+function canonicalIpUncached(address: string): string | null {
   const addr = address.replace(/^\[|\]$/g, '').replace(/%.*$/, '');
   if (isIPv4(addr)) return addr;
   if (isIP(addr) !== 6) return null;
@@ -479,11 +505,10 @@ export class TurnServer {
       }
     }
     if (this.sockets.length === 0) throw new Error('could not bind any UDP socket');
-    this.own = new Set(
-      [...localAddresses(true), this.opts.relayIp, ...(this.opts.ownAddresses ?? [])].flatMap(
-        (a) => canonicalIp(a) ?? [],
-      ),
-    );
+    this.own = new Set([
+      ...[...localAddresses(true), this.opts.relayIp].flatMap((a) => canonicalIp(a) ?? []),
+      ...parseAddressList(this.opts.ownAddresses ?? []),
+    ]);
     this.port = port;
     this.sweep = setInterval(() => this.expire(), 2000);
     this.sweep.unref?.();
@@ -569,10 +594,10 @@ export class TurnServer {
       .slice(0, 16);
   }
 
-  private nonceValid(nonce: string, address: string): 'ok' | 'stale' | 'bad' {
+  private nonceValid(nonce: string, address: string): 'ok' | 'stale' {
     const ts = nonce.slice(0, -16);
     const mac = this.nonceMac(ts, address);
-    if (mac !== nonce.slice(-16)) return 'bad';
+    if (mac !== nonce.slice(-16)) return 'stale';
     return Date.now() / 1000 - parseInt(ts, 16) > 600 ? 'stale' : 'ok';
   }
 
@@ -584,24 +609,30 @@ export class TurnServer {
   ): { key: Buffer; userId: string; grantExpiresAt: number } | null {
     const username = attrOf(m, ATTR.username)?.toString('utf8');
     const nonce = attrOf(m, ATTR.nonce)?.toString('utf8');
-    const challenge = (code: number, reason: string) =>
-      this.reply(via, m, rinfo, CLASS.error, [
-        errorAttr(code, reason),
-        { type: ATTR.realm, value: Buffer.from(REALM) },
-        { type: ATTR.nonce, value: Buffer.from(this.nonce(rinfo.address)) },
-      ]);
-    if (!username || !nonce || !attrOf(m, ATTR.messageIntegrity)) {
-      challenge(401, 'Unauthorized');
-      return null;
-    }
-    const nv = this.nonceValid(nonce, rinfo.address);
-    if (nv === 'stale') {
-      challenge(438, 'Stale Nonce');
-      return null;
-    }
-    const match = username.match(/^(\d+):([a-z2-7]{8,64})$/);
+    // `counted`: whether the answer is one of those capped per source address (see `reply`).
+    const challenge = (code: number, reason: string, counted = true) =>
+      this.reply(
+        via,
+        m,
+        rinfo,
+        CLASS.error,
+        [
+          errorAttr(code, reason),
+          { type: ATTR.realm, value: Buffer.from(REALM) },
+          { type: ATTR.nonce, value: Buffer.from(this.nonce(rinfo.address)) },
+        ],
+        undefined,
+        counted,
+      );
+    const match = username?.match(/^(\d+):([a-z2-7]{8,64})$/);
     const written = match ? Number(match[1]) * 1000 : 0;
-    if (nv === 'bad' || !match || this.grantEnd(match[2]!, written) < Date.now()) {
+    if (
+      !username ||
+      !nonce ||
+      !attrOf(m, ATTR.messageIntegrity) ||
+      !match ||
+      this.grantEnd(match[2]!, written) < Date.now()
+    ) {
       challenge(401, 'Unauthorized');
       return null;
     }
@@ -609,6 +640,13 @@ export class TurnServer {
     const key = createHash('md5').update(`${username}:${REALM}:${password}`).digest();
     if (!verifyIntegrity(m, key)) {
       challenge(401, 'Unauthorized');
+      return null;
+    }
+    // Signed by the user, so from someone who holds their credentials, who is not to be shut out
+    // because a nonce ran out or was given to another address (a client whose address changed):
+    // the answer is smaller than the request, so it is not counted.
+    if (this.nonceValid(nonce, rinfo.address) !== 'ok') {
+      challenge(438, 'Stale Nonce', false);
       return null;
     }
     return { key, userId: match[2]!, grantExpiresAt: written };
@@ -623,10 +661,19 @@ export class TurnServer {
     return Math.max(credentialExpiry, this.opts.grantEnd?.(userId) ?? 0);
   }
 
-  private reply(via: Socket, m: Msg, rinfo: RemoteInfo, cls: number, attrs: Attr[], key?: Buffer) {
+  private reply(
+    via: Socket,
+    m: Msg,
+    rinfo: RemoteInfo,
+    cls: number,
+    attrs: Attr[],
+    key?: Buffer,
+    counted = !key,
+  ) {
     // Anyone can write any source address on a request, and what goes back to it is larger than
-    // the request: without a signature on it, only so many answers go to one address.
-    if (!key && !this.mayAnswer(rinfo.address)) return;
+    // the request: unless it answers a request that was signed, only so many answers go to one
+    // address.
+    if (counted && !this.mayAnswer(rinfo.address)) return;
     via.send(encodeStun(m.method, cls, m.txId, attrs, key), rinfo.port, rinfo.address);
   }
 

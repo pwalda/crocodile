@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { parseArgs } from 'node:util';
 import { Coordinator, defaultConfig } from './coordinator';
-import { parsePortRange } from './turn';
+import { parseAddressList, parsePortRange } from './turn';
 import { numberOption } from './util';
 
 const list = (v: string | undefined) =>
@@ -101,6 +101,13 @@ const env = process.env;
 const pick = (flag: string | undefined, envName: string) => flag ?? env[envName];
 const stunPort = pick(values['stun-port'], 'CROC_STUN_PORT');
 const relayPorts = pick(values['relay-ports'], 'CROC_RELAY_PORTS');
+let relayOwnIps: string[];
+try {
+  relayOwnIps = parseAddressList(list(pick(values['relay-own-ips'], 'CROC_RELAY_OWN_IPS')));
+} catch (err) {
+  console.error(`--relay-own-ips: ${(err as Error).message}`);
+  process.exit(1);
+}
 const stunAltPort = pick(values['stun-alt-port'], 'CROC_STUN_ALT_PORT');
 const num = (
   flag: string | undefined,
@@ -150,7 +157,7 @@ const coordinator = new Coordinator({
       { min: 0 },
     ),
     publicIp: pick(values['relay-ip'], 'CROC_RELAY_IP'),
-    ownAddresses: list(pick(values['relay-own-ips'], 'CROC_RELAY_OWN_IPS')),
+    ownAddresses: relayOwnIps,
     ...(relayPorts ? { ports: parsePortRange(relayPorts) } : {}),
     allowPrivatePeers:
       values['relay-allow-private'] === true || env.CROC_RELAY_ALLOW_PRIVATE === '1',
