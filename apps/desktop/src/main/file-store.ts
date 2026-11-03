@@ -4,7 +4,7 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { tmpdir } from 'node:os';
 import { extname, join } from 'node:path';
-import { FILE_BLOCK_SIZE, FILE_TAG_SIZE } from '@crocodile/protocol';
+import { FILE_BLOCK_SIZE, FILE_MAX_SIZE, FILE_TAG_SIZE } from '@crocodile/protocol';
 
 /**
  * Files on disk, for the UI (which can't touch the file system):
@@ -91,7 +91,15 @@ interface Export {
   path: string;
   handle: FileHandle;
   temp: boolean;
+  written: number;
+  /** When it was begun or last written to. */
+  touched: number;
 }
+
+/** Files written at once: a few saves and a few opened, not without end. */
+const MAX_OPEN_EXPORTS = 16;
+/** A file not written to for this long is one a reloaded page will never end. */
+const IDLE_EXPORT_MS = 60_000;
 
 export class FileExports {
   private open = new Map<string, Export>();
@@ -109,10 +117,37 @@ export class FileExports {
     return this.unmarked.delete(path);
   }
 
+  /** Exports being begun, whose file is not open yet (they count towards the most at once). */
+  private starting = 0;
+
   async begin(path: string, temp: boolean) {
-    const handle = await open(path, 'w');
+    // All of this up to the first `await` is done before anything else can run: the count is
+    // what the next call sees.
+    let letGo: Export | undefined;
+    if (this.open.size + this.starting >= MAX_OPEN_EXPORTS) {
+      // Room is made from the one quiet the longest, if it has been quiet a while: a page that
+      // was reloaded mid-save never ends its file. Files still being written are left alone.
+      let quiet: [string, Export] | undefined;
+      for (const e of this.open) if (!quiet || e[1].touched < quiet[1].touched) quiet = e;
+      if (!quiet || Date.now() - quiet[1].touched < IDLE_EXPORT_MS)
+        throw new Error('too many files at once');
+      this.open.delete(quiet[0]);
+      letGo = quiet[1];
+    }
+    this.starting++;
+    let handle: FileHandle;
+    try {
+      // Its partial file goes before the new one is opened, which may be at the same path.
+      if (letGo) {
+        await letGo.handle.close().catch(() => {});
+        await rm(letGo.path, { force: true }).catch(() => {});
+      }
+      handle = await open(path, 'w');
+    } finally {
+      this.starting--;
+    }
     const token = `x${++this.seq}`;
-    this.open.set(token, { path, handle, temp });
+    this.open.set(token, { path, handle, temp, written: 0, touched: Date.now() });
     return token;
   }
 
@@ -126,6 +161,11 @@ export class FileExports {
   async chunk(token: string, data: Uint8Array) {
     const x = this.open.get(token);
     if (!x || !(data instanceof Uint8Array)) throw new Error('not saving');
+    // What the page sends is a block of the file at most, and no more than a file can be.
+    if (data.length > FILE_BLOCK_SIZE || x.written + data.length > FILE_MAX_SIZE)
+      throw new Error('too much');
+    x.written += data.length;
+    x.touched = Date.now();
     await x.handle.write(data);
   }
 
