@@ -8,6 +8,7 @@ export * from './store';
 export * from './records-cache';
 export * from './keyring';
 export * from './relay-link';
+export * from './opus-sdp';
 export * from './group-session';
 export * from './client';
 export * from './voice';

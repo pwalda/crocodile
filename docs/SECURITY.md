@@ -263,6 +263,10 @@ picture size.
   new ones in that space.
 - Linked devices share the account seed; per-device signing keys certified by
   the identity (so a removed device can no longer sign) are planned.
+  A device that finds out it was removed (on connecting, or live) stops, leaves
+  its conversations and clears its local copy of the account, acting only on a
+  record signed by the account. That is the app's own doing: a device that is
+  kept offline, or modified, keeps what it had.
 - Sender keys rather than MLS: good forward secrecy and 30-minute healing,
   but rekeying cost grows with group size.
 - Safety-number verification is manual.

@@ -6,6 +6,7 @@ import {
   type SignalData,
 } from '@crocodile/protocol';
 import { Emitter } from './emitter';
+import { forceOpusCbr } from './opus-sdp';
 
 export interface FrameCryptoHooks {
   /** Install end-to-end encryption on the microphone sender. */
@@ -370,7 +371,7 @@ export class RelayLink extends Emitter<RelayLinkEvents> {
         this.fail('host answer failed signature check', 'rejected');
         return;
       }
-      await this.pc.setRemoteDescription({ type: 'answer', sdp: data.sdp });
+      await this.pc.setRemoteDescription({ type: 'answer', sdp: forceOpusCbr(data.sdp) });
       this.remoteSet = true;
       if (!this.answered) {
         this.answered = true;
@@ -452,7 +453,7 @@ export class RelayLink extends Emitter<RelayLinkEvents> {
       this.dc.send(msg);
       const sdp = await answered;
       if (this.closed) return;
-      await this.pc.setRemoteDescription({ type: 'answer', sdp });
+      await this.pc.setRemoteDescription({ type: 'answer', sdp: forceOpusCbr(sdp) });
     } catch (err) {
       // Back to the voice-only connection we had, still usable.
       if (!this.closed) {

@@ -354,12 +354,14 @@ describe('offline delivery', () => {
     await alice.openChannel(dm);
     await alice.sendMessage(dm, 'from a device that is then removed');
     await waitFor(() => alice.state.messages[dm]!.find((m) => m.mailed), 15000, 'mailed');
-    // The device is removed from the account before Bob reads what it left.
+    // The device is removed from the account before Bob reads what it left (and, being the
+    // device removed, clears itself).
+    const aliceId = alice.userId;
     await alice.revokeDevice(alice.state.deviceId as string);
     await alice.shutdown();
     const bob = await restart(net, bob0, coord);
     await waitFor(() => coord.store.mailCount({ toUser: bob.userId }) === 0, 15000, 'acked');
-    expect(bob.state.dmRequests).not.toContain(alice.userId);
+    expect(bob.state.dmRequests).not.toContain(aliceId);
     expect(bodies(bob, dm)).toEqual([]);
   });
 
