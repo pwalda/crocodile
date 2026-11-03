@@ -16,18 +16,48 @@ $repo = if ($env:CROC_REPO) { $env:CROC_REPO } else { 'pwalda/crocodile' }
 
 # Everything is downloaded over https: an address that is not, or a download that a
 # redirect took to one, is refused (and the file is not kept).
-function Save-Https($url, $path) {
+function Request-Https($url, $path) {
   $uri = $url -as [uri]
   if (-not $uri -or -not $uri.IsAbsoluteUri -or $uri.Scheme -ne 'https') {
     throw "Refusing to download from an address that is not https: $url"
   }
-  $response = Invoke-WebRequest $url -OutFile $path -UseBasicParsing -PassThru
+  if ($path) { $response = Invoke-WebRequest $url -OutFile $path -UseBasicParsing -PassThru }
+  else { $response = Invoke-WebRequest $url -UseBasicParsing }
   # Windows PowerShell gives the address it ended at as ResponseUri, PowerShell 7 in the request.
   $final = $response.BaseResponse.ResponseUri
   if (-not $final) { $final = $response.BaseResponse.RequestMessage.RequestUri }
   if ($final -and $final.Scheme -ne 'https') {
-    Remove-Item $path -ErrorAction SilentlyContinue
+    if ($path) { Remove-Item $path -ErrorAction SilentlyContinue }
     throw "Refusing a download that ended at an address that is not https: $final"
+  }
+  return $response
+}
+function Save-Https($url, $path) { Request-Https $url $path | Out-Null }
+function Get-Text($url) {
+  $content = (Request-Https $url).Content
+  if ($content -is [byte[]]) { $content = [Text.Encoding]::UTF8.GetString($content) }
+  return [string]$content
+}
+
+# The release lists the SHA-512 (base64) of each installer in its update file (latest.yml),
+# the one the app's updater reads. What does not match is deleted, and not installed.
+function Get-ListedChecksum($updateUrl, $name) {
+  $hit = $false
+  foreach ($line in (Get-Text $updateUrl) -split '\r?\n') {
+    if ($line -match '^\s*-\s+url:\s*(\S+)\s*$') { $hit = ($Matches[1] -eq $name) }
+    elseif ($hit -and $line -match '^\s*sha512:\s*(\S+)\s*$') { return $Matches[1] }
+  }
+}
+function Assert-Checksum($path, $name, $listed) {
+  if (-not $listed) {
+    Remove-Item $path -ErrorAction SilentlyContinue
+    throw "The release lists no checksum for $name"
+  }
+  try { $want = [BitConverter]::ToString([Convert]::FromBase64String($listed)).Replace('-', '') }
+  catch { $want = '' }
+  if ((Get-FileHash $path -Algorithm SHA512).Hash -ne $want) {
+    Remove-Item $path -ErrorAction SilentlyContinue
+    throw "$name does not match the checksum the release lists for it"
   }
 }
 
@@ -46,6 +76,12 @@ if ($env:CROC_INSTALL -eq 'cli') {
   $zip = Join-Path $env:TEMP $cli.name
   Write-Host "==> Downloading $($cli.name)" -ForegroundColor Green
   Save-Https $cli.browser_download_url $zip
+  # The checksum is published beside the program (releases made before that was added
+  # have none, and are installed as before).
+  $listed = $null
+  try { $listed = (Get-Text "$($cli.browser_download_url).sha512").Trim() } catch { }
+  if ($listed) { Assert-Checksum $zip $cli.name $listed }
+  else { Write-Host "==> No checksum is published for $($cli.name); not checking it" -ForegroundColor Yellow }
   $dir = Join-Path $env:LOCALAPPDATA 'Programs\crocodile-cli'
   New-Item -ItemType Directory -Force -Path $dir | Out-Null
   Expand-Archive -Path $zip -DestinationPath $dir -Force
@@ -69,6 +105,7 @@ if (-not $asset) { throw 'No Windows installer found in the latest release.' }
 $file = Join-Path $env:TEMP $asset.name
 Write-Host "==> Downloading $($asset.name)" -ForegroundColor Green
 Save-Https $asset.browser_download_url $file
+Assert-Checksum $file $asset.name (Get-ListedChecksum ($asset.browser_download_url -replace '/[^/]+$', '/latest.yml') $asset.name)
 
 Write-Host '==> Installing' -ForegroundColor Green
 # --force-run starts Crocodile when the silent install finishes.
