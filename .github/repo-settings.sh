@@ -65,6 +65,9 @@ json PUT /actions/permissions/fork-pr-contributor-approval <<'EOF'
 { "approval_policy": "all_external_contributors" }
 EOF
 
+step 'Immutable releases: a published release and its files cannot be changed'
+api PUT /immutable-releases
+
 if [ "$private" = true ]; then
   cat <<'EOF'
 
