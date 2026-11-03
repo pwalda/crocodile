@@ -60,6 +60,8 @@ interface Link {
   inbox: Promise<void>;
   /** Requests this peer may make of us. */
   limiter: RateLimiter;
+  /** Every frame it sends once signed in, of any kind. */
+  frames: RateLimiter;
 }
 
 export interface MeshConfig {
@@ -83,6 +85,16 @@ const PING_INTERVAL_MS = 20_000;
 const QUEUE_MAX = 2000;
 const QUEUE_MS = 15_000;
 const FLOOD_HOPS = 16;
+/**
+ * Frames a signed-in peer may send: a burst, and this many a second after. A record batch holds
+ * hundreds of records, so a full sync is a few thousand frames, and floods are one per event in
+ * the whole mesh. A peer past this is cut off, not skipped: a dropped frame could be one a cursor
+ * or a sequence number moves on past, and a link that comes back starts from what it has.
+ */
+const FRAMES_PER_SECOND = 2000;
+export const FRAMES_BURST = 20_000;
+/** Flood ids remembered, oldest first out. */
+const FLOOD_SEEN_MAX = 200_000;
 /** Close code for a link closed for idleness, so the other side doesn't think we died. */
 const IDLE_CLOSE = 4000;
 /** Servers we keep track of, so made-up identities can't fill our memory. */
@@ -532,6 +544,7 @@ export class Mesh {
       channelKeys: createChannelKeys(),
       inbox: Promise.resolve(),
       limiter: new RateLimiter(500, 5000),
+      frames: new RateLimiter(FRAMES_PER_SECOND, FRAMES_BURST),
     };
     this.pendingLinks.add(link);
     const authTimer = setTimeout(() => {
@@ -543,6 +556,11 @@ export class Mesh {
     ws.on('message', (raw) => {
       // A link we have started to close says nothing more.
       if (ws.readyState !== ws.OPEN) return;
+      if (link.authed && !link.frames.take()) {
+        this.hub.log.warn('closing a mesh link that sends too fast', { peer: link.peerId });
+        ws.close(1008, 'too many frames');
+        return;
+      }
       let frame: FedFrame;
       try {
         frame = JSON.parse(raw.toString()) as FedFrame;
@@ -788,6 +806,11 @@ export class Mesh {
     this.floodSeen.set(frame.id, now);
     if (this.floodSeen.size > 20_000) {
       for (const [id, at] of this.floodSeen) if (now - at > 10 * 60_000) this.floodSeen.delete(id);
+      // (Oldest first: a map keeps the order things went in.)
+      for (const id of this.floodSeen.keys()) {
+        if (this.floodSeen.size <= FLOOD_SEEN_MAX) break;
+        this.floodSeen.delete(id);
+      }
     }
     if (frame.hops < FLOOD_HOPS) this.forward({ ...frame, hops: frame.hops + 1 }, from);
     const f = frame.f;

@@ -48,7 +48,8 @@ const ROUTED = {
 /**
  * A client event another server asks us to deliver. It is delivered only if
  * it has the shape of its event and the server could be the one sending it:
- * a signal only from the server that has the sending device connected, a
+ * a signal only from the server that has the sending device connected and to a device in the
+ * session it names, a
  * conversation invitation and a session's state only from the server that owns
  * the session. Returns what to deliver, or undefined to drop it.
  */
@@ -62,7 +63,12 @@ export function routedEvent(hub: Coordinator, from: string, frame: FedRoute): un
       if (hub.sessions.ownerOf((d.state as { id: string }).id) !== from) return undefined;
       break;
     case 'signal':
-      if (!hub.presence.hosts(from, d.from as string)) return undefined;
+      // From the server that has the sender, to a device that is in the session it names.
+      if (
+        !hub.presence.hosts(from, d.from as string) ||
+        !hub.sessions.inSession(frame.to, d.sessionId as string)
+      )
+        return undefined;
       break;
     case 'session_invite': {
       const scope = parseSessionId(d.sessionId as string);

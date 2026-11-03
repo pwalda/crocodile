@@ -34,7 +34,15 @@ import {
 } from '@crocodile/protocol';
 import type { Coordinator } from './coordinator';
 import type { ClientHandle, OwnStatus } from './presence';
-import { FRAME_BUDGET, RateLimiter, RpcFailure, cutToFrame, jsonBytes, sendJson } from './util';
+import {
+  FRAME_BUDGET,
+  RateLimiter,
+  RpcFailure,
+  addressKey,
+  cutToFrame,
+  jsonBytes,
+  sendJson,
+} from './util';
 
 /** Keys `records.get` looks up first (the window doubles). */
 const GET_WINDOW = 20;
@@ -98,6 +106,9 @@ export class ClientConnection implements ClientHandle {
   /** The steps after a claim only run on a code that was guessed or given, so they get a budget apart from guessing. */
   private readonly linkStepLimiter = new RateLimiter(0.2, 10);
   private readonly mailLimiter = new RateLimiter(1, 30);
+  /** Fetching and acknowledging mail asks every server in the mesh: a budget of its own, so that
+   * a backlog being drained does not hold up sending. */
+  private readonly mailSyncLimiter = new RateLimiter(5, 50);
   private alive = true;
   private pingTimer?: ReturnType<typeof setInterval>;
 
@@ -106,6 +117,8 @@ export class ClientConnection implements ClientHandle {
     private readonly ws: WebSocket,
     /** Our address as this client reached it, for STUN and TURN URLs. */
     readonly via?: string,
+    /** Where the client connected from (as the server takes it: see `trustProxy`). */
+    private readonly address?: string,
   ) {
     const time = Date.now();
     const info = hub.info;
@@ -294,7 +307,8 @@ export class ClientConnection implements ClientHandle {
 
   private async answer(id: number, req: { m: string; p?: unknown }) {
     try {
-      if (!(req.m in RpcParams)) throw new RpcFailure('not_found', `unknown method ${req.m}`);
+      if (!Object.hasOwn(RpcParams, req.m))
+        throw new RpcFailure('not_found', `unknown method ${req.m}`);
       const method = req.m as RpcMethod;
       const parsed = RpcParams[method].safeParse(req.p ?? {});
       if (!parsed.success)
@@ -501,7 +515,8 @@ export class ClientConnection implements ClientHandle {
         };
         if (!hub.sessions.inSession(this.peer, sessionId))
           throw new RpcFailure('forbidden', 'join the session first');
-        return { delivered: hub.deliverToPeer(to, 'signal', { from: this.peer, sessionId, data }) };
+        hub.signalPeer(this.peer, to, sessionId, data);
+        return {};
       }
       case 'servers.list':
         return { servers: [hub.info, ...hub.mesh.knownServers()].map(toPublicServerInfo) };
@@ -516,6 +531,9 @@ export class ClientConnection implements ClientHandle {
       }
       case 'link.claim': {
         this.takeLink(this.linkLimiter);
+        // The connection's own budget starts over with a new connection; this one stays with the address.
+        if (!hub.linkClaims.take(addressKey(this.address)))
+          throw new RpcFailure('rate_limited', 'too many attempts; wait a minute');
         const { code } = p as unknown as { code: string };
         return hub.claimLink(this, code);
       }
@@ -550,11 +568,15 @@ export class ClientConnection implements ClientHandle {
         return await hub.mailbox.put(this, items);
       }
       case 'mail.fetch': {
+        if (!this.mailSyncLimiter.take())
+          throw new RpcFailure('rate_limited', 'fetching mail too fast; slow down');
         const { proof } = p as unknown as { proof?: MailProof };
         hub.mailbox.fetch(this, proof);
         return {};
       }
       case 'mail.ack': {
+        if (!this.mailSyncLimiter.take())
+          throw new RpcFailure('rate_limited', 'acknowledging mail too fast; slow down');
         const { ids, proof } = p as unknown as { ids: string[]; proof?: MailProof };
         hub.mailbox.ack(this, ids, proof);
         return {};

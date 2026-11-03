@@ -1,3 +1,4 @@
+import { isIP } from 'node:net';
 import type { WebSocket } from 'ws';
 
 export interface Logger {
@@ -46,6 +47,67 @@ export class RateLimiter {
     this.tokens -= cost;
     return true;
   }
+  /** Whether it has filled up again, so that a new one would answer the same. */
+  isFull(now = Date.now()): boolean {
+    return this.tokens + ((now - this.last) / 1000) * this.rate >= this.burst;
+  }
+}
+
+/**
+ * One bucket for each key (an address, say), which outlives the connection that used it. A bucket
+ * that has filled up again is forgotten, so the table holds only keys that spent something lately;
+ * if even those fill it, nothing more is allowed until some are full again.
+ */
+export class KeyedLimiter {
+  private readonly buckets = new Map<string, RateLimiter>();
+  private sweptAt = 0;
+  constructor(
+    private readonly rate: number,
+    private readonly burst: number,
+    private readonly maxKeys = 100_000,
+  ) {}
+  take(key: string): boolean {
+    const now = Date.now();
+    let bucket = this.buckets.get(key);
+    if (!bucket) {
+      if (this.buckets.size >= this.maxKeys) {
+        this.sweep(now);
+        if (this.buckets.size >= this.maxKeys) return false;
+      } else if (now - this.sweptAt > 60_000) this.sweep(now);
+      this.buckets.set(key, (bucket = new RateLimiter(this.rate, this.burst)));
+    }
+    return bucket.take();
+  }
+  private sweep(now: number) {
+    this.sweptAt = now;
+    for (const [key, bucket] of this.buckets) if (bucket.isFull(now)) this.buckets.delete(key);
+  }
+  get size() {
+    return this.buckets.size;
+  }
+}
+
+/**
+ * What to count an address as: itself, or for IPv6 its /64, which one machine has all of and can
+ * turn through at will. An IPv4 address in IPv6 form is the IPv4 address.
+ */
+export function addressKey(ip: string | undefined): string {
+  if (!ip) return '';
+  const bare = ip.split('%')[0]!.toLowerCase();
+  const mapped = /^::ffff:(\d{1,3}(?:\.\d{1,3}){3})$/.exec(bare);
+  if (mapped) return mapped[1]!;
+  if (isIP(bare) !== 6) return bare;
+  const [head = '', tail] = bare.split('::');
+  const first = head === '' ? [] : head.split(':');
+  const last = tail === undefined || tail === '' ? [] : tail.split(':');
+  const groups =
+    tail === undefined
+      ? first
+      : [...first, ...Array<string>(8 - first.length - last.length).fill('0'), ...last];
+  return groups
+    .slice(0, 4)
+    .map((g) => g.replace(/^0+(?=.)/, ''))
+    .join(':');
 }
 
 export function sendJson(ws: WebSocket, value: unknown): boolean {

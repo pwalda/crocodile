@@ -116,7 +116,10 @@ main server puts the TCP side behind a reverse proxy on 443.
 - **A program listening on the internet.** Any bug in it could be attacked.
   The server validates every message, limits sizes and rates, caps
   connections per address (`--max-connections-per-ip`) and in total
-  (`--capacity`), and times out connections that don't authenticate. Each
+  (`--capacity`), counts guesses at a device link code per address (an IPv6
+  address as its /64) and not only per connection, and times out connections
+  that don't authenticate. Behind a reverse proxy, set `--trust-proxy`, or all
+  your users are one address to it. Each
   account can make it store at most 100 devices, 100 spaces and 500
   memberships, each space at most 5000 invites, and each account receives at
   most 200 unread friend notes (a server stops at twice that when other
