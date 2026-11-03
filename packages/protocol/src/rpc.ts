@@ -388,7 +388,8 @@ export interface RpcMethods {
  * against this, so one malformed item can't keep the rest from being taken in or confirmed.
  */
 export const MailItem = z.object({
-  id: z.string().max(100),
+  /** As long as `mail.ack` takes. */
+  id: z.string().max(40),
   /** Sender user id (as authenticated by the depositing server). */
   from: z.string().max(200),
   box: SealedBox,

@@ -286,9 +286,11 @@ describe('offline delivery', () => {
     coord.store.mailPut(junk('junk-1', '{"v":3}'));
     coord.store.mailPut(junk('junk-2', '"text"'));
     coord.store.mailPut(junk('junk-3', 'null'));
+    // An id longer than a confirmation can carry can't be confirmed; it must not stop the others.
+    coord.store.mailPut(junk(`long-${'x'.repeat(60)}`, 'null'));
     coord.mailbox.deliverTo(peer);
     // They are confirmed, or they would stay at the head of the queue for good.
-    await waitFor(() => coord.store.mailCount({ toUser: bob.userId }) === 0, 8000, 'junk acked');
+    await waitFor(() => coord.store.mailCount({ toUser: bob.userId }) === 1, 8000, 'junk acked');
     expect(bodies(bob, dm)).toEqual([]);
   });
 

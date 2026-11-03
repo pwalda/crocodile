@@ -438,9 +438,9 @@ const APP_VERSION_FALLBACK = '0.1.0';
 const MAX_AHEAD_MS = 5 * 60_000;
 /** Conversations from people we don't know that wait for an answer (the newest are kept). */
 const DM_REQUESTS_MAX = 50;
-/** How long direct delivery gets before an opted-in DM goes to a mailbox. */
 /** How long someone is shown as typing after their last signal. */
 const TYPING_SHOWN_MS = 6000;
+/** How long direct delivery gets before an opted-in DM goes to a mailbox. */
 const MAIL_AFTER_MS = 5000;
 /** Plaintext bytes of messages in one mailbox box. */
 const MAIL_BOX_BYTES = 48 * 1024;
@@ -978,7 +978,11 @@ export class CrocodileClient extends Emitter<ClientEvents> {
         if (owed && needsNote(owed)) this.retryFriendNotes(FRIEND_NOTE_RETRY_MS);
       }
     });
-    link.on('mail', ({ items }) => void this.onMail(items).catch(() => {}));
+    link.on(
+      'mail',
+      ({ items }) =>
+        void this.onMail(items).catch((err) => this.log('mail not handled', { err: String(err) })),
+    );
     link.on('session', ({ state }) => this.sessions.get(state.id)?.applyState(state));
     link.on('session_renew', ({ sessionId }) => void this.sessions.get(sessionId)?.renew());
     // Taken out of the room because it did not give a new join in time: join it again.
@@ -1260,7 +1264,7 @@ export class CrocodileClient extends Emitter<ClientEvents> {
       if (!item.success) {
         const id = (raw as { id?: unknown } | null)?.id;
         this.log('mail item is not well formed');
-        if (typeof id === 'string' && id.length <= 100) done.push(id);
+        if (typeof id === 'string' && id.length <= 40) done.push(id);
         continue;
       }
       try {
@@ -3910,7 +3914,8 @@ export class CrocodileClient extends Emitter<ClientEvents> {
       const typing = s.typing[message.ch];
       if (!typing?.[message.author]) return {};
       const { [message.author]: _, ...rest } = typing;
-      return { typing: { ...s.typing, [message.ch]: rest } };
+      const { [message.ch]: __, ...others } = s.typing;
+      return { typing: Object.keys(rest).length ? { ...others, [message.ch]: rest } : others };
     });
     this.emit('message', { channel: message.ch, message, mine, update });
     return true;
