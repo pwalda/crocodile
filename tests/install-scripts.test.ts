@@ -32,11 +32,14 @@ afterEach(() => {
 // Runs scripts/install.ps1 with the network and installer calls replaced, and
 // returns the file it downloaded. GitHub's runners have PowerShell, so CI
 // always runs these; elsewhere they need pwsh installed.
-function installWindows(assets: string[], env: Record<string, string>) {
+function installWindows(assets: string[], env: Record<string, string>, scheme = 'https') {
   const temp = mkdtempSync(join(tmpdir(), 'croc-install-'));
   temps.push(temp);
   const release = JSON.stringify({
-    assets: assets.map((name) => ({ name, browser_download_url: `https://example.test/${name}` })),
+    assets: assets.map((name) => ({
+      name,
+      browser_download_url: `${scheme}://example.test/${name}`,
+    })),
   });
   const stubs = `
     function Invoke-RestMethod { param($Uri) '${release}' | ConvertFrom-Json }
@@ -78,6 +81,19 @@ describe.skipIf(!process.env.CI && !hasPwsh())('install.ps1', () => {
         PROCESSOR_ARCHITEW6432: 'ARM64',
       }),
     ).toBe('Crocodile-0.2.0-win-arm64.exe');
+  });
+
+  it('does not download from an address that is not https', () => {
+    expect(() =>
+      installWindows(WINDOWS_ASSETS, { PROCESSOR_ARCHITECTURE: 'AMD64' }, 'http'),
+    ).toThrow();
+    expect(() =>
+      installWindows(
+        ['crocodile-cli-windows-x64.zip'],
+        { PROCESSOR_ARCHITECTURE: 'AMD64', CROC_INSTALL: 'cli' },
+        'http',
+      ),
+    ).toThrow();
   });
 
   it('falls back to the installer with both builds', () => {
