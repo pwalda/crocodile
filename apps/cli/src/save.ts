@@ -51,9 +51,6 @@ export function freePath(dir: string, name: string) {
 /** What `sync` fails with where the file system has nothing to flush to. */
 const NO_SYNC = new Set(['EINVAL', 'ENOTSUP', 'EOPNOTSUPP', 'ENOSYS']);
 
-/** What `link` fails with where the file system can't make hard links. */
-const NO_LINKS = new Set(['EPERM', 'ENOTSUP', 'EOPNOTSUPP', 'ENOSYS', 'EXDEV']);
-
 /**
  * Writes a file into `dir` under `name` (or the first free "name (1)"…), readable by this user
  * only. It is written beside its place under another name and moved in once complete, so a
@@ -85,8 +82,9 @@ export async function saveFile(
         return path;
       } catch (err) {
         if ((err as NodeJS.ErrnoException).code === 'EEXIST') continue;
-        // A file system without hard links: copy it, which also fails if the name is taken.
-        if (!NO_LINKS.has((err as NodeJS.ErrnoException).code ?? '')) throw err;
+        // Whatever kept it from linking (no hard links on this file system, another disk, a
+        // refusal): copy it, which also fails if the name is taken, and fails the same way if the
+        // folder cannot be written to.
         try {
           await copyFile(part, path, constants.COPYFILE_EXCL);
           return path;
@@ -113,19 +111,20 @@ export async function saveFile(
 export async function spaceProblem(dir: string, profileDir: string, size: number, held = 0) {
   const freeIn = async (path: string) => {
     const space = await statfs(path).catch(() => null);
-    return space ? space.bavail * space.bsize : Number.POSITIVE_INFINITY;
+    // A file system that reports nothing at all (no blocks) has not said it is full.
+    return space && space.blocks > 0 ? space.bavail * space.bsize : Number.POSITIVE_INFINITY;
   };
   const [here, there] = await Promise.all([stat(dir), stat(profileDir)]).catch(() => []);
   // One disk: the copy in the profile and the saved file draw on the same space. Two disks: each
   // has its own to find.
   const needs =
     here && there && here.dev === there.dev
-      ? ([[dir, size * 2 - held, 'folder']] as const)
+      ? ([[dir, size * 2 - held, 'both']] as const)
       : ([
           [dir, size, 'folder'],
           [profileDir, size - held, 'profile'],
         ] as const);
-  let short: { free: number; needed: number; where: 'folder' | 'profile' } | undefined;
+  let short: { free: number; needed: number; where: 'folder' | 'profile' | 'both' } | undefined;
   for (const [path, needed, where] of needs) {
     const free = await freeIn(path);
     if (needed > free && (!short || free < short.free)) short = { free, needed, where };

@@ -70,7 +70,8 @@ during that copy can leave a short file under its name. A file that does not
 fit is skipped (the folder needs room for it, and so does the profile, which
 holds a copy while it downloads: on one disk, room for both), and so is one
 over `--max-size` (like `500MB` or `2GB`); `get` then stops with exit code 3 and says
-why (with `--keep` it goes on waiting for the next file). A file that finished
+why (with `--keep` it goes on waiting for the next file, which is how to go
+past one). A file that finished
 downloading but could not be saved is saved on the next `get`. Names and messages from other people are shown without their
 control characters, and a name stays on its line.
 

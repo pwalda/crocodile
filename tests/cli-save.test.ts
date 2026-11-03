@@ -207,19 +207,13 @@ describe('--max-size', () => {
   });
 
   it('refuses what is not a size', () => {
-    for (const bad of [
-      '',
-      'big',
-      '-1MB',
-      '1XB',
-      '1 MB MB',
-      'MB',
-      '0',
-      '0MB',
-      '0.0001',
-      `1${'0'.repeat(400)}`,
-    ])
+    for (const bad of ['', 'big', '-1MB', '1XB', '1 MB MB', 'MB', `1${'0'.repeat(400)}`])
       expect(() => parseSize(bad), bad).toThrow(/isn't a size/);
+  });
+
+  it('says so when the limit is less than a byte', () => {
+    for (const bad of ['0', '0MB', '0.0001', '0.4'])
+      expect(() => parseSize(bad), bad).toThrow(/less than a byte/);
   });
 });
 

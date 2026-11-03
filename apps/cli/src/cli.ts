@@ -79,8 +79,10 @@ function terminalSafe(io: Io): Io {
 export function parseSize(text: string) {
   const m = /^\s*(\d+(?:\.\d+)?)\s*([kmgt]?)b?\s*$/i.exec(text);
   const size = m && Math.floor(Number(m[1]) * 1024 ** '_kmgt'.indexOf(m[2]!.toLowerCase() || '_'));
-  if (!size || !Number.isSafeInteger(size))
+  if (!m || !Number.isSafeInteger(size))
     throw new UsageError(`"${text}" isn't a size, like 500MB or 2GB.`);
+  if (!size)
+    throw new UsageError(`"${text}" is less than a byte: a limit that refuses every file.`);
   return size;
 }
 
@@ -574,6 +576,18 @@ async function send(ctx: Ctx, paths: string[], to: string | undefined, message?:
 
 const SAVED_KEY = 'cli-saved-files';
 
+/** What to tell about a file that does not fit: how much room it needs, where, and what is free. */
+function shortOfRoom(short: Awaited<ReturnType<typeof spaceProblem>>) {
+  if (!short) return '';
+  const where =
+    short.where === 'profile'
+      ? 'in the profile (it keeps the download first)'
+      : short.where === 'both'
+        ? 'in the folder (the profile keeps a copy as well, on the same disk)'
+        : 'in the folder';
+  return `it needs ${formatBytes(short.needed)} of room ${where} and ${formatBytes(short.free)} is free`;
+}
+
 async function get(
   ctx: Ctx,
   opts: { from?: string; dir?: string; keep: boolean; maxSize?: number },
@@ -643,9 +657,7 @@ async function get(
     const free = tooBig ? undefined : await spaceProblem(dir, ctx.profileDir, file.size, held);
     const refusal = tooBig
       ? `it is over --max-size ${formatBytes(opts.maxSize!)}`
-      : free !== undefined
-        ? `it needs ${formatBytes(free.needed)} of room ${free.where === 'profile' ? 'in the profile (it keeps the download first)' : free.needed > file.size ? 'in the folder (the profile keeps a copy as well, on the same disk)' : 'in the folder'} and ${formatBytes(free.free)} is free`
-        : '';
+      : shortOfRoom(free);
     if (refusal) {
       io.err(
         `Not taking ${name} (${formatBytes(file.size)}) from ${who}: ${refusal}.${opts.keep ? ' Still waiting for the next one.' : ''}`,

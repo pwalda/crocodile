@@ -10,6 +10,7 @@ const linkFails = vi.hoisted(() => ({ code: 'EPERM', plant: '', copyFails: '', s
 const disks = vi.hoisted(() => ({
   free: new Map<string, number>(),
   dev: new Map<string, number>(),
+  blocks: new Map<string, number>(),
 }));
 vi.mock('node:fs/promises', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:fs/promises')>();
@@ -43,7 +44,9 @@ vi.mock('node:fs/promises', async (importOriginal) => {
       return handle;
     },
     statfs: async (path: string) =>
-      disks.free.has(path) ? { bavail: disks.free.get(path)!, bsize: 1 } : actual.statfs(path),
+      disks.free.has(path)
+        ? { bavail: disks.free.get(path)!, bsize: 1, blocks: disks.blocks.get(path) ?? 1000 }
+        : actual.statfs(path),
     stat: async (path: string) =>
       disks.dev.has(path) ? { dev: disks.dev.get(path)! } : actual.stat(path),
   };
@@ -123,13 +126,12 @@ describe('saving where there are no hard links', () => {
     expect(readdirSync(dir)).toEqual([]);
   });
 
-  it('gives up, leaving nothing, on any other failure', async () => {
+  it('copies it whatever kept it from linking, and stops if the copy cannot be made either', async () => {
     linkFails.code = 'EACCES';
     const dir = folder();
-    await expect(
-      saveFile(dir, 'a.txt', async (out) => void (await out.write('new'))),
-    ).rejects.toThrow(/link failed/);
-    expect(readdirSync(dir)).toEqual([]);
+    const path = await saveFile(dir, 'a.txt', async (out) => void (await out.write('new')));
+    expect(readFileSync(path, 'utf8')).toBe('new');
+    expect(readdirSync(dir)).toEqual(['a.txt']);
   });
 });
 
@@ -137,6 +139,7 @@ describe('room on the disks involved', () => {
   afterEach(() => {
     disks.free.clear();
     disks.dev.clear();
+    disks.blocks.clear();
   });
   const disk = (dir: string, profile: string, dirDev: number, profileDev: number) => {
     disks.dev.set(dir, dirDev);
@@ -164,6 +167,19 @@ describe('room on the disks involved', () => {
     });
   });
 
+  it('is not taken as full when the file system reports no blocks at all', async () => {
+    const [dir, profile] = [folder(), folder()];
+    disk(dir, profile, 1, 2);
+    disks.free.set(dir, 0);
+    disks.free.set(profile, 0);
+    disks.blocks.set(dir, 0);
+    disks.blocks.set(profile, 0);
+    expect(await spaceProblem(dir, profile, 50)).toBeUndefined();
+    // A disk that is full says how many blocks it has.
+    disks.blocks.set(dir, 1000);
+    expect(await spaceProblem(dir, profile, 50)).toEqual({ free: 0, needed: 50, where: 'folder' });
+  });
+
   it('is found once, doubled, on one disk', async () => {
     const [dir, profile] = [folder(), folder()];
     disk(dir, profile, 1, 1);
@@ -172,7 +188,7 @@ describe('room on the disks involved', () => {
     expect(await spaceProblem(dir, profile, 60)).toEqual({
       free: 100,
       needed: 120,
-      where: 'folder',
+      where: 'both',
     });
     expect(await spaceProblem(dir, profile, 40)).toBeUndefined();
     expect(await spaceProblem(dir, profile, 60, 30)).toBeUndefined();
