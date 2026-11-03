@@ -1,5 +1,13 @@
 import { afterEach, describe, expect, it } from 'vitest';
-import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import {
+  chmodSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { CrocodileClient } from '@crocodile/client-core';
@@ -121,7 +129,75 @@ describe('crocodile (command line)', () => {
     expect(saved).toBe(join(bob.cwd, 'report.bin'));
     expect(readFileSync(saved).equals(data)).toBe(true);
     expect(alice.err.join('\n')).toMatch(new RegExp(`${bobTag} has report.bin`));
+    // Nothing else is left in the folder, and the file is for this user only.
+    expect(readdirSync(bob.cwd)).toEqual(['report.bin']);
+    if (process.platform !== 'win32') expect(statSync(saved).mode & 0o777).toBe(0o600);
   }, 120_000);
+
+  it('shows a name someone chose without the escape sequences in it', async () => {
+    const coord = await startCoordinator({ stunPort: 0 });
+    stops.push(() => coord.stop());
+    // A colour, a window title, a bell and a line break inside the name.
+    const alice = person('alice', coord.url);
+    const bob = person('bob', coord.url);
+    expect(await alice.cmd('init', 'al\x1b[31m\x1b]0;pwned\x07ice\nSaved /x')).toBe(0);
+    expect(await bob.cmd('init', 'bob')).toBe(0);
+    const bobTag = bob.out.at(-1)!;
+    writeFileSync(join(alice.cwd, 'note.txt'), 'hello');
+
+    const waiting = bob.cmd('get');
+    const sending = alice.cmd('send', 'note.txt', '--to', bobTag);
+    await waitFor(
+      () => bob.err.some((l) => l.includes('wants to send you something')),
+      30_000,
+      'a hint',
+    );
+    bob.stop();
+    alice.stop();
+    await Promise.all([waiting, sending]);
+    expect(await alice.cmd('whoami')).toBe(0);
+    // What a script reads back is the name as it is; everything meant for people is clean.
+    const raw = 'al\x1b[31m\x1b]0;pwned\x07ice\nSaved /x#';
+    expect(alice.out[0]).toMatch(/#\d{4}$/);
+    expect(alice.out[0]!.startsWith(raw)).toBe(true);
+    expect(alice.out.at(-1)!.startsWith(raw)).toBe(true);
+    const shown = [...alice.err, ...bob.out, ...bob.err].join('\n');
+    // eslint-disable-next-line no-control-regex
+    expect(shown).not.toMatch(/[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/);
+    expect(bob.err.join('\n')).toContain('al?[31m?]0;pwned?ice Saved /x#');
+    // Its name would not be found again as shown, so the hint names the account instead.
+    expect(bob.err.join('\n')).toMatch(/Run: get --from [a-z2-7]{26}$/m);
+    // The name does not start a line of its own.
+    expect([...alice.err, ...bob.out, ...bob.err].some((l) => l.startsWith('Saved'))).toBe(false);
+  }, 60_000);
+
+  it('leaves a file over --max-size alone and takes the next', async () => {
+    const coord = await startCoordinator({ stunPort: 0 });
+    stops.push(() => coord.stop());
+    const alice = person('alice', coord.url);
+    const bob = person('bob', coord.url);
+    expect(await alice.cmd('init', 'alice')).toBe(0);
+    expect(await bob.cmd('init', 'bob')).toBe(0);
+    const aliceTag = alice.out.at(-1)!;
+    const bobTag = bob.out.at(-1)!;
+    writeFileSync(join(alice.cwd, 'big.bin'), Buffer.alloc(200 * 1024, 7));
+    // A direction mark in the name: it is not saved under that name.
+    writeFileSync(join(alice.cwd, 'small\u200f.txt'), 'hello');
+
+    const receiving = bob.cmd('get', '--from', aliceTag, '--keep', '--max-size', '10KB');
+    const sending = alice.cmd('send', 'big.bin', 'small\u200f.txt', '--to', bobTag);
+    const small = join(bob.cwd, 'small_.txt');
+    await waitFor(() => bob.out.includes(small), 60_000, 'the small file');
+    bob.stop();
+    alice.stop();
+    await Promise.all([receiving, sending]);
+    expect(bob.out.slice(1)).toEqual([small]);
+    expect(bob.err.join('\n')).toMatch(
+      /Not taking big.bin \(200 KB\) from alice#\d{4}: it is over --max-size 10 KB/,
+    );
+    expect(bob.err.join('\n')).not.toMatch(/Receiving big.bin/);
+    expect(readdirSync(bob.cwd)).toEqual(['small_.txt']);
+  }, 90_000);
 
   it('says who wants to send something when get was not told whose files to take', async () => {
     const coord = await startCoordinator({ stunPort: 0 });
@@ -176,6 +252,63 @@ describe('crocodile (command line)', () => {
     expect(readFileSync(again.out.at(-1)!).equals(data)).toBe(true);
     expect(await sending).toBe(0);
   }, 180_000);
+
+  it('says it did not take a file over --max-size, when asked for one file', async () => {
+    const coord = await startCoordinator({ stunPort: 0 });
+    stops.push(() => coord.stop());
+    const alice = person('alice', coord.url);
+    const bob = person('bob', coord.url);
+    expect(await alice.cmd('init', 'alice')).toBe(0);
+    expect(await bob.cmd('init', 'bob')).toBe(0);
+    const aliceTag = alice.out.at(-1)!;
+    const bobTag = bob.out.at(-1)!;
+    writeFileSync(join(alice.cwd, 'big.bin'), Buffer.alloc(200 * 1024, 7));
+
+    const receiving = bob.cmd('get', '--from', aliceTag, '--max-size', '10KB');
+    const sending = alice.cmd('send', 'big.bin', '--to', bobTag);
+    expect(await receiving).toBe(3);
+    expect(bob.err.join('\n')).toMatch(/Not taking big.bin .* over --max-size 10 KB\.$/m);
+    expect(bob.err.join('\n')).not.toMatch(/Still waiting/);
+    expect(readdirSync(bob.cwd)).toEqual([]);
+    alice.stop();
+    await sending;
+  }, 60_000);
+
+  it.skipIf(process.platform === 'win32' || process.getuid?.() === 0)(
+    'saves a file that finished downloading but could not be saved, the next time',
+    async () => {
+      const coord = await startCoordinator({ stunPort: 0 });
+      stops.push(() => coord.stop());
+      const alice = person('alice', coord.url);
+      const bob = person('bob', coord.url);
+      expect(await alice.cmd('init', 'alice')).toBe(0);
+      expect(await bob.cmd('init', 'bob')).toBe(0);
+      const aliceTag = alice.out.at(-1)!;
+      const bobTag = bob.out.at(-1)!;
+      writeFileSync(join(alice.cwd, 'note.txt'), 'hello there');
+
+      // The folder cannot be written to when the file arrives.
+      chmodSync(bob.cwd, 0o500);
+      const receiving = bob.cmd('get', '--from', aliceTag);
+      const sending = alice.cmd('send', 'note.txt', '--to', bobTag);
+      try {
+        expect(await receiving).toBe(1);
+      } finally {
+        chmodSync(bob.cwd, 0o700);
+      }
+      expect(await sending).toBe(0);
+      expect(readdirSync(bob.cwd)).toEqual([]);
+
+      // Alice is gone; what was downloaded is still there to save.
+      const again = person('bob', coord.url, bob);
+      const giveUp = setTimeout(() => again.stop(), 30_000);
+      const got = await again.cmd('get', '--from', aliceTag);
+      clearTimeout(giveUp);
+      expect({ got, err: again.err }).toMatchObject({ got: 0 });
+      expect(readFileSync(join(bob.cwd, 'note.txt'), 'utf8')).toBe('hello there');
+    },
+    120_000,
+  );
 
   it('links this computer once the security code is confirmed on both sides', async () => {
     const coord = await startCoordinator();
@@ -232,6 +365,13 @@ describe('crocodile (command line)', () => {
     expect(await run(['--version'], carol.io)).toBe(0);
     expect(await carol.cmd('init', 'carol')).toBe(0);
     expect(await carol.cmd('init', 'carol')).toBe(2);
+    // Before anything is started, and with or without an account.
+    const nobody = person('nobody', coord.url);
+    expect(await nobody.cmd('get', '--max-size', 'lots')).toBe(2);
+    expect(nobody.err.at(-1)).toMatch(/isn't a size/);
+    expect(await nobody.cmd('send', 'x', '--to', 'bob#1234', '--max-size', '10MB')).toBe(2);
+    expect(nobody.err.at(-1)).toMatch(/--max-size is for/);
+    expect(readdirSync(nobody.home)).toEqual([]);
     expect(await carol.cmd('send', 'missing.txt', '--to', 'bob#1234')).toBe(2);
     writeFileSync(join(carol.cwd, 'a.txt'), 'hi');
     expect(await carol.cmd('send', 'a.txt', '--to', 'bob')).toBe(2);
