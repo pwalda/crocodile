@@ -84,16 +84,17 @@ describe.skipIf(!process.env.CI && !hasPwsh())('install.ps1', () => {
   });
 
   it('does not download from an address that is not https', () => {
+    const refused = /not https/;
     expect(() =>
       installWindows(WINDOWS_ASSETS, { PROCESSOR_ARCHITECTURE: 'AMD64' }, 'http'),
-    ).toThrow();
+    ).toThrow(refused);
     expect(() =>
       installWindows(
         ['crocodile-cli-windows-x64.zip'],
         { PROCESSOR_ARCHITECTURE: 'AMD64', CROC_INSTALL: 'cli' },
         'http',
       ),
-    ).toThrow();
+    ).toThrow(refused);
   });
 
   it('falls back to the installer with both builds', () => {
