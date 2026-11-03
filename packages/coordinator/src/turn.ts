@@ -75,6 +75,13 @@ export interface TurnLimits {
   controlBurst: number;
   /** …and per second after that. Requests over it go unanswered. */
   controlPerSecond: number;
+  /**
+   * Answers sent without the request having been signed (a binding, a challenge) to one source
+   * address at once… A source address can be forged, so what is sent to it has to be capped.
+   */
+  answerBurst: number;
+  /** …and per second after that. Requests over it go unanswered. */
+  answerPerSecond: number;
 }
 
 export const defaultTurnLimits: TurnLimits = {
@@ -86,7 +93,12 @@ export const defaultTurnLimits: TurnLimits = {
   maxChannels: 64,
   controlBurst: 100,
   controlPerSecond: 20,
+  answerBurst: 30,
+  answerPerSecond: 10,
 };
+
+/** Source addresses whose answers are counted at once; the oldest are forgotten first. */
+const MAX_ANSWERED_SOURCES = 50_000;
 
 /** How long a permission lasts without renewal, and a channel binding (RFC 8656). */
 const PERMISSION_MS = 300_000;
@@ -335,7 +347,25 @@ export interface TurnServerOptions {
    * or home network. Only for LAN-only deployments and tests.
    */
   allowPrivatePeers?: boolean;
+  /**
+   * Addresses of this machine the server cannot find out itself, never valid relay peers: the
+   * public address of a router that forwards to it, when `relayIp` is a proxy's or a CDN's.
+   */
+  ownAddresses?: string[];
   log?: (msg: string, extra?: Record<string, unknown>) => void;
+}
+
+/**
+ * `"203.0.113.7, 2001:db8::1"` → the addresses, one spelling each; throws on anything that is not
+ * an address (a typo, a network written with `/`, a name): it would otherwise protect nothing.
+ */
+export function parseAddressList(entries: string[]): string[] {
+  return entries.map((entry) => {
+    const addr = canonicalIp(entry);
+    if (!addr)
+      throw new Error(`"${entry}" is not an IP address (one address, not a network or a name)`);
+    return addr;
+  });
 }
 
 /** `"49160-49259"` → `{ min: 49160, max: 49259 }`; throws on anything else. */
@@ -396,6 +426,19 @@ const FORBIDDEN_PEERS = (() => {
  * IPv6), everything else as compressed lowercase IPv6. Null if not an IP.
  */
 export function canonicalIp(address: string): string | null {
+  if (isIPv4(address)) return address;
+  const kept = canonicalCache.get(address);
+  if (kept !== undefined) return kept;
+  const out = canonicalIpUncached(address);
+  if (canonicalCache.size >= 2048) canonicalCache.clear();
+  canonicalCache.set(address, out);
+  return out;
+}
+
+/** What `canonicalIp` found for addresses it has been asked about lately (it is on the path of every packet). */
+const canonicalCache = new Map<string, string | null>();
+
+function canonicalIpUncached(address: string): string | null {
   const addr = address.replace(/^\[|\]$/g, '').replace(/%.*$/, '');
   if (isIPv4(addr)) return addr;
   if (isIP(addr) !== 6) return null;
@@ -414,6 +457,14 @@ export function canonicalIp(address: string): string | null {
  */
 function addrKey(address: string): string {
   return canonicalIp(address) ?? address;
+}
+
+/** What counts as one source: an IPv4 address, or the /64 of an IPv6 address. */
+function sourceKey(address: string): string {
+  const addr = canonicalIp(address);
+  if (!addr) return address;
+  if (isIPv4(addr)) return addr;
+  return `${ipv6Bytes(addr).subarray(0, 8).toString('hex')}::/64`;
 }
 
 export function isForbiddenPeerAddress(address: string, own: ReadonlySet<string> = new Set()) {
@@ -454,9 +505,10 @@ export class TurnServer {
       }
     }
     if (this.sockets.length === 0) throw new Error('could not bind any UDP socket');
-    this.own = new Set(
-      [...localAddresses(true), this.opts.relayIp].flatMap((a) => canonicalIp(a) ?? []),
-    );
+    this.own = new Set([
+      ...[...localAddresses(true), this.opts.relayIp].flatMap((a) => canonicalIp(a) ?? []),
+      ...parseAddressList(this.opts.ownAddresses ?? []),
+    ]);
     this.port = port;
     this.sweep = setInterval(() => this.expire(), 2000);
     this.sweep.unref?.();
@@ -525,22 +577,27 @@ export class TurnServer {
     return null;
   }
 
-  private nonce(): string {
+  /**
+   * A nonce is given to one source address (the port may change behind a NAT): a signed request
+   * copied by someone on the path does not serve from their own address, where it would make an
+   * allocation of the user's and push out their real one.
+   */
+  private nonce(address: string): string {
     const ts = Math.floor(Date.now() / 1000).toString(16);
-    const mac = createHmac('sha1', this.opts.secret)
-      .update(`nonce:${ts}`)
-      .digest('hex')
-      .slice(0, 16);
-    return `${ts}${mac}`;
+    return `${ts}${this.nonceMac(ts, address)}`;
   }
 
-  private nonceValid(nonce: string): 'ok' | 'stale' | 'bad' {
-    const ts = nonce.slice(0, -16);
-    const mac = createHmac('sha1', this.opts.secret)
-      .update(`nonce:${ts}`)
+  private nonceMac(ts: string, address: string): string {
+    return createHmac('sha1', this.opts.secret)
+      .update(`nonce:${ts}:${addrKey(address)}`)
       .digest('hex')
       .slice(0, 16);
-    if (mac !== nonce.slice(-16)) return 'bad';
+  }
+
+  private nonceValid(nonce: string, address: string): 'ok' | 'stale' {
+    const ts = nonce.slice(0, -16);
+    const mac = this.nonceMac(ts, address);
+    if (mac !== nonce.slice(-16)) return 'stale';
     return Date.now() / 1000 - parseInt(ts, 16) > 600 ? 'stale' : 'ok';
   }
 
@@ -552,24 +609,30 @@ export class TurnServer {
   ): { key: Buffer; userId: string; grantExpiresAt: number } | null {
     const username = attrOf(m, ATTR.username)?.toString('utf8');
     const nonce = attrOf(m, ATTR.nonce)?.toString('utf8');
-    const challenge = (code: number, reason: string) =>
-      this.reply(via, m, rinfo, CLASS.error, [
-        errorAttr(code, reason),
-        { type: ATTR.realm, value: Buffer.from(REALM) },
-        { type: ATTR.nonce, value: Buffer.from(this.nonce()) },
-      ]);
-    if (!username || !nonce || !attrOf(m, ATTR.messageIntegrity)) {
-      challenge(401, 'Unauthorized');
-      return null;
-    }
-    const nv = this.nonceValid(nonce);
-    if (nv === 'stale') {
-      challenge(438, 'Stale Nonce');
-      return null;
-    }
-    const match = username.match(/^(\d+):([a-z2-7]{8,64})$/);
+    // `counted`: whether the answer is one of those capped per source address (see `reply`).
+    const challenge = (code: number, reason: string, counted = true) =>
+      this.reply(
+        via,
+        m,
+        rinfo,
+        CLASS.error,
+        [
+          errorAttr(code, reason),
+          { type: ATTR.realm, value: Buffer.from(REALM) },
+          { type: ATTR.nonce, value: Buffer.from(this.nonce(rinfo.address)) },
+        ],
+        undefined,
+        counted,
+      );
+    const match = username?.match(/^(\d+):([a-z2-7]{8,64})$/);
     const written = match ? Number(match[1]) * 1000 : 0;
-    if (nv === 'bad' || !match || this.grantEnd(match[2]!, written) < Date.now()) {
+    if (
+      !username ||
+      !nonce ||
+      !attrOf(m, ATTR.messageIntegrity) ||
+      !match ||
+      this.grantEnd(match[2]!, written) < Date.now()
+    ) {
       challenge(401, 'Unauthorized');
       return null;
     }
@@ -577,6 +640,13 @@ export class TurnServer {
     const key = createHash('md5').update(`${username}:${REALM}:${password}`).digest();
     if (!verifyIntegrity(m, key)) {
       challenge(401, 'Unauthorized');
+      return null;
+    }
+    // Signed by the user, so from someone who holds their credentials, who is not to be shut out
+    // because a nonce ran out or was given to another address (a client whose address changed):
+    // the answer is smaller than the request, so it is not counted.
+    if (this.nonceValid(nonce, rinfo.address) !== 'ok') {
+      challenge(438, 'Stale Nonce', false);
       return null;
     }
     return { key, userId: match[2]!, grantExpiresAt: written };
@@ -591,15 +661,43 @@ export class TurnServer {
     return Math.max(credentialExpiry, this.opts.grantEnd?.(userId) ?? 0);
   }
 
-  private reply(via: Socket, m: Msg, rinfo: RemoteInfo, cls: number, attrs: Attr[], key?: Buffer) {
-    const out = encodeStun(
-      m.method,
-      cls,
-      m.txId,
-      [...attrs, { type: ATTR.software, value: Buffer.from('crocodile') }],
-      key,
+  private reply(
+    via: Socket,
+    m: Msg,
+    rinfo: RemoteInfo,
+    cls: number,
+    attrs: Attr[],
+    key?: Buffer,
+    counted = !key,
+  ) {
+    // Anyone can write any source address on a request, and what goes back to it is larger than
+    // the request: unless it answers a request that was signed, only so many answers go to one
+    // address.
+    if (counted && !this.mayAnswer(rinfo.address)) return;
+    via.send(encodeStun(m.method, cls, m.txId, attrs, key), rinfo.port, rinfo.address);
+  }
+
+  /** Counts answers by source address (an IPv6 /64 is one source), see `answerBurst`. */
+  private answered = new Map<string, { tokens: number; at: number }>();
+
+  private mayAnswer(address: string): boolean {
+    const now = Date.now();
+    const key = sourceKey(address);
+    const seen = this.answered.get(key);
+    const tokens = Math.min(
+      this.limits.answerBurst,
+      (seen?.tokens ?? this.limits.answerBurst) +
+        (seen ? ((now - seen.at) / 1000) * this.limits.answerPerSecond : 0),
     );
-    via.send(out, rinfo.port, rinfo.address);
+    this.answered.delete(key);
+    if (tokens < 1) {
+      this.answered.set(key, { tokens, at: now });
+      return false;
+    }
+    this.answered.set(key, { tokens: tokens - 1, at: now });
+    while (this.answered.size > MAX_ANSWERED_SOURCES)
+      this.answered.delete(this.answered.keys().next().value!);
+    return true;
   }
 
   private onClientPacket(via: Socket, buf: Buffer, rinfo: RemoteInfo) {
@@ -923,6 +1021,9 @@ export class TurnServer {
 
   private expire() {
     const now = Date.now();
+    // A source that has been quiet long enough for its count to be full again is not kept.
+    const refilled = (this.limits.answerBurst / this.limits.answerPerSecond) * 1000;
+    for (const [key, v] of this.answered) if (now - v.at > refilled) this.answered.delete(key);
     for (const a of [...this.allocations.values()]) {
       if (a.expiresAt < now || this.grantEnd(a.userId, a.grantExpiresAt) < now) {
         this.remove(a);

@@ -176,6 +176,14 @@ picture size.
 
 ## Known gaps
 
+- The relay on a server's UDP port answers requests that are not signed (a STUN
+  binding, a first challenge) only so many times a second to one source address
+  (an IPv6 /64 counts as one), so it is of no use for bouncing traffic at a
+  forged address. The same cap means someone who forges a user's address, or
+  shares it, can keep that user from starting a relayed connection while they
+  keep it up; connections already set up, and requests the user signed, are
+  not affected. A signed request can be copied by someone on the path, who can
+  use it only from the same address.
 - A server takes the address another server gives in its own signed beacon, and
   dials it. Any server that joins the mesh can therefore make the others try to
   connect to an http or https address it chooses (a home or internal one too:

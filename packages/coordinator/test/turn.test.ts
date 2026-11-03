@@ -7,6 +7,7 @@ import {
   canonicalIp,
   encodeStun,
   isForbiddenPeerAddress,
+  parseAddressList,
   parseStun,
   parseXorAddress,
   xorAddress,
@@ -625,5 +626,181 @@ describe('TURN relay', () => {
     const answered = c.replies.length - before;
     expect(answered).toBeGreaterThan(0);
     expect(answered).toBeLessThanOrEqual(7);
+  });
+
+  it('answers only so many unsigned requests a second to one address, and says nothing of itself', async () => {
+    const turn = await limitedTurn({ answerBurst: 5, answerPerSecond: 1 });
+    const sock = createSocket('udp4');
+    cleanup.push(() => sock.close());
+    const replies: Buffer[] = [];
+    sock.on('message', (b) => replies.push(b));
+    await new Promise<void>((r) => sock.bind(0, '127.0.0.1', r));
+    // A binding is answered with the address it came from (and names no software).
+    const tx = randomBytes(12);
+    sock.send(encodeStun(0x001, 0, tx, []), turn.port, '127.0.0.1');
+    const first = await waitFor(() =>
+      replies.map(parseStun).find((r): r is NonNullable<typeof r> => !!r?.txId.equals(tx)),
+    );
+    expect(first.attrs.map((a) => a.type)).toContain(0x0020);
+    expect(first.attrs.map((a) => a.type)).not.toContain(0x8022);
+    // A flood of them, or of requests that are only turned away, is answered a few times.
+    for (let i = 0; i < 60; i++) {
+      sock.send(encodeStun(0x001, 0, randomBytes(12), []), turn.port, '127.0.0.1');
+      sock.send(encodeStun(0x003, 0, randomBytes(12), []), turn.port, '127.0.0.1');
+    }
+    await new Promise((r) => setTimeout(r, 400));
+    expect(replies.length).toBeGreaterThan(1);
+    expect(replies.length).toBeLessThanOrEqual(7);
+  });
+
+  it('counts the addresses of one IPv6 /64 as one source', () => {
+    const turn = new TurnServer({
+      port: 0,
+      relayIp: '127.0.0.1',
+      secret: randomBytes(32),
+      limits: { answerBurst: 2, answerPerSecond: 0.001 },
+    }) as unknown as { mayAnswer(address: string): boolean };
+    expect(turn.mayAnswer('2001:db8:1:2::1')).toBe(true);
+    expect(turn.mayAnswer('2001:db8:1:2:ffff::7')).toBe(true);
+    expect(turn.mayAnswer('2001:db8:1:2::9')).toBe(false);
+    // Another /64, and an IPv4 address, have counts of their own.
+    expect(turn.mayAnswer('2001:db8:1:3::1')).toBe(true);
+    expect(turn.mayAnswer('192.0.2.1')).toBe(true);
+    expect(turn.mayAnswer('::ffff:192.0.2.1')).toBe(true);
+    expect(turn.mayAnswer('192.0.2.1')).toBe(false);
+  });
+
+  it('gives a nonce to one address, so a signed request copied elsewhere is challenged', async () => {
+    const turn = await limitedTurn({});
+    const c = await turnClient(turn);
+    const nonce = c.auth.find((a) => a.type === 0x0015)!.value.toString();
+    const inner = turn as unknown as { nonceValid(nonce: string, address: string): string };
+    expect(inner.nonceValid(nonce, '127.0.0.1')).toBe('ok');
+    // The port may change behind a NAT, the address does not.
+    expect(inner.nonceValid(nonce, '127.0.0.2')).toBe('stale');
+    expect(inner.nonceValid(nonce, '::ffff:127.0.0.1')).toBe('ok');
+    // Sent from here, the Allocate is served.
+    expect(await allocate(c)).toBe(0);
+  });
+
+  it('never relays to an address it was told is its own', async () => {
+    const turn = await new TurnServer({
+      port: 0,
+      host: '127.0.0.1',
+      relayIp: '127.0.0.1',
+      secret: randomBytes(32),
+      ownAddresses: ['8.8.4.4', '2606:4700::1111'],
+    }).start();
+    cleanup.push(() => turn.stop());
+    const c = await turnClient(turn);
+    expect(await allocate(c)).toBe(0);
+    expect(await permit(c, ['8.8.4.4'])).toBe(403);
+    expect(await permit(c, ['::ffff:8.8.4.4'])).toBe(403);
+    expect(await permit(c, ['2606:4700::1111'])).toBe(403);
+    expect(await permit(c, ['8.8.8.8'])).toBe(0);
+  });
+
+  it('does not keep a count for a source that has gone quiet, nor more than a fixed number of them', () => {
+    const make = (limits: Record<string, number>) =>
+      new TurnServer({
+        port: 0,
+        relayIp: '127.0.0.1',
+        secret: randomBytes(32),
+        limits,
+      }) as unknown as {
+        mayAnswer(address: string): boolean;
+        expire(): void;
+        answered: Map<string, unknown>;
+      };
+    const quiet = make({ answerBurst: 2, answerPerSecond: 1000 });
+    quiet.mayAnswer('192.0.2.1');
+    expect(quiet.answered.size).toBe(1);
+    quiet.expire();
+    expect(quiet.answered.size).toBe(1);
+    return new Promise<void>((resolve) =>
+      setTimeout(() => {
+        quiet.expire();
+        expect(quiet.answered.size).toBe(0);
+        // Past the number kept, the oldest is forgotten (and counts from the start again).
+        const many = make({ answerBurst: 1, answerPerSecond: 0.001 });
+        expect(many.mayAnswer('10.0.0.1')).toBe(true);
+        expect(many.mayAnswer('10.0.0.1')).toBe(false);
+        for (let i = 0; i < 50_000; i++)
+          many.mayAnswer(`11.${(i >> 16) & 255}.${(i >> 8) & 255}.${i & 255}`);
+        expect(many.answered.size).toBe(50_000);
+        expect(many.mayAnswer('10.0.0.1')).toBe(true);
+        resolve();
+      }, 20),
+    );
+  });
+
+  it('still answers a signed request whose nonce ran out, however busy its address is', async () => {
+    // One answer for an address, and no more: the client's first challenge takes it.
+    const turn = await limitedTurn({ answerBurst: 1, answerPerSecond: 0.001 });
+    const c = await turnClient(turn);
+    const inner = turn as unknown as { nonceMac(ts: string, address: string): string };
+    const old = Math.floor(Date.now() / 1000 - 700).toString(16);
+    const stale = { type: 0x0015, value: Buffer.from(`${old}${inner.nonceMac(old, '127.0.0.1')}`) };
+    const signed = (nonce: { type: number; value: Buffer }, key = c.key) => {
+      const tx = randomBytes(12);
+      c.send(0x003, tx, [c.transport, ...c.auth.filter((a) => a.type !== 0x0015), nonce], key);
+      return c.answer(tx);
+    };
+    const code = (m: { attrs: { type: number; value: Buffer }[] }) => {
+      const err = m.attrs.find((a) => a.type === 0x0009)?.value;
+      return err ? err[2]! * 100 + err[3]! : 0;
+    };
+    // Signed, with a nonce that ran out, or one that was never given: told to take a new one.
+    const answered = await signed(stale);
+    expect(code(answered)).toBe(438);
+    expect(answered.attrs.some((a) => a.type === 0x0015)).toBe(true);
+    expect(code(await signed({ type: 0x0015, value: Buffer.from('x'.repeat(30)) }))).toBe(438);
+    // With the new nonce it is served.
+    const fresh = answered.attrs.find((a) => a.type === 0x0015)!;
+    expect(code(await signed(fresh))).toBe(0);
+    // Not signed by the user, it is one of the answers counted, and there are none left.
+    const before = c.replies.length;
+    const wrong = createHash('md5').update('not the key').digest();
+    for (let i = 0; i < 5; i++) {
+      const tx = randomBytes(12);
+      c.send(0x003, tx, [c.transport, ...c.auth.filter((a) => a.type !== 0x0015), fresh], wrong);
+    }
+    await new Promise((r) => setTimeout(r, 300));
+    expect(c.replies.length).toBe(before);
+  });
+
+  it('refuses an address list that has anything but addresses in it', () => {
+    expect(
+      parseAddressList(['203.0.113.7', '2001:DB8::1', '[2001:db8::2]', '::ffff:198.51.100.1']),
+    ).toEqual(['203.0.113.7', '2001:db8::1', '2001:db8::2', '198.51.100.1']);
+    for (const bad of [
+      '203.0.113.0/24',
+      'router.example.org',
+      '203.0.113',
+      '',
+      ' ',
+      '2001:db8::/32',
+    ])
+      expect(() => parseAddressList([bad]), bad).toThrow(/not an IP address/);
+    // A server given one does not start with a protection that would do nothing.
+    return expect(
+      new TurnServer({
+        port: 0,
+        host: '127.0.0.1',
+        relayIp: '127.0.0.1',
+        secret: randomBytes(32),
+        ownAddresses: ['203.0.113.0/24'],
+      }).start(),
+    ).rejects.toThrow(/not an IP address/);
+  });
+
+  it('spells an address the same however often and however many it has been asked about', () => {
+    expect(canonicalIp('2001:DB8:0:0:0:0:0:1')).toBe('2001:db8::1');
+    for (let i = 0; i < 5000; i++) canonicalIp(`2001:db8:${i.toString(16)}::1`);
+    expect(canonicalIp('2001:db8:0:0:0:0:0:1')).toBe('2001:db8::1');
+    expect(canonicalIp('2001:DB8:0:0:0:0:0:1')).toBe('2001:db8::1');
+    expect(canonicalIp('::ffff:8.8.8.8')).toBe('8.8.8.8');
+    expect(canonicalIp('not-an-ip')).toBeNull();
+    expect(canonicalIp('not-an-ip')).toBeNull();
   });
 });

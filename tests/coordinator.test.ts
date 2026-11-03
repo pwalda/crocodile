@@ -3388,4 +3388,15 @@ describe('a roster that arrives before its space', () => {
     expect(c.records.get(listed.record.key)).toBeDefined();
     expect(c.records.pendingCount).toBe(0);
   });
+
+  it("tells the relay which other addresses are the machine's own", async () => {
+    const coord = await server({
+      stunPort: 0,
+      relay: { enabled: true, maxUsers: 5, ownAddresses: ['8.8.4.4', '2606:4700::1111'] },
+    });
+    const turn = (coord as unknown as { turn: { own: Set<string> } }).turn;
+    expect(turn.own.has('8.8.4.4')).toBe(true);
+    expect(turn.own.has('2606:4700::1111')).toBe(true);
+    expect(turn.own.has('8.8.8.8')).toBe(false);
+  });
 });
