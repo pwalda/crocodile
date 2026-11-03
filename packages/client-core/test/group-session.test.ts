@@ -397,6 +397,66 @@ describe('group session', () => {
     expect(s.relayGrant).not.toBeNull();
   });
 
+  it('takes the state of a room it joins again even when the room started over at an earlier epoch', async () => {
+    const other = 'bbbbbbbbbbbbbbbbbbbbbbbbbb.dev1';
+    const { s } = session(
+      async () => grant(60_000),
+      async (type) => (type === 'session.join' ? { state: state(me, 0) } : {}),
+    );
+    s.applyState(state(other, 7));
+    await s.leave();
+    // Everyone left, the room is gone, and joining makes a new one.
+    await s.join();
+    expect(s.state?.epoch).toBe(0);
+    expect(s.isHost).toBe(true);
+  });
+
+  it('takes the state of a room that started over at an earlier epoch when it joins on a new connection', async () => {
+    const other = 'bbbbbbbbbbbbbbbbbbbbbbbbbb.dev1';
+    const { s } = session(
+      async () => grant(60_000),
+      async (type) => (type === 'session.join' ? { state: state(me, 0) } : {}),
+    );
+    s.applyState(state(other, 7));
+    s.forgetSeen();
+    await s.join({ fresh: true });
+    expect(s.state?.epoch).toBe(0);
+    expect(s.isHost).toBe(true);
+  });
+
+  it('does not let the answer to its join undo a newer state that was pushed while the join was on its way', async () => {
+    const other = 'bbbbbbbbbbbbbbbbbbbbbbbbbb.dev1';
+    let answer!: (r: unknown) => void;
+    const { s } = session(
+      async () => grant(60_000),
+      (type) =>
+        type === 'session.join'
+          ? new Promise((resolve) => (answer = resolve))
+          : Promise.resolve({}),
+    );
+    s.applyState(state(other, 7));
+    const joining = s.join({ fresh: true });
+    await waitFor(() => typeof answer === 'function');
+    s.applyState(state(other, 9));
+    answer({ state: state(other, 8) });
+    await joining;
+    expect(s.state?.epoch).toBe(9);
+  });
+
+  it('still refuses a push of an earlier epoch than the one it holds', () => {
+    const { s } = session(async () => grant(60_000));
+    s.applyState(state('bbbbbbbbbbbbbbbbbbbbbbbbbb.dev1', 7));
+    s.applyState(state(me, 3));
+    expect(s.state?.epoch).toBe(7);
+  });
+
+  it('keeps what it held of a room it left until it joins again', async () => {
+    const { s } = session(async () => grant(60_000));
+    s.applyState(state('bbbbbbbbbbbbbbbbbbbbbbbbbb.dev1', 7));
+    await s.leave();
+    expect(s.state?.epoch).toBe(7);
+  });
+
   it('does not keep a grant that arrives after the session was left', async () => {
     const { s } = session(async () => {
       await wait(30);
