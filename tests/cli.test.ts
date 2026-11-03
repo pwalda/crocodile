@@ -166,9 +166,7 @@ describe('crocodile (command line)', () => {
     expect(shown).not.toMatch(/[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/);
     expect(bob.err.join('\n')).toContain('al?[31m?]0;pwned?ice Saved /x#');
     // Its name would not be found again as shown, so the hint names the account instead.
-    expect(bob.err.join('\n')).toMatch(
-      /Run: get --from [a-z2-7]{26}\n|Run: get --from [a-z2-7]{26}$/,
-    );
+    expect(bob.err.join('\n')).toMatch(/Run: get --from [a-z2-7]{26}$/m);
     // The name does not start a line of its own.
     expect([...alice.err, ...bob.out, ...bob.err].some((l) => l.startsWith('Saved'))).toBe(false);
   }, 60_000);
