@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createIdentity, signMailProof, signRecord } from '@crocodile/crypto';
 import { recordKey, sessionIds } from '@crocodile/protocol';
 import type { Coordinator } from '@crocodile/coordinator';
-import { KeyedLimiter, addressKey } from '../packages/coordinator/src/util';
+import { KeyedLimiter, addressKey, isPrivateAddress } from '../packages/coordinator/src/util';
 import { FRAMES_BURST } from '../packages/coordinator/src/mesh';
 import { caps, connectUser, meshLinkTo, startCoordinator, waitFor, type TestUser } from './helpers';
 
@@ -59,6 +59,27 @@ describe('guesses at a device link code', () => {
     expect(await guess(fresh)).toMatch(/too many attempts/);
   });
 
+  it('say once, when the address is a local one, that a proxy has to be trusted', async () => {
+    const c = await server();
+    const warn = vi.spyOn(c.log, 'warn');
+    for (let i = 0; i < 40; i++) c.takeLinkClaim('127.0.0.1');
+    expect(c.takeLinkClaim('127.0.0.1')).toBe(false);
+    expect(warn.mock.calls.filter(([m]) => /--trust-proxy/.test(m))).toHaveLength(1);
+    // A connection with no address has its own budget only.
+    for (let i = 0; i < 40; i++) expect(c.takeLinkClaim(undefined)).toBe(true);
+    // An address that is not a local one is just refused, with nothing said of proxies.
+    const open = await server();
+    const quiet = vi.spyOn(open.log, 'warn');
+    for (let i = 0; i < 40; i++) open.takeLinkClaim('203.0.113.7');
+    expect(open.takeLinkClaim('203.0.113.7')).toBe(false);
+    expect(quiet).not.toHaveBeenCalled();
+    // Trusting the proxy: the address is the client's, and nothing is said of it.
+    const behind = await server({ trustProxy: true });
+    const said = vi.spyOn(behind.log, 'warn');
+    for (let i = 0; i < 40; i++) behind.takeLinkClaim('10.0.0.2');
+    expect(said).not.toHaveBeenCalled();
+  });
+
   it('still go through while the address has some left', async () => {
     const c = await server();
     const u = await user(c);
@@ -83,6 +104,37 @@ describe('what an address is counted as', () => {
     expect(addressKey('::1')).toBe('0:0:0:0');
     expect(addressKey('2001:db8::')).toBe('2001:db8:0:0');
     expect(addressKey(undefined)).toBe('');
+  });
+
+  it('is the IPv4 address in whatever way it is written inside an IPv6 one', () => {
+    for (const ip of [
+      '::ffff:203.0.113.7',
+      '::ffff:cb00:7107',
+      '0:0:0:0:0:ffff:203.0.113.7',
+      '0:0:0:0:0:FFFF:CB00:7107',
+      '64:ff9b::203.0.113.7',
+      '64:ff9b::cb00:7107',
+    ])
+      expect(addressKey(ip), ip).toBe('203.0.113.7');
+    // Not mapped, so its /64.
+    expect(addressKey('64:ff9b:1::cb00:7107')).toBe('64:ff9b:1:0');
+    expect(addressKey('not an address')).toBe('not an address');
+  });
+
+  it("is private when it is this machine's or on a private network", () => {
+    for (const ip of [
+      '127.0.0.1',
+      '::1',
+      '::ffff:127.0.0.1',
+      '10.1.2.3',
+      '172.17.0.2',
+      '192.168.1.5',
+      'fd12:3456::1',
+      'fe80::1',
+    ])
+      expect(isPrivateAddress(ip), ip).toBe(true);
+    for (const ip of ['203.0.113.7', '172.32.0.1', '2001:db8::1'])
+      expect(isPrivateAddress(ip), ip).toBe(false);
   });
 });
 
@@ -162,12 +214,26 @@ describe('mail requests that are passed on to the mesh', () => {
     expect(flood).not.toHaveBeenCalled();
   });
 
-  it('are held to a budget of their own, apart from sending mail', async () => {
-    const { alice } = await setup();
+  it('are passed on within a budget of their own, and always answered here', async () => {
+    const { c, alice, flood } = await setup();
+    const proof = signMailProof(alice.identity, {
+      t: 'mail_fetch',
+      peer: alice.conn.peer,
+      server: c.info.id,
+    });
     const results: string[] = [];
-    for (let i = 0; i < 60; i++) results.push(await answer(alice, 'mail.fetch'));
-    expect(results.filter((r) => /too fast/.test(r)).length).toBeGreaterThan(0);
-    expect(results.filter((r) => r === 'ok').length).toBeGreaterThanOrEqual(50);
+    for (let i = 0; i < 70; i++) results.push(await answer(alice, 'mail.fetch', { proof }));
+    // Never refused, but asked of the mesh for only so many.
+    expect(results.every((r) => r === 'ok')).toBe(true);
+    expect(flood.mock.calls.length).toBeGreaterThanOrEqual(50);
+    expect(flood.mock.calls.length).toBeLessThan(60);
+    // An acknowledgement over the budget still deletes what is held here.
+    const ids = ['m1'];
+    const ack = signMailProof(alice.identity, { t: 'mail_ack', peer: alice.conn.peer, ids });
+    const deleted = vi.spyOn(c.store, 'mailDelete');
+    expect(await answer(alice, 'mail.ack', { ids, proof: ack })).toBe('ok');
+    expect(deleted).toHaveBeenCalledWith(alice.conn.peer, ids);
+    expect(flood).toHaveBeenCalledTimes(flood.mock.calls.length);
     // Sending is not held up by it.
     expect(await answer(alice, 'mail.put', { items: [] })).not.toMatch(/too fast/);
   });
@@ -280,6 +346,28 @@ describe('invitations to a conversation', () => {
   });
 });
 
+describe('the invitations a server remembers', () => {
+  it('are so many, the oldest dropped first, and the cooldown still holds for a new one', async () => {
+    const c = await server();
+    const invited = (c.sessions as unknown as { invited: Map<string, number> }).invited;
+    const now = Date.now();
+    for (let i = 0; i < 100_000; i++) invited.set(`dm:x${i}|y`, now);
+    const alice = await user(c);
+    const bob = await user(c);
+    const got: unknown[] = [];
+    bob.conn.on('session_invite', (d) => got.push(d));
+    const sessionId = sessionIds.dm(alice.identity.userId, bob.identity.userId);
+    await alice.conn.request('session.join', { sessionId, caps: caps() });
+    await waitFor(() => got.length === 1, 3000, 'invitation');
+    expect(invited.size).toBe(100_000);
+    expect(invited.has('dm:x0|y')).toBe(false);
+    await alice.conn.request('session.leave', { sessionId });
+    await alice.conn.request('session.join', { sessionId, caps: caps() });
+    await new Promise((r) => setTimeout(r, 200));
+    expect(got).toHaveLength(1);
+  });
+});
+
 describe('conversations a device is in at once', () => {
   it('are held to a number, which does not apply to a conversation it is already in, or to spaces', async () => {
     const c = await server();
@@ -298,6 +386,21 @@ describe('conversations a device is in at once', () => {
     await alice.conn.request('session.leave', { sessionId: open[1]! });
     expect(await answer(alice, 'session.join', { sessionId: dm(), caps: caps() })).toBe('ok');
     expect(c.sessions.sessionsOf(alice.conn.peer).filter((s) => s.startsWith('dm:'))).toHaveLength(
+      3,
+    );
+    // Asked for all at once, the count is not taken before the earlier ones are in.
+    const crowd = await user(c);
+    const together = await Promise.all(
+      Array.from({ length: 10 }, () =>
+        answer(crowd, 'session.join', {
+          sessionId: sessionIds.dm(crowd.identity.userId, createIdentity().userId),
+          caps: caps(),
+        }),
+      ),
+    );
+    expect(together.filter((r) => r === 'ok')).toHaveLength(3);
+    expect(together.filter((r) => /too many conversations/.test(r))).toHaveLength(7);
+    expect(c.sessions.sessionsOf(crowd.conn.peer).filter((s) => s.startsWith('dm:'))).toHaveLength(
       3,
     );
     // Another device has its own count.
@@ -359,6 +462,21 @@ describe('what a server in the mesh may send', () => {
     expect(seen.size).toBeLessThanOrEqual(200_000);
     expect(seen.has('old0')).toBe(false);
     expect(seen.has('old200499')).toBe(true);
+  });
+
+  it('forgets flood ids after ten minutes', async () => {
+    const { a, toA } = await link();
+    const seen = (a.mesh as unknown as { floodSeen: Map<string, number> }).floodSeen;
+    seen.set('ancient', Date.now() - 11 * 60_000);
+    toA.send({
+      t: 'flood',
+      id: 'fresh',
+      origin: createIdentity().userId,
+      hops: 0,
+      f: { t: 'mail_query', peer: `${createIdentity().userId}.abcdefgh` },
+    });
+    await waitFor(() => seen.has('fresh'), 3000, 'flood seen');
+    expect(seen.has('ancient')).toBe(false);
   });
 
   it('lets a server catch up on more records than one batch holds', async () => {

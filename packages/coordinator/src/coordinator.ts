@@ -42,7 +42,15 @@ import { TurnServer } from './turn';
 import { startStunServer } from './stun';
 import type { Socket } from 'node:dgram';
 import { MailboxService, defaultMailboxConfig, type MailboxConfig } from './mailbox';
-import { KeyedLimiter, cleanUrl, consoleLogger, RpcFailure, type Logger } from './util';
+import {
+  KeyedLimiter,
+  addressKey,
+  cleanUrl,
+  isPrivateAddress,
+  consoleLogger,
+  RpcFailure,
+  type Logger,
+} from './util';
 import { isIP } from 'node:net';
 import { networkInterfaces } from 'node:os';
 import { lookup } from 'node:dns/promises';
@@ -524,7 +532,23 @@ export class Coordinator {
   /** Open WebSocket connections per remote IP. */
   private connectionsByIp = new Map<string, number>();
   /** Tries at a link code by address, kept across connections (a new connection is a new start for its own budget). */
-  readonly linkClaims = new KeyedLimiter(0.5, 30);
+  private linkClaims = new KeyedLimiter(0.5, 30);
+  private warnedOfSharedAddress = false;
+
+  /** Whether a try at a link code from this address is allowed. (No address: only the connection's own budget.) */
+  takeLinkClaim(address: string | undefined): boolean {
+    if (!address) return true;
+    if (this.linkClaims.take(addressKey(address))) return true;
+    // Behind a proxy that is not trusted, everyone is the proxy's address.
+    if (!this.warnedOfSharedAddress && !this.config.trustProxy && isPrivateAddress(address)) {
+      this.warnedOfSharedAddress = true;
+      this.log.warn(
+        'tries at a device link code are counted per address, and this one is a local address: behind a reverse proxy, set --trust-proxy',
+        { address },
+      );
+    }
+    return false;
+  }
 
   /** Per-IP connection limit, so one machine cannot exhaust a (home) server. */
   private admit(

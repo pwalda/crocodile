@@ -70,8 +70,9 @@ export class KeyedLimiter {
     const now = Date.now();
     let bucket = this.buckets.get(key);
     if (!bucket) {
+      // (Looking through all of them: not for each new key while the table stays full.)
       if (this.buckets.size >= this.maxKeys) {
-        this.sweep(now);
+        if (now - this.sweptAt >= 1000) this.sweep(now);
         if (this.buckets.size >= this.maxKeys) return false;
       } else if (now - this.sweptAt > 60_000) this.sweep(now);
       this.buckets.set(key, (bucket = new RateLimiter(this.rate, this.burst)));
@@ -87,27 +88,47 @@ export class KeyedLimiter {
   }
 }
 
+/** The eight 16-bit groups of an IPv6 address (an embedded dotted IPv4 tail counts as two), or null. */
+function groupsOf(ip: string): number[] | null {
+  let text = ip;
+  const dotted = /(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(text);
+  if (dotted) {
+    const [a, b, c, d] = dotted.slice(1).map(Number) as [number, number, number, number];
+    if ([a, b, c, d].some((n) => n > 255)) return null;
+    text = `${text.slice(0, dotted.index)}${((a << 8) | b).toString(16)}:${((c << 8) | d).toString(16)}`;
+  }
+  if (isIP(text) !== 6) return null;
+  const [head = '', tail] = text.split('::');
+  const first = head === '' ? [] : head.split(':');
+  const last = tail === undefined || tail === '' ? [] : tail.split(':');
+  const middle = tail === undefined ? [] : Array<string>(8 - first.length - last.length).fill('0');
+  return [...first, ...middle, ...last].map((g) => parseInt(g, 16));
+}
+
 /**
  * What to count an address as: itself, or for IPv6 its /64, which one machine has all of and can
- * turn through at will. An IPv4 address in IPv6 form is the IPv4 address.
+ * turn through at will. An IPv4 address in IPv6 form (mapped, or behind NAT64) is the IPv4 address.
  */
 export function addressKey(ip: string | undefined): string {
   if (!ip) return '';
   const bare = ip.split('%')[0]!.toLowerCase();
-  const mapped = /^::ffff:(\d{1,3}(?:\.\d{1,3}){3})$/.exec(bare);
-  if (mapped) return mapped[1]!;
-  if (isIP(bare) !== 6) return bare;
-  const [head = '', tail] = bare.split('::');
-  const first = head === '' ? [] : head.split(':');
-  const last = tail === undefined || tail === '' ? [] : tail.split(':');
-  const groups =
-    tail === undefined
-      ? first
-      : [...first, ...Array<string>(8 - first.length - last.length).fill('0'), ...last];
-  return groups
+  const g = groupsOf(bare);
+  if (!g) return bare;
+  const v4 = () => `${g[6]! >> 8}.${g[6]! & 255}.${g[7]! >> 8}.${g[7]! & 255}`;
+  if (g.slice(0, 5).every((x) => x === 0) && g[5] === 0xffff) return v4();
+  if (g[0] === 0x64 && g[1] === 0xff9b && g.slice(2, 6).every((x) => x === 0)) return v4();
+  return g
     .slice(0, 4)
-    .map((g) => g.replace(/^0+(?=.)/, ''))
+    .map((x) => x.toString(16))
     .join(':');
+}
+
+/** Whether an address is this machine's own or on a private network (what a proxy next to us has). */
+export function isPrivateAddress(ip: string): boolean {
+  const key = addressKey(ip);
+  if (/^(127|10)\./.test(key) || /^192\.168\./.test(key) || /^172\.(1[6-9]|2\d|3[01])\./.test(key))
+    return true;
+  return key === '0:0:0:0' || /^f[cd][0-9a-f]{2}:/.test(key) || /^fe[89ab][0-9a-f]:/.test(key);
 }
 
 export function sendJson(ws: WebSocket, value: unknown): boolean {

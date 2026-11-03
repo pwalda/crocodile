@@ -804,13 +804,11 @@ export class Mesh {
     if (this.floodSeen.has(frame.id) || frame.origin === this.selfId) return;
     const now = Date.now();
     this.floodSeen.set(frame.id, now);
-    if (this.floodSeen.size > 20_000) {
-      for (const [id, at] of this.floodSeen) if (now - at > 10 * 60_000) this.floodSeen.delete(id);
-      // (Oldest first: a map keeps the order things went in.)
-      for (const id of this.floodSeen.keys()) {
-        if (this.floodSeen.size <= FLOOD_SEEN_MAX) break;
-        this.floodSeen.delete(id);
-      }
+    // Oldest first (a map keeps the order things went in): out go those past their time, and
+    // whatever is over the number kept.
+    for (const [id, at] of this.floodSeen) {
+      if (this.floodSeen.size <= FLOOD_SEEN_MAX && now - at <= 10 * 60_000) break;
+      this.floodSeen.delete(id);
     }
     if (frame.hops < FLOOD_HOPS) this.forward({ ...frame, hops: frame.hops + 1 }, from);
     const f = frame.f;
