@@ -339,12 +339,17 @@ export class GroupSession extends Emitter<GroupSessionEvents> {
     if (this.left) return;
     // What we last saw of the room, for a new owner to keep the same host (signed with the join).
     const seen = this.lastSeen;
+    const before = this.state;
     const { state } = await this.ctx.link().request('session.join', {
       sessionId: this.sessionId,
       caps,
       ...(seen ? { hint: { epoch: seen.epoch, host: seen.host, backup: seen.backup } } : {}),
     });
-    this.applyState(state);
+    // What we held before the join is of a room as it was when we left or lost the
+    // connection: it may have emptied and started over at a lower epoch since, so the
+    // answer replaces it. A push that came in while the join was on its way is newer
+    // than the answer, which then does not.
+    this.applyState(state, { answer: this.state === before });
   }
 
   /**
@@ -415,10 +420,8 @@ export class GroupSession extends Emitter<GroupSessionEvents> {
   async leave() {
     if (this.left) return;
     this.left = true;
-    // (What we saw of the room is not what it is by the time we join again: it may
-    // have emptied and started over at a lower epoch, which would be refused as old.)
+    // (What we saw of the room is not what it is by the time we join again.)
     this.lastSeen = undefined;
-    this.state = null;
     this.joining = undefined;
     clearTimeout(this.retryTimer);
     clearTimeout(this.renewTimer);
@@ -442,9 +445,9 @@ export class GroupSession extends Emitter<GroupSessionEvents> {
   // Session state from the coordinator
   // -------------------------------------------------------------------------
 
-  applyState(state: SessionState) {
+  applyState(state: SessionState, opts: { answer?: boolean } = {}) {
     if (this.left || state.id !== this.sessionId) return;
-    if (this.state && state.epoch < this.state.epoch) return;
+    if (!opts.answer && this.state && state.epoch < this.state.epoch) return;
     this.state = this.lastSeen = state;
     if (state.host === this.me) {
       if (!this.hosting || this.hosting.epoch !== state.epoch) this.startHosting(state);
