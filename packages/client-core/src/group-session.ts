@@ -415,8 +415,10 @@ export class GroupSession extends Emitter<GroupSessionEvents> {
   async leave() {
     if (this.left) return;
     this.left = true;
-    // (What we saw of the room is not what it is by the time we join again.)
+    // (What we saw of the room is not what it is by the time we join again: it may
+    // have emptied and started over at a lower epoch, which would be refused as old.)
     this.lastSeen = undefined;
+    this.state = null;
     this.joining = undefined;
     clearTimeout(this.retryTimer);
     clearTimeout(this.renewTimer);

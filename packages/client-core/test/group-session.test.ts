@@ -397,6 +397,21 @@ describe('group session', () => {
     expect(s.relayGrant).not.toBeNull();
   });
 
+  it('takes the state of a room it joins again even when the room started over at an earlier epoch', async () => {
+    const other = 'bbbbbbbbbbbbbbbbbbbbbbbbbb.dev1';
+    const { s } = session(
+      async () => grant(60_000),
+      async (type) => (type === 'session.join' ? { state: state(me, 0) } : {}),
+    );
+    s.applyState(state(other, 7));
+    await s.leave();
+    expect(s.state).toBeNull();
+    // Everyone left, the room is gone, and joining makes a new one.
+    await s.join();
+    expect(s.state?.epoch).toBe(0);
+    expect(s.isHost).toBe(true);
+  });
+
   it('does not keep a grant that arrives after the session was left', async () => {
     const { s } = session(async () => {
       await wait(30);
