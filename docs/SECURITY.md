@@ -269,6 +269,12 @@ picture size.
 - The host peer and relay operators see traffic metadata (sizes, timing,
   speaking activity); for video the host also sees frame sizes, key frames and
   picture sizes.
+- The host peer says which member each voice slot and picture tile shows, and
+  who is speaking. The sound and picture are authenticated by the key of the
+  member that made them, but a hostile host can put one member's stream in
+  another's place; the label on a tile is the host's word. What a host sends is
+  checked and bounded before it is used, so it can't make a device allocate
+  without limit.
 - Session operations are signed by the device they are for, so a server
   cannot, on its own, make a device that is on another server join, change
   or vote. What that does not cover:

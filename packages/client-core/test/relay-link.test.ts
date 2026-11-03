@@ -348,3 +348,56 @@ describe('connection to the host', () => {
     });
   });
 });
+
+describe('what the host sends', () => {
+  const peer = { id: 'p.d', muted: false, deafened: false };
+  const hello = (extra: object = {}) => ({
+    t: 'hello',
+    you: 'a.d',
+    host: 'h.d',
+    peers: [peer],
+    slots: 5,
+    ...extra,
+  });
+
+  /** Everything the link passes on after the host sent `messages`. */
+  async function heard(messages: unknown[]) {
+    const a = await open();
+    const got: unknown[] = [];
+    a.l.on('message', (m) => got.push(m));
+    for (const m of messages) a.pc().dc.onmessage?.({ data: JSON.stringify(m) });
+    return got;
+  }
+
+  it('passes on what a host sends, and only that', async () => {
+    const real = [
+      hello({ media: { video: 9, audio: 2 } }),
+      { t: 'peer_join', peer: { ...peer, voice: true, rtt: 30, camera: true } },
+      { t: 'peer_leave', peer: 'p.d' },
+      { t: 'msg', from: 'p.d', direct: true, d: { k: 'group' } },
+      { t: 'slots', map: ['p.d', null] },
+      { t: 'media', video: [null, 'p.d:camera'], audio: [null], paused: [] },
+      { t: 'speaking', users: ['p'] },
+      { t: 'pong', ts: 1 },
+    ];
+    expect(await heard(real)).toEqual(real);
+  });
+
+  it('drops a message that is not what a host sends', async () => {
+    // A host that says how many slots there are must not make this device allocate what it likes.
+    const got = await heard([
+      hello({ slots: 2_000_000_000 }),
+      hello({ slots: -1 }),
+      hello({ peers: 'many' }),
+      hello({ peers: Array.from({ length: 5000 }, () => peer) }),
+      { t: 'slots', map: new Array(5000).fill(null) },
+      { t: 'media', video: new Array(100).fill(null), audio: [], paused: [] },
+      { t: 'speaking', users: [1] },
+      { t: 'msg', from: 'p.d' },
+      { t: 'nonsense' },
+      null,
+      'text',
+    ]);
+    expect(got).toEqual([]);
+  });
+});

@@ -262,9 +262,102 @@ describe('offline delivery', () => {
       new TextEncoder().encode(JSON.stringify({ type: 'mail', messages: [message] })),
     );
     await (bob as unknown as { onMail(items: unknown[]): Promise<void> }).onMail([
-      { id: 'forged', box },
+      { id: 'forged', from: alice.userId, box, createdAt: Date.now() },
     ]);
     expect(bob.state.dmRequests).not.toContain(carol.userId);
+    expect(bodies(bob, dm)).toEqual([]);
+  });
+
+  it('confirms mail the server sent that is not well formed, and takes in the rest', async () => {
+    const { coord, bob, alice, dm } = await mailedByStranger();
+    await bob.acceptDmRequest(alice.userId);
+    await waitFor(() => coord.store.mailCount({ toUser: bob.userId }) === 0, 8000, 'acked');
+    const peer = `${bob.userId}.${bob.state.deviceId as string}`;
+    const junk = (id: string, box: string) => ({
+      id,
+      to: peer,
+      toUser: bob.userId,
+      from: alice.userId,
+      box,
+      createdAt: Date.now(),
+      expiresAt: Date.now() + 60_000,
+    });
+    // Boxes that are not boxes, and one that is cut short: nothing in them can ever be opened.
+    coord.store.mailPut(junk('junk-1', '{"v":3}'));
+    coord.store.mailPut(junk('junk-2', '"text"'));
+    coord.store.mailPut(junk('junk-3', 'null'));
+    coord.mailbox.deliverTo(peer);
+    // They are confirmed, or they would stay at the head of the queue for good.
+    await waitFor(() => coord.store.mailCount({ toUser: bob.userId }) === 0, 8000, 'junk acked');
+    expect(bodies(bob, dm)).toEqual([]);
+  });
+
+  it('keeps mail on the server when it could not be stored, and confirms what could', async () => {
+    const { coord, bob } = await mailedByStranger();
+    await waitFor(() => coord.store.mailCount({ toUser: bob.userId }) === 0, 8000, 'acked');
+    const peer = `${bob.userId}.${bob.state.deviceId as string}`;
+    // One item makes handling throw (as a failing store would): the others still go through.
+    const internals = bob as unknown as { takeMail(item: { id: string }): Promise<void> };
+    const take = internals.takeMail.bind(bob);
+    internals.takeMail = async (item) => {
+      if (item.id === 'throws') throw new Error('disk full');
+      return take(item as never);
+    };
+    const device = bob.records.get(
+      recordKey.device(bob.userId, bob.state.deviceId as string),
+    ) as SignedRecord<'device'>;
+    const box = sealToDevice(
+      bob.identity!,
+      bob.state.deviceId as string,
+      { peer, prekey: device.body.prekey },
+      new TextEncoder().encode(JSON.stringify({ type: 'ack', ids: [] })),
+    );
+    for (const id of ['ok-1', 'throws', 'ok-2'])
+      coord.store.mailPut({
+        id,
+        to: peer,
+        toUser: bob.userId,
+        from: bob.userId,
+        box: JSON.stringify(box),
+        createdAt: Date.now(),
+        expiresAt: Date.now() + 60_000,
+      });
+    coord.mailbox.deliverTo(peer);
+    await waitFor(
+      () =>
+        coord.store
+          .mailFor(peer, Date.now(), 10)
+          .map((m) => m.id)
+          .join() === 'throws',
+      8000,
+      'only the one that could not be kept is left',
+    );
+  });
+
+  it('does not take in mail from a device that was removed from its account', async () => {
+    const coord = await server();
+    const net = new FakeRelayNetwork();
+    const alice = await signUp(makeClient(net, coord), 'alice');
+    const bob0 = await signUp(makeClient(net, coord), 'bob');
+    await waitFor(() => coord.records.get(`profile:${alice.userId}`), 8000, 'profile');
+    await waitFor(
+      () => coord.store.listPrefix(`device:${bob0.userId}`, 1).length > 0,
+      8000,
+      'bob device',
+    );
+    await alice.updateSettings({ useMailbox: true });
+    // Bob is away before the conversation starts, so nothing reaches him but the mail.
+    await bob0.shutdown();
+    const dm = await alice.openDm(bob0.userId);
+    await alice.openChannel(dm);
+    await alice.sendMessage(dm, 'from a device that is then removed');
+    await waitFor(() => alice.state.messages[dm]!.find((m) => m.mailed), 15000, 'mailed');
+    // The device is removed from the account before Bob reads what it left.
+    await alice.revokeDevice(alice.state.deviceId as string);
+    await alice.shutdown();
+    const bob = await restart(net, bob0, coord);
+    await waitFor(() => coord.store.mailCount({ toUser: bob.userId }) === 0, 15000, 'acked');
+    expect(bob.state.dmRequests).not.toContain(alice.userId);
     expect(bodies(bob, dm)).toEqual([]);
   });
 

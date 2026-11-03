@@ -383,14 +383,18 @@ export interface RpcMethods {
   'mail.ack': Record<string, never>;
 }
 
-/** A mailbox item on its way to the recipient device. */
-export interface MailItem {
-  id: string;
+/**
+ * A mailbox item on its way to the recipient device. The device checks what a server hands it
+ * against this, so one malformed item can't keep the rest from being taken in or confirmed.
+ */
+export const MailItem = z.object({
+  id: z.string().max(100),
   /** Sender user id (as authenticated by the depositing server). */
-  from: string;
-  box: SealedBox;
-  createdAt: number;
-}
+  from: z.string().max(200),
+  box: SealedBox,
+  createdAt: z.number(),
+});
+export type MailItem = z.infer<typeof MailItem>;
 
 export type RpcMethod = keyof RpcMethods;
 export type RpcParamsOf<M extends RpcMethod> = z.input<(typeof RpcParams)[M]>;

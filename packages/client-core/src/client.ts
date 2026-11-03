@@ -69,7 +69,7 @@ import {
   type ChatMessage,
   type DeviceBody,
   type LinkBox,
-  type MailItem,
+  MailItem,
   SealedPayload,
   messageSession,
   utf8,
@@ -439,6 +439,8 @@ const MAX_AHEAD_MS = 5 * 60_000;
 /** Conversations from people we don't know that wait for an answer (the newest are kept). */
 const DM_REQUESTS_MAX = 50;
 /** How long direct delivery gets before an opted-in DM goes to a mailbox. */
+/** How long someone is shown as typing after their last signal. */
+const TYPING_SHOWN_MS = 6000;
 const MAIL_AFTER_MS = 5000;
 /** Plaintext bytes of messages in one mailbox box. */
 const MAIL_BOX_BYTES = 48 * 1024;
@@ -976,7 +978,7 @@ export class CrocodileClient extends Emitter<ClientEvents> {
         if (owed && needsNote(owed)) this.retryFriendNotes(FRIEND_NOTE_RETRY_MS);
       }
     });
-    link.on('mail', ({ items }) => void this.onMail(items));
+    link.on('mail', ({ items }) => void this.onMail(items).catch(() => {}));
     link.on('session', ({ state }) => this.sessions.get(state.id)?.applyState(state));
     link.on('session_renew', ({ sessionId }) => void this.sessions.get(sessionId)?.renew());
     // Taken out of the room because it did not give a new join in time: join it again.
@@ -1132,8 +1134,8 @@ export class CrocodileClient extends Emitter<ClientEvents> {
     });
   }
 
-  private onAcked(ids: string[]) {
-    const done = new Set(this.outbox.ack(ids));
+  private onAcked(sessionId: string, ids: string[]) {
+    const done = new Set(this.outbox.ack(sessionId, ids));
     if (done.size === 0) return;
     this.store.set((s) => {
       const messages = { ...s.messages };
@@ -1242,41 +1244,85 @@ export class CrocodileClient extends Emitter<ClientEvents> {
     return out.slice(0, max);
   }
 
-  /** Mail that waited on a server for this device. */
-  private async onMail(items: MailItem[]) {
+  /**
+   * Mail that waited on a server for this device. What the server hands over is checked: an item
+   * that is not well formed, or can't be opened, never will be, so it is confirmed (left on the
+   * server it would stay at the head of the queue, which is sent in batches). One that could not
+   * be kept (storage failed) is left there for the next fetch. Each item stands alone: one that
+   * throws keeps neither the others nor their confirmation from going through.
+   */
+  private async onMail(items: unknown) {
+    if (!Array.isArray(items)) return;
     const done: string[] = [];
-    for (const item of items) {
-      done.push(item.id);
-      const opened = this.openBox(item.box);
-      if (!opened) {
-        this.log('could not open mail', { id: item.id });
+    const revoked = new Map<string, Promise<boolean>>();
+    for (const raw of items) {
+      const item = MailItem.safeParse(raw);
+      if (!item.success) {
+        const id = (raw as { id?: unknown } | null)?.id;
+        this.log('mail item is not well formed');
+        if (typeof id === 'string' && id.length <= 100) done.push(id);
         continue;
       }
-      let payload: SealedPayload;
       try {
-        payload = SealedPayload.parse(JSON.parse(utf8.decode(opened.plaintext)));
-      } catch {
-        continue;
-      }
-      if (payload.type !== 'mail') continue;
-      const sender = peerIds.user(opened.from);
-      for (const m of payload.messages) {
-        if (m.author !== sender) continue;
-        const scope = parseSessionId(m.ch);
-        if (scope?.kind !== 'dm' || !scope.users.includes(this.userId)) continue;
-        const other = scope.users.find((u) => u !== this.userId) ?? this.userId;
-        if (this.state.friends.blocked.includes(other)) continue;
-        // Someone we don't know is a request, not a message: nothing of it is kept (the sender's
-        // queue still holds it, and goes through once we accept). Only the sender can ask.
-        // What another device of ours sent is our own conversation, whoever it was to.
-        if (sender !== this.userId && !this.knowsForDm(other)) {
-          if (other === sender) this.addDmRequest(other);
-          continue;
-        }
-        if (await this.acceptMessage(m.ch, m)) this.addDm(other);
+        await this.takeMail(item.data, revoked);
+        done.push(item.data.id);
+      } catch (err) {
+        this.log('mail not kept, left on the server', { id: item.data.id, err: String(err) });
       }
     }
     this.ackMail(done);
+  }
+
+  /** Whether the device mail came from has been removed from its account (as far as we can tell). */
+  private senderRemoved(peer: string, asked: Map<string, Promise<boolean>>) {
+    let known = asked.get(peer);
+    if (!known) {
+      known = (async () => {
+        if (!peer.includes('.')) return false;
+        const key = recordKey.device(peerIds.user(peer), peerIds.device(peer));
+        const res = await this.link?.request('records.get', { keys: [key] }).catch(() => null);
+        if (res) this.records.ingestAll(res.records);
+        return !!this.deviceRecord(peer)?.body.revoked;
+      })();
+      asked.set(peer, known);
+    }
+    return known;
+  }
+
+  private async takeMail(item: MailItem, asked: Map<string, Promise<boolean>>) {
+    const opened = this.openBox(item.box);
+    if (!opened) {
+      this.log('could not open mail', { id: item.id });
+      return;
+    }
+    let payload: SealedPayload;
+    try {
+      payload = SealedPayload.parse(JSON.parse(utf8.decode(opened.plaintext)));
+    } catch {
+      return;
+    }
+    if (payload.type !== 'mail') return;
+    // A device that was removed from its account is not heard from any more.
+    if (await this.senderRemoved(opened.from, asked)) {
+      this.log('ignoring mail from a removed device', { from: opened.from });
+      return;
+    }
+    const sender = peerIds.user(opened.from);
+    for (const m of payload.messages) {
+      if (m.author !== sender) continue;
+      const scope = parseSessionId(m.ch);
+      if (scope?.kind !== 'dm' || !scope.users.includes(this.userId)) continue;
+      const other = scope.users.find((u) => u !== this.userId) ?? this.userId;
+      if (this.state.friends.blocked.includes(other)) continue;
+      // Someone we don't know is a request, not a message: nothing of it is kept (the sender's
+      // queue still holds it, and goes through once we accept). Only the sender can ask.
+      // What another device of ours sent is our own conversation, whoever it was to.
+      if (sender !== this.userId && !this.knowsForDm(other)) {
+        if (other === sender) this.addDmRequest(other);
+        continue;
+      }
+      if (await this.acceptMessage(m.ch, m)) this.addDm(other);
+    }
   }
 
   private async ensureProfilePublished() {
@@ -2739,7 +2785,7 @@ export class CrocodileClient extends Emitter<ClientEvents> {
         admits: (sid, m, history) => this.admits(sid, m, history),
         outbox: {
           pending: (sid) => this.outbox.forSession(sid),
-          acked: (ids) => this.onAcked(ids),
+          acked: (sessionId, ids) => this.onAcked(sessionId, ids),
         },
         syncCursor: (ch) => this.syncCursor(ch),
         log: (m, e) => this.log(m, { session: sessionId, ...e }),
@@ -2776,10 +2822,18 @@ export class CrocodileClient extends Emitter<ClientEvents> {
     session.on('file', ({ from, payload }) => this.files?.onMessage(sessionId, from, payload));
     session.on('update', () => this.files?.sessionChanged(sessionId));
     session.on('typing', ({ userId, ch }) => {
-      const until = Date.now() + 6000;
-      this.store.set((s) => ({
-        typing: { ...s.typing, [ch]: { ...(s.typing[ch] ?? {}), [userId]: until } },
-      }));
+      const now = Date.now();
+      this.store.set((s) => {
+        // Only who is still typing is kept (an entry is shown for a few seconds), so the table
+        // follows the people typing now, not everyone who ever did.
+        const typing: ClientState['typing'] = {};
+        for (const [channel, who] of Object.entries(s.typing)) {
+          const live = Object.fromEntries(Object.entries(who).filter(([, until]) => until > now));
+          if (Object.keys(live).length) typing[channel] = live;
+        }
+        typing[ch] = { ...typing[ch], [userId]: now + TYPING_SHOWN_MS };
+        return { typing };
+      });
     });
     if (scope?.kind === 'voice') session.isVoice = true;
     this.sessions.set(sessionId, session);
