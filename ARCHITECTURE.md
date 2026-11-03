@@ -506,7 +506,14 @@ mechanisms get them everywhere they belong:
    other person has confirmed yet (`client-core/src/outbox.ts`). Whenever a
    peer who should have them appears — the other side of a DM, or the host
    or backup of a space — the queue is handed over, sealed to that device,
-   and the receiver answers with an acknowledgement that clears it. This
+   and the receiver answers with an acknowledgement that clears it. Only
+   a message the receiver kept is confirmed (one that fails its checks is
+   not). The acknowledgement clears only what was written for the session
+   it came in, and counts only from whoever was handed the message to keep:
+   the other side of a DM, the host or backup of a space (any member, when
+   we are the host). An acknowledgement from anyone else is ignored, so a
+   member can't clear what others never received; if the host has changed
+   since, the message stays and is offered again. This
    works no matter who was online when, or whose clock is ahead. Messages
    show a small clock until confirmed. A DM with undelivered messages
    re-invites the friend as soon as they come online.
@@ -526,7 +533,10 @@ recipient device (and per own other device), sealed to that device's prekey.
 The server keeps them at most `--mailbox-days` (≤ 7), enforces quotas per
 sender and recipient, and pushes them when the device connects to any server
 in the mesh (`mail_query`/`mail_ack` between servers). The recipient confirms
-with `mail.ack`, which deletes the item everywhere. Prekey secrets are deleted
+with `mail.ack`, which deletes the item everywhere: also an item that is not
+well formed or can't be opened (it never will be, and left in the queue it would
+hold up the batches behind it); one that could not be stored stays for the next
+fetch. Mail from a device that was removed from its account is dropped. Prekey secrets are deleted
 only two days after the device itself replaced them, so mail sealed to a
 device that was away for weeks can still be opened when it returns. Servers
 operated from the desktop app keep mail only if their operator enables it,

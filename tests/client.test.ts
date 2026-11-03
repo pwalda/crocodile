@@ -2915,9 +2915,9 @@ describe('channel ids belong to one space', () => {
     await bob.openChannel(ch);
     await alice.openChannel(ch);
     const confirmed: string[] = [];
-    const holder = alice as unknown as { onAcked(ids: string[]): void };
+    const holder = alice as unknown as { onAcked(sessionId: string, ids: string[]): void };
     const onAcked = holder.onAcked.bind(alice);
-    holder.onAcked = (ids) => (confirmed.push(...ids), onAcked(ids));
+    holder.onAcked = (sid, ids) => (confirmed.push(...ids), onAcked(sid, ids));
     // A message from an older version, sent live: Bob refuses it.
     const old = createChatMessage(alice.identity!, { ch, body: 'old' });
     const link = (
@@ -3070,6 +3070,29 @@ describe('message ids', () => {
     const [, edit] = await alice.platform.messages.page(ch, { limit: 10 });
     expect(await accept(session, edit!)).toBe(true);
     expect(bodies(bob, ch).sort()).toEqual(['alice, edited', 'from mallory']);
+  });
+
+  it('forgets who was typing once their indicator has run out', async () => {
+    const coord = await server();
+    const net = new FakeRelayNetwork();
+    const alice = await signUp(makeClient(net, coord), 'alice');
+    const spaceId = await alice.createSpace('Swamp');
+    const sid = sessionIds.space(spaceId);
+    const ch = channelOf(alice, spaceId);
+    const session = (
+      alice as unknown as { ensureSession(id: string): { emit(ev: 'typing', d: object): void } }
+    ).ensureSession(sid);
+    vi.useFakeTimers({ toFake: ['Date'] });
+    try {
+      for (let i = 0; i < 50; i++) session.emit('typing', { userId: `user${i}`, ch: `ch${i}` });
+      expect(Object.keys(alice.state.typing)).toHaveLength(50);
+      // Later, one more is typing: those whose time ran out are not kept.
+      vi.setSystemTime(Date.now() + 60_000);
+      session.emit('typing', { userId: 'someone', ch });
+      expect(alice.state.typing).toEqual({ [ch]: { someone: expect.any(Number) } });
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("does not take another author's message for one of its own waiting to be delivered", async () => {

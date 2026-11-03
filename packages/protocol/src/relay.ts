@@ -69,32 +69,67 @@ export interface PeerState {
   screen?: { audio: boolean };
 }
 
-export type RelayToClient =
-  | {
-      t: 'hello';
-      you: string;
-      host: string;
-      peers: PeerState[];
-      slots: number;
-      /** The host can carry video: slots for cameras and screens, and for screens' sound. */
-      media?: { video: number; audio: number };
-    }
+/**
+ * What a host relay sends a member. A member takes in only what fits: the host is chosen by the
+ * session, not trusted, so sizes are bounded here (a host can't make a member allocate what it
+ * likes). Ids are only length-bounded, since the relay stamps the ones it proved itself.
+ */
+const relayId = z.string().max(200);
+/** At most the slots a session can ask for (`session.join`), and as many video/sound slots as fit. */
+const RELAY_MAX_SLOTS = 1000;
+const RELAY_MAX_MEDIA_SLOTS = 64;
+
+const RelayPeerState = z.object({
+  id: relayId,
+  muted: z.boolean(),
+  deafened: z.boolean(),
+  voice: z.boolean().optional(),
+  rtt: z.number().optional(),
+  camera: z.boolean().optional(),
+  screen: z.object({ audio: z.boolean() }).optional(),
+});
+
+export const RelayToClient = z.discriminatedUnion('t', [
+  z.object({
+    t: z.literal('hello'),
+    you: relayId,
+    host: relayId,
+    peers: z.array(RelayPeerState).max(LIMITS.sessionMembersMax * 4),
+    slots: z.number().int().min(0).max(RELAY_MAX_SLOTS),
+    /** The host can carry video: slots for cameras and screens, and for screens' sound. */
+    media: z
+      .object({
+        video: z.number().int().min(0).max(RELAY_MAX_MEDIA_SLOTS),
+        audio: z.number().int().min(0).max(RELAY_MAX_MEDIA_SLOTS),
+      })
+      .optional(),
+  }),
   /** The host's answer to `renegotiate`. */
-  | { t: 'answer'; sdp: string }
+  z.object({ t: z.literal('answer'), sdp: z.string().max(64 * 1024) }),
   /**
    * Which stream each of this member's video slots and screen-sound slots
    * carries now, and the streams it asked for that the host can't send at
    * the moment (its connection, or this member's, is full).
    */
-  | { t: 'media'; video: (string | null)[]; audio: (string | null)[]; paused: string[] }
-  | { t: 'peer_join'; peer: PeerState }
-  | { t: 'peer_leave'; peer: string }
-  | { t: 'peer_state'; peer: PeerState }
-  | { t: 'msg'; from: string; direct: boolean; d: unknown }
+  z.object({
+    t: z.literal('media'),
+    video: z.array(relayId.nullable()).max(RELAY_MAX_MEDIA_SLOTS),
+    audio: z.array(relayId.nullable()).max(RELAY_MAX_MEDIA_SLOTS),
+    paused: z.array(relayId).max(RELAY_MAX_MEDIA_SLOTS),
+  }),
+  z.object({ t: z.literal('peer_join'), peer: RelayPeerState }),
+  z.object({ t: z.literal('peer_leave'), peer: relayId }),
+  z.object({ t: z.literal('peer_state'), peer: RelayPeerState }),
+  z.object({ t: z.literal('msg'), from: relayId, direct: z.boolean(), d: z.unknown() }),
   /** Which speaker currently occupies each of this listener's audio slots. */
-  | { t: 'slots'; map: (string | null)[] }
-  | { t: 'speaking'; users: string[] }
-  | { t: 'pong'; ts: number };
+  z.object({
+    t: z.literal('slots'),
+    map: z.array(relayId.nullable()).max(RELAY_MAX_SLOTS),
+  }),
+  z.object({ t: z.literal('speaking'), users: z.array(relayId).max(LIMITS.sessionMembersMax * 4) }),
+  z.object({ t: z.literal('pong'), ts: z.number() }),
+]);
+export type RelayToClient = z.infer<typeof RelayToClient>;
 
 // ---------------------------------------------------------------------------
 // End-to-end envelopes carried inside relay messages (`d`).

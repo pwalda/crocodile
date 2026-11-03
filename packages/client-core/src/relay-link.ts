@@ -1,8 +1,8 @@
 import { signSdp, verifySdp, type Identity } from '@crocodile/crypto';
 import {
   RELAY_CHANNEL_LABEL,
+  RelayToClient,
   type ClientToRelay,
-  type RelayToClient,
   type SignalData,
 } from '@crocodile/protocol';
 import { Emitter } from './emitter';
@@ -247,12 +247,16 @@ export class RelayLink extends Emitter<RelayLinkEvents> {
     };
     this.dc.onclose = () => this.fail('control channel closed');
     this.dc.onmessage = (ev) => {
-      let msg: RelayToClient;
+      // The host is not trusted: what it sends is checked, and anything that does not fit is
+      // dropped (nothing it says may make this device allocate without bound).
+      let parsed: ReturnType<typeof RelayToClient.safeParse>;
       try {
-        msg = JSON.parse(String(ev.data)) as RelayToClient;
+        parsed = RelayToClient.safeParse(JSON.parse(String(ev.data)));
       } catch {
         return;
       }
+      if (!parsed.success) return;
+      const msg = parsed.data;
       if (msg.t === 'answer') this.mediaAnswer?.(msg.sdp);
       else this.emit('message', msg);
     };
