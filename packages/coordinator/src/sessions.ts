@@ -111,6 +111,14 @@ const DEVICE_LOOKUPS = 3;
 const DEVICE_LOOKUP_WAIT_MS = 300;
 /** A new owner adopts the epoch a member saw; no honest session has changed host this often. */
 const HINT_EPOCH_MAX = 1_000_000;
+/**
+ * A conversation with the same person invites them again no sooner than this after an invitation
+ * that reached them (one that went nowhere is no reason to wait). Joining and leaving over and
+ * over is not a way to keep ringing them.
+ */
+const INVITE_COOLDOWN_MS = 15_000;
+/** Invitations remembered at most, the oldest dropped first. */
+const INVITES_MAX = 100_000;
 
 /**
  * Sessions and host election.
@@ -152,10 +160,13 @@ export class SessionService {
    * server it joined from, also after it has left: the same join is not taken twice. Only those that could still pass for recent are kept.
    */
   private joinedAt = new Map<string, number>();
+  /** When a conversation last invited a user (room and invitee), if it got to them. */
+  private invited = new Map<string, number>();
   /** Devices asked to sign a new join, by room and device: what ends the wait, and when. */
   private renewing = new Map<string, { timer: ReturnType<typeof setTimeout>; deadline: number }>();
   private renewTimeoutMs = RENEW_TIMEOUT_MS;
   private renewRetryMs = RENEW_RETRY_MS;
+  private dmSessionsMax: number = LIMITS.dmSessionsPerDevice;
 
   constructor(private readonly hub: Coordinator) {
     this.voiceRefresh = setInterval(() => this.refreshVoice(), VOICE_REFRESH_MS);
@@ -171,6 +182,7 @@ export class SessionService {
     this.joinSweep = setInterval(() => {
       const oldest = Date.now() - 2 * SESSION_OP_SKEW_MS;
       for (const [key, at] of this.joinedAt) if (at < oldest) this.joinedAt.delete(key);
+      this.forgetInvites(Date.now());
     }, JOIN_SWEEP_MS);
     this.joinSweep.unref?.();
   }
@@ -431,6 +443,15 @@ export class SessionService {
     proof: SessionOpProof | undefined,
   ): Promise<SessionState> {
     const joinKey = `${sessionId}|${client.peer}`;
+    // A conversation can be made up by naming anyone: only so many at once, before any work. (Those
+    // being joined count too, or a device could ask for any number at once.)
+    if (
+      sessionId.startsWith('dm:') &&
+      !this.inSession(client.peer, sessionId) &&
+      !this.joining.has(joinKey) &&
+      this.dmSessionCount(client.peer) >= this.dmSessionsMax
+    )
+      throw new RpcFailure('rate_limited', 'too many conversations open at once');
     // The device's own signature, for us, before anything is spent on it.
     this.checkProof(
       client.publicKey,
@@ -931,9 +952,8 @@ export class SessionService {
       this.recompute(s);
       if (scope.kind === 'dm') {
         const other = scope.users[0] === userId ? scope.users[1] : scope.users[0];
-        if (!s.state.members.some((m) => m.userId === other)) {
-          this.hub.deliver(other, 'session_invite', { sessionId, from: userId });
-        }
+        if (!s.state.members.some((m) => m.userId === other))
+          this.invite(sessionId, userId, other, now);
       }
       return s.state;
     }
@@ -972,6 +992,45 @@ export class SessionService {
         return {};
       }
     }
+  }
+
+  /** Invites `other` to the conversation, unless they were just invited and it reached them. */
+  private invite(sessionId: string, from: string, other: string, now: number) {
+    const key = `${sessionId}|${other}`;
+    const last = this.invited.get(key);
+    if (last !== undefined && now - last < INVITE_COOLDOWN_MS) return;
+    if (this.hub.deliver(other, 'session_invite', { sessionId, from })) {
+      // (Deleted first, so that it goes to the end: the map is kept oldest first.)
+      this.invited.delete(key);
+      this.invited.set(key, now);
+      // Over the number kept: the oldest go, which are the ones nearest the end of their wait.
+      for (const old of this.invited.keys()) {
+        if (this.invited.size <= INVITES_MAX) break;
+        this.invited.delete(old);
+      }
+    } else this.invited.delete(key);
+  }
+
+  private forgetInvites(now: number) {
+    for (const [key, at] of this.invited) {
+      if (now - at < INVITE_COOLDOWN_MS) break;
+      this.invited.delete(key);
+    }
+  }
+
+  /** Direct conversations the device is in, or is joining. */
+  private dmSessionCount(peer: string) {
+    let n = 0;
+    for (const [id, members] of this.local) if (id.startsWith('dm:') && members.has(peer)) n++;
+    const suffix = `|${peer}`;
+    for (const key of this.joining.keys())
+      if (
+        key.startsWith('dm:') &&
+        key.endsWith(suffix) &&
+        !this.local.get(key.slice(0, -suffix.length))?.has(peer)
+      )
+        n++;
+    return n;
   }
 
   private removeMember(s: OwnedSession, peer: string) {

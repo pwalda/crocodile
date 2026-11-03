@@ -1952,7 +1952,7 @@ describe('sessions and host election', () => {
     await bob.conn.request('session.join', { sessionId, caps: caps() });
     const data = { type: 'bye' as const, epoch: 1, dir: 'toRelay' as const };
     const r = await bob.conn.request('signal.send', { to: alice.conn.peer, sessionId, data });
-    expect(r.delivered).toBe(true);
+    expect(r).toEqual({});
     await waitFor(() => alice.events.find((e) => e.ev === 'signal'));
     await expect(
       outsider.conn.request('session.join', { sessionId, caps: caps() }),
@@ -2050,7 +2050,7 @@ describe('coordination mesh', () => {
       sessionId,
       data: { type: 'bye', epoch: 1, dir: 'toRelay' },
     });
-    expect(sig.delivered).toBe(true);
+    expect(sig).toEqual({});
 
     const owner = a.sessions.ownerOf(sessionId) === a.info.id ? a : b;
     const survivor = owner === a ? b : a;

@@ -368,7 +368,8 @@ export interface RpcMethods {
   'session.update': Record<string, never>;
   'session.report': Record<string, never>;
   'voice.watch': { voice: VoiceOccupancy[] };
-  'signal.send': { delivered: boolean };
+  /** Says nothing of whether it arrived: that would tell who is connected. */
+  'signal.send': Record<string, never>;
   'servers.list': { servers: PublicServerInfo[] };
   'link.open': { code: string; expiresAt: number };
   'link.claim': { peer: string; key: string; encKey: string; kemKey: string; commit: string };

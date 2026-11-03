@@ -292,6 +292,12 @@ picture size.
     server refuses their joins, so they cannot take part in its rooms, and
     servers on a lower protocol cannot link to it. Update apps and
     coordination servers together (protocol 4).
+- Anyone who is signed in to a server can follow the presence of any user
+  whose id they know: online, away or busy and the status text, never
+  "invisible" (shown as offline). Friend lists are sealed, so a server cannot
+  tell who may follow whom, and limiting it to people who share a space would
+  break presence for friends. Signalling is another matter: a signal goes only
+  to a device in the same room, and the answer does not say whether it arrived.
 - The command line tool keeps the account's keys in a file only its user can
   read (mode 600), not in an OS keychain; anyone with that user's access, or
   root, can use the account. One process at a time may hold the file (a lock
