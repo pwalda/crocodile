@@ -263,6 +263,10 @@ picture size.
   new ones in that space.
 - Linked devices share the account seed; per-device signing keys certified by
   the identity (so a removed device can no longer sign) are planned.
+  A device that finds out it was removed (on connecting, or live) stops, leaves
+  its conversations and clears its local copy of the account, acting only on a
+  record signed by the account. That is the app's own doing: a device that is
+  kept offline, or modified, keeps what it had.
 - Sender keys rather than MLS: good forward secrecy and 30-minute healing,
   but rekeying cost grows with group size.
 - Safety-number verification is manual.
@@ -270,9 +274,11 @@ picture size.
   speaking activity); for video the host also sees frame sizes, key frames and
   picture sizes.
 - The host peer says which member each voice slot and picture tile shows, and
-  who is speaking. The sound and picture are authenticated by the key of the
-  member that made them, but a hostile host can put one member's stream in
-  another's place; the label on a tile is the host's word. What a host sends is
+  who is speaking. The sound and picture open only with the key of a member
+  of the session, but a hostile host can put one member's stream in
+  another's place; the label on a tile is the host's word. Members hold each
+  other's sender keys, so a member can also make sound or pictures that open as
+  another member's: the key shows the group, not which member. What a host sends is
   checked and bounded before it is used, so it can't make a device allocate
   without limit.
 - Session operations are signed by the device they are for, so a server

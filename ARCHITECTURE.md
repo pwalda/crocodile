@@ -471,12 +471,17 @@ effort. Everything below is automatic.
   device, one dated far from their clock, one older than the newest from the
   same sender and one the sender has since replaced, so a recorded old key
   can't be played back to bring expired ones to life.
+  Key ids are public (every message and voice frame carries one), so keys are
+  kept by sender and id: two members using the same id don't displace each
+  other's keys, and a message opens only with a key its own sender gave.
 - **Voice.** An Encoded Transform worker encrypts every Opus frame with
   AES-256-GCM before packetisation:
   `ciphertext ‖ tag ‖ kid ‖ gen ‖ counter ‖ 0xC8`, the trailer authenticated
   as AAD. Frames that cannot be encrypted are dropped, never sent in the
   clear. Opus runs at a **constant bitrate** so packet sizes do not reveal
-  what is said.
+  what is said. The host's description of the connection is not
+  trusted for that: the client puts `cbr=1` into it itself, so a host that
+  leaves it out does not change how voice is sent.
 - **Video.** Camera and screen frames are encrypted the same way, with keys
   from the audio chain under their own label, so a video frame can never be
   taken for a voice frame or the other way round. The first bytes of each

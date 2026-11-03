@@ -1513,8 +1513,8 @@ export class GroupSession extends Emitter<GroupSessionEvents> {
       await this.onSealed(from, payload);
       return;
     }
-    const result = this.keyring.decrypt(env.kid, env.g, env.ct);
-    if (!result) {
+    const plaintext = this.keyring.decrypt(from, env.kid, env.g, env.ct);
+    if (!plaintext) {
       // A key we hold that cannot open it: the message is from before the key we were given.
       if (this.keyring.isBehind(from, env.kid, env.g)) {
         this.missed(from);
@@ -1524,8 +1524,7 @@ export class GroupSession extends Emitter<GroupSessionEvents> {
       if (this.pendingGroup.length > 500) this.pendingGroup.shift();
       return;
     }
-    if (result.peer !== from) return;
-    await this.onGroupPlaintext(from, result.plaintext);
+    await this.onGroupPlaintext(from, plaintext);
   }
 
   private async onSealed(from: string, payload: SealedPayload) {
@@ -1614,10 +1613,9 @@ export class GroupSession extends Emitter<GroupSessionEvents> {
     const queue = this.pendingGroup.filter((p) => now - p.at < PENDING_TTL_MS);
     this.pendingGroup = [];
     for (const p of queue) {
-      const result = this.keyring.decrypt(p.env.kid, p.env.g, p.env.ct);
-      if (result) {
-        if (result.peer === p.from) await this.onGroupPlaintext(p.from, result.plaintext);
-      } else if (this.keyring.isBehind(p.from, p.env.kid, p.env.g)) this.missed(p.from);
+      const plaintext = this.keyring.decrypt(p.from, p.env.kid, p.env.g, p.env.ct);
+      if (plaintext) await this.onGroupPlaintext(p.from, plaintext);
+      else if (this.keyring.isBehind(p.from, p.env.kid, p.env.g)) this.missed(p.from);
       else this.pendingGroup.push(p);
     }
   }

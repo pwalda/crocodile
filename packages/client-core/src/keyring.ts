@@ -23,6 +23,10 @@ interface PeerKey {
   expiresAt: number | null;
 }
 
+function peerKeyId(peer: string, kid: number) {
+  return `${peer}|${kid >>> 0}`;
+}
+
 /** Snapshot handed to the voice frame worker. */
 export interface FrameKeys {
   mine: { kid: number; gen: number; key: string } | null;
@@ -41,7 +45,11 @@ export const SENDER_KEY_ROTATION_MS = 30 * 60_000;
  */
 export class GroupKeyring extends Emitter<{ changed: FrameKeys; rotated: ExportedChains }> {
   private mine: SenderKey;
-  private peers = new Map<number, PeerKey>();
+  /**
+   * Keyed by sender and key id: ids are public (every message and frame carries one), so
+   * another member can send a key under someone else's id, and the two must not displace each other.
+   */
+  private peers = new Map<string, PeerKey>();
   /** When the newest key we took from each peer was sealed. */
   private newest = new Map<string, number>();
   private audioTimer?: ReturnType<typeof setInterval>;
@@ -94,8 +102,7 @@ export class GroupKeyring extends Emitter<{ changed: FrameKeys; rotated: Exporte
   addPeerKey(peer: string, chains: ExportedChains, at = Date.now()): boolean {
     const kid = chains.kid >>> 0;
     if (at < (this.newest.get(peer) ?? 0)) return false;
-    const existing = this.peers.get(kid);
-    if (existing && existing.peer !== peer) return false;
+    const existing = this.peers.get(peerKeyId(peer, kid));
     this.newest.set(peer, at);
     // Re-sent current state for a key we already track: keep our (newer) text
     // receiver, but take a newer audio position. Receivers for a new
@@ -111,7 +118,7 @@ export class GroupKeyring extends Emitter<{ changed: FrameKeys; rotated: Exporte
     for (const p of this.peers.values()) {
       if (p.peer === peer && p.kid !== kid && p.expiresAt === null) p.expiresAt = now + GRACE_MS;
     }
-    this.peers.set(kid, {
+    this.peers.set(peerKeyId(peer, kid), {
       peer,
       kid,
       text: new TextReceiver(kid, importChain(chains.text)),
@@ -129,8 +136,8 @@ export class GroupKeyring extends Emitter<{ changed: FrameKeys; rotated: Exporte
 
   /** Whether a message of this key, which is `peer`'s, is one the key we hold has already passed. */
   isBehind(peer: string, kid: number, g: number) {
-    const pk = this.peers.get(kid >>> 0);
-    return !!pk && pk.peer === peer && g < pk.text.gen;
+    const pk = this.peers.get(peerKeyId(peer, kid));
+    return !!pk && g < pk.text.gen;
   }
 
   hasKeyFrom(peer: string) {
@@ -159,12 +166,10 @@ export class GroupKeyring extends Emitter<{ changed: FrameKeys; rotated: Exporte
     return encryptText(this.mine, plaintext);
   }
 
-  decrypt(kid: number, g: number, ct: string): { peer: string; plaintext: Uint8Array } | null {
+  /** A message of `peer`'s: opened only with a key that peer gave us. */
+  decrypt(peer: string, kid: number, g: number, ct: string): Uint8Array | null {
     this.prune();
-    const pk = this.peers.get(kid >>> 0);
-    if (!pk) return null;
-    const plaintext = pk.text.decrypt(g, ct);
-    return plaintext ? { peer: pk.peer, plaintext } : null;
+    return this.peers.get(peerKeyId(peer, kid))?.text.decrypt(g, ct) ?? null;
   }
 
   frameKeys(): FrameKeys {

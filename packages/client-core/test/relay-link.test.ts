@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createIdentity, signSdp } from '@crocodile/crypto';
 import type { SignalData } from '@crocodile/protocol';
 import { RelayLink, linkStatsFrom, type FailStage } from '../src/relay-link';
+import { forceOpusCbr } from '../src/opus-sdp';
 
 /** Enough of RTCPeerConnection for RelayLink; the test drives its states. */
 class FakePc {
@@ -53,8 +54,10 @@ class FakePc {
       if (d.type === 'offer') this.signalingState = 'have-local-offer';
     }
   }
-  async setRemoteDescription() {
+  remote: { type: string; sdp: string } | null = null;
+  async setRemoteDescription(d?: { type: string; sdp: string }) {
     this.signalingState = 'stable';
+    this.remote = d ?? null;
   }
   async addIceCandidate() {}
   async getStats() {
@@ -399,5 +402,97 @@ describe('what the host sends', () => {
       'text',
     ]);
     expect(got).toEqual([]);
+  });
+});
+
+describe('constant bitrate voice', () => {
+  const sdp = (opus: string) =>
+    [
+      'v=0',
+      'm=audio 9 UDP/TLS/RTP/SAVPF 111 0',
+      'a=rtpmap:111 opus/48000/2',
+      ...(opus ? [`a=fmtp:111 ${opus}`] : []),
+      'a=rtpmap:0 PCMU/8000',
+      'a=fmtp:0 something=1',
+      'm=video 9 UDP/TLS/RTP/SAVPF 96',
+      'a=rtpmap:96 VP8/90000',
+      '',
+    ].join('\r\n');
+
+  it('asks for it whatever the description says about it', () => {
+    expect(forceOpusCbr(sdp('minptime=10;useinbandfec=1;cbr=1'))).toBe(
+      sdp('minptime=10;useinbandfec=1;cbr=1'),
+    );
+    // Left out, turned off, or given a parameters line of its own.
+    expect(forceOpusCbr(sdp('minptime=10;useinbandfec=1'))).toBe(
+      sdp('minptime=10;useinbandfec=1;cbr=1'),
+    );
+    expect(forceOpusCbr(sdp('cbr=0;minptime=10'))).toBe(sdp('minptime=10;cbr=1'));
+    expect(forceOpusCbr(sdp('CBR=0'))).toBe(sdp('cbr=1'));
+    expect(forceOpusCbr(sdp(''))).toBe(sdp('cbr=1'));
+    // Other formats are not touched, nor a description with no Opus in it.
+    expect(forceOpusCbr(sdp('')).includes('a=fmtp:0 something=1')).toBe(true);
+    expect(forceOpusCbr('v=0\n')).toBe('v=0\n');
+    expect(forceOpusCbr('v=0\na=rtpmap:109 opus/48000/2\n')).toBe(
+      'v=0\na=rtpmap:109 opus/48000/2\na=fmtp:109 cbr=1\n',
+    );
+  });
+
+  it('deals with each media section on its own, and with a parameters line that has none', () => {
+    const two = [
+      'v=0',
+      'm=audio 9 RTP/AVP 111',
+      'a=rtpmap:111 opus/48000/2',
+      'a=fmtp:111 minptime=10',
+      'm=audio 9 RTP/AVP 111',
+      'a=rtpmap:111 opus/48000/2',
+      '',
+    ].join('\n');
+    expect(forceOpusCbr(two)).toBe(
+      [
+        'v=0',
+        'm=audio 9 RTP/AVP 111',
+        'a=rtpmap:111 opus/48000/2',
+        'a=fmtp:111 minptime=10;cbr=1',
+        'm=audio 9 RTP/AVP 111',
+        'a=rtpmap:111 opus/48000/2',
+        'a=fmtp:111 cbr=1',
+        '',
+      ].join('\n'),
+    );
+    // A bare line is completed, not repeated.
+    expect(forceOpusCbr('m=audio 9 RTP/AVP 111\na=rtpmap:111 opus/48000/2\na=fmtp:111\n')).toBe(
+      'm=audio 9 RTP/AVP 111\na=rtpmap:111 opus/48000/2\na=fmtp:111 cbr=1\n',
+    );
+  });
+
+  it('applies it to the answer of the host, and to one for a new offer', async () => {
+    const a = link();
+    await a.l.connect();
+    const signed = signSdp(
+      host,
+      'answer',
+      { sessionId: 'dm:x', epoch: 1, from: hostPeer, to: self },
+      sdp('minptime=10;useinbandfec=1'),
+    );
+    await a.l.handleSignal(signed);
+    expect(a.pc().remote?.sdp).toBe(sdp('minptime=10;useinbandfec=1;cbr=1'));
+  });
+
+  it('applies it to the answer to a video offer too', async () => {
+    vi.stubGlobal('RTCRtpReceiver', {
+      getCapabilities: (kind: string) => ({
+        codecs: [kind === 'video' ? 'video/VP8' : 'audio/opus'].map((mimeType) => ({ mimeType })),
+      }),
+    });
+    const a = await open();
+    const adding = a.l.addMedia({ video: 1, audio: 1 });
+    await vi.waitFor(() => expect(a.pc().dc.sent).toHaveLength(1));
+    const sdp = 'v=0\r\na=rtpmap:111 opus/48000/2\r\na=fmtp:111 minptime=10;cbr=0\r\n';
+    a.pc().dc.onmessage?.({ data: JSON.stringify({ t: 'answer', sdp }) });
+    await adding;
+    expect(a.pc().remote?.sdp).toBe(
+      'v=0\r\na=rtpmap:111 opus/48000/2\r\na=fmtp:111 minptime=10;cbr=1\r\n',
+    );
   });
 });

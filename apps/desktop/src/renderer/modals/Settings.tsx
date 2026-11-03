@@ -419,7 +419,7 @@ function DevicesTab() {
                     openModal({
                       kind: 'confirm',
                       title: `Remove ${d.name}?`,
-                      body: 'It will stop receiving messages and calls immediately. Note: a removed device still knows your account key; if it was lost or stolen, consider it compromised.',
+                      body: 'It will stop receiving messages and calls immediately, and clear its copy of your account the next time it connects. Note: a removed device still knows your account key; if it was lost or stolen, consider it compromised.',
                       action: 'Remove',
                       danger: true,
                       onConfirm: () => client.revokeDevice(d.deviceId),
