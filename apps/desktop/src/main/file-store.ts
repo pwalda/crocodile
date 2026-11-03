@@ -121,6 +121,9 @@ export class FileExports {
   private starting = 0;
 
   async begin(path: string, temp: boolean) {
+    // All of this up to the first `await` is done before anything else can run: the count is
+    // what the next call sees.
+    let letGo: Export | undefined;
     if (this.open.size + this.starting >= MAX_OPEN_EXPORTS) {
       // Room is made from the one quiet the longest, if it has been quiet a while: a page that
       // was reloaded mid-save never ends its file. Files still being written are left alone.
@@ -128,11 +131,17 @@ export class FileExports {
       for (const e of this.open) if (!quiet || e[1].touched < quiet[1].touched) quiet = e;
       if (!quiet || Date.now() - quiet[1].touched < IDLE_EXPORT_MS)
         throw new Error('too many files at once');
-      void this.abort(quiet[0]);
+      this.open.delete(quiet[0]);
+      letGo = quiet[1];
     }
     this.starting++;
     let handle: FileHandle;
     try {
+      // Its partial file goes before the new one is opened, which may be at the same path.
+      if (letGo) {
+        await letGo.handle.close().catch(() => {});
+        await rm(letGo.path, { force: true }).catch(() => {});
+      }
       handle = await open(path, 'w');
     } finally {
       this.starting--;

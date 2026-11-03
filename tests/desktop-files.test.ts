@@ -340,6 +340,36 @@ describe('what the page may send when a file is saved', () => {
     expect(await exports.end(token)).toBe(join(dir, 'f16'));
   });
 
+  it('makes room once for many that ask at once', async () => {
+    const dir = tempDir();
+    const exports = new FileExports(async () => 'none');
+    const tokens: string[] = [];
+    for (let i = 0; i < 16; i++) tokens.push(await exports.begin(join(dir, `h${i}`), false));
+    const inner = exports as unknown as { open: Map<string, { touched: number }> };
+    inner.open.get(tokens[5]!)!.touched = Date.now() - 120_000;
+    const results = await Promise.allSettled(
+      ['a', 'b', 'c'].map((n) => exports.begin(join(dir, `new-${n}`), false)),
+    );
+    expect(results.filter((r) => r.status === 'fulfilled')).toHaveLength(1);
+    expect(inner.open.size).toBe(16);
+  });
+
+  it('keeps a file begun again at the path of one that was let go', async () => {
+    const dir = tempDir();
+    const exports = new FileExports(async () => 'none');
+    const tokens: string[] = [];
+    for (let i = 0; i < 16; i++) tokens.push(await exports.begin(join(dir, `k${i}`), false));
+    await exports.chunk(tokens[5]!, block(2, 1));
+    const inner = exports as unknown as { open: Map<string, { touched: number }> };
+    inner.open.get(tokens[5]!)!.touched = Date.now() - 120_000;
+    // A page that was reloaded saves the same file again, to the same place.
+    const again = await exports.begin(join(dir, 'k5'), false);
+    await exports.chunk(again, block(3, 7));
+    await exports.end(again);
+    await new Promise((r) => setTimeout(r, 50));
+    expect(readFileSync(join(dir, 'k5'))).toEqual(Buffer.from([7, 7, 7]));
+  });
+
   it('counts files being begun, so many at once do not pass the most', async () => {
     const dir = tempDir();
     const exports = new FileExports(async () => 'none');
