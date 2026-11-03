@@ -90,8 +90,8 @@ the range is full, a user's newest connection takes the port of their own
 oldest, so stale ones never lock anyone out. Each
 grant lasts at most one hour (apps renew it while their connection still
 goes through the relay), `--relay-max-users` caps how many people use
-it at once, and each allocation is rate-limited (about 100 kbit/s of voice
-per person). Your server only ever sees ciphertext. Turn it off with
+it at once, and each allocation is rate-limited (about 96 KiB/s, some 790
+kbit/s, with room to burst to twice that). Your server only ever sees ciphertext. Turn it off with
 `--relay off` if bandwidth is scarce. The desktop app's built-in server
 leaves it off unless you enable "Offer a relay"; it then relays on the UDP
 ports just above its own (four per relay user; the app shows the range), which
@@ -163,7 +163,8 @@ the servers it measures and uses.
 **Recommendations:**
 
 - For friends on your network, the desktop app's server is fine: it accepts
-  no connections from the internet unless you forward the port. It still
+  no connections from the internet behind a router that does not forward the
+  port (if the computer has a public address of its own, its firewall decides). It still
   connects out to the network to keep its copy of the records.
 - For a public server, prefer a small VPS or a separate machine with Docker
   over the computer you use every day, so a compromise doesn't reach your

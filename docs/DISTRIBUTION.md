@@ -175,15 +175,15 @@ update**. If a call is going on, the app asks first. Code:
 
 How the update is applied depends on the install:
 
-| Install                         | How                                                                                                                                                                                           |
-| ------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Windows installer               | electron-updater runs the new installer silently and restarts the app.                                                                                                                        |
-| macOS, Developer ID signed      | electron-updater (Squirrel.Mac).                                                                                                                                                              |
-| macOS, ad-hoc signed (today)    | The app downloads the release `.zip`, checks its SHA-512 against `latest-mac.yml` and the bundle's version, and after it quits a small script swaps the new `Crocodile.app` in and starts it. |
-| macOS, app can't replace itself | Run from the disk image, translocated, or a folder the user can't write: the `.dmg` is downloaded (checked the same way) and opened, and the user drags Crocodile into Applications.          |
-| Linux AppImage                  | electron-updater replaces the AppImage file.                                                                                                                                                  |
-| Linux `.deb` / `.rpm`           | electron-updater installs the new package with `dpkg`/`rpm`, which asks for the administrator password (pkexec or sudo).                                                                      |
-| Linux `.tar.gz`                 | Can't update itself: the button opens the release page.                                                                                                                                       |
+| Install                         | How                                                                                                                                                                                                                                                  |
+| ------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Windows installer               | electron-updater runs the new installer silently and restarts the app.                                                                                                                                                                               |
+| macOS, Developer ID signed      | electron-updater (Squirrel.Mac).                                                                                                                                                                                                                     |
+| macOS, ad-hoc signed (today)    | The app downloads the release `.zip`, checks its SHA-512 against `latest-mac.yml` and the bundle's version, and after it quits a small script swaps the new `Crocodile.app` in and starts it.                                                        |
+| macOS, app can't replace itself | Run from the disk image, translocated, or a folder the user can't write: the `.dmg` is downloaded (its SHA-512 is checked against `latest-mac.yml`; the version inside is not looked at) and opened, and the user drags Crocodile into Applications. |
+| Linux AppImage                  | electron-updater replaces the AppImage file.                                                                                                                                                                                                         |
+| Linux `.deb` / `.rpm`           | electron-updater installs the new package with `dpkg`/`rpm`, which asks for the administrator password (pkexec or sudo).                                                                                                                             |
+| Linux `.tar.gz`                 | Can't update itself: the button opens the release page.                                                                                                                                                                                              |
 
 Updates come only from this repository's latest GitHub release over HTTPS,
 and every file is checked against the SHA-512 in that release's `latest*.yml`.
