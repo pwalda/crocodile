@@ -9,6 +9,7 @@ import {
 import {
   DEFAULT_RELAY_SLOTS,
   LIMITS,
+  joinOp,
   SIG_DOMAIN,
   parseSessionId,
   peerIds,
@@ -20,6 +21,7 @@ import {
   type SessionOp,
   type SessionOpProof,
   type SessionState,
+  type SessionHint,
   type SignedSessionOp,
   type SignedRecord,
   type VoiceOccupancy,
@@ -39,6 +41,8 @@ interface OwnedSession {
   signed: Map<string, { key: string; since: number; n: number }>;
   /** Host adopted from a hint whose member has not re-joined yet. */
   pendingHostUntil: number;
+  /** Until when members that have been in the room before (a new owner is putting it together) may say what they saw. */
+  rebuildUntil: number;
   timer?: ReturnType<typeof setTimeout>;
 }
 
@@ -58,9 +62,9 @@ class Refused extends Error {
   }
 }
 
-type Hint = { epoch: number; host: string | null; backup: string | null };
-
 const PENDING_HOST_GRACE_MS = 4000;
+/** How long after a room is made its members' devices may still say what they saw of it (they are asked at once; some are slower). */
+const REBUILD_MS = 10_000;
 const HOST_PENALTY_MS = 60_000;
 const OP_TIMEOUT_MS = 8000;
 /** How far the time on a signed join may be from ours (as for mailbox proofs). */
@@ -107,6 +111,14 @@ const DEVICE_LOOKUPS = 3;
 const DEVICE_LOOKUP_WAIT_MS = 300;
 /** A new owner adopts the epoch a member saw; no honest session has changed host this often. */
 const HINT_EPOCH_MAX = 1_000_000;
+/**
+ * A conversation with the same person invites them again no sooner than this after an invitation
+ * that reached them (one that went nowhere is no reason to wait). Joining and leaving over and
+ * over is not a way to keep ringing them.
+ */
+const INVITE_COOLDOWN_MS = 15_000;
+/** Invitations remembered at most, the oldest dropped first. */
+const INVITES_MAX = 100_000;
 
 /**
  * Sessions and host election.
@@ -115,14 +127,13 @@ const HINT_EPOCH_MAX = 1_000_000;
  * rendezvous hashing over the live mesh. Members' own servers keep a registry
  * of which local clients are in which session and forward operations to the
  * owner; when the mesh changes and a session gets a new owner, the member
- * servers simply re-submit their joins (with a hint of the last known host)
- * so the new owner rebuilds identical state without disturbing the call.
+ * servers ask their members for a new join (each carrying the host its device
+ * last saw) so the new owner rebuilds identical state without disturbing the call.
  */
 export class SessionService {
   /** sessionId -> local peer id -> caps */
   private local = new Map<string, Map<string, HostCaps>>();
   private lastOwner = new Map<string, string>();
-  private lastKnown = new Map<string, Hint>();
   private owned = new Map<string, OwnedSession>();
   private rechecking = false;
   /** A join of ours being looked into, by room and device; a leave in the meantime cancels it. */
@@ -149,10 +160,13 @@ export class SessionService {
    * server it joined from, also after it has left: the same join is not taken twice. Only those that could still pass for recent are kept.
    */
   private joinedAt = new Map<string, number>();
+  /** When a conversation last invited a user (room and invitee), if it got to them. */
+  private invited = new Map<string, number>();
   /** Devices asked to sign a new join, by room and device: what ends the wait, and when. */
   private renewing = new Map<string, { timer: ReturnType<typeof setTimeout>; deadline: number }>();
   private renewTimeoutMs = RENEW_TIMEOUT_MS;
   private renewRetryMs = RENEW_RETRY_MS;
+  private dmSessionsMax: number = LIMITS.dmSessionsPerDevice;
 
   constructor(private readonly hub: Coordinator) {
     this.voiceRefresh = setInterval(() => this.refreshVoice(), VOICE_REFRESH_MS);
@@ -168,6 +182,7 @@ export class SessionService {
     this.joinSweep = setInterval(() => {
       const oldest = Date.now() - 2 * SESSION_OP_SKEW_MS;
       for (const [key, at] of this.joinedAt) if (at < oldest) this.joinedAt.delete(key);
+      this.forgetInvites(Date.now());
     }, JOIN_SWEEP_MS);
     this.joinSweep.unref?.();
   }
@@ -214,11 +229,13 @@ export class SessionService {
     proof: SessionOpProof | undefined,
   ) {
     this.checkProofIsFor(server, op, proof);
-    // What a server may add (a hint) or must set (the kind of device) is not what was signed.
+    // What a server must set (the kind of device) is not what was signed; the hint is, so a server can neither add one nor change it.
     const signed: SignedSessionOp =
       op.op === 'report'
         ? { op: 'report', epoch: op.epoch, issue: op.issue }
-        : { op: op.op, caps: op.caps };
+        : op.op === 'join'
+          ? joinOp(op.caps, op.hint)
+          : { op: 'update', caps: op.caps };
     if (!verifySessionOp(key, sessionId, peer, signed, proof))
       throw new RpcFailure('forbidden', 'the signature on that operation is not valid');
   }
@@ -232,11 +249,7 @@ export class SessionService {
     if (!scope) throw new RpcFailure('bad_request', 'invalid session id');
     if (scope.kind === 'space' || scope.kind === 'voice') {
       // The space's records may live on other servers.
-      const records = await this.hub.dist.get([
-        `space:${scope.spaceId}`,
-        `member:${scope.spaceId}:${userId}`,
-      ]);
-      const byKey = new Map(records.map((r) => [r.key, r]));
+      const byKey = await this.hub.dist.membershipRecords([scope.spaceId], userId);
       if (!isSpaceMember({ get: (k) => byKey.get(k) }, scope.spaceId, userId))
         throw new RpcFailure('forbidden', 'not a member of this space');
       if (scope.kind === 'voice') {
@@ -337,7 +350,8 @@ export class SessionService {
     sessionId: string,
     op: FedSessionOp['op'],
   ): Promise<
-    { refused: string; code: RpcFailure['code'] } | { device: SignedRecord<'device'>; hint?: Hint }
+    | { refused: string; code: RpcFailure['code'] }
+    | { device: SignedRecord<'device'>; hint?: SessionHint }
   > {
     try {
       // The cheap refusals first: a device made up for somebody who may not be here costs no wait.
@@ -356,7 +370,10 @@ export class SessionService {
           ? { refused: DEVICE_REMOVED, code: 'forbidden' }
           : { refused: DEVICE_UNKNOWN, code: 'unavailable' };
       // What a hint names is looked into here too, not in the room's queue.
-      const hint = op.op === 'join' && op.hint ? await this.hintAllowed(sessionId, op.hint) : null;
+      const hint =
+        op.op === 'join' && op.hint && this.hintMatters(sessionId, op.hint)
+          ? await this.hintAllowed(sessionId, op.hint)
+          : null;
       return { device, ...(hint ? { hint } : {}) };
     } catch (err) {
       if (err instanceof Refused) return { refused: err.message, code: err.code };
@@ -422,16 +439,26 @@ export class SessionService {
     client: ClientHandle,
     sessionId: string,
     caps: HostCaps,
+    hint: SessionHint | undefined,
     proof: SessionOpProof | undefined,
   ): Promise<SessionState> {
     const joinKey = `${sessionId}|${client.peer}`;
+    // A conversation can be made up by naming anyone: only so many at once, before any work. (Those
+    // being joined count too, or a device could ask for any number at once.)
+    if (
+      sessionId.startsWith('dm:') &&
+      !this.inSession(client.peer, sessionId) &&
+      !this.joining.has(joinKey) &&
+      this.dmSessionCount(client.peer) >= this.dmSessionsMax
+    )
+      throw new RpcFailure('rate_limited', 'too many conversations open at once');
     // The device's own signature, for us, before anything is spent on it.
     this.checkProof(
       client.publicKey,
       sessionId,
       client.peer,
       this.selfId,
-      { op: 'join', caps },
+      joinOp(caps, hint),
       proof,
     );
     // It answered, if it was asked to sign again (the wait starts again if what it sent is not taken).
@@ -443,9 +470,14 @@ export class SessionService {
     const leavesBefore = wait.leaves;
     let vouched: HostCaps;
     let device: SignedRecord<'device'>;
+    // What the device says it saw is believed only as far as it can be (the owner looks at it again
+    // when it is another server).
+    let believed: SessionHint | null = null;
     try {
       await this.checkAccess(client.userId, sessionId);
       ({ caps: vouched, device } = await this.vouchOrDrop(client.peer, sessionId, caps, true));
+      if (hint && this.hintMatters(sessionId, hint))
+        believed = await this.hintAllowed(sessionId, hint);
     } catch (err) {
       // No longer allowed in (left the space, say): asking again would only be refused again.
       if (renewal && err instanceof RpcFailure && err.code === 'forbidden') {
@@ -476,15 +508,15 @@ export class SessionService {
     members.set(client.peer, vouched);
     const owner = this.ownerOf(sessionId);
     this.lastOwner.set(sessionId, owner);
-    const hint = this.lastKnown.get(sessionId);
     try {
       // What was signed goes on as it was; the owner sets the kind of device from the record itself.
       const state = (await this.submit(
         sessionId,
         client.peer,
-        { op: 'join', caps, ...(hint ? { hint } : {}) },
+        joinOp(caps, hint),
         proof,
         device,
+        believed,
       )) as SessionState;
       // Taken by the owner: nothing more to ask of it (unless the owner has changed again meanwhile).
       if (this.lastOwner.get(sessionId) === owner) this.endRenewal(joinKey);
@@ -554,7 +586,6 @@ export class SessionService {
     if (members.size === 0) {
       this.local.delete(sessionId);
       this.lastOwner.delete(sessionId);
-      this.lastKnown.delete(sessionId);
     }
     // Not signed: the server a device joined from says so when it goes (the device cannot, then).
     await this.submit(sessionId, peer, { op: 'leave' }).catch(() => {});
@@ -596,12 +627,6 @@ export class SessionService {
     }
   }
 
-  /** Called when a 'session' event reaches a local member: remember the host. */
-  noteState(state: SessionState) {
-    if (this.local.has(state.id))
-      this.lastKnown.set(state.id, { epoch: state.epoch, host: state.host, backup: state.backup });
-  }
-
   /** Sessions the given local peer is in (for tests and diagnostics). */
   sessionsOf(peer: string) {
     return [...this.local].filter(([, m]) => m.has(peer)).map(([id]) => id);
@@ -622,6 +647,8 @@ export class SessionService {
     proof?: SessionOpProof,
     /** The record of the device, for a join (we have already found it). */
     device?: SignedRecord<'device'>,
+    /** What of its hint we found to be believable, for a join we keep ourselves. */
+    hint?: SessionHint | null,
   ): Promise<unknown> {
     const owner = this.ownerOf(sessionId);
     if (owner === this.selfId) {
@@ -635,7 +662,6 @@ export class SessionService {
           op,
           ...(proof ? { proof } : {}),
         };
-        const hint = op.op === 'join' ? op.hint : undefined;
         return Promise.resolve(
           this.runRemoteOp(this.selfId, frame, {
             ...(device ? { device } : {}),
@@ -768,7 +794,7 @@ export class SessionService {
   private runRemoteOp(
     fromServer: string,
     frame: FedSessionOp,
-    admitted: { device?: SignedRecord<'device'>; hint?: Hint },
+    admitted: { device?: SignedRecord<'device'>; hint?: SessionHint },
   ): unknown {
     const { sessionId, peer } = frame;
     const proof = frame.proof as SessionOpProof;
@@ -828,12 +854,28 @@ export class SessionService {
   }
 
   /**
+   * Whether a room takes a hint: only while it is being put together again (it has no member
+   * yet, or was made a moment ago), and only one that is later than what it has. A member of a
+   * room that stands cannot move its host by saying what it saw, nor keep the moment open by
+   * doing so.
+   */
+  private mayTakeHint(s: OwnedSession, hint: SessionHint, now: number) {
+    return (s.state.members.length === 0 || now < s.rebuildUntil) && hint.epoch > s.state.epoch;
+  }
+
+  /** Whether a hint is worth looking into: the room is not ours yet, or would take it. */
+  private hintMatters(sessionId: string, hint: SessionHint) {
+    const s = this.owned.get(sessionId);
+    return !s || this.mayTakeHint(s, hint, Date.now());
+  }
+
+  /**
    * What of a hint is believed: the host it names, and the backup, if they may be in the
    * session as devices that exist (a record not yet found is waited for, as at a join). A
    * backup that does not pass is left out and the host kept; a host that is named and does
    * not pass makes the whole hint worthless (none named is fine: the epoch is kept).
    */
-  private async hintAllowed(sessionId: string, hint: Hint): Promise<Hint | null> {
+  private async hintAllowed(sessionId: string, hint: SessionHint): Promise<SessionHint | null> {
     if (hint.epoch < 0 || hint.epoch > HINT_EPOCH_MAX) return null;
     const known = async (peer: string | null) => {
       if (!peer) return null;
@@ -886,10 +928,11 @@ export class SessionService {
           penalties: new Map(),
           reports: new Map(),
           pendingHostUntil: 0,
+          rebuildUntil: now + REBUILD_MS,
         };
         this.owned.set(sessionId, s);
       }
-      if (op.hint && op.hint.epoch > s.state.epoch) {
+      if (op.hint && this.mayTakeHint(s, op.hint, now)) {
         s.state.epoch = op.hint.epoch;
         s.state.host = op.hint.host;
         s.state.backup = op.hint.backup;
@@ -909,9 +952,8 @@ export class SessionService {
       this.recompute(s);
       if (scope.kind === 'dm') {
         const other = scope.users[0] === userId ? scope.users[1] : scope.users[0];
-        if (!s.state.members.some((m) => m.userId === other)) {
-          this.hub.deliver(other, 'session_invite', { sessionId, from: userId });
-        }
+        if (!s.state.members.some((m) => m.userId === other))
+          this.invite(sessionId, userId, other, now);
       }
       return s.state;
     }
@@ -950,6 +992,45 @@ export class SessionService {
         return {};
       }
     }
+  }
+
+  /** Invites `other` to the conversation, unless they were just invited and it reached them. */
+  private invite(sessionId: string, from: string, other: string, now: number) {
+    const key = `${sessionId}|${other}`;
+    const last = this.invited.get(key);
+    if (last !== undefined && now - last < INVITE_COOLDOWN_MS) return;
+    if (this.hub.deliver(other, 'session_invite', { sessionId, from })) {
+      // (Deleted first, so that it goes to the end: the map is kept oldest first.)
+      this.invited.delete(key);
+      this.invited.set(key, now);
+      // Over the number kept: the oldest go, which are the ones nearest the end of their wait.
+      for (const old of this.invited.keys()) {
+        if (this.invited.size <= INVITES_MAX) break;
+        this.invited.delete(old);
+      }
+    } else this.invited.delete(key);
+  }
+
+  private forgetInvites(now: number) {
+    for (const [key, at] of this.invited) {
+      if (now - at < INVITE_COOLDOWN_MS) break;
+      this.invited.delete(key);
+    }
+  }
+
+  /** Direct conversations the device is in, or is joining. */
+  private dmSessionCount(peer: string) {
+    let n = 0;
+    for (const [id, members] of this.local) if (id.startsWith('dm:') && members.has(peer)) n++;
+    const suffix = `|${peer}`;
+    for (const key of this.joining.keys())
+      if (
+        key.startsWith('dm:') &&
+        key.endsWith(suffix) &&
+        !this.local.get(key.slice(0, -suffix.length))?.has(peer)
+      )
+        n++;
+    return n;
   }
 
   private removeMember(s: OwnedSession, peer: string) {

@@ -86,6 +86,9 @@ EOF
   step 'Private vulnerability reporting (see .github/SECURITY.md)'
   api PUT /private-vulnerability-reporting
 
+  step 'Immutable releases: a published release and its files cannot be changed'
+  api PUT /immutable-releases
+
   step 'Rulesets for main: green CI for everyone, a reviewed PR unless an admin merges it'
   ruleset() {
     local name=$1 body id

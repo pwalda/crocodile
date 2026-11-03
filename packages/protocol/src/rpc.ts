@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { b64uBytes, b64uText, keyB64u, sigB64u } from './b64u';
 import type { SignedRecord } from './records';
 import { SignedRecordEnvelope } from './records';
 import {
@@ -12,17 +13,20 @@ import {
 import { DeviceId } from './records';
 import type { PublicServerInfo } from './directory';
 import { SealedBox } from './relay';
-import { MailProof, SessionEpoch, SessionOpProof } from './federation';
+import { MailProof, SessionEpoch, SessionHint, SessionOpProof } from './federation';
 
 /** Public identity of a coordination server. */
 export const ServerInfo = z.object({
   /** base32(sha256(key))[:26] */
   id: z.string(),
   /** Ed25519 public key, base64url. */
-  key: z.string(),
+  key: keyB64u,
   name: z.string().max(64),
   /** Public base URL, e.g. https://croc.example.org or http://203.0.113.4:7443 */
-  url: z.string().url(),
+  url: z
+    .string()
+    .url()
+    .refine((u) => /^https?:\/\//.test(u), { message: 'a server is at an http or https address' }),
   version: z.string().max(32),
   region: z.string().max(32).optional(),
 });
@@ -120,17 +124,17 @@ export function helloFullPayload(h: Omit<ServerHello, 'sig' | 'sigFull'>) {
 export const ClientAuth = z.object({
   t: z.literal('auth'),
   /** Client's half of the channel: ephemeral X25519 key and ML-KEM ciphertext. */
-  channel: z.object({ epk: z.string().max(64), kem: z.string().max(2000) }),
+  channel: z.object({ epk: b64uBytes(32), kem: b64uBytes(1088) }),
   /** A `ClientAuthBody`, sealed as the first frame (`n` 0) of a channel used for it alone. */
-  sealed: z.object({ n: z.literal(0), c: z.string().max(8000) }),
+  sealed: z.object({ n: z.literal(0), c: b64uText(8000) }),
 });
 export type ClientAuth = z.infer<typeof ClientAuth>;
 
 export const ClientAuthBody = z.object({
-  key: z.string(),
+  key: keyB64u,
   device: DeviceId,
   /** Signature over (challenge, server.id, device, channel). */
-  sig: z.string(),
+  sig: sigB64u,
   client: z.object({
     platform: Platform,
     version: z.string().max(32),
@@ -195,18 +199,19 @@ export type ServerFrame =
 export type ClientFrame = ClientAuth | RpcRequest;
 
 /** 32 bytes, base64url: link keys, nonces and commitments. */
-const linkB64 = z.string().regex(/^[A-Za-z0-9_-]{43}$/);
+export const LinkValue = b64uBytes(32);
+const linkB64 = LinkValue;
 /** ML-KEM-768 encapsulation key, base64url (1184 bytes). */
-export const LinkKemKey = z.string().regex(/^[A-Za-z0-9_-]{1579}$/);
+export const LinkKemKey = b64uBytes(1184);
 
 /** Account seed sealed to a new device during linking (see link.* methods). */
 export const LinkBox = z.object({
-  epk: z.string().max(64),
+  epk: b64uBytes(32),
   /** ML-KEM-768 ciphertext, base64url (1088 bytes). */
-  kem: z.string().regex(/^[A-Za-z0-9_-]{1451}$/),
-  ct: z.string().max(4000),
-  from: z.string(),
-  sig: z.string(),
+  kem: b64uBytes(1088),
+  ct: b64uText(4000),
+  from: keyB64u,
+  sig: sigB64u,
 });
 export type LinkBox = z.infer<typeof LinkBox>;
 
@@ -231,15 +236,15 @@ export const SignalData = z.discriminatedUnion('type', [
     type: z.literal('offer'),
     epoch: z.number().int(),
     sdp: z.string().max(64_000),
-    key: z.string(),
-    sig: z.string(),
+    key: keyB64u,
+    sig: sigB64u,
   }),
   z.object({
     type: z.literal('answer'),
     epoch: z.number().int(),
     sdp: z.string().max(64_000),
-    key: z.string(),
-    sig: z.string(),
+    key: keyB64u,
+    sig: sigB64u,
   }),
   z.object({
     type: z.literal('candidate'),
@@ -286,6 +291,7 @@ export const RpcParams = {
   'session.join': z.object({
     sessionId: SessionId,
     caps: HostCaps,
+    hint: SessionHint.optional(),
     proof: SessionOpProof.optional(),
   }),
   'session.leave': z.object({ sessionId: SessionId }),
@@ -362,7 +368,8 @@ export interface RpcMethods {
   'session.update': Record<string, never>;
   'session.report': Record<string, never>;
   'voice.watch': { voice: VoiceOccupancy[] };
-  'signal.send': { delivered: boolean };
+  /** Says nothing of whether it arrived: that would tell who is connected. */
+  'signal.send': Record<string, never>;
   'servers.list': { servers: PublicServerInfo[] };
   'link.open': { code: string; expiresAt: number };
   'link.claim': { peer: string; key: string; encKey: string; kemKey: string; commit: string };
@@ -376,14 +383,19 @@ export interface RpcMethods {
   'mail.ack': Record<string, never>;
 }
 
-/** A mailbox item on its way to the recipient device. */
-export interface MailItem {
-  id: string;
+/**
+ * A mailbox item on its way to the recipient device. The device checks what a server hands it
+ * against this, so one malformed item can't keep the rest from being taken in or confirmed.
+ */
+export const MailItem = z.object({
+  /** As long as `mail.ack` takes. */
+  id: z.string().max(40),
   /** Sender user id (as authenticated by the depositing server). */
-  from: string;
-  box: SealedBox;
-  createdAt: number;
-}
+  from: z.string().max(200),
+  box: SealedBox,
+  createdAt: z.number(),
+});
+export type MailItem = z.infer<typeof MailItem>;
 
 export type RpcMethod = keyof RpcMethods;
 export type RpcParamsOf<M extends RpcMethod> = z.input<(typeof RpcParams)[M]>;

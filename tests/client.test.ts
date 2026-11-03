@@ -16,11 +16,19 @@ import {
   createChatMessage,
   createIdentity,
   createLinkKem,
+  emptyRosterHash,
+  encodeRecoveryKey,
+  inviteCommitment,
   linkCommitment,
   linkNonce,
   sealLink,
   sign,
+  randomId,
   signRecord,
+  signSpaceAuthority,
+  spaceIdFor,
+  ticketFromSecret,
+  type Identity,
 } from '@crocodile/crypto';
 import {
   DELETED_PROFILE_NAME,
@@ -405,6 +413,90 @@ describe('client', () => {
     await waitFor(() => bodies(bob, ch).includes('still here?'), 12000, 'chat after failover');
   });
 
+  it('signs the host it last saw into the join it renews, and none into the first or after leaving', async () => {
+    const coord = await server();
+    const net = new FakeRelayNetwork();
+    const alice = await signUp(makeClient(net, coord, { nat: 'open' }), 'alice');
+    const bob = await signUp(makeClient(net, coord, { nat: 'cone' }), 'bob');
+    const link = bob.link!;
+    const joins: { sessionId: string; hint?: unknown }[] = [];
+    // How each was answered (a join the server finds not to be signed as it was sent is refused).
+    const answers: string[] = [];
+    let failNext = false;
+    const request = link.request.bind(link);
+    link.request = (async (method: string, params: { sessionId: string; hint?: unknown }) => {
+      if (method !== 'session.join') return request(method as never, params as never);
+      joins.push(params);
+      const at = joins.length - 1;
+      if (failNext) {
+        failNext = false;
+        answers[at] = 'failed';
+        throw Object.assign(new Error('the owner did not answer'), { code: 'unavailable' });
+      }
+      return request(method as never, params as never).then(
+        (res) => ((answers[at] = 'ok'), res),
+        (err) => {
+          answers[at] = String(err);
+          throw err;
+        },
+      );
+    }) as typeof link.request;
+    const spaceId = await alice.createSpace('Hint');
+    await bob.joinWithInvite(await alice.createInvite(spaceId));
+    const ch = channelOf(alice, spaceId);
+    const sid = sessionIds.space(spaceId);
+    await alice.openChannel(ch);
+    await bob.openChannel(ch);
+    await waitFor(() => bob.state.sessions[sid]?.peers.includes(alice.userId), 12000, 'connected');
+    // The first join has seen nothing.
+    expect(joins[0]!.sessionId).toBe(sid);
+    expect(joins[0]!.hint).toBeUndefined();
+
+    // The server that keeps the room changed: it asks for a new join, which says what Bob saw.
+    const seen = coord.sessions.ownedState(sid)!;
+    expect(seen.host).toMatch(new RegExp(`^${alice.userId}\\.`));
+    const before = joins.length;
+    (link as unknown as { emit(ev: string, d: unknown): void }).emit('session_renew', {
+      sessionId: sid,
+    });
+    await waitFor(() => answers[before] !== undefined, 5000, 'the answer to a new join');
+    expect(answers[before]).toBe('ok');
+    expect(joins[before]!.hint).toEqual({
+      epoch: seen.epoch,
+      host: seen.host,
+      backup: seen.backup,
+    });
+
+    // After leaving, what it saw is no longer what the room is.
+    const session = (
+      bob as unknown as {
+        sessions: Map<string, { leave(): Promise<void>; join(): Promise<void> }>;
+      }
+    ).sessions.get(sid)!;
+    await session.leave();
+    const afterLeave = joins.length;
+    await session.join();
+    expect(joins[afterLeave]!.hint).toBeUndefined();
+    expect(answers[afterLeave]).toBe('ok');
+
+    // Nor when the first join after leaving is not taken and it tries again.
+    await session.leave();
+    failNext = true;
+    const retried = joins.length;
+    await session.join().catch(() => {});
+    await session.join();
+    expect(joins.slice(retried).map((j) => j.hint)).toEqual([undefined, undefined]);
+    expect(answers.slice(retried)).toEqual(['failed', 'ok']);
+
+    // A new connection starts from nothing: what it saw before is not what the room is now.
+    const reconnected = joins.length;
+    for (const c of coord.presence.localOf(bob.userId)) c.close(4000, 'going away');
+    await waitFor(() => bob.state.link !== 'connected', 3000, 'disconnected');
+    await waitFor(() => joins.length > reconnected, 8000, 'a join on the new connection');
+    expect(joins[reconnected]!.sessionId).toBe(sid);
+    expect(joins[reconnected]!.hint).toBeUndefined();
+  });
+
   it('works across two coordination servers in a mesh', async () => {
     const a = await server({ name: 'A' });
     const b = await server({ name: 'B', meshPeers: [a.url] });
@@ -414,7 +506,11 @@ describe('client', () => {
     const bob = await signUp(makeClient(net, b), 'bob');
     const spaceId = await alice.createSpace('Federated');
     const code = await alice.createInvite(spaceId);
-    await waitFor(() => b.records.get(`invite:${code}`), 12000, 'invite replicated');
+    await waitFor(
+      () => b.records.get(`invite:${ticketFromSecret(code)!.tid}`),
+      12000,
+      'invite replicated',
+    );
     await bob.joinWithInvite(code);
     const ch = channelOf(alice, spaceId);
     await bob.openChannel(ch);
@@ -995,7 +1091,7 @@ describe('space admins', () => {
     await waitFor(() => bob.state.spaces[spaceId]?.admins.length === 0, 8000, 'no longer admin');
     await expect(bob.addChannel(spaceId, 'again', 'text')).rejects.toThrow(/owner or an admin/);
     // His invite stopped working with his rights.
-    await expect(dave.joinWithInvite(bobsInvite)).rejects.toThrow(/may no longer invite/);
+    await expect(dave.joinWithInvite(bobsInvite)).rejects.toThrow(/maker can no longer invite/);
   });
 });
 
@@ -1303,6 +1399,36 @@ describe('multiple devices', () => {
     fresh.cancelDeviceLink();
     await fresh.confirmDeviceLink();
     expect(fresh.identity).toBeNull();
+  });
+
+  it('refuses a link value in another spelling before its own nonce goes out', async () => {
+    const coord = await server();
+    const net = new FakeRelayNetwork();
+    const alice = await signUp(makeClient(net, coord), 'alice');
+    const fresh = makeClient(net, coord);
+    await fresh.init();
+    await fresh.startDeviceLink();
+    const code = await waitFor(
+      () => (fresh.state.linking?.role === 'new' ? fresh.state.linking.code : undefined),
+      5000,
+    );
+    // The same 32 bytes of the new device's commit, with a bit set that carries nothing: it
+    // would be hashed as another text and the two devices would show different codes.
+    const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_';
+    const lax = (s: string) => s.slice(0, -1) + alphabet[alphabet.indexOf(s.at(-1)!) | 1]!;
+    const link = alice.link!;
+    const request = link.request.bind(link);
+    const sent: string[] = [];
+    link.request = (async (method: string, params: unknown) => {
+      sent.push(method);
+      const res = (await request(method as never, params as never)) as { commit: string };
+      return method === 'link.claim' ? { ...res, commit: lax(res.commit) } : res;
+    }) as typeof link.request;
+
+    await expect(alice.claimDeviceLink(code)).rejects.toThrow(/could not be verified/);
+    expect(sent).toContain('link.claim');
+    expect(sent).not.toContain('link.nonce');
+    fresh.cancelDeviceLink();
   });
 
   it('refuses the link when the server swaps only the ML-KEM key', async () => {
@@ -1616,6 +1742,135 @@ describe('leaving', () => {
     expect(bob.state.friends.outgoing).not.toContain(aliceId);
   });
 
+  describe('a device removed from its account', () => {
+    async function twoDevices() {
+      const coord = await server();
+      const net = new FakeRelayNetwork();
+      const alice = await signUp(makeClient(net, coord), 'alice');
+      const kv = new MemoryKeyValueStore();
+      const laptop = makeClient(net, coord, { kv });
+      await laptop.init();
+      await laptop.restoreAccount(alice.recoveryKey());
+      await waitFor(() => laptop.state.link === 'connected', 5000, 'laptop connected');
+      alice.finishOnboarding();
+      laptop.finishOnboarding();
+      // The first device learns of the second one (a list it opens, or a push).
+      await waitFor(
+        () => coord.store.listPrefix(recordKey.devicePrefix(alice.userId), 10).length === 2,
+        8000,
+        'both devices published',
+      );
+      alice.records.ingestAll(coord.store.listPrefix(recordKey.devicePrefix(alice.userId), 10));
+      const spaceId = await alice.createSpace('Place');
+      await waitFor(() => laptop.state.spaces[spaceId], 8000, 'laptop synced');
+      await laptop.openChannel(channelOf(laptop, spaceId));
+      await laptop.sendMessage(channelOf(laptop, spaceId), 'held on the laptop');
+      return { coord, net, alice, laptop, kv, spaceId };
+    }
+    const cleared = async (c: CrocodileClient, kv: MemoryKeyValueStore) => {
+      expect(c.identity).toBeNull();
+      expect(c.state.phase).toBe('onboarding');
+      expect(c.state.accountDeleted).toBe(false);
+      expect(await kv.get('identity-seed')).toBeUndefined();
+      expect(await kv.get('records-cache')).toBeUndefined();
+      expect(c.state.messages).toEqual({});
+    };
+
+    it('stops and clears what it held when it is removed while connected', async () => {
+      const { alice, laptop, kv } = await twoDevices();
+      const errors: string[] = [];
+      laptop.on('error', (e) => errors.push(e.message));
+      await alice.revokeDevice(laptop.deviceId);
+      await waitFor(() => laptop.identity === null, 8000, 'laptop cleared');
+      await cleared(laptop, kv);
+      expect(errors).toContain('This device was removed from your account on another device.');
+      // The account itself, and the device that removed this one, carry on.
+      expect(alice.state.phase).toBe('ready');
+      expect(alice.state.link).toBe('connected');
+    });
+
+    it('stops and clears what it held when it finds out on connecting', async () => {
+      const { net, coord, alice, laptop, kv } = await twoDevices();
+      const laptopId = laptop.deviceId;
+      await laptop.shutdown();
+      await alice.revokeDevice(laptopId);
+      const again = makeClient(net, coord, { kv });
+      await again.init();
+      const asked = vi.spyOn((again as unknown as { link: CoordinatorLink }).link, 'request');
+      await waitFor(() => again.identity === null, 8000, 'cleared on connecting');
+      await cleared(again, kv);
+      // It doesn't go on to load the account it no longer has.
+      await new Promise((r) => setTimeout(r, 300));
+      expect(asked.mock.calls.map((c) => c[0])).not.toContain('spaces.mine');
+    });
+
+    it('clears it when the removal is already in its records but it carries on', async () => {
+      const { alice, laptop, kv } = await twoDevices();
+      const key = recordKey.device(laptop.userId, laptop.deviceId);
+      await alice.revokeDevice(laptop.deviceId);
+      // The record is taken in without the device acting on it (it was cut short, say).
+      const inner = laptop as unknown as {
+        signingOut: boolean;
+        ensureDeviceRecord(): Promise<void>;
+      };
+      inner.signingOut = true;
+      laptop.records.ingest(alice.records.get(key)!);
+      inner.signingOut = false;
+      expect(laptop.identity).not.toBeNull();
+      await inner.ensureDeviceRecord();
+      await cleared(laptop, kv);
+    });
+
+    it("does not clear it for a removal the account didn't sign", async () => {
+      const { laptop } = await twoDevices();
+      const key = recordKey.device(laptop.userId, laptop.deviceId);
+      const mine = laptop.records.get(key)!;
+      // A server says it was removed, with nothing signed to show for it.
+      const forged = { ...mine, version: mine.version + 1, body: { ...mine.body, revoked: true } };
+      const link = (laptop as unknown as { link: CoordinatorLink }).link;
+      vi.spyOn(link, 'request').mockImplementation(async (method) => {
+        if (method === 'records.get') return { records: [forged] } as never;
+        return {} as never;
+      });
+      await (laptop as unknown as { ensureDeviceRecord(): Promise<void> }).ensureDeviceRecord();
+      expect(laptop.identity).not.toBeNull();
+      expect(laptop.state.phase).toBe('ready');
+      expect((laptop.records.get(key)!.body as { revoked?: boolean }).revoked).toBeUndefined();
+    });
+
+    it('removing this very device from its own list is signing out', async () => {
+      const { coord, alice, laptop, kv } = await twoDevices();
+      const errors: string[] = [];
+      laptop.on('error', (e) => errors.push(e.message));
+      await laptop.revokeDevice(laptop.deviceId);
+      await cleared(laptop, kv);
+      expect(errors).toEqual([]);
+      // Its record on the account says it is gone.
+      const mine = coord.store.listPrefix(recordKey.devicePrefix(alice.userId), 10);
+      expect(mine.filter((r) => (r.body as { revoked?: boolean }).revoked)).toHaveLength(1);
+    });
+
+    it('says it was removed even when clearing did not get to the end', async () => {
+      const { alice, laptop } = await twoDevices();
+      const errors: string[] = [];
+      laptop.on('error', (e) => errors.push(e.message));
+      vi.spyOn(laptop.platform.messages, 'clear').mockRejectedValue(new Error('disk'));
+      await alice.revokeDevice(laptop.deviceId);
+      await waitFor(() => errors.length > 0, 8000, 'told');
+      expect(errors).toEqual(['This device was removed from your account on another device.']);
+    });
+
+    it('signing out is not reported as a removal', async () => {
+      const { alice, laptop } = await twoDevices();
+      const errors: string[] = [];
+      laptop.on('error', (e) => errors.push(e.message));
+      await laptop.signOut();
+      expect(laptop.identity).toBeNull();
+      expect(errors).toEqual([]);
+      expect(alice.state.phase).toBe('ready');
+    });
+  });
+
   it('comes up on reconnect even when one space cannot be checked just now', async () => {
     const coord = await server();
     const alice = await signUp(makeClient(new FakeRelayNetwork(), coord), 'alice');
@@ -1687,6 +1942,288 @@ describe('leaving', () => {
     spy.mockRestore();
   });
 
+  describe('the roster of an owner', () => {
+    /**
+     * A space as it was before rosters, the way an older server kept it: the owner's account,
+     * a link of the older kind and the people who joined with it (Bob, and Mallory by a record
+     * made to look as old as theirs), all taken as copies from another server.
+     */
+    async function older() {
+      const coord = await server();
+      const net = new FakeRelayNetwork();
+      const owner = createIdentity();
+      const nonce = randomId();
+      const spaceId = spaceIdFor(owner.publicKey, nonce);
+      const code = randomId(16);
+      const copy = (r: SignedRecord) => {
+        const res = coord.records.put(r, { fresh: false, origin: 'peer' });
+        if (!res.accepted) throw new Error(`copy refused: ${res.reason}`);
+      };
+      copy(
+        signRecord(owner, 'space', recordKey.space(spaceId), {
+          name: 'Swamp',
+          owner: owner.userId,
+          nonce,
+          admins: [],
+          bans: [],
+          publicInvite: inviteCommitment(spaceId, code),
+          channels: [
+            { id: randomId(), name: 'general', kind: 'text' },
+            { id: randomId(), name: 'General', kind: 'voice' },
+          ],
+        }),
+      );
+      copy(
+        signRecord(owner, 'member', recordKey.member(spaceId, owner.userId), {
+          spaceId,
+          userId: owner.userId,
+        }),
+      );
+      copy(
+        signRecord(owner, 'invite', recordKey.invite(code), {
+          spaceId,
+          code,
+          expiresAt: Date.now() + 7 * 24 * 3600_000,
+        }),
+      );
+      const legacyJoin = (who: Identity, version?: number) =>
+        signRecord(
+          who,
+          'member',
+          recordKey.member(spaceId, who.userId),
+          { spaceId, userId: who.userId, inviteCode: code },
+          version,
+        );
+      const alice = makeClient(net, coord);
+      await alice.init();
+      await alice.restoreAccount(encodeRecoveryKey(owner.seed), 'alice');
+      await waitFor(() => alice.state.link === 'connected' && alice.state.me, 5000, 'alice');
+      const bob = await signUp(makeClient(net, coord), 'bob');
+      const mallory = createIdentity();
+      copy(legacyJoin(identityOf(bob)));
+      copy(legacyJoin(mallory, 1000));
+      // Dave was invited by name, which the roster is not for.
+      const dave = createIdentity();
+      const named = randomId(6);
+      copy(
+        signRecord(owner, 'invite', recordKey.invite(named), {
+          spaceId,
+          code: named,
+          expiresAt: Date.now() + 24 * 3600_000,
+          for: dave.userId,
+        }),
+      );
+      copy(
+        signRecord(dave, 'member', recordKey.member(spaceId, dave.userId), {
+          spaceId,
+          userId: dave.userId,
+          inviteCode: named,
+        }),
+      );
+      return { coord, net, alice, bob, mallory, dave, spaceId, code, legacyJoin };
+    }
+    /** The owner's list of those who joined by the older link, once Bob and Mallory are in it. */
+    const toReview = (owner: CrocodileClient, spaceId: string) =>
+      waitFor(() => owner.legacyMembers(spaceId).length === 2, 8000, 'the list to review');
+    const identityOf = (c: CrocodileClient) => (c as unknown as { identity: Identity }).identity;
+
+    it('asks the owner who of those who joined by an older link stays, and changes nothing until then', async () => {
+      const { alice, bob, mallory, dave, spaceId } = await older();
+      await toReview(alice, spaceId);
+      // (Not Dave, whom the owner invited by name.)
+      expect(alice.legacyMembers(spaceId)).toEqual([bob.userId, mallory.userId].sort());
+      // Until the owner has signed, they count as they always did.
+      expect(alice.state.spaces[spaceId]!.members).toEqual(
+        expect.arrayContaining([alice.userId, bob.userId, mallory.userId, dave.userId]),
+      );
+    });
+
+    it('keeps those the owner signs and no one else, for the owner, the servers and the others', async () => {
+      const { coord, alice, bob, mallory, dave, spaceId, legacyJoin } = await older();
+      await toReview(alice, spaceId);
+      await alice.signRoster(spaceId, [bob.userId]);
+      await waitFor(
+        () => !alice.state.spaces[spaceId]?.members.includes(mallory.userId),
+        5000,
+        'Mallory off the list',
+      );
+      const view = alice.state.spaces[spaceId]!;
+      expect(view.members.sort()).toEqual([alice.userId, bob.userId, dave.userId].sort());
+      expect(view.rosterToSign).toBeUndefined();
+      expect(await coord.areSpaceMember([spaceId], bob.userId)).toEqual([true]);
+      expect(await coord.areSpaceMember([spaceId], dave.userId)).toEqual([true]);
+      expect(await coord.areSpaceMember([spaceId], mallory.userId)).toEqual([false]);
+      // A record made to look older than the roster is turned away.
+      expect(
+        coord.records.put(legacyJoin(createIdentity(), 1), { fresh: false, origin: 'peer' })
+          .accepted,
+      ).toBe(false);
+      // Bob has kept his place, and the others see the same list as the owner does.
+      await waitFor(
+        () => {
+          const members = bob.state.spaces[spaceId]?.members;
+          return members?.length === 3 && !members.includes(mallory.userId);
+        },
+        8000,
+        'bob sees the same list',
+      );
+      expect(bob.state.spaces[spaceId]!.members.sort()).toEqual(
+        [alice.userId, bob.userId, dave.userId].sort(),
+      );
+    });
+
+    it('is fetched by a device that starts with nothing, before it shows who is in', async () => {
+      const { net, coord, alice, bob, mallory, dave, spaceId } = await older();
+      await toReview(alice, spaceId);
+      await alice.signRoster(spaceId, [bob.userId]);
+      const phone = makeClient(net, coord);
+      await phone.init();
+      await phone.restoreAccount(bob.recoveryKey());
+      await waitFor(
+        () => {
+          const members = phone.state.spaces[spaceId]?.members;
+          return members?.length === 3 && !members.includes(mallory.userId);
+        },
+        8000,
+        'the same list',
+      );
+      expect(phone.state.spaces[spaceId]!.members.sort()).toEqual(
+        [alice.userId, bob.userId, dave.userId].sort(),
+      );
+    });
+
+    it('lists nobody the owner was not shown, and nobody the owner has banned', async () => {
+      const { alice, bob, mallory, spaceId } = await older();
+      await toReview(alice, spaceId);
+      await alice.banMember(spaceId, mallory.userId);
+      await waitFor(
+        () => !alice.legacyMembers(spaceId).includes(mallory.userId),
+        5000,
+        'the banned off the list',
+      );
+      const stranger = createIdentity();
+      await alice.signRoster(spaceId, [bob.userId, mallory.userId, stranger.userId]);
+      const roster = alice.records.get(recordKey.roster(spaceId)) as SignedRecord<'roster'>;
+      expect(roster.body.members).toEqual([bob.userId]);
+    });
+
+    it('is the owner’s alone to sign, and once', async () => {
+      const { alice, bob, spaceId } = await older();
+      await toReview(alice, spaceId);
+      await expect(bob.signRoster(spaceId, [bob.userId])).rejects.toThrow(
+        /only the owner can do this/,
+      );
+      await alice.signRoster(spaceId, [bob.userId]);
+      const first = alice.records.get(recordKey.roster(spaceId));
+      await expect(alice.signRoster(spaceId, [])).rejects.toThrow(/signed already/);
+      expect(alice.records.get(recordKey.roster(spaceId))).toBe(first);
+    });
+
+    it('is not signed from a list of members that has not come in yet, nor one too long to keep', async () => {
+      const { alice, bob, spaceId } = await older();
+      await toReview(alice, spaceId);
+      const loaded = (alice as unknown as { membersLoaded: Set<string> }).membersLoaded;
+      loaded.delete(spaceId);
+      await expect(alice.signRoster(spaceId, [bob.userId])).rejects.toThrow(/still coming in/);
+      loaded.add(spaceId);
+      const many = Array.from({ length: 10_001 }, (_, i) => `${i}`.padStart(26, 'a'));
+      const spy = vi.spyOn(alice, 'legacyMembers').mockReturnValue(many);
+      await expect(alice.signRoster(spaceId, many)).rejects.toThrow(/At most 10000 people/);
+      spy.mockRestore();
+      expect(alice.state.spaces[spaceId]!.rosterToSign).toBe(true);
+    });
+
+    it('does not offer, preview or join with a link of the older kind, even one that has not ended', async () => {
+      const { net, coord, alice, spaceId, code } = await older();
+      await toReview(alice, spaceId);
+      // The space names it and it has time left, but servers turn every join with it away.
+      expect(alice.openLinkOf(spaceId).state).toBe('ended');
+      const carol = await signUp(makeClient(net, coord), 'carol');
+      expect(await carol.previewInvite(code)).toMatchObject({ expired: true });
+      await expect(carol.joinWithInvite(code)).rejects.toThrow(/That link is out of date\./);
+      expect(carol.state.spaces[spaceId]).toBeUndefined();
+    });
+
+    it('is only read by those in the space', async () => {
+      const { coord, alice, bob, spaceId } = await older();
+      await toReview(alice, spaceId);
+      await alice.signRoster(spaceId, [bob.userId]);
+      const stranger = await connectUser(coord);
+      cleanup.push(() => stranger.conn.close());
+      const ask = (link: Pick<CoordinatorLink, 'request'>) =>
+        link.request('records.get', { keys: [recordKey.roster(spaceId)] });
+      expect((await ask(stranger.conn)).records).toEqual([]);
+      expect((await ask(bob.link!)).records).toHaveLength(1);
+    });
+
+    it('is in a new space from the start, so that no one of the older kind is ever one of its members', async () => {
+      const coord = await server();
+      const net = new FakeRelayNetwork();
+      const alice = await signUp(makeClient(net, coord), 'alice');
+      const spaceId = await alice.createSpace('Swamp');
+      const space = alice.records.get(recordKey.space(spaceId)) as SignedRecord<'space'>;
+      expect(space.body.authority?.roster).toBe(emptyRosterHash(spaceId));
+      // A membership made to look as old as any, with a code that is not a secret.
+      const mallory = createIdentity();
+      const code = randomId(16);
+      coord.records.put(
+        signRecord(identityOf(alice), 'invite', recordKey.invite(code), {
+          spaceId,
+          code,
+          expiresAt: null,
+        }),
+        { fresh: false, origin: 'peer' },
+      );
+      const forged = signRecord(
+        mallory,
+        'member',
+        recordKey.member(spaceId, mallory.userId),
+        { spaceId, userId: mallory.userId, inviteCode: code },
+        1000,
+      );
+      expect(coord.records.put(forged, { fresh: false, origin: 'peer' }).accepted).toBe(false);
+      expect(await coord.areSpaceMember([spaceId], mallory.userId)).toEqual([false]);
+    });
+
+    it('still lets the owner make others admins, ban and change the space once it is signed', async () => {
+      const { alice, bob, spaceId } = await older();
+      await toReview(alice, spaceId);
+      await alice.signRoster(spaceId, [bob.userId]);
+      await alice.setAdmin(spaceId, bob.userId, true);
+      await waitFor(() => bob.state.spaces[spaceId]?.admins.includes(bob.userId), 5000, 'admin');
+      await alice.setAdmin(spaceId, bob.userId, false);
+      await alice.updateSpace(spaceId, (b) => ({ ...b, name: 'Marsh' }));
+      await waitFor(() => bob.state.spaces[spaceId]?.name === 'Marsh', 5000, 'renamed');
+      const space = alice.records.get(recordKey.space(spaceId)) as SignedRecord<'space'>;
+      expect(space.body.authority?.roster).toBeDefined();
+      expect(space.body.formerAdmins).toEqual([bob.userId]);
+    });
+
+    it('needs a link that works to come back after leaving, not the code that was listed', async () => {
+      const { alice, bob, spaceId, code } = await older();
+      await toReview(alice, spaceId);
+      await alice.signRoster(spaceId, [bob.userId]);
+      await bob.leaveSpace(spaceId);
+      await expect(bob.joinWithInvite(code)).rejects.toThrow();
+      const link = await alice.createInvite(spaceId);
+      await bob.joinWithInvite(link);
+      await waitFor(() => bob.state.spaces[spaceId], 5000, 'bob back');
+    });
+
+    it('is not in the way of deleting an account that owns a space with former admins and a roster', async () => {
+      const coord = await server();
+      const net = new FakeRelayNetwork();
+      const alice = await signUp(makeClient(net, coord), 'alice');
+      const bob = await signUp(makeClient(net, coord), 'bob');
+      const spaceId = await alice.createSpace('Swamp');
+      await alice.setAdmin(spaceId, bob.userId, true);
+      await alice.setAdmin(spaceId, bob.userId, false);
+      await alice.deleteAccount();
+      const marker = coord.records.get(recordKey.space(spaceId)) as SignedRecord<'space'>;
+      expect(marker.body.deleted).toBe(true);
+    });
+  });
+
   describe('the open invite', () => {
     async function trio() {
       const coord = await server();
@@ -1736,7 +2273,7 @@ describe('leaving', () => {
       expect(carol.openLinkOf(spaceId)).toEqual({ state: 'elsewhere' });
       await expect(carol.shareInvite(spaceId)).rejects.toThrow(/another device/);
       // Nothing was replaced.
-      expect(alice.openInviteOf(spaceId)?.body.code).toBe(link);
+      expect(alice.openInviteOf(spaceId)?.body.code).toBe(ticketFromSecret(link)!.tid);
       await carol.stopOpenInvite(spaceId);
       await waitFor(() => alice.state.spaces[spaceId]?.publicInvite === undefined, 5000, 'off');
       expect(alice.openLinkOf(spaceId)).toEqual({ state: 'none' });
@@ -1752,13 +2289,407 @@ describe('leaving', () => {
           (await bob.link!.request('records.get', { keys: [`space:${spaceId}`] })).records,
         ),
       ).not.toContain(link);
+      // Nor is it in the invite record, which anyone can read.
+      expect(named).toBe(ticketFromSecret(link)!.tid);
+      expect(
+        JSON.stringify(
+          (await bob.link!.request('records.get', { keys: [`invite:${named}`] })).records,
+        ),
+      ).not.toContain(link);
       // A link is the one that is shared until it is about to run out, then a new one.
-      await alice.createInvite(spaceId, 3 * 3600_000);
-      const short = alice.openInviteOf(spaceId)!.body.code;
+      const short = await alice.createInvite(spaceId, 3 * 3600_000);
       expect(await alice.shareInvite(spaceId)).toBe(short);
-      await alice.createInvite(spaceId, 1800_000);
-      const dying = alice.openInviteOf(spaceId)!.body.code;
+      const dying = await alice.createInvite(spaceId, 1800_000);
       expect(await alice.shareInvite(spaceId)).not.toBe(dying);
+    });
+
+    it('is joined with a ticket: the membership carries it, and the link is the only way in', async () => {
+      const { alice, bob, carol, spaceId } = await trio();
+      const link = await alice.shareInvite(spaceId);
+      const ticket = ticketFromSecret(link)!;
+      await bob.joinWithInvite(`croc://join/${link}`);
+      const mine = bob.records.get(`member:${spaceId}:${bob.userId}`) as SignedRecord<'member'>;
+      expect(mine.body.inviteCode).toBeUndefined();
+      expect(mine.body.ticket?.invite.body).toMatchObject({ code: ticket.tid, tpub: ticket.tpub });
+      await waitFor(
+        () => alice.state.spaces[spaceId]?.members.includes(bob.userId),
+        8000,
+        'alice sees bob',
+      );
+      // What the servers hold, the name of the link, is not a way in.
+      expect(await carol.previewInvite(ticket.tid)).toBeNull();
+      await expect(carol.joinWithInvite(ticket.tid)).rejects.toThrow(/not complete/);
+      expect(await carol.previewInvite(link)).toMatchObject({ expired: false, joined: false });
+      await carol.joinWithInvite(link);
+      expect(carol.state.spaces[spaceId]).toBeDefined();
+    });
+
+    it('needs a link that works to come back after leaving', async () => {
+      const { alice, bob, spaceId } = await trio();
+      const link = await alice.shareInvite(spaceId);
+      await bob.joinWithInvite(link);
+      await bob.leaveSpace(spaceId);
+      await waitFor(() => !bob.state.spaces[spaceId], 5000, 'bob left');
+      // The same link, while it is on, brings him back.
+      await bob.joinWithInvite(link);
+      expect(bob.state.spaces[spaceId]).toBeDefined();
+      await bob.leaveSpace(spaceId);
+      await waitFor(() => !bob.state.spaces[spaceId], 5000, 'bob left again');
+      // Not once the space has a new one.
+      await alice.createInvite(spaceId);
+      await expect(bob.joinWithInvite(link)).rejects.toThrow(/revoked|replaced or turned off/);
+    });
+
+    it('keeps those an admin let in when the admin is removed', async () => {
+      const { alice, bob, carol, spaceId } = await trio();
+      await carol.joinWithInvite(await alice.shareInvite(spaceId));
+      await alice.updateSpace(spaceId, (b) => ({ ...b, admins: [carol.userId] }));
+      await waitFor(
+        () => carol.state.spaces[spaceId]?.admins.includes(carol.userId),
+        5000,
+        'carol is an admin',
+      );
+      // The link carol makes is hers: she holds its secret, and it replaces alice's.
+      const link = await carol.createInvite(spaceId);
+      await bob.joinWithInvite(link);
+      await waitFor(
+        () => alice.state.spaces[spaceId]?.members.includes(bob.userId),
+        8000,
+        'alice sees bob',
+      );
+      await alice.setAdmin(spaceId, carol.userId, false);
+      await waitFor(
+        () => !alice.state.spaces[spaceId]?.admins.includes(carol.userId),
+        5000,
+        'carol is no longer an admin',
+      );
+      const space = alice.records.get(`space:${spaceId}`) as SignedRecord<'space'>;
+      expect(space.body.formerAdmins).toEqual([carol.userId]);
+      // The link she made is not one she can hand out any more.
+      await waitFor(() => carol.openLinkOf(spaceId).state === 'ended', 5000, 'her link has ended');
+      expect(alice.state.spaces[spaceId]!.members).toContain(bob.userId);
+      // And the owner can go on changing the space.
+      await alice.updateSpace(spaceId, (b) => ({ ...b, name: 'Marsh' }));
+      await waitFor(() => bob.state.spaces[spaceId]?.name === 'Marsh', 8000, 'bob sees the change');
+      expect(bob.state.spaces[spaceId]!.members).toContain(bob.userId);
+    });
+
+    it('ends the link another admin made when it is replaced, though this device does not hold its record', async () => {
+      const { alice, carol, spaceId } = await trio();
+      await carol.joinWithInvite(await alice.shareInvite(spaceId));
+      await alice.updateSpace(spaceId, (b) => ({ ...b, admins: [carol.userId] }));
+      await waitFor(
+        () => carol.state.spaces[spaceId]?.admins.includes(carol.userId),
+        5000,
+        'carol is an admin',
+      );
+      const hers = ticketFromSecret(await carol.createInvite(spaceId))!.tid;
+      await waitFor(
+        () => alice.state.spaces[spaceId]?.publicInvite === hers,
+        5000,
+        'the space names her link',
+      );
+      expect(alice.records.get(`invite:${hers}`)).toBeUndefined();
+      await alice.createInvite(spaceId);
+      expect((alice.records.get(`invite:${hers}`) as SignedRecord<'invite'>).body.revoked).toBe(
+        true,
+      );
+    });
+
+    it('does not take another admin off the list when it has no room for a former one', async () => {
+      const { alice, carol, spaceId } = await trio();
+      await alice.updateSpace(spaceId, (b) => ({ ...b, admins: [carol.userId] }));
+      // A list as long as it can be.
+      const owner = alice as unknown as { identity: import('@crocodile/crypto').Identity };
+      const former = Array.from({ length: 1000 }, () => randomId(16));
+      const r = alice.records.get(`space:${spaceId}`) as SignedRecord<'space'>;
+      const full = signRecord(
+        owner.identity,
+        'space',
+        r.key,
+        {
+          ...r.body,
+          formerAdmins: former,
+          authority: signSpaceAuthority(
+            owner.identity,
+            spaceId,
+            r.body.admins,
+            (r.body.authority?.at ?? 0) + 1,
+            r.body.invitePolicy,
+            former,
+            r.body.authority?.roster,
+          ),
+        },
+        r.version + 1,
+      );
+      alice.records.ingest(full);
+      await expect(alice.setAdmin(spaceId, carol.userId, false)).rejects.toThrow(/Too many admins/);
+      // Other changes to the space still go through.
+      await alice.updateSpace(spaceId, (b) => ({ ...b, name: 'Marsh' }));
+    });
+
+    it('takes an invite a server sends with a key that is not one as no invite', async () => {
+      const { alice, bob, spaceId } = await trio();
+      const link = await alice.shareInvite(spaceId);
+      const conn = bob.link!;
+      const real = conn.request.bind(conn) as (
+        m: string,
+        p: { keys?: string[] },
+      ) => Promise<unknown>;
+      vi.spyOn(conn, 'request').mockImplementation((async (m: string, p: { keys?: string[] }) => {
+        const res = (await real(m, p)) as { records?: SignedRecord[] };
+        if (m === 'records.get' && p.keys?.[0]?.startsWith('invite:'))
+          return { ...res, records: res.records!.map((r) => ({ ...r, author: '!!not-a-key!!' })) };
+        return res;
+      }) as never);
+      await expect(bob.joinWithInvite(link)).rejects.toThrow(/does not exist/);
+    });
+
+    it('tells someone joining with the link of an admin who has been removed that it is out of date', async () => {
+      const { alice, bob, carol, spaceId } = await trio();
+      await carol.joinWithInvite(await alice.shareInvite(spaceId));
+      await alice.updateSpace(spaceId, (b) => ({ ...b, admins: [carol.userId] }));
+      await waitFor(
+        () => carol.state.spaces[spaceId]?.admins.includes(carol.userId),
+        5000,
+        'carol is an admin',
+      );
+      const hers = await carol.createInvite(spaceId);
+      await alice.setAdmin(spaceId, carol.userId, false);
+      await waitFor(
+        () => !bob.state.spaces[spaceId] && !alice.state.spaces[spaceId]?.admins.length,
+        5000,
+        'carol is not an admin',
+      );
+      await expect(bob.joinWithInvite(hers)).rejects.toThrow(/maker can no longer invite/);
+    });
+
+    it('keeps the secret of its link across a restart, drops it when the link ends, and forgets it on signing out', async () => {
+      const coord = await server();
+      const net = new FakeRelayNetwork();
+      const alice = await signUp(makeClient(net, coord), 'alice');
+      const kv = alice.platform.kv as MemoryKeyValueStore;
+      const spaceId = await alice.createSpace('Swamp');
+      const first = await alice.shareInvite(spaceId);
+      const kept = async () =>
+        Object.keys((await kv.get<Record<string, string>>('invite-tickets')) ?? {});
+      expect(await kept()).toEqual([ticketFromSecret(first)!.tid]);
+      // The app is closed and opened again: the link can still be shown. (What is kept with it
+      // that is not a secret is not taken for one.)
+      await alice.shutdown();
+      await kv.set('invite-tickets', {
+        ...(await kv.get<Record<string, string>>('invite-tickets')),
+        notasecret: 5,
+        abcdefgh: 'short',
+      });
+      const again = new CrocodileClient(
+        { ...alice.platform, kv },
+        {
+          directories: [],
+          preferredServers: [coord.url],
+          transportFactory: net.transportFactory(),
+        },
+      );
+      cleanup.push(() => again.shutdown());
+      await again.init();
+      await waitFor(() => again.state.spaces[spaceId], 8000, 'the space is back');
+      expect(await again.shareInvite(spaceId)).toBe(first);
+      // A new link ends that one, and its secret is of no use any more.
+      const second = await again.createInvite(spaceId);
+      await again.createInvite(spaceId);
+      expect(await kept()).not.toContain(ticketFromSecret(first)!.tid);
+      expect(await kept()).not.toContain(ticketFromSecret(second)!.tid);
+      expect(await kept()).toHaveLength(1);
+      await again.signOut();
+      expect(await kept()).toEqual([]);
+    });
+
+    it('is one link even when two are made at once', async () => {
+      const { alice, bob, spaceId } = await trio();
+      await Promise.all([alice.createInvite(spaceId), alice.createInvite(spaceId)]);
+      const live = (alice.records.list('invite:') as SignedRecord<'invite'>[]).filter(
+        (r) => r.body.spaceId === spaceId && r.body.for === undefined && !r.body.revoked,
+      );
+      expect(live).toHaveLength(1);
+      expect(live[0]!.body.code).toBe(alice.state.spaces[spaceId]!.publicInvite);
+      await bob.joinWithInvite(await alice.shareInvite(spaceId));
+    });
+
+    it('gives everyone sharing at once the same link', async () => {
+      const { alice, bob, carol, spaceId } = await trio();
+      await alice.stopOpenInvite(spaceId);
+      const [one, two] = await Promise.all([
+        alice.shareInvite(spaceId),
+        alice.shareInvite(spaceId),
+      ]);
+      expect(two).toBe(one);
+      await bob.joinWithInvite(one);
+      await carol.joinWithInvite(two);
+    });
+
+    it('does not keep the secret of a first link that could not be made, or of one that ran out while the app was closed', async () => {
+      const coord = await server();
+      const net = new FakeRelayNetwork();
+      const alice = await signUp(makeClient(net, coord), 'alice');
+      const kv = alice.platform.kv as MemoryKeyValueStore;
+      const kept = async () =>
+        Object.keys((await kv.get<Record<string, string>>('invite-tickets')) ?? {});
+      const put = (alice as unknown as { putRecord(r: SignedRecord): Promise<unknown> }).putRecord;
+      const spy = vi
+        .spyOn(alice as unknown as { putRecord(r: SignedRecord): Promise<unknown> }, 'putRecord')
+        .mockImplementation(async function (this: unknown, r: SignedRecord) {
+          if (r.kind === 'invite') throw new Error('offline');
+          return put.call(alice, r);
+        });
+      await alice.createSpace('Swamp');
+      spy.mockRestore();
+      expect(await kept()).toEqual([]);
+      // A short link, and the app closed while it runs out.
+      const spaceId = await alice.createSpace('Marsh');
+      await alice.createInvite(spaceId, 2000);
+      expect(await kept()).toHaveLength(1);
+      await waitFor(() => alice.openLinkOf(spaceId).state === 'ended', 8000, 'the link to run out');
+      await alice.shutdown();
+      const again = new CrocodileClient(
+        { ...alice.platform, kv },
+        {
+          directories: [],
+          preferredServers: [coord.url],
+          transportFactory: net.transportFactory(),
+        },
+      );
+      cleanup.push(() => again.shutdown());
+      await again.init();
+      // (Written a moment after it starts.)
+      for (const start = Date.now(); (await kept()).length && Date.now() - start < 5000;)
+        await new Promise((r) => setTimeout(r, 50));
+      expect(await kept()).toEqual([]);
+    });
+
+    it('keeps the secret of the first link when the space names it, and works from the records it must ask for', async () => {
+      const coord = await server();
+      const net = new FakeRelayNetwork();
+      const alice = await signUp(makeClient(net, coord), 'alice');
+      const kv = alice.platform.kv as MemoryKeyValueStore;
+      const kept = async () =>
+        Object.keys((await kv.get<Record<string, string>>('invite-tickets')) ?? {});
+      const put = (alice as unknown as { putRecord(r: SignedRecord): Promise<unknown> }).putRecord;
+      const spy = vi
+        .spyOn(alice as unknown as { putRecord(r: SignedRecord): Promise<unknown> }, 'putRecord')
+        .mockImplementation(async function (this: unknown, r: SignedRecord) {
+          if (r.kind === 'member') throw new Error('offline');
+          return put.call(alice, r);
+        });
+      // The space is made and names its link; what follows fails.
+      await expect(alice.createSpace('Swamp')).rejects.toThrow(/offline/);
+      spy.mockRestore();
+      expect(await kept()).toHaveLength(1);
+
+      // Turning the link off ends it, also when this device does not hold its record just now.
+      const spaceId = await alice.createSpace('Marsh');
+      const link = await alice.shareInvite(spaceId);
+      const tid = ticketFromSecret(link)!.tid;
+      const forget = () =>
+        (alice.records as unknown as { map: Map<string, unknown> }).map.delete(`invite:${tid}`);
+      forget();
+      await alice.stopOpenInvite(spaceId);
+      expect((alice.records.get(`invite:${tid}`) as SignedRecord<'invite'>).body.revoked).toBe(
+        true,
+      );
+
+      // If the record cannot be asked for, nothing is decided on a guess.
+      const again = await alice.createInvite(spaceId);
+      (alice.records as unknown as { map: Map<string, unknown> }).map.delete(
+        `invite:${ticketFromSecret(again)!.tid}`,
+      );
+      const conn = alice.link!;
+      const real = conn.request.bind(conn) as (m: string, p: unknown) => Promise<unknown>;
+      const ask = vi.spyOn(conn, 'request').mockImplementation((async (m: string, p: unknown) => {
+        if (m === 'records.get') throw new Error('unreachable');
+        return real(m, p);
+      }) as never);
+      await expect(alice.shareInvite(spaceId)).rejects.toThrow(/unreachable/);
+      ask.mockRestore();
+      expect(await alice.shareInvite(spaceId)).toBe(again);
+    });
+
+    it('lasts as long as it was asked to, from when it is made', async () => {
+      const coord = await server();
+      const net = new FakeRelayNetwork();
+      const alice = await signUp(makeClient(net, coord), 'alice');
+      const kv = alice.platform.kv as MemoryKeyValueStore;
+      const spaceId = await alice.createSpace('Swamp');
+      const set = kv.set.bind(kv);
+      // Keeping the secret takes a while.
+      vi.spyOn(kv, 'set').mockImplementation(async (key: string, value: unknown) => {
+        if (key === 'invite-tickets') await new Promise((r) => setTimeout(r, 700));
+        return set(key, value);
+      });
+      const asked = Date.now();
+      await alice.createInvite(spaceId, 2 * 3600_000);
+      const invite = alice.openInviteOf(spaceId)!;
+      expect(invite.body.expiresAt! - asked).toBeGreaterThanOrEqual(2 * 3600_000 + 600);
+    });
+
+    it('does not write the secrets back after signing out', async () => {
+      const coord = await server();
+      const net = new FakeRelayNetwork();
+      const alice = await signUp(makeClient(net, coord), 'alice');
+      const kv = alice.platform.kv as MemoryKeyValueStore;
+      await alice.createSpace('Swamp');
+      const set = kv.set.bind(kv);
+      // A write of the secrets that is slow to finish.
+      vi.spyOn(kv, 'set').mockImplementation(async (key: string, value: unknown) => {
+        if (key === 'invite-tickets') await new Promise((r) => setTimeout(r, 200));
+        return set(key, value);
+      });
+      void (alice as unknown as { saveTickets(): Promise<void> }).saveTickets();
+      await alice.signOut();
+      // A write that was still to come, with nothing left to keep, leaves nothing either.
+      await (alice as unknown as { saveTickets(): Promise<void> }).saveTickets();
+      expect(await kv.get('invite-tickets')).toBeUndefined();
+      // A link being made as the account goes does not leave its secret behind either.
+      await (
+        alice as unknown as { keepTicket(t: { tid: string; secret: string }): Promise<void> }
+      ).keepTicket({ tid: 'abcdefgh', secret: 'secret' });
+      await new Promise((r) => setTimeout(r, 800));
+      expect(await kv.get('invite-tickets')).toBeUndefined();
+    });
+
+    it('asks for the record of a link it made when it does not hold it, and shows the link once it does', async () => {
+      const { alice, spaceId } = await trio();
+      const link = await alice.shareInvite(spaceId);
+      const tid = ticketFromSecret(link)!.tid;
+      // (This device's copy of the records is behind.)
+      (alice.records as unknown as { map: Map<string, unknown> }).map.delete(`invite:${tid}`);
+      expect(alice.openLinkOf(spaceId).state).toBe('elsewhere');
+      await waitFor(() => alice.openLinkOf(spaceId).state === 'good', 5000, 'the record to come');
+      expect(await alice.shareInvite(spaceId)).toBe(link);
+      // Sharing does not take a link made here for one made elsewhere because the record is
+      // not there at that moment, and looking at the state does not ask again and again.
+      (alice.records as unknown as { map: Map<string, unknown> }).map.delete(`invite:${tid}`);
+      expect(await alice.shareInvite(spaceId)).toBe(link);
+      const asked = vi.spyOn(alice.link!, 'request');
+      (alice.records as unknown as { map: Map<string, unknown> }).map.delete(`invite:${tid}`);
+      for (let i = 0; i < 20; i++) alice.openLinkOf(spaceId);
+      await new Promise((r) => setTimeout(r, 100));
+      expect(asked.mock.calls.filter((c) => c[0] === 'records.get')).toHaveLength(0);
+    });
+
+    it('cannot show a link made on another device, and replaces it with a new one', async () => {
+      const { alice, bob, spaceId } = await trio();
+      const link = await alice.shareInvite(spaceId);
+      // (This device does not have the secret of that link.)
+      (alice as unknown as { tickets: Map<string, string> }).tickets.clear();
+      const state = alice.openLinkOf(spaceId);
+      expect(state.state).toBe('elsewhere');
+      expect('invite' in state && state.invite?.body.code).toBe(ticketFromSecret(link)!.tid);
+      await expect(alice.shareInvite(spaceId)).rejects.toThrow(/another device/);
+      const next = await alice.createInvite(spaceId);
+      expect(next).not.toBe(link);
+      // The old one was ended with the new one named.
+      await expect(bob.joinWithInvite(link)).rejects.toThrow(/revoked|replaced or turned off/);
+      await bob.joinWithInvite(next);
     });
 
     it('is not left behind when it could not be named', async () => {
@@ -1782,7 +2713,7 @@ describe('leaving', () => {
       for (const bad of [0, -1, NaN])
         await expect(alice.createInvite(spaceId, bad)).rejects.toThrow(/time to last/);
       const code = await alice.createInvite(spaceId, 30 * 24 * 3600_000);
-      expect(alice.openInviteOf(spaceId)?.body.code).toBe(code);
+      expect(alice.openInviteOf(spaceId)?.body.code).toBe(ticketFromSecret(code)!.tid);
     });
   });
 
@@ -2113,9 +3044,9 @@ describe('channel ids belong to one space', () => {
     await bob.openChannel(ch);
     await alice.openChannel(ch);
     const confirmed: string[] = [];
-    const holder = alice as unknown as { onAcked(ids: string[]): void };
+    const holder = alice as unknown as { onAcked(sessionId: string, ids: string[]): void };
     const onAcked = holder.onAcked.bind(alice);
-    holder.onAcked = (ids) => (confirmed.push(...ids), onAcked(ids));
+    holder.onAcked = (sid, ids) => (confirmed.push(...ids), onAcked(sid, ids));
     // A message from an older version, sent live: Bob refuses it.
     const old = createChatMessage(alice.identity!, { ch, body: 'old' });
     const link = (
@@ -2268,6 +3199,29 @@ describe('message ids', () => {
     const [, edit] = await alice.platform.messages.page(ch, { limit: 10 });
     expect(await accept(session, edit!)).toBe(true);
     expect(bodies(bob, ch).sort()).toEqual(['alice, edited', 'from mallory']);
+  });
+
+  it('forgets who was typing once their indicator has run out', async () => {
+    const coord = await server();
+    const net = new FakeRelayNetwork();
+    const alice = await signUp(makeClient(net, coord), 'alice');
+    const spaceId = await alice.createSpace('Swamp');
+    const sid = sessionIds.space(spaceId);
+    const ch = channelOf(alice, spaceId);
+    const session = (
+      alice as unknown as { ensureSession(id: string): { emit(ev: 'typing', d: object): void } }
+    ).ensureSession(sid);
+    vi.useFakeTimers({ toFake: ['Date'] });
+    try {
+      for (let i = 0; i < 50; i++) session.emit('typing', { userId: `user${i}`, ch: `ch${i}` });
+      expect(Object.keys(alice.state.typing)).toHaveLength(50);
+      // Later, one more is typing: those whose time ran out are not kept.
+      vi.setSystemTime(Date.now() + 60_000);
+      session.emit('typing', { userId: 'someone', ch });
+      expect(alice.state.typing).toEqual({ [ch]: { someone: expect.any(Number) } });
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("does not take another author's message for one of its own waiting to be delivered", async () => {

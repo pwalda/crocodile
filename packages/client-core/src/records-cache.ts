@@ -1,5 +1,5 @@
-import { validateRecord } from '@crocodile/crypto';
-import { RECORD_KIND_ORDER, type SignedRecord } from '@crocodile/protocol';
+import { rosterKeyOf, validateRecord } from '@crocodile/crypto';
+import { RECORD_KIND_ORDER, type RecordBodies, type SignedRecord } from '@crocodile/protocol';
 import { Emitter } from './emitter';
 import type { KeyValueStore } from './platform';
 
@@ -77,7 +77,9 @@ export class RecordCache extends Emitter<{ changed: SignedRecord; wanted: string
     });
     if (!res.ok) {
       if (res.retryable) {
-        const wanted = dependenciesOf(record).filter((k) => !this.map.has(k));
+        const wanted = dependenciesOf(record, (k) => this.map.get(k)).filter(
+          (k) => !this.map.has(k),
+        );
         if (wanted.length) {
           this.wait(record, wanted);
           this.emit('wanted', wanted);
@@ -165,11 +167,21 @@ export class RecordCache extends Emitter<{ changed: SignedRecord; wanted: string
 }
 
 /** Records a record's validation depends on. */
-function dependenciesOf(record: SignedRecord): string[] {
+function dependenciesOf(
+  record: SignedRecord,
+  get: (key: string) => SignedRecord | undefined,
+): string[] {
   const body = record.body as { spaceId?: string; inviteCode?: string };
   if (record.kind === 'invite') return [`space:${body.spaceId}`];
   if (record.kind === 'member') {
-    return [`space:${body.spaceId}`, ...(body.inviteCode ? [`invite:${body.inviteCode}`] : [])];
+    const space = get(`space:${body.spaceId}`) as SignedRecord<'space'> | undefined;
+    const roster = rosterKeyOf(body.spaceId!, space?.body, record.body as RecordBodies['member']);
+    return [
+      `space:${body.spaceId}`,
+      ...(body.inviteCode ? [`invite:${body.inviteCode}`] : []),
+      ...(roster ? [roster] : []),
+    ];
   }
+  if (record.kind === 'roster') return [`space:${body.spaceId}`];
   return [];
 }

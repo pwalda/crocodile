@@ -13,6 +13,7 @@ import {
 import type { Coordinator } from '@crocodile/coordinator';
 import { newFileKey, sign } from '@crocodile/crypto';
 import {
+  FileManifest,
   SIG_DOMAIN,
   fileBlockCipherSize,
   recordKey,
@@ -719,6 +720,40 @@ describe('file names', () => {
       expect(fit.slice(-4)).toBe(name.slice(-4));
     }
     expect(cleanFileName('ż'.repeat(100) + '.txt')).toBe('ż'.repeat(100) + '.txt');
+  });
+
+  it('writes a name a manifest takes, whatever it was given', () => {
+    // A sender's app puts the cleaned name in the manifest (and parses it), so the manifest may
+    // refuse what the cleaning never writes: folders, control characters, direction overrides.
+    const odd = [
+      '../../etc/passwd',
+      'C:\\Users\\a.txt',
+      'a\u0000b',
+      'a\u007fb',
+      'evil\u202Egnp.exe',
+      '\u2066a\u2069',
+      '\n',
+      '/',
+      '\\',
+      'ż'.repeat(300),
+      '😀'.repeat(300),
+    ];
+    // Every UTF-16 code unit between two letters (so every control character, direction mark and
+    // separator there is), and characters from outside the first plane.
+    for (let c = 0; c < 0x10000; c++) odd.push(`a${String.fromCharCode(c)}b`);
+    odd.push('a\u{1F600}b', '\u{E0001}a');
+    for (const name of odd) {
+      const clean = cleanFileName(name);
+      const parsed = FileManifest.safeParse({
+        id: 'AAAAAAAAAAAAAAAAAAAAAA',
+        name: clean,
+        size: 1,
+        type: '',
+        key: 'A'.repeat(43),
+        root: 'A'.repeat(43),
+      });
+      expect(parsed.success, JSON.stringify(name)).toBe(true);
+    }
   });
 
   it('takes no longer on long runs of spaces than on any other name', () => {

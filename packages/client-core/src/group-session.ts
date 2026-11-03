@@ -68,8 +68,8 @@ export interface SessionContext {
   /** This device's unacknowledged messages. */
   outbox: {
     pending(sessionId: string): ChatMessage[];
-    /** Another user confirmed these ids. */
-    acked(ids: string[]): void;
+    /** Another user confirmed these ids, in this session. */
+    acked(sessionId: string, ids: string[]): void;
   };
   /**
    * Timestamp to sync a channel from: the newest message we did not write
@@ -310,6 +310,13 @@ export class GroupSession extends Emitter<GroupSessionEvents> {
   }
 
   private joining?: Promise<void>;
+  /** The latest state of the room we were told of, since we last left it. */
+  private lastSeen?: SessionState;
+
+  /** A new connection: what we saw before it is not what the room is now. */
+  forgetSeen() {
+    this.lastSeen = undefined;
+  }
 
   /**
    * Callers that join while a join is in flight share it. A join that has to
@@ -330,11 +337,19 @@ export class GroupSession extends Emitter<GroupSessionEvents> {
     const caps = await this.ctx.caps();
     // Left meanwhile: a join now would come after the leave.
     if (this.left) return;
+    // What we last saw of the room, for a new owner to keep the same host (signed with the join).
+    const seen = this.lastSeen;
+    const before = this.state;
     const { state } = await this.ctx.link().request('session.join', {
       sessionId: this.sessionId,
       caps,
+      ...(seen ? { hint: { epoch: seen.epoch, host: seen.host, backup: seen.backup } } : {}),
     });
-    this.applyState(state);
+    // What we held before the join is of a room as it was when we left or lost the
+    // connection: it may have emptied and started over at a lower epoch since, so the
+    // answer replaces it. A push that came in while the join was on its way is newer
+    // than the answer, which then does not.
+    this.applyState(state, { answer: this.state === before });
   }
 
   /**
@@ -405,6 +420,8 @@ export class GroupSession extends Emitter<GroupSessionEvents> {
   async leave() {
     if (this.left) return;
     this.left = true;
+    // (What we saw of the room is not what it is by the time we join again.)
+    this.lastSeen = undefined;
     this.joining = undefined;
     clearTimeout(this.retryTimer);
     clearTimeout(this.renewTimer);
@@ -428,10 +445,10 @@ export class GroupSession extends Emitter<GroupSessionEvents> {
   // Session state from the coordinator
   // -------------------------------------------------------------------------
 
-  applyState(state: SessionState) {
+  applyState(state: SessionState, opts: { answer?: boolean } = {}) {
     if (this.left || state.id !== this.sessionId) return;
-    if (this.state && state.epoch < this.state.epoch) return;
-    this.state = state;
+    if (!opts.answer && this.state && state.epoch < this.state.epoch) return;
+    this.state = this.lastSeen = state;
     if (state.host === this.me) {
       if (!this.hosting || this.hosting.epoch !== state.epoch) this.startHosting(state);
     } else if (this.hosting) {
@@ -1293,6 +1310,21 @@ export class GroupSession extends Emitter<GroupSessionEvents> {
     }, 250);
   }
 
+  /**
+   * Whose confirmation clears our outbox: another person's, not our own other devices', and one
+   * who was handed the messages to keep. In a conversation that is the other side; in a space
+   * the host or backup (any member, when we are the host ourselves). One that is not asked to
+   * confirm can't, or any member could clear what others never received. If the host changed
+   * since, the confirmation of the old one is ignored and the message is offered again.
+   */
+  private mayConfirm(from: string) {
+    if (peerIds.user(from) === peerIds.user(this.me)) return false;
+    if (!this.ctx.isAllowedPeer(this.sessionId, from)) return false;
+    if (this.isDm || this.isHost) return true;
+    const st = this.state;
+    return !!st && (from === st.host || from === st.backup);
+  }
+
   /** Live group messages: DMs always confirm; in spaces the host (or backup) does. */
   private shouldAckLive(from: string) {
     if (this.isDm) return true;
@@ -1486,8 +1518,8 @@ export class GroupSession extends Emitter<GroupSessionEvents> {
       await this.onSealed(from, payload);
       return;
     }
-    const result = this.keyring.decrypt(env.kid, env.g, env.ct);
-    if (!result) {
+    const plaintext = this.keyring.decrypt(from, env.kid, env.g, env.ct);
+    if (!plaintext) {
       // A key we hold that cannot open it: the message is from before the key we were given.
       if (this.keyring.isBehind(from, env.kid, env.g)) {
         this.missed(from);
@@ -1497,8 +1529,7 @@ export class GroupSession extends Emitter<GroupSessionEvents> {
       if (this.pendingGroup.length > 500) this.pendingGroup.shift();
       return;
     }
-    if (result.peer !== from) return;
-    await this.onGroupPlaintext(from, result.plaintext);
+    await this.onGroupPlaintext(from, plaintext);
   }
 
   private async onSealed(from: string, payload: SealedPayload) {
@@ -1541,12 +1572,7 @@ export class GroupSession extends Emitter<GroupSessionEvents> {
         this.queueAck(from, await this.take([payload.message], false));
         return;
       case 'ack':
-        // Only another person's confirmation counts, not our own other devices.
-        if (
-          peerIds.user(from) !== peerIds.user(this.me) &&
-          this.ctx.isAllowedPeer(this.sessionId, from)
-        )
-          this.ctx.outbox.acked(payload.ids);
+        if (this.mayConfirm(from)) this.ctx.outbox.acked(this.sessionId, payload.ids);
         return;
       case 'mail':
         return;
@@ -1573,7 +1599,9 @@ export class GroupSession extends Emitter<GroupSessionEvents> {
       const taken = await this.take([payload.message], false);
       if (this.shouldAckLive(from)) this.queueAck(from, taken);
     } else if (payload.type === 'typing') {
-      this.emit('typing', { userId: fromUser, ch: payload.ch });
+      // Only for a channel of this session: one named for another space is not ours to show.
+      if (this.ctx.historyChannels(this.sessionId).includes(payload.ch))
+        this.emit('typing', { userId: fromUser, ch: payload.ch });
     } else if (payload.type === 'call' && this.isDm) {
       this.emit('call', {
         userId: fromUser,
@@ -1590,10 +1618,9 @@ export class GroupSession extends Emitter<GroupSessionEvents> {
     const queue = this.pendingGroup.filter((p) => now - p.at < PENDING_TTL_MS);
     this.pendingGroup = [];
     for (const p of queue) {
-      const result = this.keyring.decrypt(p.env.kid, p.env.g, p.env.ct);
-      if (result) {
-        if (result.peer === p.from) await this.onGroupPlaintext(p.from, result.plaintext);
-      } else if (this.keyring.isBehind(p.from, p.env.kid, p.env.g)) this.missed(p.from);
+      const plaintext = this.keyring.decrypt(p.from, p.env.kid, p.env.g, p.env.ct);
+      if (plaintext) await this.onGroupPlaintext(p.from, plaintext);
+      else if (this.keyring.isBehind(p.from, p.env.kid, p.env.g)) this.missed(p.from);
       else this.pendingGroup.push(p);
     }
   }

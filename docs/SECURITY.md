@@ -20,9 +20,15 @@ recipient's devices, with the sender's identity inside the encryption. A
 server sees that someone sent a note to a user, when, and its size. The
 server you are connected to does see whose presence you follow, whom you
 send a friend request or answer to, and whom you start a direct message or
-call with, while you do; it doesn't record who sent a note, and nothing of
-that is replicated to other servers or kept after you disconnect. Blocks are
-enforced by your own apps. They pass on signalling (SDP and
+call with, while you do; it doesn't record who sent a note, and none of
+that is passed to other servers or kept after you disconnect, with one
+exception. To follow records of other users (a friend's profile, say) live,
+your server asks the servers that keep those records to watch them for it, so
+they see which user and space ids your server follows (your own, your
+friends' and those of your spaces) while you are connected and for up to five
+minutes after (a watch lasts five minutes and is renewed every two). They are
+not told which user of your server asked, but on a server with one user that
+is that person. Blocks are enforced by your own apps. They pass on signalling (SDP and
 ICE candidates), which includes IP addresses. They never receive message or
 voice content, except that a user who turned on the **opt-in relay** sends
 their already end-to-end encrypted media through one; that server then also
@@ -87,20 +93,20 @@ picture size.
 
 ## Adversaries
 
-| Adversary                          | Can                                                                                                                                                                     | Cannot                                                                                                                                                                                                                 |
-| ---------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Network observer                   | See that you talk to certain IPs, and traffic volume.                                                                                                                   | Read content or metadata (WebRTC DTLS plus E2E; encrypted server channels). Infer speech from packet sizes (constant-bitrate Opus).                                                                                    |
-| Harvest-now, decrypt-later         | Record traffic today.                                                                                                                                                   | Decrypt it with a future quantum computer: every key exchange is hybrid with ML-KEM-768.                                                                                                                               |
-| Malicious coordination server      | Lie about presence, drop or delay signalling, refuse service, log metadata.                                                                                             | Forge profiles, spaces, invites, memberships or devices (all signed); substitute a user's key (user ids are key hashes); MITM WebRTC (SDP is identity-signed); read content.                                           |
-| Malicious mesh peer server         | Same as above; claim that a user is connected to it (misrouting, dropping and metadata); be made host by the session's members and see their IPs (only members may be). | Same as above; clients re-verify every record. Speak for another server. Join, change or vote for a device that is connected to another server (devices sign their own session operations for the server they are on). |
-| Mailbox operator (opt-in mailbox)  | See who left how many messages for whom, and when; drop them.                                                                                                           | Read, alter or forge them (sealed to the recipient's device, signed by the sender).                                                                                                                                    |
-| Relay operator (opt-in relay)      | See relayed packet sizes and timing while the relay is in use.                                                                                                          | Read or alter content.                                                                                                                                                                                                 |
-| Non-member who learns a session id | Nothing: members only share keys with devices whose membership they verify themselves.                                                                                  |                                                                                                                                                                                                                        |
-| Member sharing a file with you     | See your IP address while you fetch it; send you a harmful file.                                                                                                        | Pass off altered blocks (each is checked against hashes its author signed); get a file posted where they aren't, even by learning its id; take another's file id.                                                      |
-| Former member                      | Keep what they already saw.                                                                                                                                             | Decrypt anything after they left: sender keys are replaced on leave.                                                                                                                                                   |
-| Someone who steals a key later     | Decrypt at most the current 30-minute key period of a session.                                                                                                          | Decrypt earlier messages (hash ratchets, deleted prekeys) or later ones (periodic fresh keys).                                                                                                                         |
-| Removed device                     | Keep what it already had.                                                                                                                                               | Receive new keys or messages. (It still knows the account seed; see below.)                                                                                                                                            |
-| Stolen, unlocked device            | Everything on it. Use OS disk encryption and remove the device from another one.                                                                                        |                                                                                                                                                                                                                        |
+| Adversary                          | Can                                                                                                                                                                                                                                                                                                                                                                                                                                               | Cannot                                                                                                                                                                                                                 |
+| ---------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Network observer                   | See that you talk to certain IPs, and traffic volume.                                                                                                                                                                                                                                                                                                                                                                                             | Read content or metadata (WebRTC DTLS plus E2E; encrypted server channels). Infer speech from packet sizes (constant-bitrate Opus).                                                                                    |
+| Harvest-now, decrypt-later         | Record traffic today.                                                                                                                                                                                                                                                                                                                                                                                                                             | Decrypt it with a future quantum computer: every key exchange is hybrid with ML-KEM-768.                                                                                                                               |
+| Malicious coordination server      | Lie about presence, drop or delay signalling, refuse service, log metadata.                                                                                                                                                                                                                                                                                                                                                                       | Forge profiles, spaces, invites, memberships or devices (all signed); substitute a user's key (user ids are key hashes); MITM WebRTC (SDP is identity-signed); read content.                                           |
+| Malicious mesh peer server         | Same as above; claim that a user is connected to it (misrouting, dropping and metadata); be made host by the session's members and see their IPs (only members may be).                                                                                                                                                                                                                                                                           | Same as above; clients re-verify every record. Speak for another server. Join, change or vote for a device that is connected to another server (devices sign their own session operations for the server they are on). |
+| Mailbox operator (opt-in mailbox)  | See who left how many messages for whom, and when; drop them.                                                                                                                                                                                                                                                                                                                                                                                     | Read, alter or forge them (sealed to the recipient's device, signed by the sender).                                                                                                                                    |
+| Relay operator (opt-in relay)      | See relayed packet sizes and timing while the relay is in use.                                                                                                                                                                                                                                                                                                                                                                                    | Read or alter content.                                                                                                                                                                                                 |
+| Non-member who learns a session id | Nothing: members only share keys with devices whose membership they verify themselves.                                                                                                                                                                                                                                                                                                                                                            |                                                                                                                                                                                                                        |
+| Member sharing a file with you     | See your IP address while you fetch it; send you a harmful file.                                                                                                                                                                                                                                                                                                                                                                                  | Pass off altered blocks (each is checked against hashes its author signed); get a file posted where they aren't, even by learning its id; take another's file id.                                                      |
+| Former member                      | Keep what they already saw.                                                                                                                                                                                                                                                                                                                                                                                                                       | Decrypt anything after they left: sender keys are replaced on leave.                                                                                                                                                   |
+| Someone who steals a key later     | With a sender key: decrypt its current 30-minute period. With prekey secrets: decrypt what they recorded (as a host, relay or mailbox operator, say) that was sealed to them, voice and text, from about eight days before the theft (a prekey is replaced after six days and its secret kept two days longer, or longer if the device was switched off, since the secret goes only when the app next runs) until the device replaces the prekey. | With a sender key alone: decrypt earlier messages (hash ratchets) or later ones (periodic fresh keys). Decrypt anything sealed to prekey secrets that were already deleted.                                            |
+| Removed device                     | Keep what it already had. If it was modified, rejoin: it still holds the account seed, so it can sign a new device record under a new id and be taken as the account again, keys included.                                                                                                                                                                                                                                                        | Keep working in the app as shipped: it stops, leaves its conversations and clears its copy once it learns of the removal (on connecting, or live). Per-device signing keys (planned) would end the rest; see below.    |
+| Stolen, unlocked device            | Everything on it. Use OS disk encryption and remove the device from another one.                                                                                                                                                                                                                                                                                                                                                                  |                                                                                                                                                                                                                        |
 
 ## Cryptography
 
@@ -165,7 +171,11 @@ picture size.
   A drop anywhere but the chat does nothing, and the main process serves a
   request from the UI only if it comes from the top frame of the app's own
   page in the app's window (checked for every request), and grants the
-  microphone, camera and screen (the screen choice too) only to that page. A release build has
+  microphone, camera and screen (the screen choice too) only to that page. What
+  that page passes is checked too: settings of the app's own server only of
+  the kinds and sizes they have, messages for the relay process only in the
+  forms it uses, a saved file one block at a time and no more than a file can
+  be, links only to web addresses. A release build has
   Electron's `RunAsNode` and `NODE_OPTIONS` switches off, refuses to start with a debugging port, pipe or inspector, starts its update script with a fixed environment, loads
   only from its archive (whose hash is checked at start on macOS and Windows; on Linux anyone who can write to the install can change it anyway),
   and ignores the `CROC_*` test and development settings (another profile,
@@ -176,6 +186,19 @@ picture size.
 
 ## Known gaps
 
+- The relay on a server's UDP port answers requests that are not signed (a STUN
+  binding, a first challenge) only so many times a second to one source address
+  (an IPv6 /64 counts as one), so it is of no use for bouncing traffic at a
+  forged address. The same cap means someone who forges a user's address, or
+  shares it, can keep that user from starting a relayed connection while they
+  keep it up; connections already set up, and requests the user signed, are
+  not affected. A signed request can be copied by someone on the path, who can
+  use it only from the same address.
+- A server takes the address another server gives in its own signed beacon, and
+  dials it. Any server that joins the mesh can therefore make the others try to
+  connect to an http or https address it chooses (a home or internal one too:
+  servers on a private network are allowed). A link may tell another of only a
+  limited number of new servers a second.
 - Space admins: a removed admin's change made just before the removal
   reaches a server can stay on that server until the owner's next change
   (versions are last-writer-wins, and a record may be dated up to 5 minutes
@@ -205,7 +228,7 @@ picture size.
 - Invites: a server leaves invites out of the lists and subscriptions it gives
   clients and out of the list and term answers it gives other servers, and
   gives a space's member records (which name the invite each member joined
-  with) only to its owner and members. A user who leaves or is banned stops
+  with, or carry the maker's signed invite for an open link) only to its owner and members. A user who leaves or is banned stops
   being served as soon as the server hears of it, and within ten seconds at
   the latest. This is not a boundary against servers, which
   replicate invites and memberships among themselves and can read the ones
@@ -217,22 +240,98 @@ picture size.
   check it (they may not read a space's member list before joining). A server
   that lies about this can make a client show an invitation card that joining
   would then refuse.
-- The open link: only the servers that take a join check that the invite is the
-  one the space names, and that it has not ended; a client may show a card for
-  a link that has since been replaced until it asks again, and a server that
-  has not yet heard of a replacement still takes a join with the old link.
+- The open link is a ticket: its secret stays in the link and never reaches a
+  server, so no server and nobody who only read the invite record can make a
+  membership. What a ticket cannot do:
+  - A link that leaked works for whoever holds it, until a server that takes
+    joins has heard of the replacement or the end. Servers that only copy
+    records cannot know in what order a join and a revocation happened (the
+    joiner dates its own record), so they take a membership made with a link
+    that was good when it was made. Only the servers that take a join check
+    that the space names the link now and that it has not ended; a client may
+    show a card for a link that has since been replaced until it asks again,
+    and a server that has not yet heard of a replacement still takes a join
+    with the old link. To get rid of someone who joined with a leaked link,
+    ban them (bans are checked on every path).
+  - A removed admin who is on the owner's list of former admins can still make
+    tickets that servers copying records accept (members that admin let in
+    must stay, and no time of removal can be trusted); servers taking a new
+    join refuse them. This needs someone who was an admin and works at it,
+    not any observer. A ban is the remedy.
+  - Leaving is not a revocation: the link a member joined with, if it still
+    works, lets them join again. Banning is.
+  - Spaces made before tickets: a membership made with the older kind of link
+    counts as it did until the space's owner has signed the list of who stays
+    (the app asks them). Until then a server that is not updated, or one that
+    is hostile, can take or pass on a membership made with a code it read
+    (updated servers refuse a new join with a link of that kind, but cannot
+    tell when a record they only copy was made), and a space whose owner
+    never returns stays that way. After it, those on the list stay and others
+    need a new link; a membership forged before the owner signed is on the
+    list unless the owner takes it off when asked, so the owner has to
+    review it. The list names members, so it is given only to the space's
+    members and owner (servers that store it can read it).
+  - Old apps and servers know neither tickets nor the list: they refuse a
+    membership made with a ticket, cannot read the invite records of one, and
+    cannot verify the space record of a space that names a list. Update every
+    app and server before any link is made or any owner signs.
 - Invites are never deleted, and a space takes at most 5000 invite records in
   all (50 from any one member). A space that invites very many people by name
   over its life can reach that; the owner or an admin can then no longer make
   new ones in that space.
 - Linked devices share the account seed; per-device signing keys certified by
   the identity (so a removed device can no longer sign) are planned.
-- Sender keys rather than MLS: good forward secrecy and 30-minute healing,
-  but rekeying cost grows with group size.
+  A device that finds out it was removed (on connecting, or live) stops, leaves
+  its conversations and clears its local copy of the account, acting only on a
+  record signed by the account. That is the app's own doing: a device that is
+  kept offline, or modified, keeps what it had.
+- Sender keys rather than MLS: a sender key is replaced every 30 minutes, but
+  it travels sealed to a prekey that is kept about eight days (longer if the
+  device was switched off), so forward secrecy against a stolen prekey is
+  that long, not 30 minutes
+  (one-time prekeys or a pairwise ratchet for sending keys would close it).
+  Rekeying cost also grows with group size.
 - Safety-number verification is manual.
 - The host peer and relay operators see traffic metadata (sizes, timing,
   speaking activity); for video the host also sees frame sizes, key frames and
   picture sizes.
+- The host peer says which member each voice slot and picture tile shows, and
+  who is speaking. The sound and picture open only with the key of a member
+  of the session, but a hostile host can put one member's stream in
+  another's place; the label on a tile is the host's word. Members hold each
+  other's sender keys, so a member can also make sound or pictures that open as
+  another member's: the key shows the group, not which member. What a host sends is
+  checked and bounded before it is used, so it can't make a device allocate
+  without limit.
+- Session operations are signed by the device they are for, so a server
+  cannot, on its own, make a device that is on another server join, change
+  or vote. What that does not cover:
+  - The server a device is connected to can still drop its operations, hold
+    them back or say the device is not there. A signed join is only taken
+    within five minutes of when it was made, but an update or a report is not
+    dated: it is taken for as long as the join it belongs to stands and it is
+    the next in line. A device's own server is trusted with availability,
+    not with what the device says.
+  - Presence is not signed by the device: a server can still claim that a user
+    is connected through it, and the events routed to that user go to it (see
+    [docs/MESH.md](MESH.md)). A leave is not signed either; the server that
+    took the join sends it when the device disconnects.
+  - A member can choose the host of a room while it is being put together
+    (the first ten seconds after it is made, or while it has no member), by
+    the host it signs into its join, if its epoch is later than the room's.
+    The host must be a real device that may be in the session; one that does
+    not turn up is replaced after a few seconds. A room with members that is
+    older than that ignores hints.
+  - Old apps and servers do not sign these operations or the hint: an updated
+    server refuses their joins, so they cannot take part in its rooms, and
+    servers on a lower protocol cannot link to it. Update apps and
+    coordination servers together (protocol 4).
+- Anyone who is signed in to a server can follow the presence of any user
+  whose id they know: online, away or busy and the status text, never
+  "invisible" (shown as offline). Friend lists are sealed, so a server cannot
+  tell who may follow whom, and limiting it to people who share a space would
+  break presence for friends. Signalling is another matter: a signal goes only
+  to a device in the same room, and the answer does not say whether it arrived.
 - The command line tool keeps the account's keys in a file only its user can
   read (mode 600), not in an OS keychain; anyone with that user's access, or
   root, can use the account. One process at a time may hold the file (a lock

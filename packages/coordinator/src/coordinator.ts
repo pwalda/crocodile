@@ -23,7 +23,8 @@ import {
   type LinkBox,
   type RelayGrant,
   type ServerEvents,
-  type ServerInfo,
+  ServerInfo,
+  type SignalData,
   type SignedRecord,
   type OperatorInfo,
   isOperatorContact,
@@ -41,7 +42,15 @@ import { TurnServer } from './turn';
 import { startStunServer } from './stun';
 import type { Socket } from 'node:dgram';
 import { MailboxService, defaultMailboxConfig, type MailboxConfig } from './mailbox';
-import { consoleLogger, RpcFailure, type Logger } from './util';
+import {
+  KeyedLimiter,
+  addressKey,
+  cleanUrl,
+  isPrivateAddress,
+  consoleLogger,
+  RpcFailure,
+  type Logger,
+} from './util';
 import { isIP } from 'node:net';
 import { networkInterfaces } from 'node:os';
 import { lookup } from 'node:dns/promises';
@@ -94,6 +103,8 @@ export interface CoordinatorConfig {
     ports?: { min: number; max: number };
     /** Allow relaying to private/loopback addresses (LAN-only setups, tests). */
     allowPrivatePeers?: boolean;
+    /** Other addresses of this machine the relay must never reach (see TurnServerOptions). */
+    ownAddresses?: string[];
   };
   /** Opt-in mailbox holding sealed messages for offline devices. */
   mailbox: MailboxConfig;
@@ -208,6 +219,15 @@ export class Coordinator {
 
   constructor(config: Partial<CoordinatorConfig> & Pick<CoordinatorConfig, 'name'>) {
     this.config = { ...defaultConfig, ...config };
+    // An address that is empty (as a container's environment leaves it) is none. Other servers
+    // refuse one they do not take as a server's; the scheme is put in lower case when it is published.
+    this.config.publicUrl = this.config.publicUrl && cleanUrl(this.config.publicUrl);
+    if (this.config.publicUrl === '') this.config.publicUrl = undefined;
+    if (
+      this.config.publicUrl !== undefined &&
+      !ServerInfo.shape.url.safeParse(this.config.publicUrl).success
+    )
+      throw new Error('the public URL must be an http:// or https:// address');
     // A typo (NaN) or zero here would silently switch a protection off.
     for (const [name, n] of [
       ['capacity', this.config.capacity],
@@ -235,7 +255,14 @@ export class Coordinator {
       seed = toB64u(randomBytes(32));
       this.store.setMeta('server-seed', seed);
     }
-    this.identity = identityFromSeed(fromB64u(seed));
+    let seedBytes: Uint8Array;
+    try {
+      seedBytes = fromB64u(seed);
+    } catch (e) {
+      // (A seed is 32 bytes as the server writes them: base64url, without padding.)
+      throw new Error(`the server seed is not valid: ${(e as Error).message}`, { cause: e });
+    }
+    this.identity = identityFromSeed(seedBytes);
     this.records = new RecordService(this.store, this.log, {
       ...defaultRecordQuotas,
       ...this.config.quotas,
@@ -367,7 +394,7 @@ export class Coordinator {
       scope.get('/v1/client', { websocket: true }, (socket, req) => {
         if (!this.admit(socket, req.ip)) return;
         // Capacity is enforced when the device authenticates (see hasRoomFor).
-        new ClientConnection(this, socket, req.socket.localAddress);
+        new ClientConnection(this, socket, req.socket.localAddress, req.ip);
       });
       scope.get('/v1/federation', { websocket: true }, (socket, req) => {
         if (!this.admit(socket, req.ip)) return;
@@ -377,9 +404,9 @@ export class Coordinator {
 
     await app.listen({ host: this.config.host, port: this.config.port });
     const port = (app.server.address() as AddressInfo).port;
-    const publicUrl = (
-      this.config.publicUrl ?? `http://${hostForUrl(this.config.host)}:${port}`
-    ).replace(/\/$/, '');
+    const publicUrl = cleanUrl(
+      this.config.publicUrl ?? `http://${hostForUrl(this.config.host)}:${port}`,
+    );
     this._info = {
       id: this.identity.userId,
       key: this.identity.publicKey,
@@ -400,6 +427,9 @@ export class Coordinator {
           secret: Buffer.from(randomBytes(32)),
           limits: { maxUsers: this.config.relay.maxUsers },
           allowPrivatePeers: this.config.relay.allowPrivatePeers,
+          ...(this.config.relay.ownAddresses
+            ? { ownAddresses: this.config.relay.ownAddresses }
+            : {}),
           grantEnd: (userId) => this.relayGrants.get(userId)?.expiresAt,
           log: (m, e) => this.log.debug(m, e),
         }).start();
@@ -506,6 +536,24 @@ export class Coordinator {
 
   /** Open WebSocket connections per remote IP. */
   private connectionsByIp = new Map<string, number>();
+  /** Tries at a link code by address, kept across connections (a new connection is a new start for its own budget). */
+  private linkClaims = new KeyedLimiter(0.5, 30);
+  private warnedOfSharedAddress = false;
+
+  /** Whether a try at a link code from this address is allowed. (No address: only the connection's own budget.) */
+  takeLinkClaim(address: string | undefined): boolean {
+    if (!address) return true;
+    if (this.linkClaims.take(addressKey(address))) return true;
+    // Behind a proxy that is not trusted, everyone is the proxy's address.
+    if (!this.warnedOfSharedAddress && !this.config.trustProxy && isPrivateAddress(address)) {
+      this.warnedOfSharedAddress = true;
+      this.log.warn(
+        'tries at a device link code are counted per address, and this one is a local address: behind a reverse proxy, set --trust-proxy',
+        { address },
+      );
+    }
+    return false;
+  }
 
   /** Per-IP connection limit, so one machine cannot exhaust a (home) server. */
   private admit(
@@ -552,13 +600,28 @@ export class Coordinator {
     return this.mesh.sendTo(server, { t: 'route', to: peer, ev, d });
   }
 
+  /**
+   * Passes on a signal to a device that is in the session too: only to a device in it, and
+   * without saying whether it got there, so that sending one tells nothing of who is connected.
+   * (The server the device is on checks again before it hands it over.)
+   */
+  signalPeer(from: string, to: string, sessionId: string, data: SignalData) {
+    const d = { from, sessionId, data };
+    if (this.sessions.inSession(to, sessionId)) {
+      this.deliverLocal(to, 'signal', d);
+      return;
+    }
+    const server = this.presence.locatePeer(to);
+    if (server && server !== this.info.id)
+      this.mesh.sendTo(server, { t: 'route', to, ev: 'signal', d });
+  }
+
   /** `to` is a user id (all local devices) or a peer id (one device). */
   deliverLocal<E extends keyof ServerEvents>(to: string, ev: E, d: ServerEvents[E]): boolean {
     const targets = to.includes('.')
       ? [this.presence.localPeer(to)].filter((c): c is NonNullable<typeof c> => !!c)
       : this.presence.localOf(to);
     if (targets.length === 0) return false;
-    if (ev === 'session') this.sessions.noteState((d as ServerEvents['session']).state);
     for (const client of targets) client.send(ev, d);
     return true;
   }
@@ -768,10 +831,7 @@ export class Coordinator {
 
   /** `isSpaceMember` for several spaces at once, in one round of questions to the owners. */
   async areSpaceMember(spaceIds: string[], userId: string) {
-    const records = await this.dist.get(
-      spaceIds.flatMap((id) => [recordKey.space(id), recordKey.member(id, userId)]),
-    );
-    const byKey = new Map(records.map((r) => [r.key, r]));
+    const byKey = await this.dist.membershipRecords(spaceIds, userId);
     return spaceIds.map((id) => isSpaceMember({ get: (k) => byKey.get(k) }, id, userId));
   }
 

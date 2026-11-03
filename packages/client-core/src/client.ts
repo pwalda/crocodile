@@ -30,9 +30,14 @@ import {
   spaceAuthorityValid,
   mayInviteByName,
   INVITE_MAX_MS,
-  inviteCommitment,
-  OPEN_CODE_LENGTH,
+  emptyRosterHash,
+  newTicket,
+  openLinkName,
+  rosterOf,
+  signRoster,
   signedInvitePolicy,
+  signTicketUse,
+  ticketFromSecret,
   spaceIdFor,
   userTag,
   verifyChatMessage,
@@ -48,6 +53,7 @@ import {
   FileThumb,
   LIMITS,
   LinkKemKey,
+  LinkValue,
   fileMediaKind,
   NotePayload,
   fromB64u,
@@ -63,7 +69,7 @@ import {
   type ChatMessage,
   type DeviceBody,
   type LinkBox,
-  type MailItem,
+  MailItem,
   SealedPayload,
   messageSession,
   utf8,
@@ -208,6 +214,11 @@ export interface SpaceView {
   invitePolicy: 'admins' | 'members';
   /** The code of the link anyone can join with, if one is on. */
   publicInvite?: string;
+  /**
+   * For the owner, until they have signed the list of those who stay of the members who joined
+   * by a link of the older kind, which anyone could forge a membership to (see `legacyMembers`).
+   */
+  rosterToSign?: true;
 }
 
 /** A session as the UI sees it: user ids (devices collapsed). */
@@ -427,6 +438,8 @@ const APP_VERSION_FALLBACK = '0.1.0';
 const MAX_AHEAD_MS = 5 * 60_000;
 /** Conversations from people we don't know that wait for an answer (the newest are kept). */
 const DM_REQUESTS_MAX = 50;
+/** How long someone is shown as typing after their last signal. */
+const TYPING_SHOWN_MS = 6000;
 /** How long direct delivery gets before an opted-in DM goes to a mailbox. */
 const MAIL_AFTER_MS = 5000;
 /** Plaintext bytes of messages in one mailbox box. */
@@ -438,9 +451,11 @@ const FRIEND_NOTE_RETRY_MS = 5000;
 /** And how often while connected, whoever it is owed to. */
 const FRIEND_NOTE_SWEEP_MS = 10 * 60_000;
 const DAY_MS = 24 * 3600_000;
-/** Bytes of randomness in the code of an open link: 128 bits. */
-const OPEN_CODE_BYTES = 16;
 const HOUR_MS = 3600_000;
+/** Secrets of links this device made that it keeps to show again. */
+const TICKETS_KEPT = 500;
+/** How often the record of a link we made is asked for while we do not hold it. */
+const INVITE_ASK_MS = 10_000;
 /** How long an invite lasts unless asked otherwise, and an invitation to a named person can be accepted. */
 const INVITE_MS = 7 * DAY_MS;
 /** A member list the server could not check is asked for again this many times, a little later each time. */
@@ -607,11 +622,20 @@ export class CrocodileClient extends Emitter<ClientEvents> {
     };
     const dms = (await this.platform.kv.get<string[]>('dms')) ?? [];
     const dmRequests = (await this.platform.kv.get<string[]>('dm-requests')) ?? [];
+    // (Only what is a secret and the name that goes with it.)
+    const stored = await this.platform.kv.get<Record<string, string>>('invite-tickets');
+    this.tickets = new Map(
+      Object.entries(stored && typeof stored === 'object' ? stored : {}).filter(
+        ([tid, secret]) => typeof secret === 'string' && ticketFromSecret(secret)?.tid === tid,
+      ),
+    );
     await this.loadDevice();
     await this.outbox.load();
     await this.files?.load();
     this.store.set({ settings, dms, dmRequests, deviceId: this.deviceId });
     await this.records.load();
+    // (The secrets of links that ran out while the app was closed.)
+    if (this.dropEndedTickets()) void this.saveTickets();
     const seed = await this.platform.kv.get<string>('identity-seed');
     if (!seed) {
       this.store.set({ phase: 'onboarding' });
@@ -695,8 +719,12 @@ export class CrocodileClient extends Emitter<ClientEvents> {
     const res = await this.link!.request('records.get', { keys: [key] });
     const remote = res.records[0] as SignedRecord<'device'> | undefined;
     if (remote) this.records.ingest(remote);
-    if (remote?.body.revoked) {
-      this.reportError('This device was removed from your account on another device.');
+    // What the cache holds, which has been checked as signed by this account: not the server's
+    // word for it.
+    if ((this.records.get(key)?.body as DeviceBody | undefined)?.revoked) {
+      await this.removedFromAccount().catch((err) =>
+        this.log('could not clear a removed device', { err: String(err) }),
+      );
       return;
     }
     const name = this.state.settings.deviceName ?? defaultDeviceName(this.platform.platform);
@@ -723,11 +751,38 @@ export class CrocodileClient extends Emitter<ClientEvents> {
 
   /** Forget this device's identity (the user should have saved the recovery key). */
   async signOut() {
-    // While the link is still up: revoking goes through the server.
-    if (this.identity && this.deviceId) {
-      await this.revokeDevice(this.deviceId).catch(() => {});
+    // While the link is still up: revoking goes through the server. The record that says so is
+    // ours, so it is not taken as news of a removal.
+    this.signingOut = true;
+    try {
+      if (this.identity && this.deviceId) {
+        await this.revokeRecord(this.deviceId).catch(() => {});
+      }
+      await this.forgetLocalAccount({ deleted: false });
+    } finally {
+      this.signingOut = false;
     }
-    await this.forgetLocalAccount({ deleted: false });
+  }
+
+  private signingOut = false;
+  private removal?: Promise<void>;
+
+  /**
+   * This device was removed from the account, on another of its devices: it stops, and clears
+   * what it holds of the account (it holds nothing a removed device should keep). Only called
+   * once the cache holds the account's signed record of the removal.
+   */
+  private removedFromAccount(): Promise<void> {
+    this.removal ??= (async () => {
+      this.log('this device was removed from its account');
+      try {
+        await this.forgetLocalAccount({ deleted: false });
+      } finally {
+        // Said even if clearing did not get to the end: the device is no longer the account's.
+        this.reportError('This device was removed from your account on another device.');
+      }
+    })().finally(() => (this.removal = undefined));
+    return this.removal;
   }
 
   /**
@@ -805,6 +860,12 @@ export class CrocodileClient extends Emitter<ClientEvents> {
     await this.platform.kv.delete('friend-list');
     await this.platform.kv.delete('dms');
     await this.platform.kv.delete('dm-requests');
+    // (What is waiting to be written is written empty, and then the key goes.)
+    this.tickets.clear();
+    this.invitesAsked.clear();
+    this.membersLoaded.clear();
+    await this.ticketsSaved;
+    await this.platform.kv.delete('invite-tickets');
     this.outbox = new Outbox(this.platform.kv);
     clearTimeout(this.mailTimer);
     clearInterval(this.prekeyTimer);
@@ -948,7 +1009,11 @@ export class CrocodileClient extends Emitter<ClientEvents> {
         if (owed && needsNote(owed)) this.retryFriendNotes(FRIEND_NOTE_RETRY_MS);
       }
     });
-    link.on('mail', ({ items }) => void this.onMail(items));
+    link.on(
+      'mail',
+      ({ items }) =>
+        void this.onMail(items).catch((err) => this.log('mail not handled', { err: String(err) })),
+    );
     link.on('session', ({ state }) => this.sessions.get(state.id)?.applyState(state));
     link.on('session_renew', ({ sessionId }) => void this.sessions.get(sessionId)?.renew());
     // Taken out of the room because it did not give a new join in time: join it again.
@@ -980,6 +1045,8 @@ export class CrocodileClient extends Emitter<ClientEvents> {
     const me = this.userId;
     await this.ensureProfilePublished();
     await this.ensureDeviceRecord();
+    // Removed from the account: nothing of it is left to carry on with.
+    if (!this.identity || this.link !== link) return;
     clearInterval(this.prekeyTimer);
     this.prekeyTimer = setInterval(
       () => void this.ensureDeviceRecord().catch(() => {}),
@@ -1033,10 +1100,12 @@ export class CrocodileClient extends Emitter<ClientEvents> {
       const sid = sessionIds.dm(me, other);
       if (this.outbox.forSession(sid).length) this.ensureSession(sid);
     }
-    for (const s of this.sessions.values())
+    for (const s of this.sessions.values()) {
+      s.forgetSeen();
       void s
         .join({ fresh: true })
         .catch((err) => this.log('join failed', { id: s.sessionId, err: String(err) }));
+    }
     this.fetchMail();
     this.scheduleMail();
   }
@@ -1102,8 +1171,8 @@ export class CrocodileClient extends Emitter<ClientEvents> {
     });
   }
 
-  private onAcked(ids: string[]) {
-    const done = new Set(this.outbox.ack(ids));
+  private onAcked(sessionId: string, ids: string[]) {
+    const done = new Set(this.outbox.ack(sessionId, ids));
     if (done.size === 0) return;
     this.store.set((s) => {
       const messages = { ...s.messages };
@@ -1212,41 +1281,85 @@ export class CrocodileClient extends Emitter<ClientEvents> {
     return out.slice(0, max);
   }
 
-  /** Mail that waited on a server for this device. */
-  private async onMail(items: MailItem[]) {
+  /**
+   * Mail that waited on a server for this device. What the server hands over is checked: an item
+   * that is not well formed, or can't be opened, never will be, so it is confirmed (left on the
+   * server it would stay at the head of the queue, which is sent in batches). One that could not
+   * be kept (storage failed) is left there for the next fetch. Each item stands alone: one that
+   * throws keeps neither the others nor their confirmation from going through.
+   */
+  private async onMail(items: unknown) {
+    if (!Array.isArray(items)) return;
     const done: string[] = [];
-    for (const item of items) {
-      done.push(item.id);
-      const opened = this.openBox(item.box);
-      if (!opened) {
-        this.log('could not open mail', { id: item.id });
+    const revoked = new Map<string, Promise<boolean>>();
+    for (const raw of items) {
+      const item = MailItem.safeParse(raw);
+      if (!item.success) {
+        const id = (raw as { id?: unknown } | null)?.id;
+        this.log('mail item is not well formed');
+        if (typeof id === 'string' && id.length <= 40) done.push(id);
         continue;
       }
-      let payload: SealedPayload;
       try {
-        payload = SealedPayload.parse(JSON.parse(utf8.decode(opened.plaintext)));
-      } catch {
-        continue;
-      }
-      if (payload.type !== 'mail') continue;
-      const sender = peerIds.user(opened.from);
-      for (const m of payload.messages) {
-        if (m.author !== sender) continue;
-        const scope = parseSessionId(m.ch);
-        if (scope?.kind !== 'dm' || !scope.users.includes(this.userId)) continue;
-        const other = scope.users.find((u) => u !== this.userId) ?? this.userId;
-        if (this.state.friends.blocked.includes(other)) continue;
-        // Someone we don't know is a request, not a message: nothing of it is kept (the sender's
-        // queue still holds it, and goes through once we accept). Only the sender can ask.
-        // What another device of ours sent is our own conversation, whoever it was to.
-        if (sender !== this.userId && !this.knowsForDm(other)) {
-          if (other === sender) this.addDmRequest(other);
-          continue;
-        }
-        if (await this.acceptMessage(m.ch, m)) this.addDm(other);
+        await this.takeMail(item.data, revoked);
+        done.push(item.data.id);
+      } catch (err) {
+        this.log('mail not kept, left on the server', { id: item.data.id, err: String(err) });
       }
     }
     this.ackMail(done);
+  }
+
+  /** Whether the device mail came from has been removed from its account (as far as we can tell). */
+  private senderRemoved(peer: string, asked: Map<string, Promise<boolean>>) {
+    let known = asked.get(peer);
+    if (!known) {
+      known = (async () => {
+        if (!peer.includes('.')) return false;
+        const key = recordKey.device(peerIds.user(peer), peerIds.device(peer));
+        const res = await this.link?.request('records.get', { keys: [key] }).catch(() => null);
+        if (res) this.records.ingestAll(res.records);
+        return !!this.deviceRecord(peer)?.body.revoked;
+      })();
+      asked.set(peer, known);
+    }
+    return known;
+  }
+
+  private async takeMail(item: MailItem, asked: Map<string, Promise<boolean>>) {
+    const opened = this.openBox(item.box);
+    if (!opened) {
+      this.log('could not open mail', { id: item.id });
+      return;
+    }
+    let payload: SealedPayload;
+    try {
+      payload = SealedPayload.parse(JSON.parse(utf8.decode(opened.plaintext)));
+    } catch {
+      return;
+    }
+    if (payload.type !== 'mail') return;
+    // A device that was removed from its account is not heard from any more.
+    if (await this.senderRemoved(opened.from, asked)) {
+      this.log('ignoring mail from a removed device', { from: opened.from });
+      return;
+    }
+    const sender = peerIds.user(opened.from);
+    for (const m of payload.messages) {
+      if (m.author !== sender) continue;
+      const scope = parseSessionId(m.ch);
+      if (scope?.kind !== 'dm' || !scope.users.includes(this.userId)) continue;
+      const other = scope.users.find((u) => u !== this.userId) ?? this.userId;
+      if (this.state.friends.blocked.includes(other)) continue;
+      // Someone we don't know is a request, not a message: nothing of it is kept (the sender's
+      // queue still holds it, and goes through once we accept). Only the sender can ask.
+      // What another device of ours sent is our own conversation, whoever it was to.
+      if (sender !== this.userId && !this.knowsForDm(other)) {
+        if (other === sender) this.addDmRequest(other);
+        continue;
+      }
+      if (await this.acceptMessage(m.ch, m)) this.addDm(other);
+    }
   }
 
   private async ensureProfilePublished() {
@@ -1346,6 +1459,17 @@ export class CrocodileClient extends Emitter<ClientEvents> {
 
   private onRecordChanged(record: SignedRecord) {
     if (!this.identity) return;
+    if (
+      record.kind === 'device' &&
+      record.key === recordKey.device(this.identity.userId, this.deviceId) &&
+      (record.body as DeviceBody).revoked &&
+      !this.signingOut
+    ) {
+      void this.removedFromAccount().catch((err) =>
+        this.log('could not clear a removed device', { err: String(err) }),
+      );
+      return;
+    }
     if (record.kind === 'profile' && (record.body as ProfileBody).deleted) {
       // The cache dropped the account's devices and memberships: rebuild everything.
       this.refreshDerivedState();
@@ -1353,6 +1477,7 @@ export class CrocodileClient extends Emitter<ClientEvents> {
       return;
     }
     this.refreshDerivedState(record);
+    if (record.kind === 'space') this.wantRoster(record as SignedRecord<'space'>);
     if (
       record.kind === 'member' ||
       record.kind === 'device' ||
@@ -1426,7 +1551,12 @@ export class CrocodileClient extends Emitter<ClientEvents> {
       if (!changed || changed.kind === 'friends') this.absorbFriendRecords();
       patch.friends = this.friendsView();
     }
-    if (!changed || changed.kind === 'space' || changed.kind === 'member') {
+    if (
+      !changed ||
+      changed.kind === 'space' ||
+      changed.kind === 'member' ||
+      changed.kind === 'roster'
+    ) {
       const spaces: Record<string, SpaceView> = {};
       // A text channel id names the channel everywhere on this device, so two
       // spaces can't both use one. The space joined first keeps it (the
@@ -1446,9 +1576,10 @@ export class CrocodileClient extends Emitter<ClientEvents> {
         const body = r.body as SpaceBody;
         if (body.deleted || !isSpaceMember(this.records, id, me)) continue;
         const members = new Set<string>([body.owner]);
+        // (Who counts is the same as everywhere: a ticket is looked at against the space as it is now.)
         for (const m of this.records.list(recordKey.memberPrefix(id))) {
-          const mb = m.body as { userId: string; left?: boolean };
-          if (!mb.left && !body.bans.includes(mb.userId)) members.add(mb.userId);
+          const mb = m.body as { userId: string };
+          if (isSpaceMember(this.records, id, mb.userId)) members.add(mb.userId);
         }
         spaces[id] = {
           id,
@@ -1466,6 +1597,7 @@ export class CrocodileClient extends Emitter<ClientEvents> {
           admins: spaceAuthorityValid(id, body) ? body.admins : [],
           invitePolicy: body.invitePolicy ?? 'admins',
           ...(body.publicInvite ? { publicInvite: body.publicInvite } : {}),
+          ...(body.owner === me && !body.authority?.roster ? { rosterToSign: true as const } : {}),
         };
       }
       patch.spaces = spaces;
@@ -1901,21 +2033,36 @@ export class CrocodileClient extends Emitter<ClientEvents> {
     const nonce = randomId();
     const spaceId = spaceIdFor(id.publicKey, nonce);
     // A new space starts with a link to share, which lasts a week.
-    const code = randomId(OPEN_CODE_BYTES);
+    const ticket = newTicket();
     const body: SpaceBody = {
       name: name.trim(),
       owner: id.userId,
       nonce,
       admins: [],
       bans: [],
-      publicInvite: inviteCommitment(spaceId, code),
+      publicInvite: ticket.tid,
       channels: [
         { id: randomId(), name: 'general', kind: 'text' },
         { id: randomId(), name: 'General', kind: 'voice' },
       ],
       ...(icon ? { icon } : {}),
+      // Nobody joined by a link of the older kind, and nobody will.
+      authority: signSpaceAuthority(
+        id,
+        spaceId,
+        [],
+        Date.now(),
+        undefined,
+        undefined,
+        emptyRosterHash(spaceId),
+      ),
     };
-    await this.putRecord(signRecord(id, 'space', recordKey.space(spaceId), body));
+    // (Kept before the space names the link: a link named and not kept could not be shown again.)
+    await this.keepTicket(ticket);
+    await this.putRecord(signRecord(id, 'space', recordKey.space(spaceId), body)).catch((err) => {
+      this.forgetTicket(ticket.tid);
+      throw err;
+    });
     await this.putRecord(
       signRecord(id, 'member', recordKey.member(spaceId, id.userId), {
         spaceId,
@@ -1923,14 +2070,16 @@ export class CrocodileClient extends Emitter<ClientEvents> {
       }),
     );
     await this.putRecord(
-      signRecord(id, 'invite', recordKey.invite(code), {
+      signRecord(id, 'invite', recordKey.invite(ticket.tid), {
         spaceId,
-        code,
+        code: ticket.tid,
+        tpub: ticket.tpub,
         expiresAt: Date.now() + INVITE_MS,
       }),
     ).catch(async (err) => {
       // Do not leave the space naming a link that is not there.
       this.log('first link not made', { err: String(err) });
+      this.forgetTicket(ticket.tid);
       await this.updateSpace(spaceId, (b) => {
         const { publicInvite: _, ...rest } = b;
         return rest;
@@ -1957,6 +2106,66 @@ export class CrocodileClient extends Emitter<ClientEvents> {
           .catch(() => {});
     }, 20);
   }
+
+  /** The owner's roster, where the space names one that is not held: those it lists are members only with it. */
+  private wantRoster(space: SignedRecord<'space'>) {
+    const spaceId = space.key.slice('space:'.length);
+    if (rosterOf(this.records, spaceId, space.body) === null)
+      this.fetchWanted([recordKey.roster(spaceId)]);
+  }
+
+  /**
+   * The members of a space who joined by a link of the older kind and are not invited by name: the
+   * ones the owner's roster is for. (Of those whose invite is not here, the owner is the judge.)
+   */
+  legacyMembers(spaceId: string): string[] {
+    const space = this.records.get(recordKey.space(spaceId)) as SignedRecord<'space'> | undefined;
+    if (!space) return [];
+    return (this.records.list(recordKey.memberPrefix(spaceId)) as SignedRecord<'member'>[])
+      .filter((m) => {
+        const b = m.body;
+        if (
+          b.left ||
+          b.ticket ||
+          b.userId === space.body.owner ||
+          space.body.bans.includes(b.userId)
+        )
+          return false;
+        const invite = b.inviteCode
+          ? (this.records.get(recordKey.invite(b.inviteCode)) as SignedRecord<'invite'> | undefined)
+          : undefined;
+        return invite?.body.for !== b.userId;
+      })
+      .map((m) => m.body.userId)
+      .sort();
+  }
+
+  /**
+   * As the owner: signs who of those who joined by a link of the older kind stay (those the owner
+   * was shown and has not banned since). Memberships of that kind then count only for them, so
+   * nobody can be put among the members by a record made to look as old as theirs.
+   */
+  async signRoster(spaceId: string, keep: string[]) {
+    const space = this.records.get(recordKey.space(spaceId)) as SignedRecord<'space'> | undefined;
+    if (!space || space.body.owner !== this.userId) throw new Error('only the owner can do this');
+    if (space.body.authority?.roster)
+      throw new Error('The list of who stays has been signed already.');
+    // (The list is for ever: not from a list of members that has not come in yet.)
+    if (!this.membersLoaded.has(spaceId))
+      throw new Error('The list of members is still coming in. Try again in a moment.');
+    // Only those who are still there to be kept, never someone the owner was not shown.
+    const present = new Set(this.legacyMembers(spaceId));
+    const members = [...new Set(keep)].filter((u) => present.has(u)).sort();
+    if (members.length > LIMITS.rosterMax)
+      throw new Error(`At most ${LIMITS.rosterMax} people can stay; take some off the list.`);
+    const { record, hash } = signRoster(this.identity!, spaceId, members);
+    // The list goes first: the space names it only once it is there to be found.
+    if (members.length) await this.putRecord(record);
+    await this.updateSpace(spaceId, (b) => b, hash);
+  }
+
+  /** Spaces whose list of members has come in whole on this connection. */
+  private membersLoaded = new Set<string>();
 
   private adopting = new Set<string>();
 
@@ -1985,6 +2194,9 @@ export class CrocodileClient extends Emitter<ClientEvents> {
     try {
       const records = await fetchList(link, recordKey.memberPrefix(spaceId));
       this.records.ingestAll(records);
+      this.membersLoaded.add(spaceId);
+      const space = this.records.get(recordKey.space(spaceId)) as SignedRecord<'space'> | undefined;
+      if (space) this.wantRoster(space);
       const mine = recordKey.member(spaceId, this.userId);
       if (attempt === 0 && records.every((r) => r.key === mine)) retryIn = MEMBER_LIST_ALONE_MS;
     } catch (err) {
@@ -2019,7 +2231,7 @@ export class CrocodileClient extends Emitter<ClientEvents> {
    * carries a fresh signature on the admin list whenever it changes; an
    * admin's keeps the owner's list and signature as they are.
    */
-  async updateSpace(spaceId: string, mutate: (b: SpaceBody) => SpaceBody) {
+  async updateSpace(spaceId: string, mutate: (b: SpaceBody) => SpaceBody, roster?: string) {
     const key = recordKey.space(spaceId);
     const r = this.records.get(key) as SignedRecord<'space'> | undefined;
     if (!r) throw new Error('unknown space');
@@ -2032,14 +2244,28 @@ export class CrocodileClient extends Emitter<ClientEvents> {
     let body = mutate(structuredClone(r.body));
     if (r.body.owner === me) {
       const admins = [...new Set(body.admins)].filter((u) => u !== me);
+      // An admin who is taken off stays on a list of former admins, so that those they let in stay.
+      const formerAdmins = [
+        ...new Set([
+          ...(r.body.formerAdmins ?? []),
+          ...r.body.admins.filter((u) => !admins.includes(u)),
+        ]),
+      ];
+      if (formerAdmins.length > LIMITS.formerAdminsMax)
+        throw new Error('Too many admins have been taken off this space to take off another.');
+      // (Once the owner has signed a roster it goes with the list, whatever else is changed.)
+      const rostered = roster ?? r.body.authority?.roster;
       const unchanged =
         !!r.body.authority &&
+        rostered === r.body.authority.roster &&
         signedInvitePolicy(r.body.invitePolicy) === signedInvitePolicy(body.invitePolicy) &&
         admins.length === r.body.admins.length &&
-        admins.every((u, i) => u === r.body.admins[i]);
+        admins.every((u, i) => u === r.body.admins[i]) &&
+        formerAdmins.length === (r.body.formerAdmins ?? []).length;
       body = {
         ...body,
         admins,
+        formerAdmins: formerAdmins.length ? formerAdmins : undefined,
         authority: unchanged
           ? r.body.authority
           : signSpaceAuthority(
@@ -2048,14 +2274,27 @@ export class CrocodileClient extends Emitter<ClientEvents> {
               admins,
               Math.max(Date.now(), (r.body.authority?.at ?? 0) + 1),
               body.invitePolicy,
+              formerAdmins,
+              rostered,
             ),
       };
+      if (!body.formerAdmins) delete body.formerAdmins;
     } else {
       // What only the owner decides stays as the owner left it.
-      const { owner, nonce, admins, authority, invitePolicy } = r.body;
-      body = { ...body, owner, nonce, admins, authority, invitePolicy, deleted: r.body.deleted };
+      const { owner, nonce, admins, authority, invitePolicy, formerAdmins } = r.body;
+      body = {
+        ...body,
+        owner,
+        nonce,
+        admins,
+        authority,
+        invitePolicy,
+        formerAdmins,
+        deleted: r.body.deleted,
+      };
       if (body.deleted === undefined) delete body.deleted;
       if (body.invitePolicy === undefined) delete body.invitePolicy;
+      if (body.formerAdmins === undefined) delete body.formerAdmins;
       body.bans = body.bans.filter((u) => u !== owner && !admins.includes(u));
     }
     await this.putRecord(signRecord(this.identity!, 'space', key, body, this.nextVersion(key)));
@@ -2109,30 +2348,73 @@ export class CrocodileClient extends Emitter<ClientEvents> {
   }
 
   /**
-   * The state of the link anyone can join a space with: none on; on and good (with its record);
-   * on but run out; or on but made on another device, whose record we do not hold (the space
-   * names it by a hash of its code, so the code cannot be found from the space).
+   * The state of the link anyone can join a space with: none on; on and good (with its record,
+   * and the link to share); on but run out; or on but made on another device, which holds the
+   * secret in the link (the space names the link, but the link itself cannot be found from it).
    */
   openLinkOf(
     spaceId: string,
-  ): { state: 'none' | 'elsewhere' } | { state: 'good' | 'ended'; invite: SignedRecord<'invite'> } {
+  ):
+    | { state: 'none' }
+    | { state: 'elsewhere'; invite?: SignedRecord<'invite'> }
+    | { state: 'good'; invite: SignedRecord<'invite'>; token: string }
+    | { state: 'ended'; invite: SignedRecord<'invite'> } {
     const space = this.records.get(recordKey.space(spaceId)) as SignedRecord<'space'> | undefined;
     const named = space?.body.publicInvite;
     if (!named) return { state: 'none' };
-    const invite = (this.records.list('invite:') as SignedRecord<'invite'>[]).find(
-      (r) =>
-        r.body.spaceId === spaceId &&
-        r.body.for === undefined &&
-        inviteCommitment(spaceId, r.body.code) === named,
-    );
-    if (!invite) return { state: 'elsewhere' };
-    // (One that never ends is not a link any more: servers turn joins with it away.)
+    // A link that is a ticket is named by its own name; an older one by a hash of its code.
+    const invite =
+      (this.records.get(recordKey.invite(named)) as SignedRecord<'invite'> | undefined) ??
+      (this.records.list('invite:') as SignedRecord<'invite'>[]).find(
+        (r) =>
+          r.body.spaceId === spaceId &&
+          r.body.for === undefined &&
+          r.body.tpub === undefined &&
+          openLinkName(spaceId, r.body.code, false) === named,
+      );
+    if (!invite || invite.body.spaceId !== spaceId || invite.body.for !== undefined) {
+      // A link we made whose record we do not hold yet (it is not on this device's copy): ask for it.
+      if (!invite && this.tickets.has(named) && this.mayAskForInvite(named))
+        this.fetchWanted([recordKey.invite(named)]);
+      return { state: 'elsewhere' };
+    }
+    // (One that never ends, or that is not a ticket, is not a link any more: servers turn joins with it away.)
     const good =
       !invite.body.revoked &&
       invite.body.expiresAt !== null &&
       invite.body.expiresAt > Date.now() &&
-      invite.body.code.length >= OPEN_CODE_LENGTH;
-    return { state: good ? 'good' : 'ended', invite };
+      invite.body.tpub !== undefined;
+    // (And its maker may still make one: an admin taken off the list ends the links they made.)
+    const makerMay = canManageSpace(space!.body, userIdFromKey(invite.author));
+    if (!good || !makerMay) return { state: 'ended', invite };
+    const secret = this.tickets.get(invite.body.code);
+    return secret ? { state: 'good', invite, token: secret } : { state: 'elsewhere', invite };
+  }
+
+  // Asked for at most this often, however often the state of the link is looked at.
+  private invitesAsked = new Map<string, number>();
+  private mayAskForInvite(tid: string) {
+    const last = this.invitesAsked.get(tid) ?? 0;
+    if (Date.now() - last < INVITE_ASK_MS) return false;
+    this.invitesAsked.set(tid, Date.now());
+    return true;
+  }
+
+  /**
+   * The state of the space's link, after asking for its record if we do not hold it (this device's
+   * copy of the records may be behind, or the link was made by another admin), so that what is
+   * decided on it is right.
+   */
+  private async openLinkNow(spaceId: string) {
+    const link = this.openLinkOf(spaceId);
+    if (link.state !== 'elsewhere' || link.invite || !this.link) return link;
+    const space = this.records.get(recordKey.space(spaceId)) as SignedRecord<'space'> | undefined;
+    const named = space?.body.publicInvite;
+    // (The record of a link is public, whoever made it: it is what a change to the link must end.)
+    if (!named) return link;
+    // (If it cannot be asked for, nothing is decided on a guess: the action fails and can be tried again.)
+    this.records.ingestAll(await fetchRecords(this.link, [recordKey.invite(named)]));
+    return this.openLinkOf(spaceId);
   }
 
   /** The record of the space's open link, if it is on, good, and we hold it. */
@@ -2141,25 +2423,82 @@ export class CrocodileClient extends Emitter<ClientEvents> {
     return link.state === 'good' ? link.invite : undefined;
   }
 
+  /** Keeps the secret of a link we made, to show it again; it is only ever on this device. */
+  private async keepTicket(ticket: { tid: string; secret: string }) {
+    // (Not once the account is being erased: nothing is left on this device to keep it for.)
+    if (!this.link) return;
+    this.tickets.set(ticket.tid, ticket.secret);
+    this.dropEndedTickets(ticket.tid);
+    // Only as a last resort, and then not the link a space has on.
+    if (this.tickets.size > TICKETS_KEPT) {
+      const on = new Set(
+        (this.records.list('space:') as SignedRecord<'space'>[]).map((r) => r.body.publicInvite),
+      );
+      for (const tid of [...this.tickets.keys()]) {
+        if (this.tickets.size <= TICKETS_KEPT) break;
+        if (tid !== ticket.tid && !on.has(tid)) this.tickets.delete(tid);
+      }
+    }
+    await this.saveTickets();
+  }
+  private tickets = new Map<string, string>();
+  private ticketsSaved: Promise<void> = Promise.resolve();
+
+  /** Writes what is kept as it is when its turn comes, one write at a time. */
+  private saveTickets() {
+    return (this.ticketsSaved = this.ticketsSaved
+      .then(() =>
+        // (Nothing kept is nothing stored: a write after the account was erased leaves nothing behind.)
+        this.tickets.size
+          ? this.platform.kv.set('invite-tickets', Object.fromEntries(this.tickets))
+          : this.platform.kv.delete('invite-tickets'),
+      )
+      .catch((err) => this.log('link secrets not saved', { err: String(err) })));
+  }
+
+  /** Those of links that have ended are no use. (An invite we hold no record of is kept.) */
+  private dropEndedTickets(except?: string) {
+    const before = this.tickets.size;
+    for (const tid of [...this.tickets.keys()]) {
+      const r = this.records.get(recordKey.invite(tid)) as SignedRecord<'invite'> | undefined;
+      if (tid !== except && r && (r.body.revoked || (r.body.expiresAt ?? Infinity) < Date.now())) {
+        this.tickets.delete(tid);
+        this.invitesAsked.delete(tid);
+      }
+    }
+    return this.tickets.size !== before;
+  }
+
+  /** Forgets the secret of a link that was not made after all. */
+  private forgetTicket(tid: string) {
+    this.invitesAsked.delete(tid);
+    if (this.tickets.delete(tid)) void this.saveTickets();
+  }
+
   /**
    * The link to share: the one the space has on, or a new one if it has none, it has run out or
    * it is about to. Not when one was made on another device that we cannot see: a new one would
    * end it.
    */
-  async shareInvite(spaceId: string): Promise<string> {
-    const link = this.openLinkOf(spaceId);
-    if (link.state === 'good' && link.invite.body.expiresAt! > Date.now() + HOUR_MS)
-      return link.invite.body.code;
-    if (link.state === 'elsewhere')
-      throw new Error(
-        'The link for this space was made on another device. Make a new link to replace it.',
-      );
-    return this.createInvite(spaceId);
+  shareInvite(spaceId: string): Promise<string> {
+    // (Seeing what there is and making one if there is none are one step: another sharing at the
+    // same time must see the link this one makes, not make its own.)
+    return this.oneLinkChangeAtATime(async () => {
+      const link = await this.openLinkNow(spaceId);
+      if (link.state === 'good' && link.invite.body.expiresAt! > Date.now() + HOUR_MS)
+        return link.token;
+      if (link.state === 'elsewhere')
+        throw new Error(
+          'The link for this space was made by another admin or on another device, so this device cannot show it. Make a new link to replace it.',
+        );
+      return this.makeOpenLink(spaceId, INVITE_MS);
+    });
   }
 
   /**
    * Creates an invite. With `forUser`, one only that person can join with. Without, the space's
    * open link: it replaces the one the space had, which stops working, and lasts at most 30 days.
+   * Returns what the link carries.
    */
   async createInvite(
     spaceId: string,
@@ -2169,48 +2508,84 @@ export class CrocodileClient extends Emitter<ClientEvents> {
     if (!Number.isFinite(expiresInMs) || expiresInMs <= 0)
       throw new Error('An invite needs a time to last.');
     if (expiresInMs > INVITE_MAX_MS) throw new Error('An invite can last 30 days at most.');
-    // Long enough that the hash the space names it by cannot be turned back into it.
-    const code = randomId(forUser ? 5 : OPEN_CODE_BYTES);
-    const invite = signRecord(this.identity!, 'invite', recordKey.invite(code), {
-      spaceId,
-      code,
-      expiresAt: Date.now() + expiresInMs,
-      ...(forUser ? { for: forUser } : {}),
-    });
     if (forUser) {
-      await this.putRecord(invite);
+      const code = randomId(5);
+      await this.putRecord(
+        signRecord(this.identity!, 'invite', recordKey.invite(code), {
+          spaceId,
+          code,
+          expiresAt: Date.now() + expiresInMs,
+          for: forUser,
+        }),
+      );
       return code;
     }
+    return this.oneLinkChangeAtATime(() => this.makeOpenLink(spaceId, expiresInMs));
+  }
+
+  // Changes of the open link go one after the other, each seeing what the last made.
+  private linkWork: Promise<unknown> = Promise.resolve();
+  private oneLinkChangeAtATime<T>(work: () => Promise<T>): Promise<T> {
+    const run = this.linkWork.then(work);
+    this.linkWork = run.catch(() => {});
+    return run;
+  }
+
+  private async makeOpenLink(spaceId: string, expiresInMs: number): Promise<string> {
+    // The open link is a ticket: its secret is only in the link, and in this device to show it again.
+    const ticket = newTicket();
     // The invite first, then the space naming it: until then the old link goes on working.
-    const previous = this.openLinkOf(spaceId);
-    await this.putRecord(invite);
+    const previous = await this.openLinkNow(spaceId);
+    await this.keepTicket(ticket);
+    // (Dated now, not before the waits above: it lasts as long as it was asked to.)
+    const invite = signRecord(this.identity!, 'invite', recordKey.invite(ticket.tid), {
+      spaceId,
+      code: ticket.tid,
+      tpub: ticket.tpub,
+      expiresAt: Date.now() + expiresInMs,
+    });
+    await this.putRecord(invite).catch((err) => {
+      this.forgetTicket(ticket.tid);
+      throw err;
+    });
     try {
-      await this.updateSpace(spaceId, (b) => ({
-        ...b,
-        publicInvite: inviteCommitment(spaceId, code),
-      }));
+      await this.updateSpace(spaceId, (b) => ({ ...b, publicInvite: ticket.tid }));
     } catch (err) {
       // Not named, so not a link: do not leave it counting against the space. (Unless it was
       // named after all and only the answer was lost.)
       const now = this.records.get(recordKey.space(spaceId)) as SignedRecord<'space'> | undefined;
-      if (now?.body.publicInvite !== inviteCommitment(spaceId, code))
-        await this.revokeInvite(code).catch(() => {});
+      if (now?.body.publicInvite !== ticket.tid) {
+        await this.revokeInvite(ticket.tid).catch(() => {});
+        this.forgetTicket(ticket.tid);
+      }
       throw err;
     }
-    if (previous.state === 'good')
-      await this.revokeInvite(previous.invite.body.code).catch(() => {});
-    return code;
+    // The one it replaces ends with it. (Also one that had ended because its maker may no longer
+    // make it: it is still a record that counts and could be named again.)
+    const old = 'invite' in previous ? previous.invite : undefined;
+    if (
+      old &&
+      !old.body.revoked &&
+      (old.body.expiresAt === null || old.body.expiresAt > Date.now())
+    )
+      await this.revokeInvite(old.body.code).catch(() => {});
+    return ticket.secret;
   }
 
   /** Turns the space's open link off: the link stops working. People already in stay. */
-  async stopOpenInvite(spaceId: string) {
-    const previous = this.openLinkOf(spaceId);
+  stopOpenInvite(spaceId: string) {
+    return this.oneLinkChangeAtATime(() => this.stopLink(spaceId));
+  }
+
+  private async stopLink(spaceId: string) {
+    const previous = await this.openLinkNow(spaceId);
     if (previous.state === 'none') return;
     await this.updateSpace(spaceId, (b) => {
       const { publicInvite: _, ...rest } = b;
       return rest;
     });
-    if ('invite' in previous) await this.revokeInvite(previous.invite.body.code).catch(() => {});
+    if ('invite' in previous && previous.invite)
+      await this.revokeInvite(previous.invite.body.code).catch(() => {});
   }
 
   /** The spaces we could invite this person to by name: ours to invite to, and they are neither in nor banned. */
@@ -2279,6 +2654,7 @@ export class CrocodileClient extends Emitter<ClientEvents> {
         this.nextVersion(key),
       ),
     );
+    if (this.dropEndedTickets()) void this.saveTickets();
   }
 
   /**
@@ -2287,7 +2663,11 @@ export class CrocodileClient extends Emitter<ClientEvents> {
    * still works. Null if the server doesn't know the invite.
    */
   async previewInvite(input: string): Promise<InvitePreview | null> {
-    const code = inviteCodeOf(input);
+    // What a link carries: the secret of a ticket (the invite is named by a hash of its key), or
+    // the code of an invitation to a person.
+    const token = inviteCodeOf(input);
+    const ticket = ticketFromSecret(token);
+    const code = ticket ? ticket.tid : token;
     const key = recordKey.invite(code);
     const res = await this.link!.request('records.get', { keys: [key] });
     const claimed = res.records[0] as SignedRecord<'invite'> | undefined;
@@ -2304,6 +2684,8 @@ export class CrocodileClient extends Emitter<ClientEvents> {
     this.records.ingest(claimed, false);
     const invite = this.records.get(key) as SignedRecord<'invite'> | undefined;
     if (!invite || invite.body.code !== code) return null;
+    // A ticket is the link's, and its name alone is not a way in.
+    if ((invite.body.tpub ?? undefined) !== ticket?.tpub) return null;
     const { spaceId } = invite.body;
     const space = this.records.get(recordKey.space(spaceId)) as SignedRecord<'space'> | undefined;
     if (!space || space.body.deleted) return null;
@@ -2319,11 +2701,11 @@ export class CrocodileClient extends Emitter<ClientEvents> {
       // The link anyone can use is the one the space has on, no older one.
       (invite.body.for === undefined &&
         (invite.body.expiresAt === null ||
-          code.length < OPEN_CODE_LENGTH ||
-          space.body.publicInvite !== inviteCommitment(spaceId, code))) ||
+          invite.body.tpub === undefined ||
+          space.body.publicInvite !== openLinkName(spaceId, code, !!ticket))) ||
       (invite.body.expiresAt !== null && invite.body.expiresAt < Date.now());
     return {
-      code,
+      code: token,
       spaceId,
       name: space.body.name,
       ...(space.body.icon ? { icon: space.body.icon } : {}),
@@ -2336,10 +2718,17 @@ export class CrocodileClient extends Emitter<ClientEvents> {
 
   /** Accepts "abcd1234", "croc://join/abcd1234" or "https://…/join/abcd1234". */
   async joinWithInvite(input: string): Promise<string> {
-    const code = inviteCodeOf(input);
+    const token = inviteCodeOf(input);
+    const ticket = ticketFromSecret(token);
+    const code = ticket ? ticket.tid : token;
     const res = await this.link!.request('records.get', { keys: [recordKey.invite(code)] });
     const invite = res.records[0] as SignedRecord<'invite'> | undefined;
-    if (!invite) throw new Error('That invite does not exist (yet). Check the code and try again.');
+    if (!invite || invite.key !== recordKey.invite(code) || invite.body.code !== code)
+      throw new Error('That invite does not exist (yet). Check the code and try again.');
+    // A ticket is joined with the whole link, not with its name; and the invite must be the one
+    // the link is the key of.
+    if ((invite.body.tpub ?? undefined) !== ticket?.tpub)
+      throw new Error('That link is not complete. Ask for it again.');
     if (invite.body.for !== undefined && invite.body.for !== this.userId)
       throw new Error('That invitation is for somebody else.');
     if (
@@ -2349,7 +2738,7 @@ export class CrocodileClient extends Emitter<ClientEvents> {
       throw new Error('That invite has expired or was revoked.');
     if (
       invite.body.for === undefined &&
-      (invite.body.expiresAt === null || invite.body.code.length < OPEN_CODE_LENGTH)
+      (invite.body.expiresAt === null || invite.body.tpub === undefined)
     )
       throw new Error('That link is out of date. Ask for a new one.');
     const { spaceId } = invite.body;
@@ -2360,9 +2749,21 @@ export class CrocodileClient extends Emitter<ClientEvents> {
     if (
       named &&
       invite.body.for === undefined &&
-      named.body.publicInvite !== inviteCommitment(spaceId, code)
+      named.body.publicInvite !== openLinkName(spaceId, code, !!ticket)
     )
       throw new Error('That link has been replaced or turned off. Ask for a new one.');
+    // Made by someone the space no longer lets make it: told here, not by a server's refusal.
+    let maker: string | undefined;
+    try {
+      maker = userIdFromKey(invite.author);
+    } catch {
+      // (Not a record: it is taken as if there were none.)
+    }
+    if (!maker) throw new Error('That invite does not exist (yet). Check the code and try again.');
+    if (named && invite.body.for === undefined && !canManageSpace(named.body, maker))
+      throw new Error(
+        'That link is out of date: its maker can no longer invite. Ask for a new one.',
+      );
     this.records.ingestAll([...space.records, invite]);
     const me = this.userId;
     const key = recordKey.member(spaceId, me);
@@ -2371,7 +2772,9 @@ export class CrocodileClient extends Emitter<ClientEvents> {
         this.identity!,
         'member',
         key,
-        { spaceId, userId: me, inviteCode: code },
+        ticket
+          ? { spaceId, userId: me, ticket: { invite, proof: signTicketUse(ticket, spaceId, me) } }
+          : { spaceId, userId: me, inviteCode: code },
         this.nextVersion(key),
       ),
     );
@@ -2430,7 +2833,7 @@ export class CrocodileClient extends Emitter<ClientEvents> {
         admits: (sid, m, history) => this.admits(sid, m, history),
         outbox: {
           pending: (sid) => this.outbox.forSession(sid),
-          acked: (ids) => this.onAcked(ids),
+          acked: (sessionId, ids) => this.onAcked(sessionId, ids),
         },
         syncCursor: (ch) => this.syncCursor(ch),
         log: (m, e) => this.log(m, { session: sessionId, ...e }),
@@ -2467,10 +2870,18 @@ export class CrocodileClient extends Emitter<ClientEvents> {
     session.on('file', ({ from, payload }) => this.files?.onMessage(sessionId, from, payload));
     session.on('update', () => this.files?.sessionChanged(sessionId));
     session.on('typing', ({ userId, ch }) => {
-      const until = Date.now() + 6000;
-      this.store.set((s) => ({
-        typing: { ...s.typing, [ch]: { ...(s.typing[ch] ?? {}), [userId]: until } },
-      }));
+      const now = Date.now();
+      this.store.set((s) => {
+        // Only who is still typing is kept (an entry is shown for a few seconds), so the table
+        // follows the people typing now, not everyone who ever did.
+        const typing: ClientState['typing'] = {};
+        for (const [channel, who] of Object.entries(s.typing)) {
+          const live = Object.fromEntries(Object.entries(who).filter(([, until]) => until > now));
+          if (Object.keys(live).length) typing[channel] = live;
+        }
+        typing[ch] = { ...typing[ch], [userId]: now + TYPING_SHOWN_MS };
+        return { typing };
+      });
     });
     if (scope?.kind === 'voice') session.isVoice = true;
     this.sessions.set(sessionId, session);
@@ -2848,8 +3259,13 @@ export class CrocodileClient extends Emitter<ClientEvents> {
   // Devices and linking
   // ===========================================================================
 
-  /** Remove a device from this account (permanent). */
+  /** Remove a device from this account (permanent). Removing this one is signing out. */
   async revokeDevice(deviceId: string) {
+    if (deviceId === this.deviceId) return this.signOut();
+    return this.revokeRecord(deviceId);
+  }
+
+  private async revokeRecord(deviceId: string) {
     const id = this.identity!;
     const key = recordKey.device(id.userId, deviceId);
     const current = this.records.get(key) as SignedRecord<'device'> | undefined;
@@ -2930,7 +3346,7 @@ export class CrocodileClient extends Emitter<ClientEvents> {
       // could make us take another nonce could choose one to match the codes.
       const t = this.linkTemp;
       if (!t || t.claimedBy || !keyMatchesUserId(key, userId)) return;
-      if (!/^[A-Za-z0-9_-]{43}$/.test(theirNonce ?? '')) return;
+      if (!LinkValue.safeParse(theirNonce).success) return;
       t.claimedBy = userId;
       const securityCode = linkSecurityCode(
         temp.publicKey,
@@ -3014,7 +3430,7 @@ export class CrocodileClient extends Emitter<ClientEvents> {
     const res = await link.request('link.claim', { code });
     // These go into newline-separated hash inputs, so hold them to one encoding.
     if (
-      ![res.key, res.encKey, res.commit].every((s) => /^[A-Za-z0-9_-]{43}$/.test(s ?? '')) ||
+      ![res.key, res.encKey, res.commit].every((s) => LinkValue.safeParse(s).success) ||
       !LinkKemKey.safeParse(res.kemKey).success
     )
       throw new Error('The new device could not be verified. Start again on both devices.');
@@ -3547,7 +3963,8 @@ export class CrocodileClient extends Emitter<ClientEvents> {
       const typing = s.typing[message.ch];
       if (!typing?.[message.author]) return {};
       const { [message.author]: _, ...rest } = typing;
-      return { typing: { ...s.typing, [message.ch]: rest } };
+      const { [message.ch]: __, ...others } = s.typing;
+      return { typing: Object.keys(rest).length ? { ...others, [message.ch]: rest } : others };
     });
     this.emit('message', { channel: message.ch, message, mine, update });
     return true;

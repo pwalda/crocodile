@@ -14,6 +14,38 @@
 $ErrorActionPreference = 'Stop'
 $repo = if ($env:CROC_REPO) { $env:CROC_REPO } else { 'pwalda/crocodile' }
 
+# Everything is downloaded over https: an address that is not, or a download that a
+# redirect took to one, is refused (and the file is not kept).
+function Save-Https($url, $path) {
+  $uri = $url -as [uri]
+  if (-not $uri -or -not $uri.IsAbsoluteUri -or $uri.Scheme -ne 'https') {
+    throw "Refusing to download from an address that is not https: $url"
+  }
+  $response = Invoke-WebRequest $url -OutFile $path -UseBasicParsing -PassThru
+  # Windows PowerShell gives the address it ended at as ResponseUri, PowerShell 7 in the request.
+  $final = $response.BaseResponse.ResponseUri
+  if (-not $final) { $final = $response.BaseResponse.RequestMessage.RequestUri }
+  if ($final -and $final.Scheme -ne 'https') {
+    Remove-Item $path -ErrorAction SilentlyContinue
+    throw "Refusing a download that ended at an address that is not https: $final"
+  }
+}
+
+# The release lists a SHA-256 for each asset (its digest, which GitHub works out when the
+# file is uploaded). That there is one is found out before anything is downloaded, and a
+# download that does not match is deleted and not installed.
+function Get-Digest($asset) {
+  $digest = ([string]$asset.digest) -replace '^sha256:', ''
+  if ($digest -notmatch '^[0-9a-fA-F]{64}$') { throw "The release lists no checksum for $($asset.name)" }
+  return $digest
+}
+function Assert-Digest($path, $asset, $digest) {
+  if ((Get-FileHash $path -Algorithm SHA256).Hash -ne $digest) {
+    Remove-Item $path -ErrorAction SilentlyContinue
+    throw "$($asset.name) does not match the checksum the release lists for it"
+  }
+}
+
 Write-Host '==> Looking up the latest Crocodile release' -ForegroundColor Green
 $release = Invoke-RestMethod "https://api.github.com/repos/$repo/releases/latest"
 # There is an installer per architecture, and a bigger one with both. 32-bit
@@ -26,9 +58,11 @@ if ($env:CROC_INSTALL -eq 'cli') {
     $cli = $release.assets | Where-Object { $_.name -eq 'crocodile-cli-windows-x64.zip' } | Select-Object -First 1
   }
   if (-not $cli) { throw 'No command line build found; with Node.js 22 or newer: npm install -g crocodile-cli' }
+  $digest = Get-Digest $cli
   $zip = Join-Path $env:TEMP $cli.name
   Write-Host "==> Downloading $($cli.name)" -ForegroundColor Green
-  Invoke-WebRequest $cli.browser_download_url -OutFile $zip -UseBasicParsing
+  Save-Https $cli.browser_download_url $zip
+  Assert-Digest $zip $cli $digest
   $dir = Join-Path $env:LOCALAPPDATA 'Programs\crocodile-cli'
   New-Item -ItemType Directory -Force -Path $dir | Out-Null
   Expand-Archive -Path $zip -DestinationPath $dir -Force
@@ -49,9 +83,11 @@ if (-not $asset) {
 }
 if (-not $asset) { throw 'No Windows installer found in the latest release.' }
 
+$digest = Get-Digest $asset
 $file = Join-Path $env:TEMP $asset.name
 Write-Host "==> Downloading $($asset.name)" -ForegroundColor Green
-Invoke-WebRequest $asset.browser_download_url -OutFile $file -UseBasicParsing
+Save-Https $asset.browser_download_url $file
+Assert-Digest $file $asset $digest
 
 Write-Host '==> Installing' -ForegroundColor Green
 # --force-run starts Crocodile when the silent install finishes.

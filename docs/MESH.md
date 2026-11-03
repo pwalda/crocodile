@@ -59,6 +59,7 @@ live full-copy server:
 | profile               | `user:<id>`, `name:<lowercase>`  | `user:<id>`            |
 | device, friends, note | `user:<id>`                      | `user:<id>`            |
 | space                 | `space:<id>`, `user:<owner>`     | `user:<owner>`         |
+| roster                | `space:<space>`                  | `space:<space>`        |
 | invite                | `invite:<code>`, `space:<space>` | `space:<space>`        |
 | member                | `space:<space>`, `user:<member>` | `user:<member>`        |
 
@@ -83,7 +84,8 @@ by name goes to `name:<name>`.
 - **Live updates.** A server whose clients follow records it doesn't own asks
   the owners to **watch** them for it; owners push each change to the
   watching servers, which pass it on to their clients. Watches last five
-  minutes and are renewed.
+  minutes and are renewed, and an owner sees which user and space ids a server
+  follows (not which of its users asked).
 - **When servers come and go**, the ring changes. Once the live set has been
   stable for a few seconds, each server goes through what it stores and sends
   every record to owners that have just become responsible for it (only the
@@ -114,12 +116,19 @@ by name goes to `name:<name>`.
   another. The owner also admits a member only if the sending server has said
   that member's device is connected to it, checks again that the member may be in
   the session and that the device has a record on the member's account that has
-  not been removed, and believes a host hint only if the host and backup it names
-  may be in the session and are such devices too; afterwards it takes operations
-  on that member only from the server it joined from (a leave, which the
-  member's server sends when the device disconnects, is not signed). When a
-  session's owner changes, each member's server asks its device to sign a new
-  join, and takes it out of the session if it does not. A client event
+  not been removed; afterwards it takes operations on that member only from the
+  server it joined from (a leave, which the member's server sends when the
+  device disconnects, is not signed). When a session's owner changes, each
+  member's server asks its device to sign a new join, which carries the host
+  the device last saw (epoch, host and backup), and takes it out of the session
+  if it does not. The owner takes such a hint only while it puts the room
+  together (the room has no member yet, or was made less than ten seconds ago),
+  only if its epoch is later than the room's, and only if the host and backup
+  it names may be in the session and are devices with records on their
+  accounts; a room that stands ignores hints. A member can therefore still
+  choose the host of a room in its first seconds, as a server could before
+  (the host must still be a real, allowed device, and one that is not in the
+  room is replaced after a few seconds). A client event
   routed to us is delivered only if it comes from a server that could be
   sending it: a signal from the server the sending device is connected to, a
   session's state or a conversation invitation from the session's owner.
@@ -166,6 +175,16 @@ by name goes to `name:<name>`.
   - The ring is built only when the live set really changes and someone looks.
     Under a steady trickle of new servers that is still once per look.
   - Spent allowances are kept for 2000 links, idle ones dropped first.
+  - A signed-in peer may send a burst of 20,000 frames and 2,000 a second after
+    that, of any kind (a full catch-up is a few thousand, as a batch holds
+    hundreds of records); past that its link is closed, not thinned out, as a
+    frame skipped could be one a cursor or a sequence number moves on past. It
+    reconnects and starts again from what it has. Requests have a limit of
+    their own, answered with an error.
+  - The hop count of a flooded frame is written by whoever sends it, so it
+    bounds how far an honest flood goes, not a hostile one: a server can send a
+    new flood with a fresh id at any time. What bounds it is the budget above
+    and the 200,000 flood ids a server remembers, oldest dropped first.
 - What is not limited: a flood of live made-up servers can fill the 5000
   places and keep real newcomers out, and enough made-up link identities push
   out the allowances of real ones. Admitting only servers the directory has
@@ -174,7 +193,11 @@ by name goes to `name:<name>`.
   its own users. A server can sign that any user is connected through it, and
   then the events routed to that user (signalling, session invites, mail) go to
   it. That is the same as the server dropping them. Closing it would take the
-  user's device proving which server it connected to.
+  user's device proving which server it connected to; only its join, update
+  and report do that so far. The server a device is on can also drop or hold
+  back those operations (a join is only taken within five minutes of being made;
+  an update or report is not dated), and the leave
+  it sends when the device disconnects is not signed.
 - Every server still hears every beacon and every presence change; that is
   fine for thousands of servers but not for millions of users online at once.
   Presence would then move to the owners of each user's shard.

@@ -59,6 +59,7 @@ node packages/coordinator/dist/bin.js --help
 | `--relay`                  | `CROC_RELAY`                 | `on` (`off` to disable)               |
 | `--relay-max-users`        | `CROC_RELAY_MAX_USERS`       | 25                                    |
 | `--relay-ip`               | `CROC_RELAY_IP`              | public IP from `--public-url`         |
+| `--relay-own-ips`          | `CROC_RELAY_OWN_IPS`         | none (comma-separated addresses)      |
 | `--relay-ports`            | `CROC_RELAY_PORTS`           | any free port (49160-49259 in Docker) |
 | `--mailbox`                | `CROC_MAILBOX`               | `on` (`off` to disable)               |
 | `--mailbox-days`           | `CROC_MAILBOX_DAYS`          | 3 (max 7)                             |
@@ -89,12 +90,20 @@ the range is full, a user's newest connection takes the port of their own
 oldest, so stale ones never lock anyone out. Each
 grant lasts at most one hour (apps renew it while their connection still
 goes through the relay), `--relay-max-users` caps how many people use
-it at once, and each allocation is rate-limited (about 100 kbit/s of voice
-per person). Your server only ever sees ciphertext. Turn it off with
+it at once, and each allocation is rate-limited (about 96 KiB/s, some 790
+kbit/s, with room to burst to twice that), and a user may hold eight of them,
+so size your bandwidth for that. Your server only ever sees ciphertext. Turn it off with
 `--relay off` if bandwidth is scarce. The desktop app's built-in server
 leaves it off unless you enable "Offer a relay"; it then relays on the UDP
 ports just above its own (four per relay user; the app shows the range), which
 you forward along with its port to serve people outside your network.
+
+The relay never sends to the machine it runs on or its network (private,
+loopback and link-local addresses, and its own addresses). It knows its own
+interface addresses and `--relay-ip`; if `--relay-ip` is a proxy's or a CDN's
+address, and the machine is reached through a router with a public address of its
+own, give that address in `--relay-own-ips` so the relay can't be used to reach
+what the router forwards to the machine.
 
 ## Hosting safely
 
@@ -116,7 +125,10 @@ main server puts the TCP side behind a reverse proxy on 443.
 - **A program listening on the internet.** Any bug in it could be attacked.
   The server validates every message, limits sizes and rates, caps
   connections per address (`--max-connections-per-ip`) and in total
-  (`--capacity`), and times out connections that don't authenticate. Each
+  (`--capacity`), counts guesses at a device link code per address (an IPv6
+  address as its /64) and not only per connection, and times out connections
+  that don't authenticate. Behind a reverse proxy, set `--trust-proxy`, or all
+  your users are one address to it. Each
   account can make it store at most 100 devices, 100 spaces and 500
   memberships, each space at most 5000 invites, and each account receives at
   most 200 unread friend notes (a server stops at twice that when other
@@ -152,7 +164,8 @@ the servers it measures and uses.
 **Recommendations:**
 
 - For friends on your network, the desktop app's server is fine: it accepts
-  no connections from the internet unless you forward the port. It still
+  no connections from the internet behind a router that does not forward the
+  port (if the computer has a public address of its own, its firewall decides). It still
   connects out to the network to keep its copy of the records.
 - For a public server, prefer a small VPS or a separate machine with Docker
   over the computer you use every day, so a compromise doesn't reach your
@@ -223,10 +236,11 @@ the website. See
 ## Running a directory
 
 The directory is tiny: `docker compose --profile directory up -d directory`
-(port 7400). Point coordinators at it with `CROC_DIRECTORY` and build the app
-with `CROC_DIRECTORIES=https://your-directory` to make it the default.
-Directories verify that each registered server is reachable at its advertised
-URL, and drop servers that stop sending heartbeats. A public directory refuses
+(port 7400, on the machine's own address only: put a reverse proxy in front of
+it, or set `CROC_DIR_BIND=0.0.0.0` to publish it). Point coordinators at it
+with `CROC_DIRECTORY` and build the app with
+`CROC_DIRECTORIES=https://your-directory` to make it the default. Directories
+verify that each registered server is reachable at its advertised URL, and drop servers that stop sending heartbeats. A public directory refuses
 URLs whose name resolves to a private address, connects only to the address it
 checked, and does not follow redirects. One address may register
 20 times a minute, and a directory lists at most 5000 servers. Behind a

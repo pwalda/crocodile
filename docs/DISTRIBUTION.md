@@ -29,8 +29,14 @@ irm https://raw.githubusercontent.com/pwalda/crocodile/main/scripts/install.ps1 
 Files fetched by `curl` or PowerShell are not tagged as "downloaded from the
 internet" (no quarantine attribute on macOS, no Mark-of-the-Web on Windows),
 so Gatekeeper and SmartScreen do not interrupt. The scripts only download the
-official release assets from GitHub over HTTPS. The website offers them next
-to the regular download buttons.
+official release assets from GitHub over HTTPS (a download that a redirect
+takes to anything else is refused). Each download is checked against the
+SHA-256 that the release lists for it (the `digest` GitHub works out when a
+file is uploaded, in the same release listing the scripts read); one that does
+not match is deleted and not installed, and so is one the release lists no
+checksum for. The check guards against a corrupted or swapped file, not
+against someone who controls the release itself, since the checksum comes from
+the same place. The website offers the scripts next to the regular download buttons.
 
 ## Windows
 
@@ -175,15 +181,15 @@ update**. If a call is going on, the app asks first. Code:
 
 How the update is applied depends on the install:
 
-| Install                         | How                                                                                                                                                                                           |
-| ------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Windows installer               | electron-updater runs the new installer silently and restarts the app.                                                                                                                        |
-| macOS, Developer ID signed      | electron-updater (Squirrel.Mac).                                                                                                                                                              |
-| macOS, ad-hoc signed (today)    | The app downloads the release `.zip`, checks its SHA-512 against `latest-mac.yml` and the bundle's version, and after it quits a small script swaps the new `Crocodile.app` in and starts it. |
-| macOS, app can't replace itself | Run from the disk image, translocated, or a folder the user can't write: the `.dmg` is downloaded (checked the same way) and opened, and the user drags Crocodile into Applications.          |
-| Linux AppImage                  | electron-updater replaces the AppImage file.                                                                                                                                                  |
-| Linux `.deb` / `.rpm`           | electron-updater installs the new package with `dpkg`/`rpm`, which asks for the administrator password (pkexec or sudo).                                                                      |
-| Linux `.tar.gz`                 | Can't update itself: the button opens the release page.                                                                                                                                       |
+| Install                         | How                                                                                                                                                                                                                                                  |
+| ------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Windows installer               | electron-updater runs the new installer silently and restarts the app.                                                                                                                                                                               |
+| macOS, Developer ID signed      | electron-updater (Squirrel.Mac).                                                                                                                                                                                                                     |
+| macOS, ad-hoc signed (today)    | The app downloads the release `.zip`, checks its SHA-512 against `latest-mac.yml` and the bundle's version, and after it quits a small script swaps the new `Crocodile.app` in and starts it.                                                        |
+| macOS, app can't replace itself | Run from the disk image, translocated, or a folder the user can't write: the `.dmg` is downloaded (its SHA-512 is checked against `latest-mac.yml`; the version inside is not looked at) and opened, and the user drags Crocodile into Applications. |
+| Linux AppImage                  | electron-updater replaces the AppImage file.                                                                                                                                                                                                         |
+| Linux `.deb` / `.rpm`           | electron-updater installs the new package with `dpkg`/`rpm`, which asks for the administrator password (pkexec or sudo).                                                                                                                             |
+| Linux `.tar.gz`                 | Can't update itself: the button opens the release page.                                                                                                                                                                                              |
 
 Updates come only from this repository's latest GitHub release over HTTPS,
 and every file is checked against the SHA-512 in that release's `latest*.yml`.

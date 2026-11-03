@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { b64uBytes, b64uText, keyB64u, sigB64u } from './b64u';
 import { LIMITS } from './constants';
 
 /**
@@ -13,6 +14,7 @@ export const RECORD_KINDS = [
   'device',
   'friends',
   'space',
+  'roster',
   'invite',
   'member',
   'note',
@@ -20,8 +22,7 @@ export const RECORD_KINDS = [
 export type RecordKind = (typeof RECORD_KINDS)[number];
 
 const id = z.string().regex(/^[a-z2-7]{8,64}$/);
-const pubKey = z.string().regex(/^[A-Za-z0-9_-]{43}$/);
-const b64u = /^[A-Za-z0-9_-]*$/;
+const pubKey = keyB64u;
 export const DeviceId = z.string().regex(/^[a-z2-7]{8,32}$/);
 const peerId = z.string().regex(/^[a-z2-7]{8,64}\.[a-z2-7]{8,32}$/);
 
@@ -34,7 +35,7 @@ export const PrekeyBundle = z.object({
   id: z.number().int().min(0).max(0xffffffff),
   x25519: pubKey,
   /** ML-KEM-768 encapsulation key, base64url (1184 bytes). */
-  mlkem: z.string().regex(/^[A-Za-z0-9_-]{1579}$/),
+  mlkem: b64uBytes(1184),
   expiresAt: z.number().int(),
 });
 export type PrekeyBundle = z.infer<typeof PrekeyBundle>;
@@ -97,7 +98,7 @@ export type LegacyFriendsBody = z.infer<typeof LegacyFriendsBody>;
  * learns about it from sealed notes (see NoteBody).
  */
 export const SealedFriendsBody = z.object({
-  sealed: z.string().regex(b64u).max(LIMITS.recordMaxBytes),
+  sealed: b64uText(LIMITS.recordMaxBytes),
 });
 export type SealedFriendsBody = z.infer<typeof SealedFriendsBody>;
 
@@ -122,8 +123,8 @@ export const AnonBox = z.object({
   /** Ephemeral X25519 public key. */
   epk: pubKey,
   /** ML-KEM-768 ciphertext (1088 bytes). */
-  kem: z.string().regex(/^[A-Za-z0-9_-]{1451}$/),
-  ct: z.string().regex(b64u).max(8192),
+  kem: b64uBytes(1088),
+  ct: b64uText(8192),
 });
 export type AnonBox = z.infer<typeof AnonBox>;
 
@@ -186,15 +187,17 @@ export const SpaceBody = z.object({
    * Admins the owner has removed, kept (and only added to) so that those they let in stay: a
    * link an admin made still admits a member after the admin is gone. Signed with the admin list.
    */
-  formerAdmins: z.array(id).max(1000).optional(),
+  formerAdmins: z.array(id).max(LIMITS.formerAdminsMax).optional(),
   /**
    * Who may invite a named person: only the owner and admins (the default), or members too.
    * The one open invite is always made by the owner or an admin.
    */
   invitePolicy: z.enum(['admins', 'members']).optional(),
   /**
-   * The one invite anyone holding it can join with, if the space has one on, named by a hash of
-   * its code (the space record is readable by anyone who knows the space, the code is not).
+   * The one invite anyone holding the link can join with, if the space has one on. A link that
+   * is a ticket is named by the name of its invite (a hash of its public key; the secret in the
+   * link is not in any record); an older one by a hash of its code. The space record is readable
+   * by anyone who knows the space, so it holds nothing that is a way in.
    * Making a new one replaces it, and so ends the old one; the owner and admins set it.
    */
   publicInvite: z
@@ -210,17 +213,40 @@ export const SpaceBody = z.object({
    */
   authority: z
     .object({
-      ownerKey: z.string().max(64),
+      ownerKey: keyB64u,
       at: z.number().int().min(0),
-      sig: z.string().max(200),
+      sig: sigB64u,
+      /**
+       * The hash of the roster the owner has signed (see RosterBody): who joined by a link of the
+       * older kind and stays. Once a space names one, memberships of that kind count only for
+       * those on it. Signed with the admin list, and never changed or taken off.
+       */
+      roster: b64uBytes(32).optional(),
     })
     .optional(),
 });
 export type SpaceBody = z.infer<typeof SpaceBody>;
 
+/**
+ * Who stays in a space of those who joined by an open link of the older kind, which anyone could
+ * forge a membership to: the owner reads the list, removes those who should not be on it, and
+ * signs it once. Key `roster:<spaceId>`, written by the owner; the space's `authority` names it
+ * by its hash (a roster of nobody needs no record). The members are in order, each once.
+ */
+export const RosterBody = z.object({
+  spaceId: id,
+  members: z.array(id).max(LIMITS.rosterMax),
+  /** Epoch ms, when the owner signed it. */
+  at: z.number().int().positive(),
+});
+export type RosterBody = z.infer<typeof RosterBody>;
+
+/** What a space's invite is called: 8 to 32 base32 characters (an open link's is 26). */
+const inviteCode = z.string().regex(/^[a-z2-7]{8,32}$/);
+
 export const InviteBody = z.object({
   spaceId: id,
-  code: z.string().regex(/^[a-z2-7]{8,32}$/),
+  code: inviteCode,
   /** Epoch ms, or null for never. */
   expiresAt: z.number().int().nullable(),
   revoked: z.boolean().optional(),
@@ -242,7 +268,7 @@ export const SignedRecordEnvelope = z.object({
   author: pubKey,
   version: z.number().int().positive(),
   body: z.unknown(),
-  sig: z.string().regex(/^[A-Za-z0-9_-]{86}$/),
+  sig: sigB64u,
 });
 
 /** The invite record a ticket carries, as signed by its maker. */
@@ -256,12 +282,12 @@ export const MemberBody = z.object({
   spaceId: id,
   userId: id,
   /** Invite used to join; the space owner and admins may omit it. */
-  inviteCode: z.string().optional(),
+  inviteCode: inviteCode.optional(),
   /**
    * Joined with an open link that is a ticket: the maker's signed invite, and the signature of
    * this user by the secret in the link. (Instead of `inviteCode`, not with it.)
    */
-  ticket: z.object({ invite: TicketInvite, proof: z.string().min(1).max(200) }).optional(),
+  ticket: z.object({ invite: TicketInvite, proof: sigB64u }).optional(),
   left: z.boolean().optional(),
 });
 export type MemberBody = z.infer<typeof MemberBody>;
@@ -271,6 +297,7 @@ export interface RecordBodies {
   device: DeviceBody;
   friends: FriendsBody;
   space: SpaceBody;
+  roster: RosterBody;
   invite: InviteBody;
   member: MemberBody;
   note: NoteBody;
@@ -281,6 +308,7 @@ export const RECORD_BODY_SCHEMAS = {
   device: DeviceBody,
   friends: FriendsBody,
   space: SpaceBody,
+  roster: RosterBody,
   invite: InviteBody,
   member: MemberBody,
   note: NoteBody,
@@ -305,6 +333,7 @@ export const recordKey = {
   devicePrefix: (userId: string) => `device:${userId}:`,
   friends: (userId: string) => `friends:${userId}`,
   space: (spaceId: string) => `space:${spaceId}`,
+  roster: (spaceId: string) => `roster:${spaceId}`,
   invite: (code: string) => `invite:${code}`,
   invitePrefix: 'invite:',
   member: (spaceId: string, userId: string) => `member:${spaceId}:${userId}`,
@@ -319,7 +348,8 @@ export const RECORD_KIND_ORDER: Record<RecordKind, number> = {
   device: 1,
   friends: 2,
   space: 3,
-  invite: 4,
-  member: 5,
-  note: 6,
+  roster: 4,
+  invite: 5,
+  member: 6,
+  note: 7,
 };
