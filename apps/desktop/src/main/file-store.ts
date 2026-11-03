@@ -4,7 +4,7 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { tmpdir } from 'node:os';
 import { extname, join } from 'node:path';
-import { FILE_BLOCK_SIZE, FILE_TAG_SIZE } from '@crocodile/protocol';
+import { FILE_BLOCK_SIZE, FILE_MAX_SIZE, FILE_TAG_SIZE } from '@crocodile/protocol';
 
 /**
  * Files on disk, for the UI (which can't touch the file system):
@@ -91,7 +91,11 @@ interface Export {
   path: string;
   handle: FileHandle;
   temp: boolean;
+  written: number;
 }
+
+/** Files written at once: a few saves and a few opened, not without end. */
+const MAX_OPEN_EXPORTS = 16;
 
 export class FileExports {
   private open = new Map<string, Export>();
@@ -110,9 +114,15 @@ export class FileExports {
   }
 
   async begin(path: string, temp: boolean) {
+    // Past that the oldest is let go (a page that was reloaded mid-save never ends its file).
+    if (this.open.size >= MAX_OPEN_EXPORTS) {
+      const [oldest, x] = this.open.entries().next().value!;
+      this.open.delete(oldest);
+      await x.handle.close().catch(() => {});
+    }
     const handle = await open(path, 'w');
     const token = `x${++this.seq}`;
-    this.open.set(token, { path, handle, temp });
+    this.open.set(token, { path, handle, temp, written: 0 });
     return token;
   }
 
@@ -126,6 +136,10 @@ export class FileExports {
   async chunk(token: string, data: Uint8Array) {
     const x = this.open.get(token);
     if (!x || !(data instanceof Uint8Array)) throw new Error('not saving');
+    // What the page sends is a block of the file at most, and no more than a file can be.
+    if (data.length > FILE_BLOCK_SIZE || x.written + data.length > FILE_MAX_SIZE)
+      throw new Error('too much');
+    x.written += data.length;
     await x.handle.write(data);
   }
 

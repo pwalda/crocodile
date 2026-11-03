@@ -165,7 +165,11 @@ picture size.
   A drop anywhere but the chat does nothing, and the main process serves a
   request from the UI only if it comes from the top frame of the app's own
   page in the app's window (checked for every request), and grants the
-  microphone, camera and screen (the screen choice too) only to that page. A release build has
+  microphone, camera and screen (the screen choice too) only to that page. What
+  that page passes is checked too: settings of the app's own server only of
+  the kinds and sizes they have, messages for the relay process only in the
+  forms it uses, a saved file one block at a time and no more than a file can
+  be, links only to web addresses. A release build has
   Electron's `RunAsNode` and `NODE_OPTIONS` switches off, refuses to start with a debugging port, pipe or inspector, starts its update script with a fixed environment, loads
   only from its archive (whose hash is checked at start on macOS and Windows; on Linux anyone who can write to the install can change it anyway),
   and ignores the `CROC_*` test and development settings (another profile,

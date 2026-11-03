@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { FILE_BLOCK_SIZE } from '@crocodile/protocol';
+import { FILE_BLOCK_SIZE, FILE_MAX_SIZE } from '@crocodile/protocol';
 import { newFileId } from '@crocodile/crypto';
 import {
   FileExports,
@@ -294,5 +294,36 @@ describe('files received from other people', () => {
     const p = join(dir, 'c.pdf');
     await throws.end(await throws.begin(p, false));
     expect(throws.markFailed(p)).toBe(true);
+  });
+});
+
+describe('what the page may send when a file is saved', () => {
+  it('takes a block at a time at most, and no more than a file can be', async () => {
+    const dir = tempDir();
+    const exports = new FileExports(async () => 'none');
+    const token = await exports.begin(join(dir, 'out.bin'), false);
+    await exports.chunk(token, block(FILE_BLOCK_SIZE, 1));
+    await expect(exports.chunk(token, block(FILE_BLOCK_SIZE + 1, 1))).rejects.toThrow('too much');
+    await expect(exports.chunk(token, 'text' as unknown as Uint8Array)).rejects.toThrow(
+      'not saving',
+    );
+    // The most a file can be, counted over all its chunks.
+    const big = await exports.begin(join(dir, 'big.bin'), false);
+    const inner = exports as unknown as { open: Map<string, { written: number }> };
+    inner.open.get(big)!.written = FILE_MAX_SIZE - 10;
+    await exports.chunk(big, block(10, 1));
+    await expect(exports.chunk(big, block(1, 1))).rejects.toThrow('too much');
+    expect(readFileSync(join(dir, 'out.bin')).length).toBe(FILE_BLOCK_SIZE);
+  });
+
+  it('lets go of the oldest when many are started and never ended', async () => {
+    const dir = tempDir();
+    const exports = new FileExports(async () => 'none');
+    const tokens: string[] = [];
+    for (let i = 0; i < 17; i++) tokens.push(await exports.begin(join(dir, `f${i}`), false));
+    // The newest sixteen work; the first has been let go.
+    await expect(exports.chunk(tokens[0]!, block(1, 1))).rejects.toThrow('not saving');
+    for (const t of tokens.slice(1)) await exports.chunk(t, block(1, 1));
+    expect(await exports.end(tokens[16]!)).toBe(join(dir, 'f16'));
   });
 });
