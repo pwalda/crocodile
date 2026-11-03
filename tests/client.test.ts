@@ -1838,6 +1838,28 @@ describe('leaving', () => {
       expect((laptop.records.get(key)!.body as { revoked?: boolean }).revoked).toBeUndefined();
     });
 
+    it('removing this very device from its own list is signing out', async () => {
+      const { coord, alice, laptop, kv } = await twoDevices();
+      const errors: string[] = [];
+      laptop.on('error', (e) => errors.push(e.message));
+      await laptop.revokeDevice(laptop.deviceId);
+      await cleared(laptop, kv);
+      expect(errors).toEqual([]);
+      // Its record on the account says it is gone.
+      const mine = coord.store.listPrefix(recordKey.devicePrefix(alice.userId), 10);
+      expect(mine.filter((r) => (r.body as { revoked?: boolean }).revoked)).toHaveLength(1);
+    });
+
+    it('says it was removed even when clearing did not get to the end', async () => {
+      const { alice, laptop } = await twoDevices();
+      const errors: string[] = [];
+      laptop.on('error', (e) => errors.push(e.message));
+      vi.spyOn(laptop.platform.messages, 'clear').mockRejectedValue(new Error('disk'));
+      await alice.revokeDevice(laptop.deviceId);
+      await waitFor(() => errors.length > 0, 8000, 'told');
+      expect(errors).toEqual(['This device was removed from your account on another device.']);
+    });
+
     it('signing out is not reported as a removal', async () => {
       const { alice, laptop } = await twoDevices();
       const errors: string[] = [];

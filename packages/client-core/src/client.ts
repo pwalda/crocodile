@@ -722,7 +722,9 @@ export class CrocodileClient extends Emitter<ClientEvents> {
     // What the cache holds, which has been checked as signed by this account: not the server's
     // word for it.
     if ((this.records.get(key)?.body as DeviceBody | undefined)?.revoked) {
-      await this.removedFromAccount();
+      await this.removedFromAccount().catch((err) =>
+        this.log('could not clear a removed device', { err: String(err) }),
+      );
       return;
     }
     const name = this.state.settings.deviceName ?? defaultDeviceName(this.platform.platform);
@@ -754,7 +756,7 @@ export class CrocodileClient extends Emitter<ClientEvents> {
     this.signingOut = true;
     try {
       if (this.identity && this.deviceId) {
-        await this.revokeDevice(this.deviceId).catch(() => {});
+        await this.revokeRecord(this.deviceId).catch(() => {});
       }
       await this.forgetLocalAccount({ deleted: false });
     } finally {
@@ -773,8 +775,12 @@ export class CrocodileClient extends Emitter<ClientEvents> {
   private removedFromAccount(): Promise<void> {
     this.removal ??= (async () => {
       this.log('this device was removed from its account');
-      await this.forgetLocalAccount({ deleted: false });
-      this.reportError('This device was removed from your account on another device.');
+      try {
+        await this.forgetLocalAccount({ deleted: false });
+      } finally {
+        // Said even if clearing did not get to the end: the device is no longer the account's.
+        this.reportError('This device was removed from your account on another device.');
+      }
     })().finally(() => (this.removal = undefined));
     return this.removal;
   }
@@ -3253,8 +3259,13 @@ export class CrocodileClient extends Emitter<ClientEvents> {
   // Devices and linking
   // ===========================================================================
 
-  /** Remove a device from this account (permanent). */
+  /** Remove a device from this account (permanent). Removing this one is signing out. */
   async revokeDevice(deviceId: string) {
+    if (deviceId === this.deviceId) return this.signOut();
+    return this.revokeRecord(deviceId);
+  }
+
+  private async revokeRecord(deviceId: string) {
     const id = this.identity!;
     const key = recordKey.device(id.userId, deviceId);
     const current = this.records.get(key) as SignedRecord<'device'> | undefined;

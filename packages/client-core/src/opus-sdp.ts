@@ -5,21 +5,39 @@
  * could leave it out. This puts `cbr=1` into every Opus format of a description we are given.
  */
 export function forceOpusCbr(sdp: string): string {
-  const lines = sdp.split(/\r?\n/);
   const eol = sdp.includes('\r\n') ? '\r\n' : '\n';
+  const lines = sdp.split(/\r?\n/);
+  const out: string[] = [];
+  // Payload numbers belong to one media section (`m=`), so each is dealt with on its own.
+  let start = 0;
+  for (let i = 1; i <= lines.length; i++) {
+    if (i < lines.length && !lines[i]!.startsWith('m=')) continue;
+    out.push(...forceInSection(lines.slice(start, i)));
+    start = i;
+  }
+  return out.join(eol);
+}
+
+const RTPMAP = /^a=rtpmap:(\d+) opus\/48000(?:\/|$)/i;
+const FMTP = /^a=fmtp:(\d+)(?: (.*))?$/;
+
+function forceInSection(lines: string[]): string[] {
   const opus = new Set<string>();
   for (const line of lines) {
-    const m = /^a=rtpmap:(\d+) opus\/48000(?:\/|$)/i.exec(line);
+    const m = RTPMAP.exec(line);
     if (m) opus.add(m[1]!);
   }
-  if (opus.size === 0) return sdp;
-  const seen = new Set<string>();
+  if (opus.size === 0) return lines;
+  const given = new Set<string>();
+  for (const line of lines) {
+    const m = FMTP.exec(line);
+    if (m && opus.has(m[1]!)) given.add(m[1]!);
+  }
   const out: string[] = [];
   for (const line of lines) {
-    const fmtp = /^a=fmtp:(\d+) ?(.*)$/.exec(line);
+    const fmtp = FMTP.exec(line);
     if (fmtp && opus.has(fmtp[1]!)) {
-      seen.add(fmtp[1]!);
-      const params = fmtp[2]!
+      const params = (fmtp[2] ?? '')
         .split(';')
         .map((p) => p.trim())
         .filter((p) => p && !/^cbr=/i.test(p));
@@ -27,10 +45,9 @@ export function forceOpusCbr(sdp: string): string {
       continue;
     }
     out.push(line);
-    const rtpmap = /^a=rtpmap:(\d+) opus\/48000(?:\/|$)/i.exec(line);
-    // A format with no parameters line gets one (placed after its rtpmap, where they belong).
-    if (rtpmap && !lines.some((l) => l.startsWith(`a=fmtp:${rtpmap[1]} `)))
-      out.push(`a=fmtp:${rtpmap[1]} cbr=1`);
+    // A format with no parameters line gets one, after its rtpmap.
+    const rtpmap = RTPMAP.exec(line);
+    if (rtpmap && !given.has(rtpmap[1]!)) out.push(`a=fmtp:${rtpmap[1]} cbr=1`);
   }
-  return out.join(eol);
+  return out;
 }

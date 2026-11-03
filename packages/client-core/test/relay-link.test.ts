@@ -438,6 +438,34 @@ describe('constant bitrate voice', () => {
     );
   });
 
+  it('deals with each media section on its own, and with a parameters line that has none', () => {
+    const two = [
+      'v=0',
+      'm=audio 9 RTP/AVP 111',
+      'a=rtpmap:111 opus/48000/2',
+      'a=fmtp:111 minptime=10',
+      'm=audio 9 RTP/AVP 111',
+      'a=rtpmap:111 opus/48000/2',
+      '',
+    ].join('\n');
+    expect(forceOpusCbr(two)).toBe(
+      [
+        'v=0',
+        'm=audio 9 RTP/AVP 111',
+        'a=rtpmap:111 opus/48000/2',
+        'a=fmtp:111 minptime=10;cbr=1',
+        'm=audio 9 RTP/AVP 111',
+        'a=rtpmap:111 opus/48000/2',
+        'a=fmtp:111 cbr=1',
+        '',
+      ].join('\n'),
+    );
+    // A bare line is completed, not repeated.
+    expect(forceOpusCbr('m=audio 9 RTP/AVP 111\na=rtpmap:111 opus/48000/2\na=fmtp:111\n')).toBe(
+      'm=audio 9 RTP/AVP 111\na=rtpmap:111 opus/48000/2\na=fmtp:111 cbr=1\n',
+    );
+  });
+
   it('applies it to the answer of the host, and to one for a new offer', async () => {
     const a = link();
     await a.l.connect();
