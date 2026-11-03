@@ -1,5 +1,5 @@
-import { afterEach, describe, expect, it } from 'vitest';
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { FILE_BLOCK_SIZE, FILE_MAX_SIZE } from '@crocodile/protocol';
@@ -316,14 +316,37 @@ describe('what the page may send when a file is saved', () => {
     expect(readFileSync(join(dir, 'out.bin')).length).toBe(FILE_BLOCK_SIZE);
   });
 
-  it('lets go of the oldest when many are started and never ended', async () => {
+  it('makes room for a new file only from one that has gone quiet', async () => {
     const dir = tempDir();
     const exports = new FileExports(async () => 'none');
     const tokens: string[] = [];
-    for (let i = 0; i < 17; i++) tokens.push(await exports.begin(join(dir, `f${i}`), false));
-    // The newest sixteen work; the first has been let go.
-    await expect(exports.chunk(tokens[0]!, block(1, 1))).rejects.toThrow('not saving');
-    for (const t of tokens.slice(1)) await exports.chunk(t, block(1, 1));
-    expect(await exports.end(tokens[16]!)).toBe(join(dir, 'f16'));
+    for (let i = 0; i < 16; i++) tokens.push(await exports.begin(join(dir, `f${i}`), false));
+    // All sixteen are being written to: a seventeenth waits.
+    await expect(exports.begin(join(dir, 'f16'), false)).rejects.toThrow('too many files at once');
+    await exports.chunk(tokens[0]!, block(1, 1));
+    // One that has not been written to for a while (its page was reloaded) gives way, its partial
+    // file going with it; the others carry on.
+    const inner = exports as unknown as { open: Map<string, { touched: number }> };
+    inner.open.get(tokens[3]!)!.touched = Date.now() - 120_000;
+    // (Writing to it again keeps it: it was only slow.)
+    await exports.chunk(tokens[3]!, block(1, 1));
+    await expect(exports.begin(join(dir, 'f16'), false)).rejects.toThrow('too many files at once');
+    inner.open.get(tokens[3]!)!.touched = Date.now() - 120_000;
+    const token = await exports.begin(join(dir, 'f16'), false);
+    await expect(exports.chunk(tokens[3]!, block(1, 1))).rejects.toThrow('not saving');
+    await vi.waitFor(() => expect(existsSync(join(dir, 'f3'))).toBe(false));
+    for (const t of [...tokens.slice(0, 3), ...tokens.slice(4), token])
+      await exports.chunk(t, block(1, 1));
+    expect(await exports.end(token)).toBe(join(dir, 'f16'));
+  });
+
+  it('counts files being begun, so many at once do not pass the most', async () => {
+    const dir = tempDir();
+    const exports = new FileExports(async () => 'none');
+    const results = await Promise.allSettled(
+      Array.from({ length: 25 }, (_, i) => exports.begin(join(dir, `g${i}`), false)),
+    );
+    expect(results.filter((r) => r.status === 'fulfilled')).toHaveLength(16);
+    expect(results.filter((r) => r.status === 'rejected')).toHaveLength(9);
   });
 });

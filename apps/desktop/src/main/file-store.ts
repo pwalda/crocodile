@@ -92,10 +92,14 @@ interface Export {
   handle: FileHandle;
   temp: boolean;
   written: number;
+  /** When it was begun or last written to. */
+  touched: number;
 }
 
 /** Files written at once: a few saves and a few opened, not without end. */
 const MAX_OPEN_EXPORTS = 16;
+/** A file not written to for this long is one a reloaded page will never end. */
+const IDLE_EXPORT_MS = 60_000;
 
 export class FileExports {
   private open = new Map<string, Export>();
@@ -113,16 +117,28 @@ export class FileExports {
     return this.unmarked.delete(path);
   }
 
+  /** Exports being begun, whose file is not open yet (they count towards the most at once). */
+  private starting = 0;
+
   async begin(path: string, temp: boolean) {
-    // Past that the oldest is let go (a page that was reloaded mid-save never ends its file).
-    if (this.open.size >= MAX_OPEN_EXPORTS) {
-      const [oldest, x] = this.open.entries().next().value!;
-      this.open.delete(oldest);
-      await x.handle.close().catch(() => {});
+    if (this.open.size + this.starting >= MAX_OPEN_EXPORTS) {
+      // Room is made from the one quiet the longest, if it has been quiet a while: a page that
+      // was reloaded mid-save never ends its file. Files still being written are left alone.
+      let quiet: [string, Export] | undefined;
+      for (const e of this.open) if (!quiet || e[1].touched < quiet[1].touched) quiet = e;
+      if (!quiet || Date.now() - quiet[1].touched < IDLE_EXPORT_MS)
+        throw new Error('too many files at once');
+      void this.abort(quiet[0]);
     }
-    const handle = await open(path, 'w');
+    this.starting++;
+    let handle: FileHandle;
+    try {
+      handle = await open(path, 'w');
+    } finally {
+      this.starting--;
+    }
     const token = `x${++this.seq}`;
-    this.open.set(token, { path, handle, temp, written: 0 });
+    this.open.set(token, { path, handle, temp, written: 0, touched: Date.now() });
     return token;
   }
 
@@ -140,6 +156,7 @@ export class FileExports {
     if (data.length > FILE_BLOCK_SIZE || x.written + data.length > FILE_MAX_SIZE)
       throw new Error('too much');
     x.written += data.length;
+    x.touched = Date.now();
     await x.handle.write(data);
   }
 

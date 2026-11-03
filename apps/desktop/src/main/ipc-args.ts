@@ -1,4 +1,4 @@
-import { FILE_BLOCK_SIZE, SignalData } from '@crocodile/protocol';
+import { SignalData, isOperatorContact } from '@crocodile/protocol';
 import type { CoordinatorSettings, RelayProcessIn } from './ipc-types';
 
 /**
@@ -23,18 +23,21 @@ export function coordinatorPatch(raw: unknown): Partial<CoordinatorSettings> {
   if (!isObject(raw)) return out;
   for (const key of ['enabled', 'announce', 'relay', 'mailbox'] as const)
     if (typeof raw[key] === 'boolean') out[key] = raw[key];
+  // A name that is more than blank, one line.
   // eslint-disable-next-line no-control-regex
-  if (text(raw.name, 100) && !/[\u0000-\u001f\u007f-\u009f]/.test(raw.name)) out.name = raw.name;
+  if (text(raw.name, 100) && raw.name.trim() && !/[\u0000-\u001f\u007f-\u009f]/.test(raw.name))
+    out.name = raw.name;
   if (whole(raw.port, 1, 65535)) out.port = raw.port;
   if (whole(raw.relayMaxUsers, 1, 100)) out.relayMaxUsers = raw.relayMaxUsers;
-  // Left out or empty clears them.
+  // Sent empty (or as undefined) clears them; sent as something that does not fit, they stay as they were.
   if ('publicUrl' in raw) {
     if (raw.publicUrl === undefined || raw.publicUrl === '') out.publicUrl = undefined;
     else if (text(raw.publicUrl, 200) && webUrl(raw.publicUrl)) out.publicUrl = raw.publicUrl;
   }
   if ('contact' in raw) {
     if (raw.contact === undefined || raw.contact === '') out.contact = undefined;
-    else if (text(raw.contact, 200)) out.contact = raw.contact;
+    else if (typeof raw.contact === 'string' && isOperatorContact(raw.contact))
+      out.contact = raw.contact;
   }
   return out;
 }
@@ -47,9 +50,9 @@ export function withCoordinatorPatch(
   return { ...current, ...coordinatorPatch(raw) };
 }
 
-/** An http or https address, or null. */
+/** An http or https address (signed storage links and the like are long, so up to 8 KiB), or null. */
 export function webUrl(raw: unknown): string | null {
-  if (!text(raw, 2048)) return null;
+  if (!text(raw, 8192)) return null;
   try {
     const url = new URL(raw);
     return url.protocol === 'http:' || url.protocol === 'https:' ? url.href : null;
@@ -71,14 +74,13 @@ export function relayMessage(raw: unknown): RelayProcessIn | null {
         !text(sessionId, 200) ||
         !whole(epoch, 0, Number.MAX_SAFE_INTEGER) ||
         !whole(slots, 0, 1000) ||
-        !Array.isArray(iceServers) ||
-        iceServers.length > 8
+        !Array.isArray(iceServers)
       )
         return null;
+      // A server may name any number of STUN addresses: the first few that fit are used.
       const servers: { urls: string }[] = [];
-      for (const s of iceServers) {
-        if (!isObject(s) || !text(s.urls, 300)) return null;
-        servers.push({ urls: s.urls });
+      for (const s of iceServers.slice(0, 64)) {
+        if (isObject(s) && text(s.urls, 300) && servers.length < 8) servers.push({ urls: s.urls });
       }
       return {
         type: 'start',
@@ -119,15 +121,18 @@ export function exportEnding(raw: unknown): 'open' | 'reveal' | 'none' {
   throw new Error('bad ending');
 }
 
-/** A name in the secure store: letters, digits and a few marks. */
+/** What the secure store keeps: the identity seed, prekey secrets and the key to local data. */
+export const SECURE_KEYS = ['identity-seed', 'prekeys', 'local-data-key'];
+
+/** A name in the secure store: one of those the app keeps there. */
 export function secureKey(raw: unknown): string {
-  if (!text(raw, 100) || !/^[A-Za-z0-9._:-]+$/.test(raw)) throw new Error('bad key');
+  if (typeof raw !== 'string' || !SECURE_KEYS.includes(raw)) throw new Error('bad key');
   return raw;
 }
 
-/** What the secure store keeps: a seed, keys; never more than a megabyte. */
+/** What the secure store keeps under a name: text of at most a megabyte. */
 export function secureValue(raw: unknown): string {
-  if (typeof raw !== 'string' || raw.length > 1024 * 1024) throw new Error('bad value');
+  if (typeof raw !== 'string' || Buffer.byteLength(raw) > 1024 * 1024) throw new Error('bad value');
   return raw;
 }
 
@@ -137,6 +142,3 @@ export function pttCode(raw: unknown): string | null {
   if (!text(raw, 64)) throw new Error('bad key');
   return raw;
 }
-
-/** The most one chunk of a saved file may be: a block. */
-export const MAX_CHUNK = FILE_BLOCK_SIZE;
