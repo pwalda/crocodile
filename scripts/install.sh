@@ -30,39 +30,28 @@ need() { command -v "$1" >/dev/null 2>&1 || die "$1 is required"; }
 # Everything is fetched over https, and a redirect may not leave it either.
 fetch() { curl --proto '=https' --proto-redir '=https' "$@"; }
 
-# The release lists the SHA-512 (base64) of each installer in the update file the app's
-# updater reads (latest*.yml). What does not match is deleted, and not installed.
-hex_of_file() {
-  if command -v sha512sum >/dev/null 2>&1; then sha512sum "$1" | cut -d' ' -f1
-  elif command -v shasum >/dev/null 2>&1; then shasum -a 512 "$1" | cut -d' ' -f1
-  elif command -v openssl >/dev/null 2>&1; then openssl dgst -sha512 -r "$1" | cut -d' ' -f1
-  else die "cannot check the download: none of sha512sum, shasum and openssl is installed"
-  fi
+# The release lists a SHA-256 for each asset (its "digest", which GitHub works out when the
+# file is uploaded). A download that does not match is deleted, and not installed.
+if command -v sha256sum >/dev/null 2>&1; then hasher="sha256sum"
+elif command -v shasum >/dev/null 2>&1; then hasher="shasum -a 256"
+elif command -v openssl >/dev/null 2>&1; then hasher="openssl dgst -sha256 -r"
+else die "cannot check the download: none of sha256sum, shasum and openssl is installed"
+fi
+# expect URL: the SHA-256 the release lists for it, in $want (before downloading anything).
+expect() {
+  want=$(printf '%s\n' "$listing" | awk -v u="$1" '$1 == u { print $2; exit }')
+  case "$want" in
+    sha256:*) want=${want#sha256:} ;;
+    *) die "the release lists no checksum for $(basename "$1")" ;;
+  esac
+  case "$want" in *[!0-9a-f]*) die "the checksum the release lists for $(basename "$1") is not a SHA-256" ;; esac
+  [ "${#want}" -eq 64 ] || die "the checksum the release lists for $(basename "$1") is not a SHA-256"
 }
-hex_of_b64() {
-  { printf '%s' "$1" | base64 --decode 2>/dev/null || printf '%s' "$1" | base64 -d; } |
-    od -An -v -tx1 | tr -d ' \n'
-}
-# check FILE NAME EXPECTED: EXPECTED is the base64 SHA-512 the release lists for NAME.
-check() {
-  if [ -z "$3" ]; then rm -f "$1"; die "the release lists no checksum for $2"; fi
-  if [ "$(hex_of_file "$1")" != "$(hex_of_b64 "$3")" ]; then
-    rm -f "$1"
-    die "$2 does not match the checksum the release lists for it"
-  fi
-}
-# check_app FILE URL UPDATE-FILE: the update file sits beside the installer in the release.
-check_app() {
-  name=$(basename "$2")
-  want=$(fetch -fsSL "${2%/*}/$3" | awk -v n="$name" '$1 == "-" && $2 == "url:" { hit = ($3 == n) } hit && $1 == "sha512:" { print $2; exit }')
-  check "$1" "$name" "$want"
-}
-# check_cli FILE URL: the checksum is published beside the program (releases made before
-# that was added have none, and are installed as before).
-check_cli() {
-  want=$(fetch -fsSL "$2.sha512" 2>/dev/null | tr -d ' \r\n' || true)
-  if [ -z "$want" ]; then say "No checksum is published for $(basename "$2"); not checking it"; return 0; fi
-  check "$1" "$(basename "$2")" "$want"
+# verify FILE URL: FILE is what was downloaded from URL, for which expect was called.
+verify() {
+  have=$($hasher "$1" | cut -d' ' -f1)
+  # (What was downloaded sits in a folder that is removed when the script ends.)
+  [ "$have" = "$want" ] || die "$(basename "$2") does not match the checksum the release lists for it"
 }
 
 need curl
@@ -75,8 +64,13 @@ case "$arch" in
 esac
 
 say "Looking up the latest Crocodile release"
-assets=$(fetch -fsSL "$API" | grep -o '"browser_download_url": *"[^"]*"' | sed 's/.*"\(https[^"]*\)"/\1/')
-[ -n "$assets" ] || die "could not read the release list from GitHub"
+# One line for each asset: its address, then its digest (listed before the address, as
+# GitHub writes them; one that has none is left empty, and refused when it is wanted).
+listing=$(fetch -fsSL "$API" | awk '
+  /"digest": *"/ { d = $0; sub(/.*"digest": *"/, "", d); sub(/".*/, "", d) }
+  /"browser_download_url": *"https/ { u = $0; sub(/.*"browser_download_url": *"/, "", u); sub(/".*/, "", u); print u, d; d = "" }')
+[ -n "$listing" ] || die "could not read the release list from GitHub"
+assets=$(printf '%s\n' "$listing" | cut -d' ' -f1)
 
 pick() { printf '%s\n' "$assets" | grep -E -e "$1" | grep -v '\.blockmap$' | head -n 1; }
 tmp=$(mktemp -d)
@@ -96,8 +90,9 @@ if [ "$WHAT" = cli ]; then
   url=$(pick "/$name\.tar\.gz$")
   [ -n "$url" ] || die "no command line build for $cli_os $cli_arch; with Node.js 22 or newer: npm install -g crocodile-cli"
   say "Downloading $(basename "$url")"
+  expect "$url"
   fetch -fL --progress-bar "$url" -o "$tmp/cli.tar.gz"
-  check_cli "$tmp/cli.tar.gz" "$url"
+  verify "$tmp/cli.tar.gz" "$url"
   tar -xzf "$tmp/cli.tar.gz" -C "$tmp"
   mkdir -p "$HOME/.local/bin"
   cp "$tmp/$name" "$HOME/.local/bin/crocodile"
@@ -116,8 +111,9 @@ case "$os" in
     url=$(pick '-mac-(universal|'"${arch_re#(}"'\.zip$')
     [ -n "$url" ] || die "no macOS download found"
     say "Downloading $(basename "$url")"
+    expect "$url"
     fetch -fL --progress-bar "$url" -o "$tmp/croc.zip"
-    check_app "$tmp/croc.zip" "$url" latest-mac.yml
+    verify "$tmp/croc.zip" "$url"
     dest=/Applications
     [ -w "$dest" ] || { dest="$HOME/Applications"; mkdir -p "$dest"; }
     rm -rf "$dest/Crocodile.app"
@@ -126,21 +122,19 @@ case "$os" in
     open "$dest/Crocodile.app"
     ;;
   Linux)
-    case "$arch" in
-      arm64 | aarch64) update=latest-linux-arm64.yml ;;
-      *) update=latest-linux.yml ;;
-    esac
     if command -v apt-get >/dev/null 2>&1 && url=$(pick "$arch_re"'\.deb$') && [ -n "$url" ]; then
       say "Downloading $(basename "$url")"
+      expect "$url"
       fetch -fL --progress-bar "$url" -o "$tmp/crocodile.deb"
-      check_app "$tmp/crocodile.deb" "$url" "$update"
+      verify "$tmp/crocodile.deb" "$url"
       say "Installing (you may be asked for your password)"
       sudo apt-get install -y "$tmp/crocodile.deb"
     elif { command -v dnf >/dev/null 2>&1 || command -v zypper >/dev/null 2>&1; } &&
       url=$(pick "$arch_re"'\.rpm$') && [ -n "$url" ]; then
       say "Downloading $(basename "$url")"
+      expect "$url"
       fetch -fL --progress-bar "$url" -o "$tmp/crocodile.rpm"
-      check_app "$tmp/crocodile.rpm" "$url" "$update"
+      verify "$tmp/crocodile.rpm" "$url"
       say "Installing (you may be asked for your password)"
       if command -v dnf >/dev/null 2>&1; then sudo dnf install -y "$tmp/crocodile.rpm"; else sudo zypper --non-interactive install --allow-unsigned-rpm "$tmp/crocodile.rpm"; fi
     else
@@ -148,8 +142,10 @@ case "$os" in
       [ -n "$url" ] || die "no Linux download found for $arch"
       mkdir -p "$HOME/.local/bin" "$HOME/.local/share/applications"
       say "Downloading $(basename "$url")"
-      fetch -fL --progress-bar "$url" -o "$HOME/.local/bin/Crocodile.AppImage"
-      check_app "$HOME/.local/bin/Crocodile.AppImage" "$url" "$update"
+      expect "$url"
+      fetch -fL --progress-bar "$url" -o "$tmp/Crocodile.AppImage"
+      verify "$tmp/Crocodile.AppImage" "$url"
+      mv "$tmp/Crocodile.AppImage" "$HOME/.local/bin/Crocodile.AppImage"
       chmod +x "$HOME/.local/bin/Crocodile.AppImage"
       cat >"$HOME/.local/share/applications/crocodile.desktop" <<DESKTOP
 [Desktop Entry]
