@@ -54,7 +54,8 @@ report what matters most; issues and discussions are welcome.
 ## Next
 
 1. **Per-device signing keys** certified by the identity, so removing a
-   device fully revokes it.
+   device fully revokes it, and **one-time prekeys** (or a pairwise ratchet)
+   for sending sender keys, so a stolen prekey opens nothing recorded earlier.
 2. **Better reachability.** UPnP / NAT-PMP / PCP port mapping on hosts, IPv6
    preference, TURN over TCP/TLS for UDP-blocked networks, pre-warming the
    backup host for sub-second failover.
@@ -67,7 +68,9 @@ report what matters most; issues and discussions are welcome.
 7. **Wayland global shortcuts** (XDG GlobalShortcuts portal) and Flathub.
 8. **Less metadata on servers**: private space memberships, and keeping the
    connected server from seeing whose presence an app follows and whom it
-   befriends or messages (for example presence exchanged between friends directly).
+   befriends or messages (for example presence exchanged between friends directly), and blinded
+   watch keys, so the servers that keep a record don't see which user and space ids
+   a server follows.
 9. **Server-side hardening**: abuse reporting for public directories
    (per-IP connection limits and per-account record quotas are done).
 10. **Store and signing path** (see [DISTRIBUTION.md](DISTRIBUTION.md)):

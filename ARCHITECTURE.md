@@ -447,8 +447,10 @@ effort. Everything below is automatic.
   safe even against a future quantum computer. Sealed boxes to a device use
   its current **prekey**; prekey secrets are deleted after rotation plus a
   grace period, giving forward secrecy even for keys delivered to offline
-  devices. Every box is signed by the sender's Ed25519 key, which (with
-  the recipient's prekey) is also part of the key derivation.
+  devices, but only back to the oldest prekey still held (about eight days; see
+  [docs/SECURITY.md](docs/SECURITY.md)). Every box is signed by the sender's
+  Ed25519 key, which (with the recipient's prekey) is also part of the key
+  derivation.
 - **Linking a device.** A server sits between the two devices, so the 6-digit
   security code is built so it can't be ground: the code covers both devices'
   signing keys, the encryption keys the account is sent to and a nonce from
@@ -649,11 +651,14 @@ See [docs/ROADMAP.md](docs/ROADMAP.md). The main ones:
   mailbox covers DMs for up to 7 days; spaces rely on their members (usually
   someone is online).
 - **Sender keys, not MLS.** Ratchets and periodic rekeying give forward
-  secrecy and post-compromise healing within 30 minutes; MLS (RFC 9420) would
+  secrecy and post-compromise healing within 30 minutes for a stolen sender
+  key (a stolen prekey reaches back about eight days, see
+  [docs/SECURITY.md](docs/SECURITY.md)); MLS (RFC 9420) would
   make rekeying very large groups cheaper.
 - **Devices share the account key.** Linked devices hold the same identity
-  seed. Removing a device stops new keys from reaching it, but a stolen device
-  could still sign as you. Per-device signing keys certified by the identity
+  seed. Removing a device makes the app stop and clear it, but a modified or stolen
+  device that holds the seed can sign a new device record and rejoin as you.
+  Per-device signing keys certified by the identity
   are planned.
 - **The relay is UDP only.** Networks that block all UDP cannot use it yet
   (TURN over TCP/TLS is planned).
