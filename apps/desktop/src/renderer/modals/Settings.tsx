@@ -1389,7 +1389,7 @@ function HostTab() {
       </Row>
       <Row
         label="Offer a relay"
-        hint="Lets people whose networks block direct connections pass their encrypted traffic through you, up to an hour at a time. Uses about 100 kbit/s per person."
+        hint="Lets people whose networks block direct connections pass their encrypted traffic through you, up to an hour at a time. Voice takes about 100 kbit/s per person; each connection is capped at about 800 kbit/s."
       >
         <Toggle
           checked={settings.relay}

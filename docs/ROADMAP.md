@@ -69,7 +69,7 @@ report what matters most; issues and discussions are welcome.
 8. **Less metadata on servers**: private space memberships, and keeping the
    connected server from seeing whose presence an app follows and whom it
    befriends or messages (for example presence exchanged between friends directly), and blinded
-   watch keys, so the servers that keep a record don't see which user ids
+   watch keys, so the servers that keep a record don't see which user and space ids
    a server follows.
 9. **Server-side hardening**: abuse reporting for public directories
    (per-IP connection limits and per-account record quotas are done).

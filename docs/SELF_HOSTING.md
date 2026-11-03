@@ -91,7 +91,8 @@ oldest, so stale ones never lock anyone out. Each
 grant lasts at most one hour (apps renew it while their connection still
 goes through the relay), `--relay-max-users` caps how many people use
 it at once, and each allocation is rate-limited (about 96 KiB/s, some 790
-kbit/s, with room to burst to twice that). Your server only ever sees ciphertext. Turn it off with
+kbit/s, with room to burst to twice that), and a user may hold eight of them,
+so size your bandwidth for that. Your server only ever sees ciphertext. Turn it off with
 `--relay off` if bandwidth is scarce. The desktop app's built-in server
 leaves it off unless you enable "Offer a relay"; it then relays on the UDP
 ports just above its own (four per relay user; the app shows the range), which

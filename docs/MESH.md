@@ -84,8 +84,8 @@ by name goes to `name:<name>`.
 - **Live updates.** A server whose clients follow records it doesn't own asks
   the owners to **watch** them for it; owners push each change to the
   watching servers, which pass it on to their clients. Watches last five
-  minutes and are renewed, and an owner sees which user ids a server follows
-  (not which of its users asked).
+  minutes and are renewed, and an owner sees which user and space ids a server
+  follows (not which of its users asked).
 - **When servers come and go**, the ring changes. Once the live set has been
   stable for a few seconds, each server goes through what it stores and sends
   every record to owners that have just become responsible for it (only the
