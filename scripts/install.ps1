@@ -30,7 +30,6 @@ function Save-Https($url, $path) {
     throw "Refusing a download that ended at an address that is not https: $final"
   }
 }
-}
 
 Write-Host '==> Looking up the latest Crocodile release' -ForegroundColor Green
 $release = Invoke-RestMethod "https://api.github.com/repos/$repo/releases/latest"
