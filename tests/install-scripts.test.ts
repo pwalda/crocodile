@@ -1,5 +1,15 @@
 import { execFileSync } from 'node:child_process';
-import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync, mkdirSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import {
+  chmodSync,
+  existsSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+  mkdirSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -29,10 +39,42 @@ afterEach(() => {
   for (const dir of temps.splice(0)) rmSync(dir, { recursive: true, force: true });
 });
 
+/** What the fake downloads hold, so the tests know the hash the release should list. */
+const fakeContent = (name: string) => `fake ${name}`;
+const sha512 = (text: string | Uint8Array) => createHash('sha512').update(text).digest('base64');
+type Listed = 'good' | 'wrong' | 'missing';
+const isInstaller = (n: string) => !/\.(blockmap|ya?ml|sha512)$/.test(n);
+/** An update file (latest*.yml) listing each installer's SHA-512, as electron-builder writes it. */
+function updateFile(assets: string[], listed: Listed) {
+  const files = assets.filter(isInstaller);
+  return [
+    'version: 0.2.0',
+    'files:',
+    ...(listed === 'missing'
+      ? []
+      : files.flatMap((n) => [
+          `  - url: ${n}`,
+          `    sha512: ${sha512(listed === 'wrong' ? 'something else' : fakeContent(n))}`,
+          '    size: 1',
+        ])),
+    `path: ${files[0] ?? ''}`,
+    '',
+  ].join('\n');
+}
+
 // Runs scripts/install.ps1 with the network and installer calls replaced, and
 // returns the file it downloaded. GitHub's runners have PowerShell, so CI
 // always runs these; elsewhere they need pwsh installed.
-function installWindows(assets: string[], env: Record<string, string>, scheme = 'https') {
+interface WindowsRun {
+  scheme?: string;
+  /** What the release's update file says about the installer. */
+  listed?: Listed;
+  /** The command line tool's checksum file: absent, right or wrong. */
+  sidecar?: 'none' | 'good' | 'wrong';
+}
+
+function runWindows(assets: string[], env: Record<string, string>, run: WindowsRun = {}) {
+  const { scheme = 'https', listed = 'good', sidecar = 'none' } = run;
   const temp = mkdtempSync(join(tmpdir(), 'croc-install-'));
   temps.push(temp);
   const release = JSON.stringify({
@@ -41,20 +83,28 @@ function installWindows(assets: string[], env: Record<string, string>, scheme = 
       browser_download_url: `${scheme}://example.test/${name}`,
     })),
   });
+  const cli = assets.find((n) => n.startsWith('crocodile-cli-')) ?? '';
   const stubs = `
     function Invoke-RestMethod { param($Uri) '${release}' | ConvertFrom-Json }
     function Invoke-WebRequest {
       param($Uri, $OutFile)
+      if ($Uri -like '*.yml') { return [pscustomobject]@{ Content = $env:CROC_TEST_YML } }
+      if ($Uri -like '*.sha512') {
+        if ($env:CROC_TEST_SIDECAR) { return [pscustomobject]@{ Content = $env:CROC_TEST_SIDECAR } }
+        throw 'Not Found'
+      }
       [Console]::Out.WriteLine("downloaded $Uri")
+      $name = ($Uri -split '/')[-1]
+      [IO.File]::WriteAllBytes($OutFile, [Text.Encoding]::UTF8.GetBytes("${fakeContent('')}$name"))
       # Where the download ended up, after any redirect (-PassThru gives the response).
       if ($env:CROC_TEST_FINAL_URL) {
         [pscustomobject]@{ BaseResponse = [pscustomobject]@{ ResponseUri = [uri]$env:CROC_TEST_FINAL_URL } }
       }
     }
-    function Start-Process { }
+    function Start-Process { [Console]::Out.WriteLine('started') }
     function Write-Host { }
   `;
-  const out = execFileSync(
+  return execFileSync(
     'pwsh',
     ['-NoProfile', '-Command', `${stubs}; . '${resolve('scripts/install.ps1')}'`],
     {
@@ -64,10 +114,20 @@ function installWindows(assets: string[], env: Record<string, string>, scheme = 
         TEMP: temp,
         PROCESSOR_ARCHITECTURE: '',
         PROCESSOR_ARCHITEW6432: '',
+        CROC_TEST_YML: updateFile(assets, listed),
+        CROC_TEST_SIDECAR:
+          sidecar === 'none'
+            ? ''
+            : sha512(sidecar === 'good' ? fakeContent(cli) : 'something else'),
         ...env,
       },
     },
   );
+}
+
+// The file it downloaded.
+function installWindows(assets: string[], env: Record<string, string>, scheme = 'https') {
+  const out = runWindows(assets, env, { scheme });
   return /downloaded https:\/\/example\.test\/(\S+)/.exec(out)?.[1];
 }
 
@@ -128,6 +188,32 @@ describe.skipIf(!process.env.CI && !hasPwsh())('install.ps1', () => {
     ).toThrow(refused);
   });
 
+  it('runs the installer only when its checksum is the one the release lists', () => {
+    const env = { PROCESSOR_ARCHITECTURE: 'AMD64' };
+    expect(runWindows(WINDOWS_ASSETS, env)).toContain('started');
+    for (const [listed, refused] of [
+      ['wrong', /does not match/],
+      ['missing', /lists no checksum/],
+    ] as const) {
+      try {
+        runWindows(WINDOWS_ASSETS, env, { listed });
+      } catch (err) {
+        const { stdout, message } = err as { stdout: string; message: string };
+        expect(message).toMatch(refused);
+        expect(stdout).not.toContain('started');
+        continue;
+      }
+      throw new Error(`the script ran an installer whose checksum was ${listed}`);
+    }
+  });
+
+  it('refuses a command line tool that does not match the checksum published with it', () => {
+    const env = { PROCESSOR_ARCHITECTURE: 'AMD64', CROC_INSTALL: 'cli' };
+    expect(() => runWindows(['crocodile-cli-windows-x64.zip'], env, { sidecar: 'wrong' })).toThrow(
+      /does not match/,
+    );
+  });
+
   it('falls back to the installer with both builds', () => {
     expect(
       installWindows(['Crocodile-0.2.0-win.exe', 'Crocodile-0.2.0-win.exe.blockmap'], {
@@ -139,32 +225,66 @@ describe.skipIf(!process.env.CI && !hasPwsh())('install.ps1', () => {
 
 /**
  * Runs scripts/install.sh with `curl` and `uname` replaced: the release lists
- * `assets`, and every download is a tarball holding a fake program.
+ * `assets`, every command line tool is a tarball holding a fake program, and
+ * everything else is a file holding its own name.
  */
-function installUnix(args: string[], system: { os: string; arch: string }, assets: string[]) {
+interface UnixRun {
+  /** What the release's update file says about the installer. */
+  listed?: Listed;
+  /** The command line tool's checksum file: absent, right or wrong. */
+  sidecar?: 'none' | 'good' | 'wrong';
+  /** Only the tools the script needs: no apt-get, dnf or zypper, so a Linux app goes in as an AppImage. */
+  isolated?: boolean;
+}
+
+function installUnix(
+  args: string[],
+  system: { os: string; arch: string },
+  assets: string[],
+  run: UnixRun = {},
+) {
+  const { listed = 'good', sidecar = 'none', isolated = false } = run;
   const temp = mkdtempSync(join(tmpdir(), 'croc-install-sh-'));
   temps.push(temp);
   const bin = join(temp, 'bin');
   const home = join(temp, 'home');
   const fixture = join(temp, 'fixture');
-  for (const d of [bin, home, fixture]) mkdirSync(d);
+  const program = join(temp, 'program');
+  for (const d of [bin, home, fixture, program]) mkdirSync(d);
   for (const a of assets.filter((n) => n.endsWith('.tar.gz'))) {
-    const program = join(fixture, a.replace(/\.tar\.gz$/, ''));
-    writeFileSync(program, `#!/bin/sh\necho ${a}\n`);
-    chmodSync(program, 0o755);
+    const name = a.replace(/\.tar\.gz$/, '');
+    writeFileSync(join(program, name), `#!/bin/sh\necho ${a}\n`);
+    chmodSync(join(program, name), 0o755);
+    execFileSync('tar', ['-czf', join(fixture, a), '-C', program, name]);
   }
-  const listing = assets
-    .map((n) => `"browser_download_url": "https://example.test/${n}"`)
-    .join('\n');
+  // The program the script picks for this system.
+  const cli = `crocodile-cli-${system.os === 'Darwin' ? 'macos' : 'linux'}-${
+    /^(x86_64|amd64)$/.test(system.arch) ? 'x64' : 'arm64'
+  }.tar.gz`;
+  if (sidecar !== 'none' && existsSync(join(fixture, cli)))
+    writeFileSync(
+      join(temp, 'sidecar'),
+      sidecar === 'good' ? sha512(readFileSync(join(fixture, cli))) : sha512('something else'),
+    );
+  writeFileSync(join(temp, 'update.yml'), updateFile(assets, listed));
+  writeFileSync(
+    join(temp, 'listing'),
+    assets.map((n) => `"browser_download_url": "https://example.test/${n}"`).join('\n') + '\n',
+  );
   writeFileSync(
     join(bin, 'curl'),
     `#!/bin/sh
 printf '%s\\n' "$*" >> "${join(temp, 'curl.log')}"
 out=""; url=""
 while [ $# -gt 0 ]; do case "$1" in -o) out="$2"; shift ;; http*) url="$1" ;; esac; shift; done
-if [ -z "$out" ]; then printf '%s\\n' '${listing}'; exit 0; fi
-name=$(basename "$url" .tar.gz)
-tar -czf "$out" -C "${fixture}" "$name"
+case "$url" in
+  https://api.github.com/*) cat "${join(temp, 'listing')}" ;;
+  *.yml) cat "${join(temp, 'update.yml')}" ;;
+  *.sha512) if [ -f "${join(temp, 'sidecar')}" ]; then cat "${join(temp, 'sidecar')}"; else exit 22; fi ;;
+  *)
+    name=$(basename "$url")
+    if [ -f "${fixture}/$name" ]; then cp "${fixture}/$name" "$out"; else printf 'fake %s' "$name" > "$out"; fi ;;
+esac
 `,
   );
   writeFileSync(
@@ -173,13 +293,52 @@ tar -czf "$out" -C "${fixture}" "$name"
   );
   chmodSync(join(bin, 'curl'), 0o755);
   chmodSync(join(bin, 'uname'), 0o755);
-  const out = execFileSync('sh', [resolve('scripts/install.sh'), ...args], {
-    encoding: 'utf8',
-    env: { PATH: `${bin}:/usr/bin:/bin`, HOME: home },
-  });
+  if (isolated) {
+    for (const tool of [
+      'sh',
+      'tar',
+      'gzip',
+      'mktemp',
+      'basename',
+      'grep',
+      'sed',
+      'head',
+      'awk',
+      'rm',
+      'mkdir',
+      'cp',
+      'chmod',
+      'cat',
+      'od',
+      'base64',
+      'tr',
+      'cut',
+      'sha512sum',
+      'dirname',
+    ]) {
+      const found = ['/usr/bin', '/bin'].map((d) => join(d, tool)).find((f) => existsSync(f));
+      if (found) symlinkSync(found, join(bin, tool));
+    }
+  }
+  let out: string;
+  try {
+    out = execFileSync('sh', [resolve('scripts/install.sh'), ...args], {
+      encoding: 'utf8',
+      env: { PATH: isolated ? bin : `${bin}:/usr/bin:/bin`, HOME: home },
+    });
+  } catch (err) {
+    // So a test can look at what the script left behind.
+    throw Object.assign(err as Error, { home });
+  }
   const installed = join(home, '.local/bin/crocodile');
   const calls = readFileSync(join(temp, 'curl.log'), 'utf8').trim().split('\n');
-  return { out, calls, program: execFileSync(installed, { encoding: 'utf8' }).trim(), installed };
+  return {
+    out,
+    calls,
+    home,
+    program: existsSync(installed) ? execFileSync(installed, { encoding: 'utf8' }).trim() : '',
+    installed,
+  };
 }
 
 const CLI_ASSETS = [
@@ -202,10 +361,26 @@ describe.skipIf(process.platform === 'win32')('install.sh --cli', () => {
     expect(readFileSync(mac.installed, 'utf8')).toMatch(/^#!\/bin\/sh/);
   });
 
+  it('checks the command line tool against the checksum published with it', () => {
+    const linux = { os: 'Linux', arch: 'x86_64' };
+    const good = installUnix(['--cli'], linux, CLI_ASSETS, { sidecar: 'good' });
+    expect(good.program).toBe('crocodile-cli-linux-x64.tar.gz');
+    expect(good.calls.at(-1)).toMatch(/crocodile-cli-linux-x64\.tar\.gz\.sha512$/);
+    expect(() => installUnix(['--cli'], linux, CLI_ASSETS, { sidecar: 'wrong' })).toThrow(
+      /does not match/,
+    );
+  });
+
+  it('installs a command line tool that has no checksum published, and says so', () => {
+    const { out, program } = installUnix(['--cli'], { os: 'Linux', arch: 'x86_64' }, CLI_ASSETS);
+    expect(program).toBe('crocodile-cli-linux-x64.tar.gz');
+    expect(out).toMatch(/No checksum is published/);
+  });
+
   it('fetches over https only, redirects included', () => {
     const { calls } = installUnix(['--cli'], { os: 'Linux', arch: 'x86_64' }, CLI_ASSETS);
-    // The release list and the program.
-    expect(calls).toHaveLength(2);
+    // The release list, the program and its checksum (there is none published here).
+    expect(calls).toHaveLength(3);
     for (const call of calls) expect(call).toMatch(/^--proto =https --proto-redir =https /);
   });
 
@@ -217,7 +392,8 @@ describe.skipIf(process.platform === 'win32')('install.sh --cli', () => {
       "fetch() { curl --proto '=https' --proto-redir '=https' \"$@\"; }",
       'need curl',
     ]);
-    expect(script.match(/\bfetch -f/g)?.length).toBe(6);
+    // The release list, the app for each system (and each package), the CLI, and the checks.
+    expect(script.match(/\bfetch -f/g)?.length).toBe(8);
   });
 
   it('points to npm when there is no build for the processor', () => {
@@ -229,6 +405,42 @@ describe.skipIf(process.platform === 'win32')('install.sh --cli', () => {
       expect(() => installUnix(['--cli'], { os: 'Linux', arch }, CLI_ASSETS)).toThrow(
         /unsupported CPU architecture/,
       );
+  });
+});
+
+describe.skipIf(process.platform === 'win32')('install.sh, the app', () => {
+  const ASSETS = [
+    'Crocodile-0.2.0-linux-arm64.AppImage',
+    'Crocodile-0.2.0-linux-x86_64.AppImage',
+    'latest-linux.yml',
+  ];
+  const linux = { os: 'Linux', arch: 'x86_64' };
+  const appImage = (home: string) => join(home, '.local/bin/Crocodile.AppImage');
+
+  it('installs what the release lists a checksum for, from the update file of its system', () => {
+    const run = installUnix([], linux, ASSETS, { isolated: true });
+    expect(readFileSync(appImage(run.home), 'utf8')).toBe(
+      fakeContent('Crocodile-0.2.0-linux-x86_64.AppImage'),
+    );
+    expect(run.calls.some((c) => /\/latest-linux\.yml$/.test(c))).toBe(true);
+    const arm = installUnix([], { os: 'Linux', arch: 'aarch64' }, ASSETS, { isolated: true });
+    expect(arm.calls.some((c) => /\/latest-linux-arm64\.yml$/.test(c))).toBe(true);
+  });
+
+  it('keeps nothing that does not match the checksum the release lists', () => {
+    for (const [listed, refused] of [
+      ['wrong', /does not match/],
+      ['missing', /lists no checksum/],
+    ] as const) {
+      let failure: (Error & { home?: string }) | undefined;
+      try {
+        installUnix([], linux, ASSETS, { isolated: true, listed });
+      } catch (err) {
+        failure = err as Error & { home?: string };
+      }
+      expect(failure?.message).toMatch(refused);
+      expect(existsSync(appImage(failure!.home!))).toBe(false);
+    }
   });
 });
 
@@ -256,6 +468,10 @@ describe('release workflow', () => {
       const os = /secrets\.AZURE_/.test(line) ? 'Windows' : 'macOS';
       expect(line, line).toContain(`\${{ runner.os == '${os}' && secrets.`);
     }
+  });
+
+  it('publishes a checksum next to each command line program', () => {
+    expect(yml()).toContain('gh release upload "$TAG" "$asset" "$asset.sha512" --clobber');
   });
 
   it('keeps no credentials in the checkouts and no cache in the jobs', () => {
