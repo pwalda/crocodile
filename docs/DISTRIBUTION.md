@@ -29,8 +29,16 @@ irm https://raw.githubusercontent.com/pwalda/crocodile/main/scripts/install.ps1 
 Files fetched by `curl` or PowerShell are not tagged as "downloaded from the
 internet" (no quarantine attribute on macOS, no Mark-of-the-Web on Windows),
 so Gatekeeper and SmartScreen do not interrupt. The scripts only download the
-official release assets from GitHub over HTTPS. The website offers them next
-to the regular download buttons.
+official release assets from GitHub over HTTPS (a download that a redirect
+takes to anything else is refused). Each download is checked against the
+SHA-512 the release lists for it: the desktop installers against the update
+file beside them (`latest*.yml`, the one the app's updater reads), the command
+line programs against a `.sha512` file published next to each; one that does
+not match is deleted and not installed. A command line program from a release
+made before those files were published is installed with a note that it was
+not checked. The checks guard against a corrupted or swapped file, not against
+someone who controls the release itself, since the hashes come from the same
+place. The website offers the scripts next to the regular download buttons.
 
 ## Windows
 
