@@ -65,9 +65,6 @@ json PUT /actions/permissions/fork-pr-contributor-approval <<'EOF'
 { "approval_policy": "all_external_contributors" }
 EOF
 
-step 'Immutable releases: a published release and its files cannot be changed'
-api PUT /immutable-releases
-
 if [ "$private" = true ]; then
   cat <<'EOF'
 
@@ -88,6 +85,9 @@ EOF
 
   step 'Private vulnerability reporting (see .github/SECURITY.md)'
   api PUT /private-vulnerability-reporting
+
+  step 'Immutable releases: a published release and its files cannot be changed'
+  api PUT /immutable-releases
 
   step 'Rulesets for main: green CI for everyone, a reviewed PR unless an admin merges it'
   ruleset() {
