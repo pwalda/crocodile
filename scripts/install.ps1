@@ -14,6 +14,11 @@
 $ErrorActionPreference = 'Stop'
 $repo = if ($env:CROC_REPO) { $env:CROC_REPO } else { 'pwalda/crocodile' }
 
+# Everything is downloaded over https: an address that is not is refused.
+function Assert-Https($url) {
+  if ($url -notmatch '^https://') { throw "Refusing to download from an address that is not https: $url" }
+}
+
 Write-Host '==> Looking up the latest Crocodile release' -ForegroundColor Green
 $release = Invoke-RestMethod "https://api.github.com/repos/$repo/releases/latest"
 # There is an installer per architecture, and a bigger one with both. 32-bit
@@ -27,6 +32,7 @@ if ($env:CROC_INSTALL -eq 'cli') {
   }
   if (-not $cli) { throw 'No command line build found; with Node.js 22 or newer: npm install -g crocodile-cli' }
   $zip = Join-Path $env:TEMP $cli.name
+  Assert-Https $cli.browser_download_url
   Write-Host "==> Downloading $($cli.name)" -ForegroundColor Green
   Invoke-WebRequest $cli.browser_download_url -OutFile $zip -UseBasicParsing
   $dir = Join-Path $env:LOCALAPPDATA 'Programs\crocodile-cli'
@@ -50,6 +56,7 @@ if (-not $asset) {
 if (-not $asset) { throw 'No Windows installer found in the latest release.' }
 
 $file = Join-Path $env:TEMP $asset.name
+Assert-Https $asset.browser_download_url
 Write-Host "==> Downloading $($asset.name)" -ForegroundColor Green
 Invoke-WebRequest $asset.browser_download_url -OutFile $file -UseBasicParsing
 
