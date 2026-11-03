@@ -7,7 +7,7 @@ import {
   type RecordBodies,
   type SignedRecord,
 } from '@crocodile/protocol';
-import { dependenciesOf } from './placement';
+import { dependenciesOf, rosterKeyOfMember } from './placement';
 import type { Store } from './store';
 import type { Logger } from './util';
 
@@ -286,6 +286,9 @@ export class RecordService {
     } catch {
       return;
     }
+    const body = record.body as { spaceId?: string };
+    const roster = rosterKeyOfMember(record, this.lookup(recordKey.space(body.spaceId ?? '')));
+    if (roster) deps.push(roster);
     const missing = deps.filter((k) => !this.lookup(k));
     const entry: Pending = {
       record,

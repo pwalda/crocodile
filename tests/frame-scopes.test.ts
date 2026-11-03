@@ -1,6 +1,12 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { FrameScopes, GroupKeyring, vp8ClearBytes } from '@crocodile/client-core';
-import { AudioReceiver, importChain } from '@crocodile/crypto';
+import { FrameScopes, GroupKeyring, openFrame, vp8ClearBytes } from '@crocodile/client-core';
+import {
+  AudioReceiver,
+  AudioSender,
+  createSenderKey,
+  exportChains,
+  importChain,
+} from '@crocodile/crypto';
 
 afterEach(() => vi.useRealTimers());
 
@@ -44,11 +50,12 @@ describe('voice frame keys in the worker', () => {
     scopes.update('alice-1', alice.frameKeys());
     scopes.update('bob-1', bob.frameKeys());
     const recorded = scopes.get('alice-1')!.sender!.encrypt(frame);
-    expect(scopes.get('bob-1')!.receivers.get(alice.kid)!.decrypt(recorded)).toEqual(frame);
+    expect(scopes.get('bob-1')!.receivers.get(alice.kid)![0]!.decrypt(recorded)).toEqual(frame);
     // The host cuts Bob's connection and he reconnects: the frame it recorded is still refused.
     scopes.drop('bob-1');
     scopes.update('bob-2', bob.frameKeys());
-    const bobHears = (f: Uint8Array) => scopes.get('bob-2')!.receivers.get(alice.kid)!.decrypt(f);
+    const bobHears = (f: Uint8Array) =>
+      scopes.get('bob-2')!.receivers.get(alice.kid)![0]!.decrypt(f);
     expect(bobHears(recorded)).toBeNull();
     // Alice reconnects too (moving her chain on, as a new connection does), and Bob, who stayed,
     // still hears her.
@@ -72,17 +79,17 @@ describe('voice frame keys in the worker', () => {
     scopes.update('bob-1', bob.frameKeys());
     const frame = new Uint8Array(60).fill(7);
     const recorded = scopes.get('alice')!.sender!.encrypt(frame);
-    expect(scopes.get('bob-1')!.receivers.get(alice.kid)!.decrypt(recorded)).toEqual(frame);
+    expect(scopes.get('bob-1')!.receivers.get(alice.kid)![0]!.decrypt(recorded)).toEqual(frame);
     scopes.drop('bob-1');
     vi.advanceTimersByTime(10_000);
     scopes.update('bob-2', bob.frameKeys());
-    expect(scopes.get('bob-2')!.receivers.get(alice.kid)!.decrypt(recorded)).toBeNull();
+    expect(scopes.get('bob-2')!.receivers.get(alice.kid)![0]!.decrypt(recorded)).toBeNull();
     scopes.drop('bob-2');
     scopes.drop('alice');
     vi.advanceTimersByTime(60_000);
     scopes.update('bob-3', bob.frameKeys());
     // Nothing is kept of the call any more (documented: it starts from the key as last sent).
-    expect(scopes.get('bob-3')!.receivers.get(alice.kid)!.decrypt(recorded)).toEqual(frame);
+    expect(scopes.get('bob-3')!.receivers.get(alice.kid)![0]!.decrypt(recorded)).toEqual(frame);
     alice.dispose();
     bob.dispose();
   });
@@ -97,19 +104,19 @@ describe('voice frame keys in the worker', () => {
     other.addPeerKey('carol.d1', carol.exportMine());
     const scopes = new FrameScopes();
     scopes.update('bob-1', bob.frameKeys());
-    const kept = scopes.get('bob-1')!.receivers.get(alice.kid)!;
+    const kept = scopes.get('bob-1')!.receivers.get(alice.kid)![0]!;
     // Another session in the same worker updates while Bob's connection is being remade.
     scopes.drop('bob-1');
     vi.advanceTimersByTime(10_000);
     scopes.update('other', other.frameKeys());
     scopes.update('bob-2', bob.frameKeys());
-    expect(scopes.get('bob-2')!.receivers.get(alice.kid)).toBe(kept);
+    expect(scopes.get('bob-2')!.receivers.get(alice.kid)![0]!).toBe(kept);
     // After the wait, nothing of it is left.
     scopes.drop('bob-2');
     vi.advanceTimersByTime(60_000);
     scopes.update('other', other.frameKeys());
     scopes.update('bob-3', bob.frameKeys());
-    expect(scopes.get('bob-3')!.receivers.get(alice.kid)).not.toBe(kept);
+    expect(scopes.get('bob-3')!.receivers.get(alice.kid)![0]!).not.toBe(kept);
     for (const k of [alice, bob, carol, other]) k.dispose();
   });
 
@@ -120,12 +127,12 @@ describe('voice frame keys in the worker', () => {
     bob.addPeerKey('alice.d1', alice.exportMine());
     const scopes = new FrameScopes();
     scopes.update('bob-1', bob.frameKeys());
-    const kept = scopes.get('bob-1')!.receivers.get(alice.kid)!;
+    const kept = scopes.get('bob-1')!.receivers.get(alice.kid)![0]!;
     vi.advanceTimersByTime(40_000);
     scopes.drop('bob-1');
     vi.advanceTimersByTime(10_000);
     scopes.update('bob-2', bob.frameKeys());
-    expect(scopes.get('bob-2')!.receivers.get(alice.kid)).toBe(kept);
+    expect(scopes.get('bob-2')!.receivers.get(alice.kid)![0]!).toBe(kept);
     alice.dispose();
     bob.dispose();
   });
@@ -147,7 +154,7 @@ describe('voice frame keys in the worker', () => {
     const frame = new Uint8Array(60).fill(5);
     const heard = scopes
       .get('session-a')!
-      .receivers.get(alice.kid)!
+      .receivers.get(alice.kid)![0]!
       .decrypt(scopes.get('alice')!.sender!.encrypt(frame));
     expect(heard).toEqual(frame);
     for (const k of [alice, bob, mallory]) k.dispose();
@@ -167,13 +174,13 @@ describe('voice frame keys in the worker', () => {
     const frame = new Uint8Array(60).fill(3);
     const heard = scopes
       .get('bob')!
-      .receivers.get(alice.kid)!
+      .receivers.get(alice.kid)![0]!
       .decrypt(scopes.get('alice')!.sender!.encrypt(frame));
     expect(heard).toEqual(frame);
     // Video follows the same way.
     const seen = scopes
       .get('bob')!
-      .videoReceivers.get(alice.kid)!
+      .videoReceivers.get(alice.kid)![0]!
       .decrypt(scopes.get('alice')!.video!.encrypt(frame, vp8ClearBytes(true)));
     expect(seen).toEqual(frame);
     alice.dispose();
@@ -193,7 +200,7 @@ describe('voice frame keys in the worker', () => {
     scopes.update('bob-after-failover', bob.frameKeys());
     const frame = new Uint8Array(60);
     const sent = scopes.get('alice')!.sender!.encrypt(frame);
-    const receiver = scopes.get('bob-after-failover')!.receivers.get(alice.kid)!;
+    const receiver = scopes.get('bob-after-failover')!.receivers.get(alice.kid)![0]!;
     expect(receiver.decrypt(sent)).toEqual(frame);
     alice.dispose();
     bob.dispose();
@@ -216,12 +223,36 @@ describe('voice frame keys in the worker', () => {
     // The VP8 header stays as it was: 10 bytes of a key frame, 3 of another.
     expect(cam.subarray(0, 10)).toEqual(frame.subarray(0, 10));
     expect(screen.subarray(0, 3)).toEqual(frame.subarray(0, 3));
-    const rx = scopes.get('bob')!.videoReceivers.get(alice.kid)!;
+    const rx = scopes.get('bob')!.videoReceivers.get(alice.kid)![0]!;
     expect(rx.decrypt(cam)).toEqual(frame);
     expect(rx.decrypt(screen)).toEqual(frame);
     // Audio receivers don't take video frames.
-    expect(scopes.get('bob')!.receivers.get(alice.kid)!.decrypt(cam)).toBeNull();
+    expect(scopes.get('bob')!.receivers.get(alice.kid)![0]!.decrypt(cam)).toBeNull();
     alice.dispose();
     bob.dispose();
+  });
+
+  it('hears each of two members whose keys have the same id', () => {
+    const alice = new GroupKeyring({ autoRatchet: false });
+    const bob = new GroupKeyring({ autoRatchet: false });
+    const squat = createSenderKey();
+    squat.kid = alice.kid;
+    bob.addPeerKey('mallory.d1', exportChains(squat));
+    bob.addPeerKey('alice.d1', alice.exportMine());
+    const scopes = new FrameScopes();
+    scopes.update('alice', alice.frameKeys());
+    scopes.update('bob', bob.frameKeys());
+    const listening = scopes.get('bob')!;
+    expect(listening.receivers.get(alice.kid)).toHaveLength(2);
+    const frame = new Uint8Array(60).fill(9);
+    const fromAlice = scopes.get('alice')!.sender!.encrypt(frame);
+    const fromMallory = new AudioSender(alice.kid, importChain(exportChains(squat).audio)).encrypt(
+      frame,
+    );
+    expect(openFrame(listening.receivers.get(alice.kid), fromAlice)).toEqual(frame);
+    expect(openFrame(listening.receivers.get(alice.kid), fromMallory)).toEqual(frame);
+    expect(openFrame(listening.receivers.get(alice.kid), new Uint8Array(40))).toBeNull();
+    expect(openFrame(undefined, fromAlice)).toBeNull();
+    for (const k of [alice, bob]) k.dispose();
   });
 });

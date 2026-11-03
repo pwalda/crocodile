@@ -1,5 +1,7 @@
 import { z } from 'zod';
+import { b64uBytes, b64uText, keyB64u, sigB64u } from './b64u';
 import { FileId, FileManifest } from './files';
+import { LIMITS } from './constants';
 
 /**
  * Messages on the reliable data channel between a member and the host relay.
@@ -67,32 +69,67 @@ export interface PeerState {
   screen?: { audio: boolean };
 }
 
-export type RelayToClient =
-  | {
-      t: 'hello';
-      you: string;
-      host: string;
-      peers: PeerState[];
-      slots: number;
-      /** The host can carry video: slots for cameras and screens, and for screens' sound. */
-      media?: { video: number; audio: number };
-    }
+/**
+ * What a host relay sends a member. A member takes in only what fits: the host is chosen by the
+ * session, not trusted, so sizes are bounded here (a host can't make a member allocate what it
+ * likes). Ids are only length-bounded, since the relay stamps the ones it proved itself.
+ */
+const relayId = z.string().max(200);
+/** At most the slots a session can ask for (`session.join`), and as many video/sound slots as fit. */
+const RELAY_MAX_SLOTS = 1000;
+const RELAY_MAX_MEDIA_SLOTS = 64;
+
+const RelayPeerState = z.object({
+  id: relayId,
+  muted: z.boolean(),
+  deafened: z.boolean(),
+  voice: z.boolean().optional(),
+  rtt: z.number().optional(),
+  camera: z.boolean().optional(),
+  screen: z.object({ audio: z.boolean() }).optional(),
+});
+
+export const RelayToClient = z.discriminatedUnion('t', [
+  z.object({
+    t: z.literal('hello'),
+    you: relayId,
+    host: relayId,
+    peers: z.array(RelayPeerState).max(LIMITS.sessionMembersMax * 4),
+    slots: z.number().int().min(0).max(RELAY_MAX_SLOTS),
+    /** The host can carry video: slots for cameras and screens, and for screens' sound. */
+    media: z
+      .object({
+        video: z.number().int().min(0).max(RELAY_MAX_MEDIA_SLOTS),
+        audio: z.number().int().min(0).max(RELAY_MAX_MEDIA_SLOTS),
+      })
+      .optional(),
+  }),
   /** The host's answer to `renegotiate`. */
-  | { t: 'answer'; sdp: string }
+  z.object({ t: z.literal('answer'), sdp: z.string().max(64 * 1024) }),
   /**
    * Which stream each of this member's video slots and screen-sound slots
    * carries now, and the streams it asked for that the host can't send at
    * the moment (its connection, or this member's, is full).
    */
-  | { t: 'media'; video: (string | null)[]; audio: (string | null)[]; paused: string[] }
-  | { t: 'peer_join'; peer: PeerState }
-  | { t: 'peer_leave'; peer: string }
-  | { t: 'peer_state'; peer: PeerState }
-  | { t: 'msg'; from: string; direct: boolean; d: unknown }
+  z.object({
+    t: z.literal('media'),
+    video: z.array(relayId.nullable()).max(RELAY_MAX_MEDIA_SLOTS),
+    audio: z.array(relayId.nullable()).max(RELAY_MAX_MEDIA_SLOTS),
+    paused: z.array(relayId).max(RELAY_MAX_MEDIA_SLOTS),
+  }),
+  z.object({ t: z.literal('peer_join'), peer: RelayPeerState }),
+  z.object({ t: z.literal('peer_leave'), peer: relayId }),
+  z.object({ t: z.literal('peer_state'), peer: RelayPeerState }),
+  z.object({ t: z.literal('msg'), from: relayId, direct: z.boolean(), d: z.unknown() }),
   /** Which speaker currently occupies each of this listener's audio slots. */
-  | { t: 'slots'; map: (string | null)[] }
-  | { t: 'speaking'; users: string[] }
-  | { t: 'pong'; ts: number };
+  z.object({
+    t: z.literal('slots'),
+    map: z.array(relayId.nullable()).max(RELAY_MAX_SLOTS),
+  }),
+  z.object({ t: z.literal('speaking'), users: z.array(relayId).max(LIMITS.sessionMembersMax * 4) }),
+  z.object({ t: z.literal('pong'), ts: z.number() }),
+]);
+export type RelayToClient = z.infer<typeof RelayToClient>;
 
 // ---------------------------------------------------------------------------
 // End-to-end envelopes carried inside relay messages (`d`).
@@ -109,15 +146,15 @@ export const SealedBox = z.object({
   /** Recipient prekey id. */
   pk: z.number().int().min(0).max(0xffffffff),
   /** Ephemeral X25519 public key. */
-  epk: z.string(),
+  epk: b64uBytes(32),
   /** ML-KEM-768 ciphertext. */
-  kem: z.string(),
-  ct: z.string(),
+  kem: b64uBytes(1088),
+  ct: b64uText(LIMITS.sealedBoxMaxChars),
   /** Sender's Ed25519 identity key. */
-  from: z.string(),
+  from: keyB64u,
   /** Sender's device id. */
   fromDevice: z.string().regex(/^[a-z2-7]{8,32}$/),
-  sig: z.string(),
+  sig: sigB64u,
 });
 export type SealedBox = z.infer<typeof SealedBox>;
 
@@ -129,7 +166,7 @@ export const E2EEnvelope = z.discriminatedUnion('k', [
     k: z.literal('group'),
     kid: z.number().int().min(0).max(0xffffffff),
     g: z.number().int().min(0),
-    ct: z.string(),
+    ct: b64uText(LIMITS.groupCiphertextMaxChars),
   }),
 ]);
 export type E2EEnvelope = z.infer<typeof E2EEnvelope>;
@@ -147,7 +184,7 @@ export const ChatMessage = z.object({
   sid: z.string().max(200).optional(),
   author: userId,
   /** Author's Ed25519 key; userId must equal hash(key). */
-  key: z.string(),
+  key: keyB64u,
   ts: z.number().int(),
   body: z.string().max(4000),
   replyTo: z.string().max(40).optional(),
@@ -156,12 +193,27 @@ export const ChatMessage = z.object({
   deleted: z.boolean().optional(),
   /** A file posted with the message (the body is its caption). */
   file: FileManifest.optional(),
-  sig: z.string(),
+  sig: sigB64u,
 });
 export type ChatMessage = z.infer<typeof ChatMessage>;
 
 /** The session a message belongs to: the space's, or for a direct message its own `ch`. */
 export const messageSession = (m: Pick<ChatMessage, 'ch' | 'sid'>): string => m.sid ?? m.ch;
+
+/**
+ * Messages in one reply, of which the ones that do not pass the message schema are left out: one
+ * the schema refuses (a message kept from before a rule was added, say) must not cost the others.
+ */
+const chatMessages = (max: number) =>
+  z
+    .array(z.unknown())
+    .max(max)
+    .transform((items) =>
+      items.flatMap((item) => {
+        const parsed = ChatMessage.safeParse(item);
+        return parsed.success ? [parsed.data] : [];
+      }),
+    );
 
 /** Plaintext of a sealed envelope. */
 export const SealedPayload = z.discriminatedUnion('type', [
@@ -175,26 +227,34 @@ export const SealedPayload = z.discriminatedUnion('type', [
     at: z.number().int().min(0),
     kid: z.number().int().min(0).max(0xffffffff),
     /** Current state of the sender's ratcheting chains (never earlier ones). */
-    text: z.object({ gen: z.number().int().min(0), key: z.string() }),
-    audio: z.object({ gen: z.number().int().min(0), key: z.string() }),
+    text: z.object({ gen: z.number().int().min(0), key: b64uBytes(32) }),
+    audio: z.object({ gen: z.number().int().min(0), key: b64uBytes(32) }),
     /** The sender holds no key of the receiver's (it let go of it), and asks for it. */
     want: z.boolean().optional(),
   }),
   z.object({
     type: z.literal('history_req'),
-    /** channelId -> newest timestamp the requester already has. */
-    since: z.record(z.string(), z.number()),
+    /**
+     * channelId -> newest timestamp the requester already has. A session has at most
+     * `channelsPerSpace` channels (a direct message has one), and a channel id is at most
+     * as long as a message names one.
+     */
+    since: z
+      .record(z.string().max(200), z.number().int())
+      .refine((since) => Object.keys(since).length <= LIMITS.channelsPerSpace, {
+        message: 'too many channels',
+      }),
   }),
   z.object({
     type: z.literal('history'),
-    messages: z.array(ChatMessage).max(500),
+    messages: chatMessages(500),
     done: z.boolean(),
   }),
   z.object({ type: z.literal('message'), message: ChatMessage }),
   /** Outbox delivery confirmations: the sender may forget these message ids. */
   z.object({ type: z.literal('ack'), ids: z.array(z.string().max(40)).max(500) }),
   /** Messages delivered through a server mailbox while the recipient was offline. */
-  z.object({ type: z.literal('mail'), messages: z.array(ChatMessage).max(50) }),
+  z.object({ type: z.literal('mail'), messages: chatMessages(50) }),
   /** Answer to `file_want`: this device has the whole file and will serve it. */
   z.object({ type: z.literal('file_have'), file: FileId }),
   /**

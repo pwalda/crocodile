@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { sigB64u } from './b64u';
 import { ServerInfo } from './rpc';
 
 /**
@@ -13,7 +14,7 @@ export const DirectoryEntry = z.object({
   }),
   signedAt: z.number().int(),
   /** Server's signature over (server, load, signedAt). */
-  sig: z.string(),
+  sig: sigB64u,
 });
 export type DirectoryEntry = z.infer<typeof DirectoryEntry>;
 

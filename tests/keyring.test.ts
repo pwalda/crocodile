@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { GroupKeyring } from '@crocodile/client-core';
+import { createSenderKey, encryptText, exportChains } from '@crocodile/crypto';
 
 afterEach(() => vi.useRealTimers());
 
@@ -47,5 +48,40 @@ describe('keys from other members', () => {
     expect(kids()).toEqual([]);
     expect(bob.addPeerKey('alice.d1', key, 3000)).toBe(true);
     expect(kids()).toEqual([key.kid]);
+  });
+});
+
+describe('key ids are public', () => {
+  const say = (k: { kid: number; g: number; ct: string }) => [k.kid, k.g, k.ct] as const;
+
+  it("takes a member's key although another member sent a key under the same id first", () => {
+    const alice = new GroupKeyring({ autoRatchet: false });
+    const bob = new GroupKeyring({ autoRatchet: false });
+    // Mallory has seen Alice's id (it is in every message) and uses it for a key of her own.
+    const squat = createSenderKey();
+    squat.kid = alice.kid;
+    expect(bob.addPeerKey('mallory.d1', exportChains(squat), 1000)).toBe(true);
+    expect(bob.addPeerKey('alice.d1', alice.exportMine(), 1000)).toBe(true);
+    expect(bob.hasKeyFrom('alice.d1')).toBe(true);
+    // Each opens only what its own sender sent.
+    const fromAlice = say(alice.encrypt(new TextEncoder().encode('hi')));
+    expect(bob.decrypt('alice.d1', ...fromAlice)).toEqual(new TextEncoder().encode('hi'));
+    const fromMallory = say(encryptText(squat, new TextEncoder().encode('boo')));
+    expect(bob.decrypt('mallory.d1', ...fromMallory)).toEqual(new TextEncoder().encode('boo'));
+    // And a message is never opened as someone else's.
+    expect(bob.decrypt('mallory.d1', ...say(alice.encrypt(new Uint8Array(4))))).toBeNull();
+    // The voice worker is told of both.
+    expect(
+      bob
+        .frameKeys()
+        .peers.map((p) => [p.peer, p.kid])
+        .sort(),
+    ).toEqual([
+      ['alice.d1', alice.kid],
+      ['mallory.d1', alice.kid],
+    ]);
+    // Removing one leaves the other.
+    bob.forgetPeer('mallory.d1');
+    expect(bob.frameKeys().peers.map((p) => p.peer)).toEqual(['alice.d1']);
   });
 });

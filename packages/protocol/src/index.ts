@@ -1,5 +1,6 @@
 export * from './constants';
 export * from './encoding';
+export * from './b64u';
 export * from './records';
 export * from './session';
 export * from './rpc';

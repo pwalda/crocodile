@@ -25,6 +25,8 @@ export type ModalState =
   | { kind: 'invite-person'; userId: string }
   | { kind: 'create-channel'; spaceId: string }
   | { kind: 'space-settings'; spaceId: string }
+  /** The owner checks who of those who joined by an older link stays. */
+  | { kind: 'roster'; spaceId: string }
   | { kind: 'settings'; tab?: string }
   | { kind: 'profile'; userId: string }
   | { kind: 'new-dm' }

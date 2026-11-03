@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { b64uBytes } from './b64u';
 
 /**
  * File transfers (ARCHITECTURE.md §8a).
@@ -24,10 +25,11 @@ export const FILE_MAX_SIZE = 2 ** 40;
 /** Data channel label for file links. */
 export const FILE_CHANNEL_LABEL = 'croc-file';
 
-const b64u = (bytes: number) =>
-  z.string().regex(new RegExp(`^[A-Za-z0-9_-]{${Math.ceil((bytes * 4) / 3)}}$`));
+export const FileId = b64uBytes(16);
 
-export const FileId = b64u(16);
+/** What a file name may not hold: a folder separator, a control character, a direction override. */
+// eslint-disable-next-line no-control-regex
+const FILE_NAME_CHARS = /^[^\\/\u0000-\u001f\u007f\u202a-\u202e\u2066-\u2069]*$/;
 
 /**
  * A small preview the sender makes of a picture or video, shown blurred until
@@ -40,16 +42,20 @@ export const FileThumb = z
 
 export const FileManifest = z.object({
   id: FileId,
-  /** Shown to people and offered when saving; never used as a path as is. */
-  name: z.string().min(1).max(255),
+  /**
+   * Shown to people and offered when saving; never used as a path as is. A sender's app writes it
+   * without folders, control characters or text direction overrides, so a name with any is
+   * refused (a receiver cleans a name anyway before showing or saving it).
+   */
+  name: z.string().min(1).max(255).regex(FILE_NAME_CHARS),
   /** Up to 1 TiB: a size beyond what anyone sends would only waste memory. */
   size: z.number().int().min(0).max(FILE_MAX_SIZE),
   /** MIME type as the sender's system reported it; only a hint. */
   type: z.string().max(127),
   /** Key the blocks are encrypted with (32 bytes). */
-  key: b64u(32),
+  key: b64uBytes(32),
   /** SHA-256 over the SHA-256 hashes of every encrypted block, in order. */
-  root: b64u(32),
+  root: b64uBytes(32),
   thumb: FileThumb.optional(),
   /** Pixel size of a picture or video. */
   w: z.number().int().min(1).max(100_000).optional(),

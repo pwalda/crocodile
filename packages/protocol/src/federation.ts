@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { b64uBytes, b64uText, keyB64u, sigB64u } from './b64u';
 import { LIMITS } from './constants';
 import type { SignedRecord } from './records';
 import type { ServerInfo } from './rpc';
@@ -148,9 +149,9 @@ export interface FedLinkAnswer {
  * `sig` covers the request (see mailProofPayload) and `at`, its time.
  */
 export const MailProof = z.object({
-  key: z.string().regex(/^[A-Za-z0-9_-]{43}$/),
+  key: keyB64u,
   at: z.number().int(),
-  sig: z.string().max(200),
+  sig: sigB64u,
 });
 export type MailProof = z.infer<typeof MailProof>;
 
@@ -242,16 +243,29 @@ export const SessionOpProof = z.object({
     .min(0)
     .max(2 ** 31 - 1)
     .optional(),
-  sig: z.string().min(1).max(200),
+  sig: sigB64u,
 });
 export type SessionOpProof = z.infer<typeof SessionOpProof>;
 
 /** A session's epoch (it counts up from 0 with each change of host). */
 export const SessionEpoch = z.number().int().safe().min(0);
 
-// The parts of an operation a device signs; the wire form below adds to them (a hint) or takes
-// from them (a leave is not signed), so that the two cannot come apart.
-const JoinOp = z.object({ op: z.literal('join'), caps: HostCaps });
+// The parts of an operation a device signs; the wire form below takes from them (a leave is not
+// signed), so that the two cannot come apart.
+/**
+ * The last state of a session its device saw (the epoch, the host and the backup), so that a new
+ * owner can keep the same host. The owner leaves out a hint it does not take (an epoch beyond what
+ * it allows, a host that may not be there) without refusing the join; one that is not made of
+ * whole numbers and short ids is not read at all.
+ */
+export const SessionHint = z.object({
+  epoch: z.number().int(),
+  host: z.string().max(200).nullable(),
+  backup: z.string().max(200).nullable(),
+});
+export type SessionHint = z.infer<typeof SessionHint>;
+
+const JoinOp = z.object({ op: z.literal('join'), caps: HostCaps, hint: SessionHint.optional() });
 const UpdateOp = z.object({ op: z.literal('update'), caps: HostCaps });
 const ReportOp = z.object({
   op: z.literal('report'),
@@ -260,7 +274,11 @@ const ReportOp = z.object({
 });
 const SignedSessionOpSchema = z.union([JoinOp, UpdateOp, ReportOp]);
 
-/** What a device signs of an operation (the hint that a server adds to a join is not part of it, yet). */
+/** A join as a device signs it: where there is no hint there is no field, so that all build the same bytes. */
+export const joinOp = (caps: z.infer<typeof HostCaps>, hint?: SessionHint) =>
+  ({ op: 'join', caps, ...(hint ? { hint } : {}) }) as const;
+
+/** What a device signs of an operation (a join carries the hint of the device, if it has one). */
 export type SignedSessionOp = z.infer<typeof SignedSessionOpSchema>;
 
 /**
@@ -298,7 +316,7 @@ export function sessionOpPayload(
   };
 }
 
-/** What a member asks of a session; a join may come with the server's hint. */
+/** What a member asks of a session; a join may come with the hint of the device. */
 export type SessionOp = z.infer<typeof SessionOpSchema>;
 
 /** A session operation forwarded to the server that owns the session. */
@@ -320,10 +338,14 @@ export interface FedSessionOpResult {
   err?: { code: string; message: string };
 }
 
-/** Known-server gossip so meshes converge even if the directory is down. */
+/**
+ * A list of the servers a server knows of. Nothing in it is signed, so servers no longer send it
+ * or act on one (a server's address comes from its beacon); it is still read, to be ignored, from
+ * older servers.
+ */
 export interface FedServers {
   t: 'servers';
-  servers: ServerInfo[];
+  servers: unknown[];
 }
 
 /** Voice channel occupancy announced by the session owner to every server. */
@@ -373,7 +395,13 @@ const FloodBody = z.discriminatedUnion('t', [
     t: z.literal('link_answer'),
     qid: id,
     found: z
-      .object({ peer: PeerId, key: str(64), encKey: str(64), kemKey: str(1600), commit: str(64) })
+      .object({
+        peer: PeerId,
+        key: keyB64u,
+        encKey: b64uBytes(32),
+        kemKey: b64uBytes(1184),
+        commit: b64uBytes(32),
+      })
       .optional(),
   }),
   z.object({ t: z.literal('mail_query'), peer: PeerId, proof: MailProof.optional() }),
@@ -401,13 +429,7 @@ const VoiceOccupancySchema = z.object({
 });
 
 const SessionOpSchema = z.discriminatedUnion('op', [
-  JoinOp.extend({
-    // The last state the member's server saw, so that a new owner can keep the same host.
-    // An epoch that is no epoch is not a reason to drop the join (the owner leaves such a hint out).
-    hint: z
-      .object({ epoch: z.number().int(), host: id.nullable(), backup: id.nullable() })
-      .optional(),
-  }),
+  JoinOp,
   UpdateOp,
   z.object({ op: z.literal('leave') }),
   ReportOp,
@@ -426,13 +448,13 @@ export const FedFrameSchema = z.discriminatedUnion('t', [
     // Checked (ServerInfo) where used; left as sent so signatures still verify.
     server: anyJson,
     challenge: str(200),
-    channel: z.object({ x25519: str(100), mlkem: str(4000) }),
+    channel: z.object({ x25519: b64uBytes(32), mlkem: b64uBytes(1184) }),
     protocol: z.number().int().optional(),
   }),
   z.object({
     t: z.literal('fed_auth'),
-    answer: z.object({ epk: str(100), kem: str(4000) }),
-    sig: str(200),
+    answer: z.object({ epk: b64uBytes(32), kem: b64uBytes(1088) }),
+    sig: sigB64u,
     cursor: z.number().int().min(0),
   }),
   z.object({
@@ -442,7 +464,7 @@ export const FedFrameSchema = z.discriminatedUnion('t', [
     seq: z.number(),
     full: z.boolean(),
     presence: z.number().optional(),
-    sig: str(200),
+    sig: sigB64u,
   }),
   z.object({
     t: z.literal('flood'),
@@ -480,8 +502,8 @@ export const FedFrameSchema = z.discriminatedUnion('t', [
     seq: z.number(),
     full: z.boolean(),
     entries: z.array(PresenceEntry).max(100_000),
-    key: str(64),
-    sig: str(200),
+    key: keyB64u,
+    sig: sigB64u,
   }),
   z.object({ t: z.literal('route'), to: str(200), ev: z.enum(ROUTED_EVENTS), d: anyJson }),
   z.object({
@@ -498,19 +520,19 @@ export const FedFrameSchema = z.discriminatedUnion('t', [
     ok: anyJson.optional(),
     err: errorBody,
   }),
-  z.object({ t: z.literal('servers'), servers: z.array(anyJson).max(5000) }),
+  z.object({ t: z.literal('servers'), servers: z.array(z.unknown()).max(5000) }),
   z.object({
     t: z.literal('voice'),
     sessionId: SessionId,
     occ: VoiceOccupancySchema,
     owner: id,
     at: z.number(),
-    key: str(64),
-    sig: str(200),
+    key: keyB64u,
+    sig: sigB64u,
   }),
   // Sent directly as well as flooded.
   ...FloodBody.options,
-  z.object({ t: z.literal('x'), n: z.number().int(), c: z.string() }),
+  z.object({ t: z.literal('x'), n: z.number().int(), c: b64uText(LIMITS.wsMessageMaxBytes * 8) }),
   z.object({ t: z.literal('ping') }),
   z.object({ t: z.literal('pong') }),
 ]);

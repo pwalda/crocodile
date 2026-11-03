@@ -24,8 +24,24 @@ export const LIMITS = {
   friendsMax: 2000,
   messageMaxChars: 4000,
   recordMaxBytes: 400 * 1024,
+  /** The most admins a space can list as removed (those they let in stay). */
+  formerAdminsMax: 1000,
+  /** Members a roster can hold (a user id is about 29 bytes of a record). */
+  rosterMax: 10_000,
   wsMessageMaxBytes: 1024 * 1024,
+  /**
+   * The most characters a group message's ciphertext may have: what fits in one data channel
+   * message (the frame around it takes a little more, so a real one is smaller still).
+   */
+  groupCiphertextMaxChars: 64 * 1024,
+  /**
+   * A mailbox holds a sealed box (its keys and signature included) of up to this many characters,
+   * so the ciphertext of one is a little less. The schema takes this as the longest.
+   */
+  sealedBoxMaxChars: 96 * 1024,
   sessionMembersMax: 100,
+  /** Direct conversations one device is in at once (a friend list holds 2,000). */
+  dmSessionsPerDevice: 2500,
   /** Unread notes a server holds for one user. */
   notesPerUser: 200,
   /** One box per recipient device. */

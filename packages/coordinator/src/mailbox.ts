@@ -1,5 +1,6 @@
 import { randomId, verifyMailProof } from '@crocodile/crypto';
 import {
+  LIMITS,
   peerIds,
   recordKey,
   type MailItem,
@@ -13,7 +14,7 @@ import { RpcFailure } from './util';
 
 /** Upper bound on how long any server holds mail (matches prekey retention). */
 export const MAILBOX_MAX_TTL_MS = 7 * 24 * 3600_000;
-const MAX_BOX_CHARS = 96 * 1024;
+const MAX_BOX_CHARS = LIMITS.sealedBoxMaxChars;
 const BATCH = 50;
 
 export interface MailboxConfig {
@@ -118,7 +119,11 @@ export class MailboxService {
    */
   fetch(client: ClientConnection, proof?: MailProof) {
     this.deliverTo(client.peer);
-    if (proof) this.hub.mesh.flood({ t: 'mail_query', peer: client.peer, proof });
+    // Every server in the mesh is asked, so the signature is looked at here first: one that
+    // would be refused everywhere is not worth sending anywhere.
+    const server = this.hub.info.id;
+    if (verifyMailProof(client.peer, { t: 'mail_fetch', peer: client.peer, server }, proof))
+      this.hub.mesh.flood({ t: 'mail_query', peer: client.peer, proof: proof! });
   }
 
   onQuery(fromServer: string, peer: string, proof?: MailProof) {
@@ -128,8 +133,10 @@ export class MailboxService {
 
   ack(client: ClientConnection, ids: string[], proof?: MailProof) {
     this.hub.store.mailDelete(client.peer, ids);
-    // Other servers delete only with the device's signature on these ids.
-    if (proof) this.hub.mesh.flood({ t: 'mail_ack', peer: client.peer, ids, proof });
+    // Other servers delete only with the device's signature on these ids (looked at here first,
+    // as for a fetch).
+    if (verifyMailProof(client.peer, { t: 'mail_ack', peer: client.peer, ids }, proof))
+      this.hub.mesh.flood({ t: 'mail_ack', peer: client.peer, ids, proof: proof! });
     this.deliverTo(client.peer);
   }
 

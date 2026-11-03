@@ -9,7 +9,7 @@
  * dropped, never passed through in the clear.
  */
 import { peekFrameKid } from '@crocodile/crypto';
-import { FrameScopes, vp8ClearBytes } from './frame-scopes';
+import { FrameScopes, openFrame, vp8ClearBytes } from './frame-scopes';
 import type { FrameKeys } from './keyring';
 
 const scopes = new FrameScopes();
@@ -44,13 +44,13 @@ function pipe(
         return;
       }
       const kid = peekFrameKid(data);
-      const receiver =
+      const receivers =
         kid === null
           ? undefined
           : role === 'decrypt-video'
             ? s?.videoReceivers.get(kid)
             : s?.receivers.get(kid);
-      const plain = receiver?.decrypt(data);
+      const plain = openFrame(receivers, data);
       if (!plain) return;
       frame.data = plain.slice().buffer;
       controller.enqueue(frame);

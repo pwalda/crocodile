@@ -8,6 +8,7 @@ import {
   createPrekey,
   isSpaceMember,
   linkNonce,
+  newTicket,
   randomDeviceId,
   randomId,
   sealAnonymous,
@@ -16,6 +17,8 @@ import {
   sealToDevice,
   sign,
   signRecord,
+  signRoster,
+  signSpaceAuthority,
   spaceIdFor,
   userTag,
 } from '@crocodile/crypto';
@@ -26,6 +29,7 @@ import {
   peerIds,
   recordKey,
   sessionIds,
+  toB64u,
   utf8,
   type PrekeyBundle,
   type ProfileBody,
@@ -47,6 +51,7 @@ import {
   createSpace,
   expectAccepted,
   joinSpace,
+  memberBody,
   lastSession,
   registerDevice,
   startCoordinator,
@@ -119,7 +124,7 @@ describe('records', () => {
   it('does not let a stranger enumerate invite codes', async () => {
     const c = await server();
     const alice = await user(c);
-    const { spaceId, code } = await createSpace(alice);
+    const { spaceId, tid } = await createSpace(alice);
     const eve = await user(c); // never handed the invite code
 
     // No prefix sweep reveals an invite. The server's undefined invite shard
@@ -133,12 +138,13 @@ describe('records', () => {
     // and friends prefixes, then put a fresh invite and a fresh friends record;
     // only the non-invite one should arrive.
     await eve.conn.request('records.subscribe', { prefixes: ['invite:', 'friends:'] });
-    const code2 = randomId(16);
+    const second = newTicket();
     expectAccepted(
       await alice.conn.request('records.put', {
-        record: signRecord(alice.identity, 'invite', recordKey.invite(code2), {
+        record: signRecord(alice.identity, 'invite', recordKey.invite(second.tid), {
           spaceId,
-          code: code2,
+          code: second.tid,
+          tpub: second.tpub,
           expiresAt: Date.now() + 3600_000,
         }),
       }),
@@ -170,8 +176,8 @@ describe('records', () => {
     expect((await asked('rec_list', { prefix: 'space:' })).records.length).toBeGreaterThan(0);
 
     // The legitimate path is untouched: with the exact code in hand, get works.
-    const got = await eve.conn.request('records.get', { keys: [recordKey.invite(code)] });
-    expect(got.records.map((r) => r.key)).toEqual([recordKey.invite(code)]);
+    const got = await eve.conn.request('records.get', { keys: [recordKey.invite(tid)] });
+    expect(got.records.map((r) => r.key)).toEqual([recordKey.invite(tid)]);
   });
 });
 
@@ -572,13 +578,20 @@ describe('client sign-in', () => {
     // Opens, but is not a sign-in.
     const wrong = await answerWith(c, (hello) => sealedWith(hello, { hello: 'world' }));
     expect(wrong.code).toBe(4002);
-    // A key exchange that is not one.
+    // A key exchange that is not the shape of one is refused as a message.
     const garbage = await answerWith(c, () => ({
       t: 'auth',
       channel: { epk: 'AAAA', kem: 'AAAA' },
       sealed: { n: 0, c: 'AAAA' },
     }));
-    expect(garbage.code).toBe(4003);
+    expect(garbage.code).toBe(4002);
+    // One of the right shape that opens to nothing.
+    const shaped = await answerWith(c, () => ({
+      t: 'auth',
+      channel: { epk: toB64u(new Uint8Array(32)), kem: toB64u(new Uint8Array(1088)) },
+      sealed: { n: 0, c: 'AAAA' },
+    }));
+    expect(shaped.code).toBe(4003);
   });
 
   it('tells a deleted account so only in a sealed frame', async () => {
@@ -1939,7 +1952,7 @@ describe('sessions and host election', () => {
     await bob.conn.request('session.join', { sessionId, caps: caps() });
     const data = { type: 'bye' as const, epoch: 1, dir: 'toRelay' as const };
     const r = await bob.conn.request('signal.send', { to: alice.conn.peer, sessionId, data });
-    expect(r.delivered).toBe(true);
+    expect(r).toEqual({});
     await waitFor(() => alice.events.find((e) => e.ev === 'signal'));
     await expect(
       outsider.conn.request('session.join', { sessionId, caps: caps() }),
@@ -2006,7 +2019,7 @@ describe('coordination mesh', () => {
     const alice = await user(a, 'alice');
     const s = await createSpace(alice);
     const b = await server({ name: 'B', meshPeers: [a.url] });
-    await waitFor(() => b.records.get(`invite:${s.code}`), 3000, 'backlog sync');
+    await waitFor(() => b.records.get(`invite:${s.tid}`), 3000, 'backlog sync');
     expect(isSpaceMember(b.records, s.spaceId, alice.identity.userId)).toBe(true);
   });
 
@@ -2015,7 +2028,7 @@ describe('coordination mesh', () => {
     const alice = await user(a);
     const bob = await user(b);
     const s = await createSpace(alice);
-    await waitFor(() => b.records.get(`invite:${s.code}`), 3000, 'invite replicated');
+    await waitFor(() => b.records.get(`invite:${s.tid}`), 3000, 'invite replicated');
     await joinSpace(bob, s.spaceId, s.code);
     await waitFor(
       () => isSpaceMember(a.records, s.spaceId, bob.identity.userId),
@@ -2037,7 +2050,7 @@ describe('coordination mesh', () => {
       sessionId,
       data: { type: 'bye', epoch: 1, dir: 'toRelay' },
     });
-    expect(sig.delivered).toBe(true);
+    expect(sig).toEqual({});
 
     const owner = a.sessions.ownerOf(sessionId) === a.info.id ? a : b;
     const survivor = owner === a ? b : a;
@@ -2098,7 +2111,7 @@ describe('coordination mesh', () => {
     expect(a.sessions.ownerOf(sessionId)).toBe(a.info.id);
 
     const hostId = createIdentity();
-    await waitFor(() => b.records.get(`invite:${s.code}`), 3000, 'replicated');
+    await waitFor(() => b.records.get(`invite:${s.tid}`), 3000, 'replicated');
     const host = await connectUser(b, hostId, 'host', 'hostdevicex');
     cleanup.push(() => host.conn.close());
     await joinSpace(host, s.spaceId, s.code);
@@ -2156,7 +2169,7 @@ describe('coordination mesh', () => {
         Date.now() + 1,
       ),
     });
-    await waitFor(() => b.records.get(`invite:${s.code}`), 3000, 'replicated');
+    await waitFor(() => b.records.get(`invite:${s.tid}`), 3000, 'replicated');
     const bob = await user(b);
     await joinSpace(bob, s.spaceId, s.code);
     await waitFor(() => isSpaceMember(c.records, s.spaceId, bob.identity.userId), 3000);
@@ -2250,6 +2263,65 @@ describe('encrypted client channel', () => {
     const raw = (alice.conn as unknown as { ws: WebSocket }).ws;
     const closed = new Promise<number>((r) => raw.addEventListener('close', (e) => r(e.code)));
     raw.send(JSON.stringify({ t: 'req', id: 99, m: 'servers.list', p: {} }));
+    expect(await closed).toBe(1008);
+  });
+
+  it('keeps a client that is told to slow down: what was dropped unread does not break the order', async () => {
+    const c = await server();
+    const alice = await user(c);
+    const inner = alice.conn as unknown as {
+      ws: WebSocket;
+      channel: { seal(v: unknown): unknown };
+    };
+    let closed = false;
+    inner.ws.addEventListener('close', () => (closed = true));
+    // Far more than a client may send at once: those past the limit are dropped unread.
+    for (let i = 0; i < 300; i++)
+      inner.ws.send(
+        JSON.stringify(
+          inner.channel.seal({ t: 'req', id: 100_000 + i, m: 'friends.incoming', p: {} }),
+        ),
+      );
+    await new Promise((resolve) => setTimeout(resolve, 1500));
+    // The next one still follows the last, and is answered.
+    expect(await alice.conn.request('friends.incoming', {})).toBeDefined();
+    expect(closed).toBe(false);
+  });
+
+  it('ends a connection that sends a frame past the limit in a form it cannot pass over', async () => {
+    const c = await server();
+    const alice = await user(c);
+    const inner = alice.conn as unknown as {
+      ws: WebSocket;
+      channel: { seal(v: unknown): { t: string; n: number; c: string } };
+    };
+    const closed = new Promise<number>((r) => inner.ws.addEventListener('close', (e) => r(e.code)));
+    for (let i = 0; i < 300; i++)
+      inner.ws.send(
+        JSON.stringify(inner.channel.seal({ t: 'req', id: 200_000 + i, m: 'x', p: {} })),
+      );
+    // The same kind of frame with its parts in another order.
+    const { t, n, c: ct } = inner.channel.seal({ t: 'req', id: 1, m: 'friends.incoming', p: {} });
+    // (Twice: one that happens to be let through by the limiter is the next frame, the second is not.)
+    for (let i = 0; i < 2; i++) inner.ws.send(JSON.stringify({ c: ct, n, t }));
+    expect(await closed).toBe(1008);
+  });
+
+  it('ends a connection that repeats a frame past the limit, which is not the next', async () => {
+    const c = await server();
+    const alice = await user(c);
+    const inner = alice.conn as unknown as {
+      ws: WebSocket;
+      channel: { seal(v: unknown): unknown };
+    };
+    const closed = new Promise<number>((r) => inner.ws.addEventListener('close', (e) => r(e.code)));
+    const first = JSON.stringify(inner.channel.seal({ t: 'req', id: 300_000, m: 'x', p: {} }));
+    inner.ws.send(first);
+    for (let i = 1; i < 300; i++)
+      inner.ws.send(
+        JSON.stringify(inner.channel.seal({ t: 'req', id: 300_000 + i, m: 'x', p: {} })),
+      );
+    inner.ws.send(first);
     expect(await closed).toBe(1008);
   });
 });
@@ -2353,10 +2425,36 @@ describe('abuse limits', () => {
     expect(c.presence.localCount).toBe(2);
   });
 
+  it('says its address as other servers take it', async () => {
+    expect(() => new Coordinator({ name: 'x', storage: 'memory', publicUrl: 'ws://x' })).toThrow(
+      /must be an http/,
+    );
+    for (const bad of ['x.example', 'https://', 'https://x y', 'http:example.org'])
+      expect(() => new Coordinator({ name: 'x', storage: 'memory', publicUrl: bad }), bad).toThrow(
+        /must be an http/,
+      );
+    const c = await server({ publicUrl: ' HTTPS://Croc.Example.org/\n' });
+    expect(c.info.url).toBe('https://Croc.Example.org');
+    // Empty, as a container's environment leaves it, is none.
+    for (const none of ['', '  ']) {
+      const d = await server({ publicUrl: none });
+      expect(d.info.url).toMatch(/^http:\/\/[\d.]+:\d+$/);
+    }
+  });
+
   it('refuses to start with a limit that would switch a protection off', () => {
     for (const bad of [{ maxConnectionsPerIp: NaN }, { capacity: 0 }, { maxConnectionsPerIp: 1.5 }])
       expect(() => new Coordinator({ name: 'x', storage: 'memory', ...bad })).toThrow(
         /positive whole number/,
+      );
+  });
+
+  it('says what is wrong with a seed that is not as the server writes it', () => {
+    const good = toB64u(new Uint8Array(32).fill(3));
+    expect(() => new Coordinator({ name: 'x', storage: 'memory', seed: good })).not.toThrow();
+    for (const bad of [good + '=', good.slice(0, 42) + 'B', 'not a seed!'])
+      expect(() => new Coordinator({ name: 'x', storage: 'memory', seed: bad })).toThrow(
+        /the server seed is not valid: invalid base64url/,
       );
   });
 });
@@ -2424,10 +2522,11 @@ describe('record quotas', () => {
     const s = space(alice);
     expectAccepted(await put(alice, s.record));
     const invite = () => {
-      const code = randomId(16);
-      return signRecord(alice.identity, 'invite', recordKey.invite(code), {
+      const t = newTicket();
+      return signRecord(alice.identity, 'invite', recordKey.invite(t.tid), {
         spaceId: s.spaceId,
-        code,
+        code: t.tid,
+        tpub: t.tpub,
         expiresAt: Date.now() + 3600_000,
       });
     };
@@ -2522,12 +2621,13 @@ describe('record quotas', () => {
     expect((await send(invite(people[2]!))).reason).toMatch(/at most 2 invitations waiting/);
     // The open invite and a changed record of one already counted are not held back.
     expectAccepted(await send({ ...first, version: first.version }));
-    const open = randomId(16);
+    const open = newTicket();
     expectAccepted(
       await send(
-        signRecord(alice.identity, 'invite', recordKey.invite(open), {
+        signRecord(alice.identity, 'invite', recordKey.invite(open.tid), {
           spaceId,
-          code: open,
+          code: open.tid,
+          tpub: open.tpub,
           expiresAt: Date.now() + 3600_000,
         }),
       ),
@@ -2649,18 +2749,18 @@ describe('record quotas', () => {
     const two = await createSpace(await user(c), 'Two');
     const alice = await user(c);
     await joinSpace(alice, one.spaceId, one.code);
-    const member = (spaceId: string, code: string, left?: boolean) =>
+    const member = async (spaceId: string, code: string, left?: boolean) =>
       signRecord(alice.identity, 'member', recordKey.member(spaceId, alice.identity.userId), {
-        spaceId,
-        userId: alice.identity.userId,
-        inviteCode: code,
+        ...(await memberBody(alice, spaceId, code)),
         ...(left ? { left } : {}),
       });
-    expect((await put(alice, member(two.spaceId, two.code))).reason).toMatch(/at most 1 spaces/);
-    expectAccepted(await put(alice, member(one.spaceId, one.code, true)));
-    expectAccepted(await put(alice, member(two.spaceId, two.code)));
+    expect((await put(alice, await member(two.spaceId, two.code))).reason).toMatch(
+      /at most 1 spaces/,
+    );
+    expectAccepted(await put(alice, await member(one.spaceId, one.code, true)));
+    expectAccepted(await put(alice, await member(two.spaceId, two.code)));
     // Rejoining the first space would make two again.
-    expect((await put(alice, member(one.spaceId, one.code))).reason).toMatch(/quota reached/);
+    expect((await put(alice, await member(one.spaceId, one.code))).reason).toMatch(/quota reached/);
   });
 
   it('refuses leave records for memberships that never existed', async () => {
@@ -3262,5 +3362,41 @@ describe('device linking', () => {
       ),
     );
     expect(guesses.filter((m) => /too many attempts/.test(m))).toHaveLength(3);
+  });
+});
+
+describe('a roster that arrives before its space', () => {
+  it('is kept waiting for the space, and taken when the space comes', async () => {
+    const c = await server();
+    const owner = createIdentity();
+    const nonce = randomId();
+    const spaceId = spaceIdFor(owner.publicKey, nonce);
+    const listed = signRoster(owner, spaceId, [createIdentity().userId]);
+    const space = signRecord(owner, 'space', recordKey.space(spaceId), {
+      name: 'Swamp',
+      owner: owner.userId,
+      nonce,
+      admins: [],
+      bans: [],
+      channels: [],
+      authority: signSpaceAuthority(owner, spaceId, [], 1, undefined, undefined, listed.hash),
+    });
+    const early = c.records.put(listed.record, { fresh: false, origin: 'peer' });
+    expect(early).toMatchObject({ accepted: false });
+    expect(c.records.pendingCount).toBe(1);
+    expect(c.records.put(space, { fresh: false, origin: 'peer' }).accepted).toBe(true);
+    expect(c.records.get(listed.record.key)).toBeDefined();
+    expect(c.records.pendingCount).toBe(0);
+  });
+
+  it("tells the relay which other addresses are the machine's own", async () => {
+    const coord = await server({
+      stunPort: 0,
+      relay: { enabled: true, maxUsers: 5, ownAddresses: ['8.8.4.4', '2606:4700::1111'] },
+    });
+    const turn = (coord as unknown as { turn: { own: Set<string> } }).turn;
+    expect(turn.own.has('8.8.4.4')).toBe(true);
+    expect(turn.own.has('2606:4700::1111')).toBe(true);
+    expect(turn.own.has('8.8.8.8')).toBe(false);
   });
 });

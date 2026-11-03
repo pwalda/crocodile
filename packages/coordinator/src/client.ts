@@ -4,6 +4,7 @@ import {
   signInChannelContext,
   createChannelKeys,
   isSpaceMember,
+  peekFrameNumber,
   randomId,
   SecureChannel,
   sign,
@@ -28,6 +29,7 @@ import {
   type ServerFrame,
   type SignedRecord,
   type MailProof,
+  type SessionHint,
   type SessionOpProof,
 } from '@crocodile/protocol';
 import type { Coordinator } from './coordinator';
@@ -96,6 +98,9 @@ export class ClientConnection implements ClientHandle {
   /** The steps after a claim only run on a code that was guessed or given, so they get a budget apart from guessing. */
   private readonly linkStepLimiter = new RateLimiter(0.2, 10);
   private readonly mailLimiter = new RateLimiter(1, 30);
+  /** Fetching and acknowledging mail asks every server in the mesh: a budget for that, apart from
+   * sending. (Past it the mail held here is still handed over and deleted.) */
+  private readonly mailSyncLimiter = new RateLimiter(5, 50);
   private alive = true;
   private pingTimer?: ReturnType<typeof setInterval>;
 
@@ -104,6 +109,8 @@ export class ClientConnection implements ClientHandle {
     private readonly ws: WebSocket,
     /** Our address as this client reached it, for STUN and TURN URLs. */
     readonly via?: string,
+    /** Where the client connected from (as the server takes it: see `trustProxy`). */
+    private readonly address?: string,
   ) {
     const time = Date.now();
     const info = hub.info;
@@ -138,6 +145,15 @@ export class ClientConnection implements ClientHandle {
 
     ws.on('message', (raw) => {
       if (!this.limiter.take()) {
+        // A frame dropped unread still has its place in the order of the channel, which the next
+        // frame follows. Its number is read from the first bytes, where `seal` writes it (the
+        // frame is not decoded: refusing a flood has to stay cheap). A frame that does not begin
+        // like one `seal` made leaves a gap nobody can close, so the connection ends.
+        if (this.channel) {
+          const head = Buffer.isBuffer(raw) ? raw.subarray(0, 40).toString('latin1') : '';
+          const n = peekFrameNumber(head);
+          if (n === undefined || !this.channel.skip(n)) return ws.close(1008, 'slow down');
+        }
         this.frame({ t: 'error', err: { code: 'rate_limited', message: 'slow down' } });
         return;
       }
@@ -283,7 +299,8 @@ export class ClientConnection implements ClientHandle {
 
   private async answer(id: number, req: { m: string; p?: unknown }) {
     try {
-      if (!(req.m in RpcParams)) throw new RpcFailure('not_found', `unknown method ${req.m}`);
+      if (!Object.hasOwn(RpcParams, req.m))
+        throw new RpcFailure('not_found', `unknown method ${req.m}`);
       const method = req.m as RpcMethod;
       const parsed = RpcParams[method].safeParse(req.p ?? {});
       if (!parsed.success)
@@ -444,12 +461,13 @@ export class ClientConnection implements ClientHandle {
         return {};
       }
       case 'session.join': {
-        const { sessionId, caps, proof } = p as unknown as {
+        const { sessionId, caps, hint, proof } = p as unknown as {
           sessionId: string;
           caps: never;
+          hint?: SessionHint;
           proof?: SessionOpProof;
         };
-        return { state: await hub.sessions.join(this, sessionId, caps, proof) };
+        return { state: await hub.sessions.join(this, sessionId, caps, hint, proof) };
       }
       case 'session.leave': {
         const { sessionId } = p as unknown as { sessionId: string };
@@ -489,7 +507,8 @@ export class ClientConnection implements ClientHandle {
         };
         if (!hub.sessions.inSession(this.peer, sessionId))
           throw new RpcFailure('forbidden', 'join the session first');
-        return { delivered: hub.deliverToPeer(to, 'signal', { from: this.peer, sessionId, data }) };
+        hub.signalPeer(this.peer, to, sessionId, data);
+        return {};
       }
       case 'servers.list':
         return { servers: [hub.info, ...hub.mesh.knownServers()].map(toPublicServerInfo) };
@@ -504,6 +523,9 @@ export class ClientConnection implements ClientHandle {
       }
       case 'link.claim': {
         this.takeLink(this.linkLimiter);
+        // The connection's own budget starts over with a new connection; this one stays with the address.
+        if (!hub.takeLinkClaim(this.address))
+          throw new RpcFailure('rate_limited', 'too many attempts; wait a minute');
         const { code } = p as unknown as { code: string };
         return hub.claimLink(this, code);
       }
@@ -539,12 +561,14 @@ export class ClientConnection implements ClientHandle {
       }
       case 'mail.fetch': {
         const { proof } = p as unknown as { proof?: MailProof };
-        hub.mailbox.fetch(this, proof);
+        // What is held here is always sent; asking the other servers is what has a budget.
+        hub.mailbox.fetch(this, this.mailSyncLimiter.take() ? proof : undefined);
         return {};
       }
       case 'mail.ack': {
         const { ids, proof } = p as unknown as { ids: string[]; proof?: MailProof };
-        hub.mailbox.ack(this, ids, proof);
+        // Deleted here whatever the budget; telling the other servers is what has one.
+        hub.mailbox.ack(this, ids, this.mailSyncLimiter.take() ? proof : undefined);
         return {};
       }
     }
@@ -598,11 +622,13 @@ export class ClientConnection implements ClientHandle {
   }
 
   /**
-   * The space a member record of somebody else belongs to; undefined for any
+   * The space a member record of somebody else (or a roster) belongs to; undefined for any
    * other record, and for this user's own. A key without a space gives '', which
    * nobody may read.
    */
   othersMemberOf(record: SignedRecord): string | undefined {
+    // (The owner's roster lists some of a space's members, so it is read by those in it.)
+    if (record.key.startsWith('roster:')) return record.key.split(':')[1] ?? '';
     if (!record.key.startsWith('member:')) return undefined;
     const [, spaceId, userId] = record.key.split(':');
     return userId === this.userId ? undefined : (spaceId ?? '');
@@ -667,8 +693,7 @@ export class ClientConnection implements ClientHandle {
    */
   private async lookUpMembership(spaceId: string): Promise<boolean> {
     const spaceKey = recordKey.space(spaceId);
-    const found = await this.hub.dist.get([spaceKey, recordKey.member(spaceId, this.userId)]);
-    const byKey = new Map(found.map((r) => [r.key, r]));
+    const byKey = await this.hub.dist.membershipRecords([spaceId], this.userId);
     if (!byKey.has(spaceKey)) throw new Error('space not found');
     return isSpaceMember({ get: (k) => byKey.get(k) }, spaceId, this.userId);
   }

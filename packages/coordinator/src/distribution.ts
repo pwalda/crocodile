@@ -6,6 +6,7 @@ import {
   SignedRecordEnvelope,
   type FedRequest,
   type ProfileBody,
+  type RecordBodies,
   type SignedRecord,
 } from '@crocodile/protocol';
 import type { Coordinator } from './coordinator';
@@ -14,6 +15,7 @@ import {
   dependenciesOf,
   inviteCodeOfMember,
   homeShardOf,
+  rosterKeyOfMember,
   shardOfKey,
   shardOfPrefix,
   shardOfTerm,
@@ -159,7 +161,7 @@ export class Distribution {
    */
   private sift(input: unknown[]): { valid: SignedRecord[]; trusted: SignedRecord[] } {
     const now = Date.now();
-    const order = ['profile', 'friends', 'device', 'space', 'note', 'invite', 'member'];
+    const order = ['profile', 'friends', 'device', 'space', 'roster', 'note', 'invite', 'member'];
     const records = input
       .filter((r): r is SignedRecord => SignedRecordEnvelope.safeParse(r).success)
       .sort((a, b) => order.indexOf(a.kind) - order.indexOf(b.kind));
@@ -207,8 +209,8 @@ export class Distribution {
    * batch of hundreds waits for one round of lookups, not one per record.
    */
   private async ensureDependencies(records: SignedRecord[], fresh = false) {
-    const inBatch = new Set(records.map((r) => r.key));
-    const need = (k: string) => !inBatch.has(k) && !this.lookup(k);
+    const inBatchByKey = new Map(records.map((r) => [r.key, r]));
+    const need = (k: string) => !inBatchByKey.has(k) && !this.lookup(k);
     const keys = new Set<string>();
     const invites = new Map<string, Set<string>>();
     // The space a join is checked against, as it is now: what we kept of it may be from before a
@@ -235,6 +237,15 @@ export class Distribution {
     }
     if (spaces.size) await this.get([...spaces]).catch(() => {});
     if (keys.size) await this.get([...keys]).catch(() => {});
+    // The owner's roster, for memberships of the older kind in a space that names one.
+    const rosters = new Set<string>();
+    for (const record of records) {
+      if (record.kind !== 'member') continue;
+      const spaceKey = recordKey.space((record.body as RecordBodies['member']).spaceId);
+      const key = rosterKeyOfMember(record, inBatchByKey.get(spaceKey) ?? this.lookup(spaceKey));
+      if (key && need(key)) rosters.add(key);
+    }
+    if (rosters.size) await this.get([...rosters]).catch(() => {});
     // Invites the code's own owners didn't have: ask the space's.
     await Promise.all(
       [...invites].map(async ([spaceId, wanted]) => {
@@ -449,6 +460,35 @@ export class Distribution {
     for (const list of lists)
       for (const r of list) if ((newest.get(r.key)?.version ?? 0) < r.version) newest.set(r.key, r);
     return [...newest.values()];
+  }
+
+  /**
+   * What tells whether a user belongs to each of some spaces: the spaces, their memberships and,
+   * for a membership of the older kind in a space whose owner has signed a roster, that and the
+   * invite it names (all of it as far as the servers holding it will say).
+   */
+  async membershipRecords(spaceIds: string[], userId: string): Promise<Map<string, SignedRecord>> {
+    const byKey = new Map(
+      (
+        await this.get(
+          spaceIds.flatMap((id) => [recordKey.space(id), recordKey.member(id, userId)]),
+        )
+      ).map((r) => [r.key, r]),
+    );
+    const more: string[] = [];
+    for (const id of spaceIds) {
+      const member = byKey.get(recordKey.member(id, userId)) as SignedRecord<'member'> | undefined;
+      const space = byKey.get(recordKey.space(id)) as SignedRecord<'space'> | undefined;
+      // A membership of the older kind where the owner has signed a roster: it counts if the
+      // roster lists the member, or if the invite it names was made for them.
+      if (!member || member.body.left || member.body.ticket || !space?.body.authority?.roster)
+        continue;
+      const roster = rosterKeyOfMember(member, space);
+      if (roster) more.push(roster);
+      if (member.body.inviteCode) more.push(recordKey.invite(member.body.inviteCode));
+    }
+    if (more.length) for (const r of await this.get(more)) byKey.set(r.key, r);
+    return byKey;
   }
 
   /** Records by key, from our store for shards we own and from their owners otherwise. */
