@@ -626,4 +626,110 @@ describe('TURN relay', () => {
     expect(answered).toBeGreaterThan(0);
     expect(answered).toBeLessThanOrEqual(7);
   });
+
+  it('answers only so many unsigned requests a second to one address, and says nothing of itself', async () => {
+    const turn = await limitedTurn({ answerBurst: 5, answerPerSecond: 1 });
+    const sock = createSocket('udp4');
+    cleanup.push(() => sock.close());
+    const replies: Buffer[] = [];
+    sock.on('message', (b) => replies.push(b));
+    await new Promise<void>((r) => sock.bind(0, '127.0.0.1', r));
+    // A binding is answered with the address it came from (and names no software).
+    const tx = randomBytes(12);
+    sock.send(encodeStun(0x001, 0, tx, []), turn.port, '127.0.0.1');
+    const first = await waitFor(() =>
+      replies.map(parseStun).find((r): r is NonNullable<typeof r> => !!r?.txId.equals(tx)),
+    );
+    expect(first.attrs.map((a) => a.type)).toContain(0x0020);
+    expect(first.attrs.map((a) => a.type)).not.toContain(0x8022);
+    // A flood of them, or of requests that are only turned away, is answered a few times.
+    for (let i = 0; i < 60; i++) {
+      sock.send(encodeStun(0x001, 0, randomBytes(12), []), turn.port, '127.0.0.1');
+      sock.send(encodeStun(0x003, 0, randomBytes(12), []), turn.port, '127.0.0.1');
+    }
+    await new Promise((r) => setTimeout(r, 400));
+    expect(replies.length).toBeGreaterThan(1);
+    expect(replies.length).toBeLessThanOrEqual(7);
+  });
+
+  it('counts the addresses of one IPv6 /64 as one source', () => {
+    const turn = new TurnServer({
+      port: 0,
+      relayIp: '127.0.0.1',
+      secret: randomBytes(32),
+      limits: { answerBurst: 2, answerPerSecond: 0.001 },
+    }) as unknown as { mayAnswer(address: string): boolean };
+    expect(turn.mayAnswer('2001:db8:1:2::1')).toBe(true);
+    expect(turn.mayAnswer('2001:db8:1:2:ffff::7')).toBe(true);
+    expect(turn.mayAnswer('2001:db8:1:2::9')).toBe(false);
+    // Another /64, and an IPv4 address, have counts of their own.
+    expect(turn.mayAnswer('2001:db8:1:3::1')).toBe(true);
+    expect(turn.mayAnswer('192.0.2.1')).toBe(true);
+    expect(turn.mayAnswer('::ffff:192.0.2.1')).toBe(true);
+    expect(turn.mayAnswer('192.0.2.1')).toBe(false);
+  });
+
+  it('gives a nonce to one address, so a signed request copied elsewhere is challenged', async () => {
+    const turn = await limitedTurn({});
+    const c = await turnClient(turn);
+    const nonce = c.auth.find((a) => a.type === 0x0015)!.value.toString();
+    const inner = turn as unknown as { nonceValid(nonce: string, address: string): string };
+    expect(inner.nonceValid(nonce, '127.0.0.1')).toBe('ok');
+    // The port may change behind a NAT, the address does not.
+    expect(inner.nonceValid(nonce, '127.0.0.2')).toBe('bad');
+    expect(inner.nonceValid(nonce, '::ffff:127.0.0.1')).toBe('ok');
+    // Sent from here, the Allocate is served.
+    expect(await allocate(c)).toBe(0);
+  });
+
+  it('never relays to an address it was told is its own', async () => {
+    const turn = await new TurnServer({
+      port: 0,
+      host: '127.0.0.1',
+      relayIp: '127.0.0.1',
+      secret: randomBytes(32),
+      ownAddresses: ['8.8.4.4', '2606:4700::1111'],
+    }).start();
+    cleanup.push(() => turn.stop());
+    const c = await turnClient(turn);
+    expect(await allocate(c)).toBe(0);
+    expect(await permit(c, ['8.8.4.4'])).toBe(403);
+    expect(await permit(c, ['::ffff:8.8.4.4'])).toBe(403);
+    expect(await permit(c, ['2606:4700::1111'])).toBe(403);
+    expect(await permit(c, ['8.8.8.8'])).toBe(0);
+  });
+
+  it('does not keep a count for a source that has gone quiet, nor more than a fixed number of them', () => {
+    const make = (limits: Record<string, number>) =>
+      new TurnServer({
+        port: 0,
+        relayIp: '127.0.0.1',
+        secret: randomBytes(32),
+        limits,
+      }) as unknown as {
+        mayAnswer(address: string): boolean;
+        expire(): void;
+        answered: Map<string, unknown>;
+      };
+    const quiet = make({ answerBurst: 2, answerPerSecond: 1000 });
+    quiet.mayAnswer('192.0.2.1');
+    expect(quiet.answered.size).toBe(1);
+    quiet.expire();
+    expect(quiet.answered.size).toBe(1);
+    return new Promise<void>((resolve) =>
+      setTimeout(() => {
+        quiet.expire();
+        expect(quiet.answered.size).toBe(0);
+        // Past the number kept, the oldest is forgotten (and counts from the start again).
+        const many = make({ answerBurst: 1, answerPerSecond: 0.001 });
+        expect(many.mayAnswer('10.0.0.1')).toBe(true);
+        expect(many.mayAnswer('10.0.0.1')).toBe(false);
+        for (let i = 0; i < 50_000; i++)
+          many.mayAnswer(`11.${(i >> 16) & 255}.${(i >> 8) & 255}.${i & 255}`);
+        expect(many.answered.size).toBe(50_000);
+        expect(many.mayAnswer('10.0.0.1')).toBe(true);
+        resolve();
+      }, 20),
+    );
+  });
 });

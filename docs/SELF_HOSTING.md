@@ -59,6 +59,7 @@ node packages/coordinator/dist/bin.js --help
 | `--relay`                  | `CROC_RELAY`                 | `on` (`off` to disable)               |
 | `--relay-max-users`        | `CROC_RELAY_MAX_USERS`       | 25                                    |
 | `--relay-ip`               | `CROC_RELAY_IP`              | public IP from `--public-url`         |
+| `--relay-own-ips`          | `CROC_RELAY_OWN_IPS`         | none (comma-separated addresses)      |
 | `--relay-ports`            | `CROC_RELAY_PORTS`           | any free port (49160-49259 in Docker) |
 | `--mailbox`                | `CROC_MAILBOX`               | `on` (`off` to disable)               |
 | `--mailbox-days`           | `CROC_MAILBOX_DAYS`          | 3 (max 7)                             |
@@ -95,6 +96,13 @@ per person). Your server only ever sees ciphertext. Turn it off with
 leaves it off unless you enable "Offer a relay"; it then relays on the UDP
 ports just above its own (four per relay user; the app shows the range), which
 you forward along with its port to serve people outside your network.
+
+The relay never sends to the machine it runs on or its network (private,
+loopback and link-local addresses, and its own addresses). It knows its own
+interface addresses and `--relay-ip`; if `--relay-ip` is a proxy's or a CDN's
+address, and the machine is reached through a router with a public address of its
+own, give that address in `--relay-own-ips` so the relay can't be used to reach
+what the router forwards to the machine.
 
 ## Hosting safely
 

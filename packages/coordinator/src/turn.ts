@@ -75,6 +75,13 @@ export interface TurnLimits {
   controlBurst: number;
   /** …and per second after that. Requests over it go unanswered. */
   controlPerSecond: number;
+  /**
+   * Answers sent without the request having been signed (a binding, a challenge) to one source
+   * address at once… A source address can be forged, so what is sent to it has to be capped.
+   */
+  answerBurst: number;
+  /** …and per second after that. Requests over it go unanswered. */
+  answerPerSecond: number;
 }
 
 export const defaultTurnLimits: TurnLimits = {
@@ -86,7 +93,12 @@ export const defaultTurnLimits: TurnLimits = {
   maxChannels: 64,
   controlBurst: 100,
   controlPerSecond: 20,
+  answerBurst: 30,
+  answerPerSecond: 10,
 };
+
+/** Source addresses whose answers are counted at once; the oldest are forgotten first. */
+const MAX_ANSWERED_SOURCES = 50_000;
 
 /** How long a permission lasts without renewal, and a channel binding (RFC 8656). */
 const PERMISSION_MS = 300_000;
@@ -335,6 +347,11 @@ export interface TurnServerOptions {
    * or home network. Only for LAN-only deployments and tests.
    */
   allowPrivatePeers?: boolean;
+  /**
+   * Addresses of this machine the server cannot find out itself, never valid relay peers: the
+   * public address of a router that forwards to it, when `relayIp` is a proxy's or a CDN's.
+   */
+  ownAddresses?: string[];
   log?: (msg: string, extra?: Record<string, unknown>) => void;
 }
 
@@ -416,6 +433,14 @@ function addrKey(address: string): string {
   return canonicalIp(address) ?? address;
 }
 
+/** What counts as one source: an IPv4 address, or the /64 of an IPv6 address. */
+function sourceKey(address: string): string {
+  const addr = canonicalIp(address);
+  if (!addr) return address;
+  if (isIPv4(addr)) return addr;
+  return `${ipv6Bytes(addr).subarray(0, 8).toString('hex')}::/64`;
+}
+
 export function isForbiddenPeerAddress(address: string, own: ReadonlySet<string> = new Set()) {
   const addr = canonicalIp(address);
   if (!addr || own.has(addr)) return true;
@@ -455,7 +480,9 @@ export class TurnServer {
     }
     if (this.sockets.length === 0) throw new Error('could not bind any UDP socket');
     this.own = new Set(
-      [...localAddresses(true), this.opts.relayIp].flatMap((a) => canonicalIp(a) ?? []),
+      [...localAddresses(true), this.opts.relayIp, ...(this.opts.ownAddresses ?? [])].flatMap(
+        (a) => canonicalIp(a) ?? [],
+      ),
     );
     this.port = port;
     this.sweep = setInterval(() => this.expire(), 2000);
@@ -525,21 +552,26 @@ export class TurnServer {
     return null;
   }
 
-  private nonce(): string {
+  /**
+   * A nonce is given to one source address (the port may change behind a NAT): a signed request
+   * copied by someone on the path does not serve from their own address, where it would make an
+   * allocation of the user's and push out their real one.
+   */
+  private nonce(address: string): string {
     const ts = Math.floor(Date.now() / 1000).toString(16);
-    const mac = createHmac('sha1', this.opts.secret)
-      .update(`nonce:${ts}`)
-      .digest('hex')
-      .slice(0, 16);
-    return `${ts}${mac}`;
+    return `${ts}${this.nonceMac(ts, address)}`;
   }
 
-  private nonceValid(nonce: string): 'ok' | 'stale' | 'bad' {
-    const ts = nonce.slice(0, -16);
-    const mac = createHmac('sha1', this.opts.secret)
-      .update(`nonce:${ts}`)
+  private nonceMac(ts: string, address: string): string {
+    return createHmac('sha1', this.opts.secret)
+      .update(`nonce:${ts}:${addrKey(address)}`)
       .digest('hex')
       .slice(0, 16);
+  }
+
+  private nonceValid(nonce: string, address: string): 'ok' | 'stale' | 'bad' {
+    const ts = nonce.slice(0, -16);
+    const mac = this.nonceMac(ts, address);
     if (mac !== nonce.slice(-16)) return 'bad';
     return Date.now() / 1000 - parseInt(ts, 16) > 600 ? 'stale' : 'ok';
   }
@@ -556,13 +588,13 @@ export class TurnServer {
       this.reply(via, m, rinfo, CLASS.error, [
         errorAttr(code, reason),
         { type: ATTR.realm, value: Buffer.from(REALM) },
-        { type: ATTR.nonce, value: Buffer.from(this.nonce()) },
+        { type: ATTR.nonce, value: Buffer.from(this.nonce(rinfo.address)) },
       ]);
     if (!username || !nonce || !attrOf(m, ATTR.messageIntegrity)) {
       challenge(401, 'Unauthorized');
       return null;
     }
-    const nv = this.nonceValid(nonce);
+    const nv = this.nonceValid(nonce, rinfo.address);
     if (nv === 'stale') {
       challenge(438, 'Stale Nonce');
       return null;
@@ -592,14 +624,33 @@ export class TurnServer {
   }
 
   private reply(via: Socket, m: Msg, rinfo: RemoteInfo, cls: number, attrs: Attr[], key?: Buffer) {
-    const out = encodeStun(
-      m.method,
-      cls,
-      m.txId,
-      [...attrs, { type: ATTR.software, value: Buffer.from('crocodile') }],
-      key,
+    // Anyone can write any source address on a request, and what goes back to it is larger than
+    // the request: without a signature on it, only so many answers go to one address.
+    if (!key && !this.mayAnswer(rinfo.address)) return;
+    via.send(encodeStun(m.method, cls, m.txId, attrs, key), rinfo.port, rinfo.address);
+  }
+
+  /** Counts answers by source address (an IPv6 /64 is one source), see `answerBurst`. */
+  private answered = new Map<string, { tokens: number; at: number }>();
+
+  private mayAnswer(address: string): boolean {
+    const now = Date.now();
+    const key = sourceKey(address);
+    const seen = this.answered.get(key);
+    const tokens = Math.min(
+      this.limits.answerBurst,
+      (seen?.tokens ?? this.limits.answerBurst) +
+        (seen ? ((now - seen.at) / 1000) * this.limits.answerPerSecond : 0),
     );
-    via.send(out, rinfo.port, rinfo.address);
+    this.answered.delete(key);
+    if (tokens < 1) {
+      this.answered.set(key, { tokens, at: now });
+      return false;
+    }
+    this.answered.set(key, { tokens: tokens - 1, at: now });
+    while (this.answered.size > MAX_ANSWERED_SOURCES)
+      this.answered.delete(this.answered.keys().next().value!);
+    return true;
   }
 
   private onClientPacket(via: Socket, buf: Buffer, rinfo: RemoteInfo) {
@@ -923,6 +974,9 @@ export class TurnServer {
 
   private expire() {
     const now = Date.now();
+    // A source that has been quiet long enough for its count to be full again is not kept.
+    const refilled = (this.limits.answerBurst / this.limits.answerPerSecond) * 1000;
+    for (const [key, v] of this.answered) if (now - v.at > refilled) this.answered.delete(key);
     for (const a of [...this.allocations.values()]) {
       if (a.expiresAt < now || this.grantEnd(a.userId, a.grantExpiresAt) < now) {
         this.remove(a);

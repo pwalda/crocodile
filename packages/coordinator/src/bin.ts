@@ -29,6 +29,7 @@ const { values } = parseArgs({
     relay: { type: 'string' },
     'relay-max-users': { type: 'string' },
     'relay-ip': { type: 'string' },
+    'relay-own-ips': { type: 'string' },
     'relay-ports': { type: 'string' },
     'relay-allow-private': { type: 'boolean' },
     mailbox: { type: 'string' },
@@ -70,6 +71,9 @@ Options (environment variable in brackets):
   --relay on|off         opt-in relay for blocked users   [CROC_RELAY]
   --relay-max-users <n>  concurrent relay users (25)      [CROC_RELAY_MAX_USERS]
   --relay-ip <addr>      public IP for relay candidates   [CROC_RELAY_IP]
+  --relay-own-ips <list> other public addresses of this   [CROC_RELAY_OWN_IPS]
+                         machine (a router's, when the
+                         relay IP is a proxy's or CDN's)
   --relay-ports <a-b>    UDP ports for relayed traffic,   [CROC_RELAY_PORTS]
                          one per relayed connection (any
                          free port); set and open a range
@@ -146,6 +150,7 @@ const coordinator = new Coordinator({
       { min: 0 },
     ),
     publicIp: pick(values['relay-ip'], 'CROC_RELAY_IP'),
+    ownAddresses: list(pick(values['relay-own-ips'], 'CROC_RELAY_OWN_IPS')),
     ...(relayPorts ? { ports: parsePortRange(relayPorts) } : {}),
     allowPrivatePeers:
       values['relay-allow-private'] === true || env.CROC_RELAY_ALLOW_PRIVATE === '1',

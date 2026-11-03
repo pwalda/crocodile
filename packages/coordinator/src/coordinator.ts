@@ -103,6 +103,8 @@ export interface CoordinatorConfig {
     ports?: { min: number; max: number };
     /** Allow relaying to private/loopback addresses (LAN-only setups, tests). */
     allowPrivatePeers?: boolean;
+    /** Other addresses of this machine the relay must never reach (see TurnServerOptions). */
+    ownAddresses?: string[];
   };
   /** Opt-in mailbox holding sealed messages for offline devices. */
   mailbox: MailboxConfig;
@@ -425,6 +427,9 @@ export class Coordinator {
           secret: Buffer.from(randomBytes(32)),
           limits: { maxUsers: this.config.relay.maxUsers },
           allowPrivatePeers: this.config.relay.allowPrivatePeers,
+          ...(this.config.relay.ownAddresses
+            ? { ownAddresses: this.config.relay.ownAddresses }
+            : {}),
           grantEnd: (userId) => this.relayGrants.get(userId)?.expiresAt,
           log: (m, e) => this.log.debug(m, e),
         }).start();
