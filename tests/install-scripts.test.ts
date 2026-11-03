@@ -43,7 +43,14 @@ function installWindows(assets: string[], env: Record<string, string>, scheme = 
   });
   const stubs = `
     function Invoke-RestMethod { param($Uri) '${release}' | ConvertFrom-Json }
-    function Invoke-WebRequest { param($Uri, $OutFile) Write-Output "downloaded $Uri" }
+    function Invoke-WebRequest {
+      param($Uri, $OutFile)
+      [Console]::Out.WriteLine("downloaded $Uri")
+      # Where the download ended up, after any redirect (-PassThru gives the response).
+      if ($env:CROC_TEST_FINAL_URL) {
+        [pscustomobject]@{ BaseResponse = [pscustomobject]@{ ResponseUri = [uri]$env:CROC_TEST_FINAL_URL } }
+      }
+    }
     function Start-Process { }
     function Write-Host { }
   `;
@@ -85,15 +92,39 @@ describe.skipIf(!process.env.CI && !hasPwsh())('install.ps1', () => {
 
   it('does not download from an address that is not https', () => {
     const refused = /not https/;
+    for (const scheme of ['http', 'ftp']) {
+      expect(() =>
+        installWindows(WINDOWS_ASSETS, { PROCESSOR_ARCHITECTURE: 'AMD64' }, scheme),
+      ).toThrow(refused);
+      expect(() =>
+        installWindows(
+          ['crocodile-cli-windows-x64.zip'],
+          { PROCESSOR_ARCHITECTURE: 'AMD64', CROC_INSTALL: 'cli' },
+          scheme,
+        ),
+      ).toThrow(refused);
+    }
+  });
+
+  it('refuses before downloading anything, not after', () => {
+    try {
+      installWindows(WINDOWS_ASSETS, { PROCESSOR_ARCHITECTURE: 'AMD64' }, 'http');
+    } catch (err) {
+      expect(String((err as { stdout?: string }).stdout)).not.toContain('downloaded');
+      return;
+    }
+    throw new Error('the script did not refuse');
+  });
+
+  it('does not run, nor keep, a download that a redirect took away from https', () => {
+    const refused = /not https/;
+    const env = {
+      PROCESSOR_ARCHITECTURE: 'AMD64',
+      CROC_TEST_FINAL_URL: 'http://example.test/Crocodile-0.2.0-win-x64.exe',
+    };
+    expect(() => installWindows(WINDOWS_ASSETS, env)).toThrow(refused);
     expect(() =>
-      installWindows(WINDOWS_ASSETS, { PROCESSOR_ARCHITECTURE: 'AMD64' }, 'http'),
-    ).toThrow(refused);
-    expect(() =>
-      installWindows(
-        ['crocodile-cli-windows-x64.zip'],
-        { PROCESSOR_ARCHITECTURE: 'AMD64', CROC_INSTALL: 'cli' },
-        'http',
-      ),
+      installWindows(['crocodile-cli-windows-x64.zip'], { ...env, CROC_INSTALL: 'cli' }),
     ).toThrow(refused);
   });
 
