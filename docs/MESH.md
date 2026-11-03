@@ -84,7 +84,8 @@ by name goes to `name:<name>`.
 - **Live updates.** A server whose clients follow records it doesn't own asks
   the owners to **watch** them for it; owners push each change to the
   watching servers, which pass it on to their clients. Watches last five
-  minutes and are renewed.
+  minutes and are renewed, and an owner sees which user and space ids a server
+  follows (not which of its users asked).
 - **When servers come and go**, the ring changes. Once the live set has been
   stable for a few seconds, each server goes through what it stores and sends
   every record to owners that have just become responsible for it (only the
@@ -174,6 +175,16 @@ by name goes to `name:<name>`.
   - The ring is built only when the live set really changes and someone looks.
     Under a steady trickle of new servers that is still once per look.
   - Spent allowances are kept for 2000 links, idle ones dropped first.
+  - A signed-in peer may send a burst of 20,000 frames and 2,000 a second after
+    that, of any kind (a full catch-up is a few thousand, as a batch holds
+    hundreds of records); past that its link is closed, not thinned out, as a
+    frame skipped could be one a cursor or a sequence number moves on past. It
+    reconnects and starts again from what it has. Requests have a limit of
+    their own, answered with an error.
+  - The hop count of a flooded frame is written by whoever sends it, so it
+    bounds how far an honest flood goes, not a hostile one: a server can send a
+    new flood with a fresh id at any time. What bounds it is the budget above
+    and the 200,000 flood ids a server remembers, oldest dropped first.
 - What is not limited: a flood of live made-up servers can fill the 5000
   places and keep real newcomers out, and enough made-up link identities push
   out the allowances of real ones. Admitting only servers the directory has

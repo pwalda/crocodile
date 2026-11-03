@@ -1952,7 +1952,7 @@ describe('sessions and host election', () => {
     await bob.conn.request('session.join', { sessionId, caps: caps() });
     const data = { type: 'bye' as const, epoch: 1, dir: 'toRelay' as const };
     const r = await bob.conn.request('signal.send', { to: alice.conn.peer, sessionId, data });
-    expect(r.delivered).toBe(true);
+    expect(r).toEqual({});
     await waitFor(() => alice.events.find((e) => e.ev === 'signal'));
     await expect(
       outsider.conn.request('session.join', { sessionId, caps: caps() }),
@@ -2050,7 +2050,7 @@ describe('coordination mesh', () => {
       sessionId,
       data: { type: 'bye', epoch: 1, dir: 'toRelay' },
     });
-    expect(sig.delivered).toBe(true);
+    expect(sig).toEqual({});
 
     const owner = a.sessions.ownerOf(sessionId) === a.info.id ? a : b;
     const survivor = owner === a ? b : a;
@@ -3387,5 +3387,16 @@ describe('a roster that arrives before its space', () => {
     expect(c.records.put(space, { fresh: false, origin: 'peer' }).accepted).toBe(true);
     expect(c.records.get(listed.record.key)).toBeDefined();
     expect(c.records.pendingCount).toBe(0);
+  });
+
+  it("tells the relay which other addresses are the machine's own", async () => {
+    const coord = await server({
+      stunPort: 0,
+      relay: { enabled: true, maxUsers: 5, ownAddresses: ['8.8.4.4', '2606:4700::1111'] },
+    });
+    const turn = (coord as unknown as { turn: { own: Set<string> } }).turn;
+    expect(turn.own.has('8.8.4.4')).toBe(true);
+    expect(turn.own.has('2606:4700::1111')).toBe(true);
+    expect(turn.own.has('8.8.8.8')).toBe(false);
   });
 });

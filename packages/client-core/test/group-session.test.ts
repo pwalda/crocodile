@@ -397,6 +397,66 @@ describe('group session', () => {
     expect(s.relayGrant).not.toBeNull();
   });
 
+  it('takes the state of a room it joins again even when the room started over at an earlier epoch', async () => {
+    const other = 'bbbbbbbbbbbbbbbbbbbbbbbbbb.dev1';
+    const { s } = session(
+      async () => grant(60_000),
+      async (type) => (type === 'session.join' ? { state: state(me, 0) } : {}),
+    );
+    s.applyState(state(other, 7));
+    await s.leave();
+    // Everyone left, the room is gone, and joining makes a new one.
+    await s.join();
+    expect(s.state?.epoch).toBe(0);
+    expect(s.isHost).toBe(true);
+  });
+
+  it('takes the state of a room that started over at an earlier epoch when it joins on a new connection', async () => {
+    const other = 'bbbbbbbbbbbbbbbbbbbbbbbbbb.dev1';
+    const { s } = session(
+      async () => grant(60_000),
+      async (type) => (type === 'session.join' ? { state: state(me, 0) } : {}),
+    );
+    s.applyState(state(other, 7));
+    s.forgetSeen();
+    await s.join({ fresh: true });
+    expect(s.state?.epoch).toBe(0);
+    expect(s.isHost).toBe(true);
+  });
+
+  it('does not let the answer to its join undo a newer state that was pushed while the join was on its way', async () => {
+    const other = 'bbbbbbbbbbbbbbbbbbbbbbbbbb.dev1';
+    let answer!: (r: unknown) => void;
+    const { s } = session(
+      async () => grant(60_000),
+      (type) =>
+        type === 'session.join'
+          ? new Promise((resolve) => (answer = resolve))
+          : Promise.resolve({}),
+    );
+    s.applyState(state(other, 7));
+    const joining = s.join({ fresh: true });
+    await waitFor(() => typeof answer === 'function');
+    s.applyState(state(other, 9));
+    answer({ state: state(other, 8) });
+    await joining;
+    expect(s.state?.epoch).toBe(9);
+  });
+
+  it('still refuses a push of an earlier epoch than the one it holds', () => {
+    const { s } = session(async () => grant(60_000));
+    s.applyState(state('bbbbbbbbbbbbbbbbbbbbbbbbbb.dev1', 7));
+    s.applyState(state(me, 3));
+    expect(s.state?.epoch).toBe(7);
+  });
+
+  it('keeps what it held of a room it left until it joins again', async () => {
+    const { s } = session(async () => grant(60_000));
+    s.applyState(state('bbbbbbbbbbbbbbbbbbbbbbbbbb.dev1', 7));
+    await s.leave();
+    expect(s.state?.epoch).toBe(7);
+  });
+
   it('does not keep a grant that arrives after the session was left', async () => {
     const { s } = session(async () => {
       await wait(30);
@@ -702,5 +762,158 @@ describe('group session', () => {
     bob.forgetPeer('alice.d1');
     expect(latest.peers).toEqual([]);
     expect(bob.peersWithKeys()).toEqual([]);
+  });
+});
+
+describe('who may confirm what we wrote', () => {
+  const bob = 'bbbbbbbbbbbbbbbbbbbbbbbbbb.devicebb';
+  const host = 'cccccccccccccccccccccccccc.devicecc';
+  const backup = 'dddddddddddddddddddddddddd.devicedd';
+  const self = 'aaaaaaaaaaaaaaaaaaaaaaaaaa.deviceaa';
+  const mine = 'aaaaaaaaaaaaaaaaaaaaaaaaaa.devicezz';
+  const id = 'message-id-1';
+
+  /** A session of ours, with the given host and backup, that has said hello. */
+  async function joined(sessionId: string, hostPeer: string, backupPeer: string | null) {
+    const acked: { sessionId: string; ids: string[] }[] = [];
+    const blocked = new Set<string>();
+    let transport: OpenTransport | undefined;
+    const ctx = {
+      identity: createIdentity(),
+      peer: self,
+      link: () => ({ request: async () => ({}) }),
+      platform: {},
+      iceServers: () => [],
+      relay: { allowed: () => false, request: async () => grant(1000) },
+      isMemberPeer: () => true,
+      isAllowedPeer: (_session: string, peer: string) => !blocked.has(peer),
+      hasDevice: () => true,
+      refreshPeer: async () => {},
+      historyChannels: () => [],
+      syncCursor: async () => 0,
+      outbox: {
+        pending: () => [],
+        acked: (s: string, ids: string[]) => acked.push({ sessionId: s, ids }),
+      },
+      acceptMessage: async () => true,
+      admits: () => true,
+      seal: async (to: string, plaintext: Uint8Array) =>
+        box(self, to, new TextDecoder().decode(plaintext)),
+      open: (b: SealedBox) => ({ from: senders.get(b.epk)!, plaintext: fromB64u(b.ct) }),
+      log: () => {},
+    } as unknown as SessionContext;
+    const s = new GroupSession(sessionId, ctx, () => (transport = new OpenTransport([])));
+    sessions.push(s);
+    s.applyState({ ...state(hostPeer, 1), id: sessionId, backup: backupPeer });
+    await wait(20);
+    const peer = (p: string) => ({ id: p, muted: false, deafened: false });
+    transport!.emit('message', {
+      t: 'hello',
+      you: self,
+      host: hostPeer,
+      peers: [peer(hostPeer), peer(bob)],
+      slots: 0,
+    });
+    await wait(20);
+    const confirm = async (from: string) => {
+      const before = acked.length;
+      transport!.emit('message', {
+        t: 'msg',
+        from,
+        direct: true,
+        d: { k: 'sealed', box: box(from, self, JSON.stringify({ type: 'ack', ids: [id] })) },
+      });
+      await wait(30);
+      return acked.length > before;
+    };
+    return { acked, confirm, blocked };
+  }
+
+  it('takes the other side of a conversation, but not one of our own other devices', async () => {
+    const { acked, confirm } = await joined('dm:a:b', bob, null);
+    expect(await confirm(mine)).toBe(false);
+    expect(await confirm(bob)).toBe(true);
+    // The session it came in is named: a confirmation says nothing of another conversation.
+    expect(acked).toEqual([{ sessionId: 'dm:a:b', ids: [id] }]);
+  });
+
+  it('takes the host or backup of a space, not another member', async () => {
+    const { confirm } = await joined('space:abcdefghij', host, backup);
+    expect(await confirm(bob)).toBe(false);
+    expect(await confirm(host)).toBe(true);
+    expect(await confirm(backup)).toBe(true);
+  });
+
+  it('does not take one we have blocked', async () => {
+    const { confirm, blocked } = await joined('dm:a:b', bob, null);
+    blocked.add(bob);
+    expect(await confirm(bob)).toBe(false);
+  });
+
+  it('takes any member when we are the host', async () => {
+    const { confirm } = await joined('space:abcdefghij', self, null);
+    expect(await confirm(bob)).toBe(true);
+    expect(await confirm(mine)).toBe(false);
+  });
+});
+
+describe('typing indicators', () => {
+  it('shows only those for a channel of this session', async () => {
+    const self = 'aaaaaaaaaaaaaaaaaaaaaaaaaa.deviceaa';
+    const bob = 'bbbbbbbbbbbbbbbbbbbbbbbbbb.devicebb';
+    const host = 'cccccccccccccccccccccccccc.devicecc';
+    let transport: OpenTransport | undefined;
+    const ctx = {
+      identity: createIdentity(),
+      peer: self,
+      link: () => ({ request: async () => ({}) }),
+      platform: {},
+      iceServers: () => [],
+      relay: { allowed: () => false, request: async () => grant(1000) },
+      isMemberPeer: () => true,
+      isAllowedPeer: () => true,
+      hasDevice: () => true,
+      refreshPeer: async () => {},
+      historyChannels: () => ['ch'],
+      syncCursor: async () => 0,
+      outbox: { pending: () => [], acked: () => {} },
+      acceptMessage: async () => true,
+      admits: () => true,
+      seal: async (to: string, plaintext: Uint8Array) =>
+        box(self, to, new TextDecoder().decode(plaintext)),
+      open: (b: SealedBox) => ({ from: senders.get(b.epk)!, plaintext: fromB64u(b.ct) }),
+      log: () => {},
+    } as unknown as SessionContext;
+    const s = new GroupSession('dm:a:b', ctx, () => (transport = new OpenTransport([])));
+    sessions.push(s);
+    const typing: string[] = [];
+    s.on('typing', ({ ch }) => typing.push(ch));
+    s.applyState(state(host, 1));
+    await wait(20);
+    const peer = (id: string) => ({ id, muted: false, deafened: false });
+    transport!.emit('message', {
+      t: 'hello',
+      you: self,
+      host,
+      peers: [peer(host), peer(bob)],
+      slots: 0,
+    });
+    await wait(20);
+    const theirs = new GroupKeyring({ autoRatchet: false });
+    const key = { type: 'sender_key', sessionId: 'dm:a:b', to: self, at: Date.now() };
+    transport!.emit('message', {
+      t: 'msg',
+      from: bob,
+      direct: true,
+      d: { k: 'sealed', box: box(bob, self, JSON.stringify({ ...key, ...theirs.exportMine() })) },
+    });
+    await wait(20);
+    for (const ch of ['elsewhere', 'ch']) {
+      const env = theirs.encrypt(new TextEncoder().encode(JSON.stringify({ type: 'typing', ch })));
+      transport!.emit('message', { t: 'msg', from: bob, direct: false, d: { k: 'group', ...env } });
+    }
+    await waitFor(() => typing.length > 0);
+    await wait(30);
+    expect(typing).toEqual(['ch']);
   });
 });

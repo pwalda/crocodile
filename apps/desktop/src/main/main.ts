@@ -23,6 +23,16 @@ import { cpus } from 'node:os';
 import { contextMenuTemplate } from './context-menu';
 import { configureGlobalPtt, stopGlobalPtt } from './global-ptt';
 import { FileExports, FileStore, askBeforeOpening, safeFileName } from './file-store';
+import {
+  badgeCount,
+  exportEnding,
+  pttCode,
+  relayMessage,
+  secureKey,
+  secureValue,
+  webUrl,
+  withCoordinatorPatch,
+} from './ipc-args';
 import { SecureStore, type Protection } from './secure-store';
 import { isAllowedNavigation } from './navigation';
 import { allowAsking, handle, useIpc } from './ipc-guard';
@@ -35,7 +45,6 @@ import type {
   CoordinatorProcessOut,
   CoordinatorSettings,
   CoordinatorStatus,
-  RelayProcessIn,
   RelayProcessOut,
   UpdateStatus,
 } from './ipc-types';
@@ -85,9 +94,11 @@ const resource = (...p: string[]) =>
 
 const secure = new SecureStore(join(userData(), 'secure.json'), safeStorage);
 
-handle('secure:get', (_e, key: string) => secure.get(key));
-handle('secure:set', (_e, key: string, value: string) => secure.set(key, value));
-handle('secure:delete', (_e, key: string) => secure.delete(key));
+handle('secure:get', (_e, key: unknown) => secure.get(secureKey(key)));
+handle('secure:set', (_e, key: unknown, value: unknown) =>
+  secure.set(secureKey(key), secureValue(value)),
+);
+handle('secure:delete', (_e, key: unknown) => secure.delete(secureKey(key)));
 handle('secure:status', (): { protection: Protection } => ({ protection: secure.protection() }));
 
 // ---------------------------------------------------------------------------
@@ -117,7 +128,9 @@ function relayProcess(): UtilityProcess {
   return proc;
 }
 
-handle('relay:send', (_e, msg: RelayProcessIn) => {
+handle('relay:send', (_e, raw: unknown) => {
+  const msg = relayMessage(raw);
+  if (!msg) throw new Error('relay:send: not a message for the relay');
   relayProcess().postMessage(msg);
 });
 
@@ -184,8 +197,8 @@ function applyCoordinator() {
 }
 
 handle('coordinator:get', () => ({ settings: coordSettings(), status: coordStatus }));
-handle('coordinator:set', (_e, patch: Partial<CoordinatorSettings>) => {
-  const next = { ...coordSettings(), ...patch };
+handle('coordinator:set', (_e, patch: unknown) => {
+  const next = withCoordinatorPatch(coordSettings(), patch);
   mkdirSync(userData(), { recursive: true });
   writeFileSync(coordSettingsPath(), JSON.stringify(next, null, 2));
   applyCoordinator();
@@ -226,7 +239,8 @@ handle('files:chunk', (_e, token: string, data: Uint8Array) =>
 );
 handle('files:abort', (_e, token: string) => exportsInProgress.abort(token));
 /** Finish a save or open: `open` opens it, `reveal` shows it in its folder. */
-handle('files:end', async (_e, token: string, then: 'open' | 'reveal' | 'none') => {
+handle('files:end', async (_e, token: string, ending: unknown) => {
+  const then = exportEnding(ending);
   const path = await exportsInProgress.end(token);
   if (then === 'reveal') shell.showItemInFolder(path);
   if (then === 'open') {
@@ -262,20 +276,22 @@ handle('app:info', () => ({
   cpuCores: cpus().length,
 }));
 
-handle('app:open-external', (_e, url: string) => {
-  if (/^https?:\/\//i.test(url)) void shell.openExternal(url);
+handle('app:open-external', (_e, raw: unknown) => {
+  const url = webUrl(raw);
+  if (url) void shell.openExternal(url);
 });
 
 handle('app:copy-text', (_e, text: unknown) => {
   if (typeof text === 'string' && text.length <= 100_000) clipboard.writeText(text);
 });
 
-handle('app:badge', (_e, count: number) => {
+handle('app:badge', (_e, raw: unknown) => {
+  const count = badgeCount(raw);
   if (process.platform === 'darwin') app.dock?.setBadge(count > 0 ? String(count) : '');
   else app.setBadgeCount(count);
 });
 
-handle('ptt:configure', (e, code: string | null) => configureGlobalPtt(e.sender, code));
+handle('ptt:configure', (e, code: unknown) => configureGlobalPtt(e.sender, pttCode(code)));
 
 handle('app:take-deeplink', () => {
   const link = pendingDeepLink;

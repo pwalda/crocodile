@@ -1,8 +1,8 @@
-import { afterEach, describe, expect, it } from 'vitest';
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { FILE_BLOCK_SIZE } from '@crocodile/protocol';
+import { FILE_BLOCK_SIZE, FILE_MAX_SIZE } from '@crocodile/protocol';
 import { newFileId } from '@crocodile/crypto';
 import {
   FileExports,
@@ -294,5 +294,89 @@ describe('files received from other people', () => {
     const p = join(dir, 'c.pdf');
     await throws.end(await throws.begin(p, false));
     expect(throws.markFailed(p)).toBe(true);
+  });
+});
+
+describe('what the page may send when a file is saved', () => {
+  it('takes a block at a time at most, and no more than a file can be', async () => {
+    const dir = tempDir();
+    const exports = new FileExports(async () => 'none');
+    const token = await exports.begin(join(dir, 'out.bin'), false);
+    await exports.chunk(token, block(FILE_BLOCK_SIZE, 1));
+    await expect(exports.chunk(token, block(FILE_BLOCK_SIZE + 1, 1))).rejects.toThrow('too much');
+    await expect(exports.chunk(token, 'text' as unknown as Uint8Array)).rejects.toThrow(
+      'not saving',
+    );
+    // The most a file can be, counted over all its chunks.
+    const big = await exports.begin(join(dir, 'big.bin'), false);
+    const inner = exports as unknown as { open: Map<string, { written: number }> };
+    inner.open.get(big)!.written = FILE_MAX_SIZE - 10;
+    await exports.chunk(big, block(10, 1));
+    await expect(exports.chunk(big, block(1, 1))).rejects.toThrow('too much');
+    expect(readFileSync(join(dir, 'out.bin')).length).toBe(FILE_BLOCK_SIZE);
+  });
+
+  it('makes room for a new file only from one that has gone quiet', async () => {
+    const dir = tempDir();
+    const exports = new FileExports(async () => 'none');
+    const tokens: string[] = [];
+    for (let i = 0; i < 16; i++) tokens.push(await exports.begin(join(dir, `f${i}`), false));
+    // All sixteen are being written to: a seventeenth waits.
+    await expect(exports.begin(join(dir, 'f16'), false)).rejects.toThrow('too many files at once');
+    await exports.chunk(tokens[0]!, block(1, 1));
+    // One that has not been written to for a while (its page was reloaded) gives way, its partial
+    // file going with it; the others carry on.
+    const inner = exports as unknown as { open: Map<string, { touched: number }> };
+    inner.open.get(tokens[3]!)!.touched = Date.now() - 120_000;
+    // (Writing to it again keeps it: it was only slow.)
+    await exports.chunk(tokens[3]!, block(1, 1));
+    await expect(exports.begin(join(dir, 'f16'), false)).rejects.toThrow('too many files at once');
+    inner.open.get(tokens[3]!)!.touched = Date.now() - 120_000;
+    const token = await exports.begin(join(dir, 'f16'), false);
+    await expect(exports.chunk(tokens[3]!, block(1, 1))).rejects.toThrow('not saving');
+    await vi.waitFor(() => expect(existsSync(join(dir, 'f3'))).toBe(false));
+    for (const t of [...tokens.slice(0, 3), ...tokens.slice(4), token])
+      await exports.chunk(t, block(1, 1));
+    expect(await exports.end(token)).toBe(join(dir, 'f16'));
+  });
+
+  it('makes room once for many that ask at once', async () => {
+    const dir = tempDir();
+    const exports = new FileExports(async () => 'none');
+    const tokens: string[] = [];
+    for (let i = 0; i < 16; i++) tokens.push(await exports.begin(join(dir, `h${i}`), false));
+    const inner = exports as unknown as { open: Map<string, { touched: number }> };
+    inner.open.get(tokens[5]!)!.touched = Date.now() - 120_000;
+    const results = await Promise.allSettled(
+      ['a', 'b', 'c'].map((n) => exports.begin(join(dir, `new-${n}`), false)),
+    );
+    expect(results.filter((r) => r.status === 'fulfilled')).toHaveLength(1);
+    expect(inner.open.size).toBe(16);
+  });
+
+  it('keeps a file begun again at the path of one that was let go', async () => {
+    const dir = tempDir();
+    const exports = new FileExports(async () => 'none');
+    const tokens: string[] = [];
+    for (let i = 0; i < 16; i++) tokens.push(await exports.begin(join(dir, `k${i}`), false));
+    await exports.chunk(tokens[5]!, block(2, 1));
+    const inner = exports as unknown as { open: Map<string, { touched: number }> };
+    inner.open.get(tokens[5]!)!.touched = Date.now() - 120_000;
+    // A page that was reloaded saves the same file again, to the same place.
+    const again = await exports.begin(join(dir, 'k5'), false);
+    await exports.chunk(again, block(3, 7));
+    await exports.end(again);
+    await new Promise((r) => setTimeout(r, 50));
+    expect(readFileSync(join(dir, 'k5'))).toEqual(Buffer.from([7, 7, 7]));
+  });
+
+  it('counts files being begun, so many at once do not pass the most', async () => {
+    const dir = tempDir();
+    const exports = new FileExports(async () => 'none');
+    const results = await Promise.allSettled(
+      Array.from({ length: 25 }, (_, i) => exports.begin(join(dir, `g${i}`), false)),
+    );
+    expect(results.filter((r) => r.status === 'fulfilled')).toHaveLength(16);
+    expect(results.filter((r) => r.status === 'rejected')).toHaveLength(9);
   });
 });

@@ -24,6 +24,7 @@ import {
   type RelayGrant,
   type ServerEvents,
   ServerInfo,
+  type SignalData,
   type SignedRecord,
   type OperatorInfo,
   isOperatorContact,
@@ -41,7 +42,15 @@ import { TurnServer } from './turn';
 import { startStunServer } from './stun';
 import type { Socket } from 'node:dgram';
 import { MailboxService, defaultMailboxConfig, type MailboxConfig } from './mailbox';
-import { cleanUrl, consoleLogger, RpcFailure, type Logger } from './util';
+import {
+  KeyedLimiter,
+  addressKey,
+  cleanUrl,
+  isPrivateAddress,
+  consoleLogger,
+  RpcFailure,
+  type Logger,
+} from './util';
 import { isIP } from 'node:net';
 import { networkInterfaces } from 'node:os';
 import { lookup } from 'node:dns/promises';
@@ -94,6 +103,8 @@ export interface CoordinatorConfig {
     ports?: { min: number; max: number };
     /** Allow relaying to private/loopback addresses (LAN-only setups, tests). */
     allowPrivatePeers?: boolean;
+    /** Other addresses of this machine the relay must never reach (see TurnServerOptions). */
+    ownAddresses?: string[];
   };
   /** Opt-in mailbox holding sealed messages for offline devices. */
   mailbox: MailboxConfig;
@@ -383,7 +394,7 @@ export class Coordinator {
       scope.get('/v1/client', { websocket: true }, (socket, req) => {
         if (!this.admit(socket, req.ip)) return;
         // Capacity is enforced when the device authenticates (see hasRoomFor).
-        new ClientConnection(this, socket, req.socket.localAddress);
+        new ClientConnection(this, socket, req.socket.localAddress, req.ip);
       });
       scope.get('/v1/federation', { websocket: true }, (socket, req) => {
         if (!this.admit(socket, req.ip)) return;
@@ -416,6 +427,9 @@ export class Coordinator {
           secret: Buffer.from(randomBytes(32)),
           limits: { maxUsers: this.config.relay.maxUsers },
           allowPrivatePeers: this.config.relay.allowPrivatePeers,
+          ...(this.config.relay.ownAddresses
+            ? { ownAddresses: this.config.relay.ownAddresses }
+            : {}),
           grantEnd: (userId) => this.relayGrants.get(userId)?.expiresAt,
           log: (m, e) => this.log.debug(m, e),
         }).start();
@@ -522,6 +536,24 @@ export class Coordinator {
 
   /** Open WebSocket connections per remote IP. */
   private connectionsByIp = new Map<string, number>();
+  /** Tries at a link code by address, kept across connections (a new connection is a new start for its own budget). */
+  private linkClaims = new KeyedLimiter(0.5, 30);
+  private warnedOfSharedAddress = false;
+
+  /** Whether a try at a link code from this address is allowed. (No address: only the connection's own budget.) */
+  takeLinkClaim(address: string | undefined): boolean {
+    if (!address) return true;
+    if (this.linkClaims.take(addressKey(address))) return true;
+    // Behind a proxy that is not trusted, everyone is the proxy's address.
+    if (!this.warnedOfSharedAddress && !this.config.trustProxy && isPrivateAddress(address)) {
+      this.warnedOfSharedAddress = true;
+      this.log.warn(
+        'tries at a device link code are counted per address, and this one is a local address: behind a reverse proxy, set --trust-proxy',
+        { address },
+      );
+    }
+    return false;
+  }
 
   /** Per-IP connection limit, so one machine cannot exhaust a (home) server. */
   private admit(
@@ -566,6 +598,22 @@ export class Coordinator {
     const server = this.presence.locatePeer(peer);
     if (!server || server === this.info.id) return false;
     return this.mesh.sendTo(server, { t: 'route', to: peer, ev, d });
+  }
+
+  /**
+   * Passes on a signal to a device that is in the session too: only to a device in it, and
+   * without saying whether it got there, so that sending one tells nothing of who is connected.
+   * (The server the device is on checks again before it hands it over.)
+   */
+  signalPeer(from: string, to: string, sessionId: string, data: SignalData) {
+    const d = { from, sessionId, data };
+    if (this.sessions.inSession(to, sessionId)) {
+      this.deliverLocal(to, 'signal', d);
+      return;
+    }
+    const server = this.presence.locatePeer(to);
+    if (server && server !== this.info.id)
+      this.mesh.sendTo(server, { t: 'route', to, ev: 'signal', d });
   }
 
   /** `to` is a user id (all local devices) or a peer id (one device). */

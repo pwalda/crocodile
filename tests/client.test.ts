@@ -1742,6 +1742,135 @@ describe('leaving', () => {
     expect(bob.state.friends.outgoing).not.toContain(aliceId);
   });
 
+  describe('a device removed from its account', () => {
+    async function twoDevices() {
+      const coord = await server();
+      const net = new FakeRelayNetwork();
+      const alice = await signUp(makeClient(net, coord), 'alice');
+      const kv = new MemoryKeyValueStore();
+      const laptop = makeClient(net, coord, { kv });
+      await laptop.init();
+      await laptop.restoreAccount(alice.recoveryKey());
+      await waitFor(() => laptop.state.link === 'connected', 5000, 'laptop connected');
+      alice.finishOnboarding();
+      laptop.finishOnboarding();
+      // The first device learns of the second one (a list it opens, or a push).
+      await waitFor(
+        () => coord.store.listPrefix(recordKey.devicePrefix(alice.userId), 10).length === 2,
+        8000,
+        'both devices published',
+      );
+      alice.records.ingestAll(coord.store.listPrefix(recordKey.devicePrefix(alice.userId), 10));
+      const spaceId = await alice.createSpace('Place');
+      await waitFor(() => laptop.state.spaces[spaceId], 8000, 'laptop synced');
+      await laptop.openChannel(channelOf(laptop, spaceId));
+      await laptop.sendMessage(channelOf(laptop, spaceId), 'held on the laptop');
+      return { coord, net, alice, laptop, kv, spaceId };
+    }
+    const cleared = async (c: CrocodileClient, kv: MemoryKeyValueStore) => {
+      expect(c.identity).toBeNull();
+      expect(c.state.phase).toBe('onboarding');
+      expect(c.state.accountDeleted).toBe(false);
+      expect(await kv.get('identity-seed')).toBeUndefined();
+      expect(await kv.get('records-cache')).toBeUndefined();
+      expect(c.state.messages).toEqual({});
+    };
+
+    it('stops and clears what it held when it is removed while connected', async () => {
+      const { alice, laptop, kv } = await twoDevices();
+      const errors: string[] = [];
+      laptop.on('error', (e) => errors.push(e.message));
+      await alice.revokeDevice(laptop.deviceId);
+      await waitFor(() => laptop.identity === null, 8000, 'laptop cleared');
+      await cleared(laptop, kv);
+      expect(errors).toContain('This device was removed from your account on another device.');
+      // The account itself, and the device that removed this one, carry on.
+      expect(alice.state.phase).toBe('ready');
+      expect(alice.state.link).toBe('connected');
+    });
+
+    it('stops and clears what it held when it finds out on connecting', async () => {
+      const { net, coord, alice, laptop, kv } = await twoDevices();
+      const laptopId = laptop.deviceId;
+      await laptop.shutdown();
+      await alice.revokeDevice(laptopId);
+      const again = makeClient(net, coord, { kv });
+      await again.init();
+      const asked = vi.spyOn((again as unknown as { link: CoordinatorLink }).link, 'request');
+      await waitFor(() => again.identity === null, 8000, 'cleared on connecting');
+      await cleared(again, kv);
+      // It doesn't go on to load the account it no longer has.
+      await new Promise((r) => setTimeout(r, 300));
+      expect(asked.mock.calls.map((c) => c[0])).not.toContain('spaces.mine');
+    });
+
+    it('clears it when the removal is already in its records but it carries on', async () => {
+      const { alice, laptop, kv } = await twoDevices();
+      const key = recordKey.device(laptop.userId, laptop.deviceId);
+      await alice.revokeDevice(laptop.deviceId);
+      // The record is taken in without the device acting on it (it was cut short, say).
+      const inner = laptop as unknown as {
+        signingOut: boolean;
+        ensureDeviceRecord(): Promise<void>;
+      };
+      inner.signingOut = true;
+      laptop.records.ingest(alice.records.get(key)!);
+      inner.signingOut = false;
+      expect(laptop.identity).not.toBeNull();
+      await inner.ensureDeviceRecord();
+      await cleared(laptop, kv);
+    });
+
+    it("does not clear it for a removal the account didn't sign", async () => {
+      const { laptop } = await twoDevices();
+      const key = recordKey.device(laptop.userId, laptop.deviceId);
+      const mine = laptop.records.get(key)!;
+      // A server says it was removed, with nothing signed to show for it.
+      const forged = { ...mine, version: mine.version + 1, body: { ...mine.body, revoked: true } };
+      const link = (laptop as unknown as { link: CoordinatorLink }).link;
+      vi.spyOn(link, 'request').mockImplementation(async (method) => {
+        if (method === 'records.get') return { records: [forged] } as never;
+        return {} as never;
+      });
+      await (laptop as unknown as { ensureDeviceRecord(): Promise<void> }).ensureDeviceRecord();
+      expect(laptop.identity).not.toBeNull();
+      expect(laptop.state.phase).toBe('ready');
+      expect((laptop.records.get(key)!.body as { revoked?: boolean }).revoked).toBeUndefined();
+    });
+
+    it('removing this very device from its own list is signing out', async () => {
+      const { coord, alice, laptop, kv } = await twoDevices();
+      const errors: string[] = [];
+      laptop.on('error', (e) => errors.push(e.message));
+      await laptop.revokeDevice(laptop.deviceId);
+      await cleared(laptop, kv);
+      expect(errors).toEqual([]);
+      // Its record on the account says it is gone.
+      const mine = coord.store.listPrefix(recordKey.devicePrefix(alice.userId), 10);
+      expect(mine.filter((r) => (r.body as { revoked?: boolean }).revoked)).toHaveLength(1);
+    });
+
+    it('says it was removed even when clearing did not get to the end', async () => {
+      const { alice, laptop } = await twoDevices();
+      const errors: string[] = [];
+      laptop.on('error', (e) => errors.push(e.message));
+      vi.spyOn(laptop.platform.messages, 'clear').mockRejectedValue(new Error('disk'));
+      await alice.revokeDevice(laptop.deviceId);
+      await waitFor(() => errors.length > 0, 8000, 'told');
+      expect(errors).toEqual(['This device was removed from your account on another device.']);
+    });
+
+    it('signing out is not reported as a removal', async () => {
+      const { alice, laptop } = await twoDevices();
+      const errors: string[] = [];
+      laptop.on('error', (e) => errors.push(e.message));
+      await laptop.signOut();
+      expect(laptop.identity).toBeNull();
+      expect(errors).toEqual([]);
+      expect(alice.state.phase).toBe('ready');
+    });
+  });
+
   it('comes up on reconnect even when one space cannot be checked just now', async () => {
     const coord = await server();
     const alice = await signUp(makeClient(new FakeRelayNetwork(), coord), 'alice');
@@ -2915,9 +3044,9 @@ describe('channel ids belong to one space', () => {
     await bob.openChannel(ch);
     await alice.openChannel(ch);
     const confirmed: string[] = [];
-    const holder = alice as unknown as { onAcked(ids: string[]): void };
+    const holder = alice as unknown as { onAcked(sessionId: string, ids: string[]): void };
     const onAcked = holder.onAcked.bind(alice);
-    holder.onAcked = (ids) => (confirmed.push(...ids), onAcked(ids));
+    holder.onAcked = (sid, ids) => (confirmed.push(...ids), onAcked(sid, ids));
     // A message from an older version, sent live: Bob refuses it.
     const old = createChatMessage(alice.identity!, { ch, body: 'old' });
     const link = (
@@ -3070,6 +3199,29 @@ describe('message ids', () => {
     const [, edit] = await alice.platform.messages.page(ch, { limit: 10 });
     expect(await accept(session, edit!)).toBe(true);
     expect(bodies(bob, ch).sort()).toEqual(['alice, edited', 'from mallory']);
+  });
+
+  it('forgets who was typing once their indicator has run out', async () => {
+    const coord = await server();
+    const net = new FakeRelayNetwork();
+    const alice = await signUp(makeClient(net, coord), 'alice');
+    const spaceId = await alice.createSpace('Swamp');
+    const sid = sessionIds.space(spaceId);
+    const ch = channelOf(alice, spaceId);
+    const session = (
+      alice as unknown as { ensureSession(id: string): { emit(ev: 'typing', d: object): void } }
+    ).ensureSession(sid);
+    vi.useFakeTimers({ toFake: ['Date'] });
+    try {
+      for (let i = 0; i < 50; i++) session.emit('typing', { userId: `user${i}`, ch: `ch${i}` });
+      expect(Object.keys(alice.state.typing)).toHaveLength(50);
+      // Later, one more is typing: those whose time ran out are not kept.
+      vi.setSystemTime(Date.now() + 60_000);
+      session.emit('typing', { userId: 'someone', ch });
+      expect(alice.state.typing).toEqual({ [ch]: { someone: expect.any(Number) } });
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("does not take another author's message for one of its own waiting to be delivered", async () => {

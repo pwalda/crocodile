@@ -447,8 +447,10 @@ effort. Everything below is automatic.
   safe even against a future quantum computer. Sealed boxes to a device use
   its current **prekey**; prekey secrets are deleted after rotation plus a
   grace period, giving forward secrecy even for keys delivered to offline
-  devices. Every box is signed by the sender's Ed25519 key, which (with
-  the recipient's prekey) is also part of the key derivation.
+  devices, but only back to the oldest prekey still held (about eight days; see
+  [docs/SECURITY.md](docs/SECURITY.md)). Every box is signed by the sender's
+  Ed25519 key, which (with the recipient's prekey) is also part of the key
+  derivation.
 - **Linking a device.** A server sits between the two devices, so the 6-digit
   security code is built so it can't be ground: the code covers both devices'
   signing keys, the encryption keys the account is sent to and a nonce from
@@ -471,12 +473,17 @@ effort. Everything below is automatic.
   device, one dated far from their clock, one older than the newest from the
   same sender and one the sender has since replaced, so a recorded old key
   can't be played back to bring expired ones to life.
+  Key ids are public (every message and voice frame carries one), so keys are
+  kept by sender and id: two members using the same id don't displace each
+  other's keys, and a message opens only with a key its own sender gave.
 - **Voice.** An Encoded Transform worker encrypts every Opus frame with
   AES-256-GCM before packetisation:
   `ciphertext ‖ tag ‖ kid ‖ gen ‖ counter ‖ 0xC8`, the trailer authenticated
   as AAD. Frames that cannot be encrypted are dropped, never sent in the
   clear. Opus runs at a **constant bitrate** so packet sizes do not reveal
-  what is said.
+  what is said. The host's description of the connection is not
+  trusted for that: the client puts `cbr=1` into it itself, so a host that
+  leaves it out does not change how voice is sent.
 - **Video.** Camera and screen frames are encrypted the same way, with keys
   from the audio chain under their own label, so a video frame can never be
   taken for a voice frame or the other way round. The first bytes of each
@@ -506,7 +513,14 @@ mechanisms get them everywhere they belong:
    other person has confirmed yet (`client-core/src/outbox.ts`). Whenever a
    peer who should have them appears — the other side of a DM, or the host
    or backup of a space — the queue is handed over, sealed to that device,
-   and the receiver answers with an acknowledgement that clears it. This
+   and the receiver answers with an acknowledgement that clears it. Only
+   a message the receiver kept is confirmed (one that fails its checks is
+   not). The acknowledgement clears only what was written for the session
+   it came in, and counts only from whoever was handed the message to keep:
+   the other side of a DM, the host or backup of a space (any member, when
+   we are the host). An acknowledgement from anyone else is ignored, so a
+   member can't clear what others never received; if the host has changed
+   since, the message stays and is offered again. This
    works no matter who was online when, or whose clock is ahead. Messages
    show a small clock until confirmed. A DM with undelivered messages
    re-invites the friend as soon as they come online.
@@ -526,7 +540,10 @@ recipient device (and per own other device), sealed to that device's prekey.
 The server keeps them at most `--mailbox-days` (≤ 7), enforces quotas per
 sender and recipient, and pushes them when the device connects to any server
 in the mesh (`mail_query`/`mail_ack` between servers). The recipient confirms
-with `mail.ack`, which deletes the item everywhere. Prekey secrets are deleted
+with `mail.ack`, which deletes the item everywhere: also an item that is not
+well formed or can't be opened (it never will be, and left in the queue it would
+hold up the batches behind it); one that could not be stored stays for the next
+fetch. Mail from a device that was removed from its account is dropped. Prekey secrets are deleted
 only two days after the device itself replaced them, so mail sealed to a
 device that was away for weeks can still be opened when it returns. Servers
 operated from the desktop app keep mail only if their operator enables it,
@@ -634,11 +651,14 @@ See [docs/ROADMAP.md](docs/ROADMAP.md). The main ones:
   mailbox covers DMs for up to 7 days; spaces rely on their members (usually
   someone is online).
 - **Sender keys, not MLS.** Ratchets and periodic rekeying give forward
-  secrecy and post-compromise healing within 30 minutes; MLS (RFC 9420) would
+  secrecy and post-compromise healing within 30 minutes for a stolen sender
+  key (a stolen prekey reaches back about eight days, see
+  [docs/SECURITY.md](docs/SECURITY.md)); MLS (RFC 9420) would
   make rekeying very large groups cheaper.
 - **Devices share the account key.** Linked devices hold the same identity
-  seed. Removing a device stops new keys from reaching it, but a stolen device
-  could still sign as you. Per-device signing keys certified by the identity
+  seed. Removing a device makes the app stop and clear it, but a modified or stolen
+  device that holds the seed can sign a new device record and rejoin as you.
+  Per-device signing keys certified by the identity
   are planned.
 - **The relay is UDP only.** Networks that block all UDP cannot use it yet
   (TURN over TCP/TLS is planned).

@@ -1,5 +1,4 @@
 import { open, stat } from 'node:fs/promises';
-import { existsSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { basename, extname, join, resolve } from 'node:path';
 import { parseArgs } from 'node:util';
@@ -11,10 +10,14 @@ import {
 } from '@crocodile/client-core';
 import type { FileManifest } from '@crocodile/protocol';
 import { createCliPlatform, type CliFileStore, type JsonFileStore } from './platform';
+import { saveFile, spaceProblem } from './save';
 
 /** What the commands need from the outside world; tests pass their own. */
 export interface Io {
-  /** Results (saved paths, ids): what a script reads. */
+  /**
+   * Results (saved paths, ids): what a script reads, so they are printed as they are. Anything
+   * another person wrote must be made safe where it goes in (`tagOf`, `receivedName`).
+   */
   out(line: string): void;
   /** Everything for people: progress, questions, problems. */
   err(line: string): void;
@@ -30,6 +33,58 @@ export interface Io {
 
 export const VERSION = process.env.CROC_CLI_VERSION ?? '0.0.0-dev';
 const DEFAULT_DIRECTORIES = 'https://crocodilechat.com';
+
+/**
+ * Text for a terminal, with what a terminal would act on taken out: escape sequences can move the
+ * cursor, rewrite the screen or the window title, and direction marks and line separators can
+ * reorder or fake what is read, so a name someone else chose could hide or fake what the user
+ * reads. Line breaks and tabs stay (see `inline` for text that must stay on its line). Not
+ * `cleanFileName`'s list: that one keeps a line break out of a name, this one keeps it in text.
+ * The zero-width joiner and non-joiner stay, because emoji and some scripts are written with
+ * them. (A flag of England or Scotland, which is written with tag characters, shows as a black
+ * flag.)
+ */
+export function plain(text: string) {
+  return text.replace(
+    // Control and format characters (escape sequences, direction marks, zero-width and invisible
+    // characters, tag characters), and the line and paragraph separators; not what stays.
+    /(?![\n\t\u200c\u200d])[\p{Cc}\p{Cf}\u2028\u2029]/gu,
+    '?',
+  );
+}
+
+/** A name or message someone else wrote, for the middle of a line: no line breaks either. */
+export const inline = (text: string) => plain(text).replace(/[\n\t]/g, ' ');
+
+/**
+ * The name a received file is saved under: the name as sent, without what `cleanFileName` takes
+ * out and without control characters, direction marks and line separators (each becomes `_`),
+ * because the saved path is printed for a script to read, and so must be safe to print. Other
+ * invisible characters stay, as some scripts use them in words.
+ */
+export const receivedName = (name: string) =>
+  cleanFileName(name.replace(/[\p{Cc}\u061c\u200e\u200f\u2028\u2029\ufeff]/gu, '_'));
+
+/** The same Io, with the text printed for people made safe for a terminal. */
+function terminalSafe(io: Io): Io {
+  const { status } = io;
+  return {
+    ...io,
+    err: (line) => io.err(plain(line)),
+    ...(status ? { status: (line: string) => status(plain(line)) } : {}),
+  };
+}
+
+/** "500", "20MB", "1.5 GB" as bytes (powers of 1024, as the sizes shown). */
+export function parseSize(text: string) {
+  const m = /^\s*(\d+(?:\.\d+)?)\s*([kmgt]?)b?\s*$/i.exec(text);
+  const size = m && Math.floor(Number(m[1]) * 1024 ** '_kmgt'.indexOf(m[2]!.toLowerCase() || '_'));
+  if (!m || !Number.isSafeInteger(size))
+    throw new UsageError(`"${text}" isn't a size, like 500MB or 2GB.`);
+  if (!size)
+    throw new UsageError(`"${text}" is less than a byte: a limit that refuses every file.`);
+  return size;
+}
 
 const HELP = `crocodile: send and receive files with Crocodile, peer-to-peer and end-to-end encrypted.
 
@@ -48,6 +103,7 @@ Options:
   --from <name#1234>   only accept files from this person
   -d, --dir <folder>   where received files go (default: here)
   --keep               keep receiving after the first file
+  --max-size <size>    don't take files over this size, like 500MB or 2GB (get)
   --profile <name>     a separate account on this computer
   --server <url>       use this coordination server first
   --directory <url>    find servers through this directory (default: ${DEFAULT_DIRECTORIES})
@@ -78,7 +134,7 @@ app like any file; a command line receiver gets them with \`crocodile get\`.
 The files go from this computer to theirs, so this keeps running until
 they have downloaded every one (Ctrl+C stops it; files not yet downloaded
 can't be fetched after that).`,
-  get: `crocodile get [--from <name#1234>] [-d <folder>] [--keep]
+  get: `crocodile get [--from <name#1234>] [-d <folder>] [--keep] [--max-size <size>]
 
 Waits for a file sent to you in a direct conversation (including ones sent
 while this computer was off, if the sender is still online), downloads it
@@ -87,7 +143,11 @@ it goes on receiving until you stop it.
 
 With --from it also takes up a conversation that person starts while it
 runs, even if they aren't a friend yet (the app would show a request to
-accept). Without --from, only friends and existing conversations are heard.`,
+accept). Without --from, only friends and existing conversations are heard.
+
+Files are saved readable by you only. A file bigger than the free space in
+the folder is skipped, and so is one over --max-size (like 500MB or 2GB);
+without --keep it then stops, with exit code 3.`,
   whoami: `crocodile whoami
 
 Shows the account this computer uses (name#tag and user id).`,
@@ -96,7 +156,8 @@ Shows the account this computer uses (name#tag and user id).`,
 class UsageError extends Error {}
 
 /** Runs one command; resolves to the exit code. */
-export async function run(argv: string[], io: Io): Promise<number> {
+export async function run(argv: string[], terminal: Io): Promise<number> {
+  const io = terminalSafe(terminal);
   let args;
   try {
     args = parseArgs({
@@ -108,6 +169,7 @@ export async function run(argv: string[], io: Io): Promise<number> {
         message: { type: 'string', short: 'm' },
         dir: { type: 'string', short: 'd' },
         keep: { type: 'boolean' },
+        'max-size': { type: 'string' },
         profile: { type: 'string' },
         server: { type: 'string' },
         directory: { type: 'string' },
@@ -136,22 +198,32 @@ export async function run(argv: string[], io: Io): Promise<number> {
     return 2;
   }
 
+  let maxSize: number | undefined;
+  try {
+    if (opts['max-size'] !== undefined) {
+      if (command !== 'get') throw new UsageError('--max-size is for `crocodile get`.');
+      maxSize = parseSize(opts['max-size']);
+    }
+  } catch (err) {
+    io.err((err as Error).message);
+    return 2;
+  }
   let ctx: Ctx;
   try {
     ctx = await start(io, opts);
   } catch (err) {
-    io.err(`Error: ${(err as Error).message}`);
+    io.err(`Error: ${inline((err as Error).message)}`);
     return 1;
   }
   let code: number;
   try {
-    code = await runCommand(ctx, command, rest, opts);
+    code = await runCommand(ctx, command, rest, { ...opts, maxSize });
   } catch (err) {
     if (err instanceof UsageError) {
       io.err(err.message);
       code = 2;
     } else {
-      io.err(`Error: ${(err as Error).message}`);
+      io.err(`Error: ${inline((err as Error).message)}`);
       code = 1;
     }
   }
@@ -169,7 +241,14 @@ async function runCommand(
   ctx: Ctx,
   command: string,
   rest: string[],
-  opts: { to?: string; message?: string; dir?: string; from?: string; keep?: boolean },
+  opts: {
+    to?: string;
+    message?: string;
+    dir?: string;
+    from?: string;
+    keep?: boolean;
+    maxSize?: number;
+  },
 ): Promise<number> {
   switch (command) {
     case 'init':
@@ -181,13 +260,20 @@ async function runCommand(
     case 'send':
       return await send(ctx, rest, opts.to, opts.message);
     case 'get':
-      return await get(ctx, { from: opts.from, dir: opts.dir, keep: !!opts.keep });
+      return await get(ctx, {
+        from: opts.from,
+        dir: opts.dir,
+        keep: !!opts.keep,
+        maxSize: opts.maxSize,
+      });
   }
   return 2;
 }
 
 interface Ctx {
   io: Io;
+  /** Where this account's keys and downloads are kept. */
+  profileDir: string;
   client: CrocodileClient;
   kv: JsonFileStore;
   files: CliFileStore;
@@ -219,7 +305,7 @@ async function start(
     stun: () => ref.client?.stunUrls ?? [],
   });
   try {
-    return await startClient(io, opts, { platform, kv, files, ref });
+    return await startClient(io, opts, { platform, kv, files, ref, dir });
   } catch (err) {
     try {
       kv.close();
@@ -238,9 +324,10 @@ async function startClient(
     kv: JsonFileStore;
     files: CliFileStore;
     ref: { client?: CrocodileClient };
+    dir: string;
   },
 ): Promise<Ctx> {
-  const { platform, kv, files, ref } = parts;
+  const { platform, kv, files, ref, dir } = parts;
   const directories = (opts.directory ?? io.env.CROCODILE_DIRECTORIES ?? DEFAULT_DIRECTORIES)
     .split(',')
     .map((s) => s.trim())
@@ -255,6 +342,7 @@ async function startClient(
   await client.init();
   return {
     io,
+    profileDir: dir,
     client,
     kv,
     files,
@@ -298,8 +386,17 @@ function needAccount(ctx: Ctx) {
 
 const me = (ctx: Ctx) => {
   const p = ctx.client.state.me;
+  return p ? tagOf(p) : ctx.client.userId;
+};
+
+/** This account's "name#1234" exactly as it is, for a script to read back (`--to`, `--from`). */
+const identity = (ctx: Ctx) => {
+  const p = ctx.client.state.me;
   return p ? `${p.username}#${p.tag}` : ctx.client.userId;
 };
+
+/** "name#1234" for a profile, as shown to people. */
+const tagOf = (p: { username: string; tag: string }) => inline(`${p.username}#${p.tag}`);
 
 async function init(ctx: Ctx, name: string) {
   if (ctx.client.state.phase === 'ready')
@@ -314,7 +411,7 @@ async function init(ctx: Ctx, name: string) {
   ctx.io.err(
     `\nRecovery key (the only way to restore this account elsewhere; keep it safe):\n\n  ${ctx.client.recoveryKey()}\n`,
   );
-  ctx.io.out(me(ctx));
+  ctx.io.out(identity(ctx));
   return 0;
 }
 
@@ -373,14 +470,14 @@ async function link(ctx: Ctx) {
   await connected(ctx);
   await until(ctx, () => ctx.client.state.me, 15_000);
   io.err(`Linked: this computer is now one of ${me(ctx)}'s devices.`);
-  io.out(me(ctx));
+  io.out(identity(ctx));
   return 0;
 }
 
 async function whoami(ctx: Ctx) {
   needAccount(ctx);
   await until(ctx, () => ctx.client.state.me, 10_000);
-  ctx.io.out(`${me(ctx)} ${ctx.client.userId}`);
+  ctx.io.out(`${identity(ctx)} ${ctx.client.userId}`);
   return 0;
 }
 
@@ -479,17 +576,22 @@ async function send(ctx: Ctx, paths: string[], to: string | undefined, message?:
 
 const SAVED_KEY = 'cli-saved-files';
 
-/** A path in `dir` for `name` that doesn't exist yet: "a.txt", "a (1).txt"… */
-function freePath(dir: string, name: string) {
-  const ext = extname(name);
-  const stem = name.slice(0, name.length - ext.length);
-  for (let i = 0; ; i++) {
-    const p = join(dir, i === 0 ? name : `${stem} (${i})${ext}`);
-    if (!existsSync(p)) return p;
-  }
+/** What to tell about a file that does not fit: how much room it needs, where, and what is free. */
+function shortOfRoom(short: Awaited<ReturnType<typeof spaceProblem>>) {
+  if (!short) return '';
+  const where =
+    short.where === 'profile'
+      ? 'in the profile (it keeps the download first)'
+      : short.where === 'both'
+        ? 'in the folder (the profile keeps a copy as well, on the same disk)'
+        : 'in the folder';
+  return `it needs ${formatBytes(short.needed)} of room ${where} and ${formatBytes(short.free)} is free`;
 }
 
-async function get(ctx: Ctx, opts: { from?: string; dir?: string; keep: boolean }) {
+async function get(
+  ctx: Ctx,
+  opts: { from?: string; dir?: string; keep: boolean; maxSize?: number },
+) {
   needAccount(ctx);
   const io = ctx.io;
   const dir = resolve(io.cwd, opts.dir ?? '.');
@@ -508,11 +610,12 @@ async function get(ctx: Ctx, opts: { from?: string; dir?: string; keep: boolean 
   client.on('message', ({ message: m }) => {
     if (m.file && !m.deleted && m.ch.startsWith('dm:')) add(m.author, m.file);
   });
-  // Files that arrived before (a download stopped half way, or sent while
-  // this wasn't running): their messages won't come again.
+  // Files that arrived before (a download stopped half way, one that finished but could not be
+  // saved, or sent while this wasn't running): their messages won't come again. A saved file
+  // is not kept in the profile any more, and is in `saved` anyway.
   for (const f of client.files?.list() ?? []) {
     const file = client.files!.manifest(f.id);
-    if (file && !f.complete && !f.mine && f.sessionId.startsWith('dm:')) add(f.author, file);
+    if (file && !f.mine && f.sessionId.startsWith('dm:')) add(f.author, file);
   }
   // Naming the sender is asking to hear from them: a conversation they start is taken up while
   // this runs (the app would wait for an answer). Without a name, only people already known.
@@ -521,14 +624,14 @@ async function get(ctx: Ctx, opts: { from?: string; dir?: string; keep: boolean 
     if (from && client.state.dmRequests.includes(from))
       void client
         .acceptDmRequest(from)
-        .catch((e) => io.err(`Could not take up the conversation: ${e.message}`));
+        .catch((e) => io.err(`Could not take up the conversation: ${inline(e.message)}`));
     for (const u of client.state.dmRequests) {
       const p = client.state.profiles[u];
       if (u === from || told.has(u) || !p) continue;
       told.add(u);
-      io.err(
-        `${p.username}#${p.tag} wants to send you something. Run: get --from ${p.username}#${p.tag}`,
-      );
+      // A name that had to be cleaned would not be found again: point to the account instead.
+      const ref = tagOf(p) === `${p.username}#${p.tag}` ? tagOf(p) : u;
+      io.err(`${tagOf(p)} wants to send you something. Run: get --from ${ref}`);
     }
   };
   takeRequests();
@@ -546,9 +649,23 @@ async function get(ctx: Ctx, opts: { from?: string; dir?: string; keep: boolean 
     if (!next) break;
     const m = queue.shift()!;
     const file = m.file;
-    const name = cleanFileName(file.name);
+    const name = receivedName(file.name);
     const sender = client.state.profiles[m.author];
-    const who = sender ? `${sender.username}#${sender.tag}` : m.author;
+    const who = sender ? tagOf(sender) : m.author;
+    const tooBig = opts.maxSize !== undefined && file.size > opts.maxSize;
+    const held = client.state.files[file.id]?.done ?? 0;
+    const free = tooBig ? undefined : await spaceProblem(dir, ctx.profileDir, file.size, held);
+    const refusal = tooBig
+      ? `it is over --max-size ${formatBytes(opts.maxSize!)}`
+      : shortOfRoom(free);
+    if (refusal) {
+      io.err(
+        `Not taking ${name} (${formatBytes(file.size)}) from ${who}: ${refusal}.${opts.keep ? ' Still waiting for the next one.' : ''}`,
+      );
+      // Taking the next file is what a one-file `get` is for; a script is told it did not.
+      if (!opts.keep) return 3;
+      continue;
+    }
     io.err(`Receiving ${name} (${formatBytes(file.size)}) from ${who}…`);
     await client.downloadFile(file.id);
     let said = '';
@@ -578,13 +695,9 @@ async function get(ctx: Ctx, opts: { from?: string; dir?: string; keep: boolean 
     );
     if (!end) break;
     io.status?.('');
-    const path = freePath(dir, name);
-    const out = await open(path, 'wx', 0o644);
-    try {
-      await client.readFile(file.id, async (plain) => void (await out.write(plain)));
-    } finally {
-      await out.close();
-    }
+    const path = await saveFile(dir, name, async (out) => {
+      await client.readFile(file.id, async (chunk) => void (await out.write(chunk)));
+    });
     // Remember not to fetch it again; the copy in the profile isn't needed any more.
     saved.add(file.id);
     await ctx.kv.set(SAVED_KEY, [...saved].slice(-5000));

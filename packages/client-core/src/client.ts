@@ -69,7 +69,7 @@ import {
   type ChatMessage,
   type DeviceBody,
   type LinkBox,
-  type MailItem,
+  MailItem,
   SealedPayload,
   messageSession,
   utf8,
@@ -438,6 +438,8 @@ const APP_VERSION_FALLBACK = '0.1.0';
 const MAX_AHEAD_MS = 5 * 60_000;
 /** Conversations from people we don't know that wait for an answer (the newest are kept). */
 const DM_REQUESTS_MAX = 50;
+/** How long someone is shown as typing after their last signal. */
+const TYPING_SHOWN_MS = 6000;
 /** How long direct delivery gets before an opted-in DM goes to a mailbox. */
 const MAIL_AFTER_MS = 5000;
 /** Plaintext bytes of messages in one mailbox box. */
@@ -717,8 +719,12 @@ export class CrocodileClient extends Emitter<ClientEvents> {
     const res = await this.link!.request('records.get', { keys: [key] });
     const remote = res.records[0] as SignedRecord<'device'> | undefined;
     if (remote) this.records.ingest(remote);
-    if (remote?.body.revoked) {
-      this.reportError('This device was removed from your account on another device.');
+    // What the cache holds, which has been checked as signed by this account: not the server's
+    // word for it.
+    if ((this.records.get(key)?.body as DeviceBody | undefined)?.revoked) {
+      await this.removedFromAccount().catch((err) =>
+        this.log('could not clear a removed device', { err: String(err) }),
+      );
       return;
     }
     const name = this.state.settings.deviceName ?? defaultDeviceName(this.platform.platform);
@@ -745,11 +751,38 @@ export class CrocodileClient extends Emitter<ClientEvents> {
 
   /** Forget this device's identity (the user should have saved the recovery key). */
   async signOut() {
-    // While the link is still up: revoking goes through the server.
-    if (this.identity && this.deviceId) {
-      await this.revokeDevice(this.deviceId).catch(() => {});
+    // While the link is still up: revoking goes through the server. The record that says so is
+    // ours, so it is not taken as news of a removal.
+    this.signingOut = true;
+    try {
+      if (this.identity && this.deviceId) {
+        await this.revokeRecord(this.deviceId).catch(() => {});
+      }
+      await this.forgetLocalAccount({ deleted: false });
+    } finally {
+      this.signingOut = false;
     }
-    await this.forgetLocalAccount({ deleted: false });
+  }
+
+  private signingOut = false;
+  private removal?: Promise<void>;
+
+  /**
+   * This device was removed from the account, on another of its devices: it stops, and clears
+   * what it holds of the account (it holds nothing a removed device should keep). Only called
+   * once the cache holds the account's signed record of the removal.
+   */
+  private removedFromAccount(): Promise<void> {
+    this.removal ??= (async () => {
+      this.log('this device was removed from its account');
+      try {
+        await this.forgetLocalAccount({ deleted: false });
+      } finally {
+        // Said even if clearing did not get to the end: the device is no longer the account's.
+        this.reportError('This device was removed from your account on another device.');
+      }
+    })().finally(() => (this.removal = undefined));
+    return this.removal;
   }
 
   /**
@@ -976,7 +1009,11 @@ export class CrocodileClient extends Emitter<ClientEvents> {
         if (owed && needsNote(owed)) this.retryFriendNotes(FRIEND_NOTE_RETRY_MS);
       }
     });
-    link.on('mail', ({ items }) => void this.onMail(items));
+    link.on(
+      'mail',
+      ({ items }) =>
+        void this.onMail(items).catch((err) => this.log('mail not handled', { err: String(err) })),
+    );
     link.on('session', ({ state }) => this.sessions.get(state.id)?.applyState(state));
     link.on('session_renew', ({ sessionId }) => void this.sessions.get(sessionId)?.renew());
     // Taken out of the room because it did not give a new join in time: join it again.
@@ -1008,6 +1045,8 @@ export class CrocodileClient extends Emitter<ClientEvents> {
     const me = this.userId;
     await this.ensureProfilePublished();
     await this.ensureDeviceRecord();
+    // Removed from the account: nothing of it is left to carry on with.
+    if (!this.identity || this.link !== link) return;
     clearInterval(this.prekeyTimer);
     this.prekeyTimer = setInterval(
       () => void this.ensureDeviceRecord().catch(() => {}),
@@ -1132,8 +1171,8 @@ export class CrocodileClient extends Emitter<ClientEvents> {
     });
   }
 
-  private onAcked(ids: string[]) {
-    const done = new Set(this.outbox.ack(ids));
+  private onAcked(sessionId: string, ids: string[]) {
+    const done = new Set(this.outbox.ack(sessionId, ids));
     if (done.size === 0) return;
     this.store.set((s) => {
       const messages = { ...s.messages };
@@ -1242,41 +1281,85 @@ export class CrocodileClient extends Emitter<ClientEvents> {
     return out.slice(0, max);
   }
 
-  /** Mail that waited on a server for this device. */
-  private async onMail(items: MailItem[]) {
+  /**
+   * Mail that waited on a server for this device. What the server hands over is checked: an item
+   * that is not well formed, or can't be opened, never will be, so it is confirmed (left on the
+   * server it would stay at the head of the queue, which is sent in batches). One that could not
+   * be kept (storage failed) is left there for the next fetch. Each item stands alone: one that
+   * throws keeps neither the others nor their confirmation from going through.
+   */
+  private async onMail(items: unknown) {
+    if (!Array.isArray(items)) return;
     const done: string[] = [];
-    for (const item of items) {
-      done.push(item.id);
-      const opened = this.openBox(item.box);
-      if (!opened) {
-        this.log('could not open mail', { id: item.id });
+    const revoked = new Map<string, Promise<boolean>>();
+    for (const raw of items) {
+      const item = MailItem.safeParse(raw);
+      if (!item.success) {
+        const id = (raw as { id?: unknown } | null)?.id;
+        this.log('mail item is not well formed');
+        if (typeof id === 'string' && id.length <= 40) done.push(id);
         continue;
       }
-      let payload: SealedPayload;
       try {
-        payload = SealedPayload.parse(JSON.parse(utf8.decode(opened.plaintext)));
-      } catch {
-        continue;
-      }
-      if (payload.type !== 'mail') continue;
-      const sender = peerIds.user(opened.from);
-      for (const m of payload.messages) {
-        if (m.author !== sender) continue;
-        const scope = parseSessionId(m.ch);
-        if (scope?.kind !== 'dm' || !scope.users.includes(this.userId)) continue;
-        const other = scope.users.find((u) => u !== this.userId) ?? this.userId;
-        if (this.state.friends.blocked.includes(other)) continue;
-        // Someone we don't know is a request, not a message: nothing of it is kept (the sender's
-        // queue still holds it, and goes through once we accept). Only the sender can ask.
-        // What another device of ours sent is our own conversation, whoever it was to.
-        if (sender !== this.userId && !this.knowsForDm(other)) {
-          if (other === sender) this.addDmRequest(other);
-          continue;
-        }
-        if (await this.acceptMessage(m.ch, m)) this.addDm(other);
+        await this.takeMail(item.data, revoked);
+        done.push(item.data.id);
+      } catch (err) {
+        this.log('mail not kept, left on the server', { id: item.data.id, err: String(err) });
       }
     }
     this.ackMail(done);
+  }
+
+  /** Whether the device mail came from has been removed from its account (as far as we can tell). */
+  private senderRemoved(peer: string, asked: Map<string, Promise<boolean>>) {
+    let known = asked.get(peer);
+    if (!known) {
+      known = (async () => {
+        if (!peer.includes('.')) return false;
+        const key = recordKey.device(peerIds.user(peer), peerIds.device(peer));
+        const res = await this.link?.request('records.get', { keys: [key] }).catch(() => null);
+        if (res) this.records.ingestAll(res.records);
+        return !!this.deviceRecord(peer)?.body.revoked;
+      })();
+      asked.set(peer, known);
+    }
+    return known;
+  }
+
+  private async takeMail(item: MailItem, asked: Map<string, Promise<boolean>>) {
+    const opened = this.openBox(item.box);
+    if (!opened) {
+      this.log('could not open mail', { id: item.id });
+      return;
+    }
+    let payload: SealedPayload;
+    try {
+      payload = SealedPayload.parse(JSON.parse(utf8.decode(opened.plaintext)));
+    } catch {
+      return;
+    }
+    if (payload.type !== 'mail') return;
+    // A device that was removed from its account is not heard from any more.
+    if (await this.senderRemoved(opened.from, asked)) {
+      this.log('ignoring mail from a removed device', { from: opened.from });
+      return;
+    }
+    const sender = peerIds.user(opened.from);
+    for (const m of payload.messages) {
+      if (m.author !== sender) continue;
+      const scope = parseSessionId(m.ch);
+      if (scope?.kind !== 'dm' || !scope.users.includes(this.userId)) continue;
+      const other = scope.users.find((u) => u !== this.userId) ?? this.userId;
+      if (this.state.friends.blocked.includes(other)) continue;
+      // Someone we don't know is a request, not a message: nothing of it is kept (the sender's
+      // queue still holds it, and goes through once we accept). Only the sender can ask.
+      // What another device of ours sent is our own conversation, whoever it was to.
+      if (sender !== this.userId && !this.knowsForDm(other)) {
+        if (other === sender) this.addDmRequest(other);
+        continue;
+      }
+      if (await this.acceptMessage(m.ch, m)) this.addDm(other);
+    }
   }
 
   private async ensureProfilePublished() {
@@ -1376,6 +1459,17 @@ export class CrocodileClient extends Emitter<ClientEvents> {
 
   private onRecordChanged(record: SignedRecord) {
     if (!this.identity) return;
+    if (
+      record.kind === 'device' &&
+      record.key === recordKey.device(this.identity.userId, this.deviceId) &&
+      (record.body as DeviceBody).revoked &&
+      !this.signingOut
+    ) {
+      void this.removedFromAccount().catch((err) =>
+        this.log('could not clear a removed device', { err: String(err) }),
+      );
+      return;
+    }
     if (record.kind === 'profile' && (record.body as ProfileBody).deleted) {
       // The cache dropped the account's devices and memberships: rebuild everything.
       this.refreshDerivedState();
@@ -2739,7 +2833,7 @@ export class CrocodileClient extends Emitter<ClientEvents> {
         admits: (sid, m, history) => this.admits(sid, m, history),
         outbox: {
           pending: (sid) => this.outbox.forSession(sid),
-          acked: (ids) => this.onAcked(ids),
+          acked: (sessionId, ids) => this.onAcked(sessionId, ids),
         },
         syncCursor: (ch) => this.syncCursor(ch),
         log: (m, e) => this.log(m, { session: sessionId, ...e }),
@@ -2776,10 +2870,18 @@ export class CrocodileClient extends Emitter<ClientEvents> {
     session.on('file', ({ from, payload }) => this.files?.onMessage(sessionId, from, payload));
     session.on('update', () => this.files?.sessionChanged(sessionId));
     session.on('typing', ({ userId, ch }) => {
-      const until = Date.now() + 6000;
-      this.store.set((s) => ({
-        typing: { ...s.typing, [ch]: { ...(s.typing[ch] ?? {}), [userId]: until } },
-      }));
+      const now = Date.now();
+      this.store.set((s) => {
+        // Only who is still typing is kept (an entry is shown for a few seconds), so the table
+        // follows the people typing now, not everyone who ever did.
+        const typing: ClientState['typing'] = {};
+        for (const [channel, who] of Object.entries(s.typing)) {
+          const live = Object.fromEntries(Object.entries(who).filter(([, until]) => until > now));
+          if (Object.keys(live).length) typing[channel] = live;
+        }
+        typing[ch] = { ...typing[ch], [userId]: now + TYPING_SHOWN_MS };
+        return { typing };
+      });
     });
     if (scope?.kind === 'voice') session.isVoice = true;
     this.sessions.set(sessionId, session);
@@ -3157,8 +3259,13 @@ export class CrocodileClient extends Emitter<ClientEvents> {
   // Devices and linking
   // ===========================================================================
 
-  /** Remove a device from this account (permanent). */
+  /** Remove a device from this account (permanent). Removing this one is signing out. */
   async revokeDevice(deviceId: string) {
+    if (deviceId === this.deviceId) return this.signOut();
+    return this.revokeRecord(deviceId);
+  }
+
+  private async revokeRecord(deviceId: string) {
     const id = this.identity!;
     const key = recordKey.device(id.userId, deviceId);
     const current = this.records.get(key) as SignedRecord<'device'> | undefined;
@@ -3856,7 +3963,8 @@ export class CrocodileClient extends Emitter<ClientEvents> {
       const typing = s.typing[message.ch];
       if (!typing?.[message.author]) return {};
       const { [message.author]: _, ...rest } = typing;
-      return { typing: { ...s.typing, [message.ch]: rest } };
+      const { [message.ch]: __, ...others } = s.typing;
+      return { typing: Object.keys(rest).length ? { ...others, [message.ch]: rest } : others };
     });
     this.emit('message', { channel: message.ch, message, mine, update });
     return true;

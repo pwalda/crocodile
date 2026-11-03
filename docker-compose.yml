@@ -33,6 +33,9 @@ services:
       # The address the relay hands out when it cannot tell its own (a server
       # behind NAT or a CDN), and how people reach whoever runs this server.
       CROC_RELAY_IP: ${CROC_RELAY_IP:-}
+      # When the address above is a proxy's or a CDN's, the router's own public address
+      # (comma-separated): the relay never sends to the addresses of this machine.
+      CROC_RELAY_OWN_IPS: ${CROC_RELAY_OWN_IPS:-}
       CROC_CONTACT: ${CROC_CONTACT:-}
       # Set to 1 only behind a reverse proxy (see above).
       CROC_TRUST_PROXY: ${CROC_TRUST_PROXY:-}

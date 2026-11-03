@@ -368,7 +368,8 @@ export interface RpcMethods {
   'session.update': Record<string, never>;
   'session.report': Record<string, never>;
   'voice.watch': { voice: VoiceOccupancy[] };
-  'signal.send': { delivered: boolean };
+  /** Says nothing of whether it arrived: that would tell who is connected. */
+  'signal.send': Record<string, never>;
   'servers.list': { servers: PublicServerInfo[] };
   'link.open': { code: string; expiresAt: number };
   'link.claim': { peer: string; key: string; encKey: string; kemKey: string; commit: string };
@@ -382,14 +383,19 @@ export interface RpcMethods {
   'mail.ack': Record<string, never>;
 }
 
-/** A mailbox item on its way to the recipient device. */
-export interface MailItem {
-  id: string;
+/**
+ * A mailbox item on its way to the recipient device. The device checks what a server hands it
+ * against this, so one malformed item can't keep the rest from being taken in or confirmed.
+ */
+export const MailItem = z.object({
+  /** As long as `mail.ack` takes. */
+  id: z.string().max(40),
   /** Sender user id (as authenticated by the depositing server). */
-  from: string;
-  box: SealedBox;
-  createdAt: number;
-}
+  from: z.string().max(200),
+  box: SealedBox,
+  createdAt: z.number(),
+});
+export type MailItem = z.infer<typeof MailItem>;
 
 export type RpcMethod = keyof RpcMethods;
 export type RpcParamsOf<M extends RpcMethod> = z.input<(typeof RpcParams)[M]>;

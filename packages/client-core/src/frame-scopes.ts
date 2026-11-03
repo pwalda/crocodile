@@ -17,9 +17,13 @@ const KEEP_IDLE_MS = AUDIO_EPOCH_MS * 1.5;
 
 export interface FrameScope {
   sender: AudioSender | null;
-  receivers: Map<number, AudioReceiver>;
+  /**
+   * By key id, which is public: members' ids can be the same, and a frame is tried against each
+   * receiver of its id (it opens with only one).
+   */
+  receivers: Map<number, AudioReceiver[]>;
   video: VideoSender | null;
-  videoReceivers: Map<number, VideoReceiver>;
+  videoReceivers: Map<number, VideoReceiver[]>;
   /** Keys (in `FrameScopes.heard`) of the senders this connection listens to. */
   holds: Set<string>;
 }
@@ -112,8 +116,8 @@ export class FrameScopes {
         h.video.catchUp(chain());
       }
       h.lastUsed = now;
-      s.receivers.set(kid, h.audio);
-      s.videoReceivers.set(kid, h.video);
+      s.receivers.set(kid, [...(s.receivers.get(kid) ?? []), h.audio]);
+      s.videoReceivers.set(kid, [...(s.videoReceivers.get(kid) ?? []), h.video]);
       s.holds.add(key);
     }
     this.prune();
@@ -160,6 +164,18 @@ export class FrameScopes {
     }, KEEP_IDLE_MS + 1000);
     (this.idleTimer as { unref?: () => void }).unref?.();
   }
+}
+
+/** The frame opened with the first receiver it fits, or null. */
+export function openFrame(
+  receivers: { decrypt(data: Uint8Array): Uint8Array | null }[] | undefined,
+  data: Uint8Array,
+): Uint8Array | null {
+  for (const r of receivers ?? []) {
+    const plain = r.decrypt(data);
+    if (plain) return plain;
+  }
+  return null;
 }
 
 /**

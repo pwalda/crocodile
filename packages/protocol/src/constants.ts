@@ -40,6 +40,8 @@ export const LIMITS = {
    */
   sealedBoxMaxChars: 96 * 1024,
   sessionMembersMax: 100,
+  /** Direct conversations one device is in at once (a friend list holds 2,000). */
+  dmSessionsPerDevice: 2500,
   /** Unread notes a server holds for one user. */
   notesPerUser: 200,
   /** One box per recipient device. */

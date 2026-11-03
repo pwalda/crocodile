@@ -1,11 +1,12 @@
 import { signSdp, verifySdp, type Identity } from '@crocodile/crypto';
 import {
   RELAY_CHANNEL_LABEL,
+  RelayToClient,
   type ClientToRelay,
-  type RelayToClient,
   type SignalData,
 } from '@crocodile/protocol';
 import { Emitter } from './emitter';
+import { forceOpusCbr } from './opus-sdp';
 
 export interface FrameCryptoHooks {
   /** Install end-to-end encryption on the microphone sender. */
@@ -247,12 +248,16 @@ export class RelayLink extends Emitter<RelayLinkEvents> {
     };
     this.dc.onclose = () => this.fail('control channel closed');
     this.dc.onmessage = (ev) => {
-      let msg: RelayToClient;
+      // The host is not trusted: what it sends is checked, and anything that does not fit is
+      // dropped (nothing it says may make this device allocate without bound).
+      let parsed: ReturnType<typeof RelayToClient.safeParse>;
       try {
-        msg = JSON.parse(String(ev.data)) as RelayToClient;
+        parsed = RelayToClient.safeParse(JSON.parse(String(ev.data)));
       } catch {
         return;
       }
+      if (!parsed.success) return;
+      const msg = parsed.data;
       if (msg.t === 'answer') this.mediaAnswer?.(msg.sdp);
       else this.emit('message', msg);
     };
@@ -366,7 +371,7 @@ export class RelayLink extends Emitter<RelayLinkEvents> {
         this.fail('host answer failed signature check', 'rejected');
         return;
       }
-      await this.pc.setRemoteDescription({ type: 'answer', sdp: data.sdp });
+      await this.pc.setRemoteDescription({ type: 'answer', sdp: forceOpusCbr(data.sdp) });
       this.remoteSet = true;
       if (!this.answered) {
         this.answered = true;
@@ -448,7 +453,7 @@ export class RelayLink extends Emitter<RelayLinkEvents> {
       this.dc.send(msg);
       const sdp = await answered;
       if (this.closed) return;
-      await this.pc.setRemoteDescription({ type: 'answer', sdp });
+      await this.pc.setRemoteDescription({ type: 'answer', sdp: forceOpusCbr(sdp) });
     } catch (err) {
       // Back to the voice-only connection we had, still usable.
       if (!this.closed) {

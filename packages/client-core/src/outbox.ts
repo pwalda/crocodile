@@ -57,9 +57,16 @@ export class Outbox {
       .sort((a, b) => a.ts - b.ts);
   }
 
-  /** Removes acknowledged ids; returns the ones that were pending. */
-  ack(ids: string[]): string[] {
-    const removed = ids.filter((id) => this.entries.delete(id));
+  /**
+   * Removes acknowledged ids; returns the ones that were pending. Only messages of the session
+   * the acknowledgement came in count: a confirmation from one conversation says nothing of
+   * another.
+   */
+  ack(sessionId: string, ids: string[]): string[] {
+    const removed = ids.filter((id) => {
+      if (this.entries.get(id)?.sessionId !== sessionId) return false;
+      return this.entries.delete(id);
+    });
     if (removed.length) this.save();
     return removed;
   }
