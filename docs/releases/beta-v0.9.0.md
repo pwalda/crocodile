@@ -49,8 +49,9 @@ other in a few places (listed under "Updating").
 - **Installers check what they download.** The one-line installers fetch over
   https only and compare each download with the checksum the release lists
   before installing it.
-- **Up-to-date components.** Electron 44.10.0 (Chromium 152.0.7977.169), WebRTC
-  (werift), the build tools and the app's libraries.
+- **Up-to-date components.** Electron 44.10.0 with Chromium 152.0.7977.169 (from
+  152.0.7977.167, with upstream security fixes), WebRTC (werift), the build tools
+  and the app's libraries.
 
 ## Updating
 
@@ -106,7 +107,7 @@ under _Settings → Network → Preferred servers_. See the
 - Voice rooms with three or more people; leave as the host (the crown / radio
   icon) and check the others stay connected.
 - Push-to-talk while another app is focused (Settings → Voice).
-- Link a second computer (account menu → _Link another device_); both must be on this version.
+- Link a second computer (account menu → _Link another device_).
 - Make a new invite link for a space, or invite one person by name.
 - Light/dark theme and accent colours (Settings → Appearance).
 
