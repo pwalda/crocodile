@@ -59,8 +59,8 @@ are code-signed, browser downloads show a one-time warning; see
 Mobile apps are on the [roadmap](docs/ROADMAP.md).
 
 Say hi in the **Lounge**, our public space for questions, feedback and trying
-out a call: with the app installed, open `croc://join/aa3g6v2a` or paste the
-code `aa3g6v2a` under **+ Space → Join a space**.
+out a call: with the app installed, open `croc://join/ph4j2sg3g3pqhtmibl2pcrrzx5rs7bq77pac5in4yeurokm557vq` or paste the
+code `ph4j2sg3g3pqhtmibl2pcrrzx5rs7bq77pac5in4yeurokm557vq` under **+ Space → Join a space**.
 
 ### Command line
 
