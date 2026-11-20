@@ -116,7 +116,10 @@ export async function probeNetwork(
         }
       }
     };
-    void pc.createOffer().then((o) => pc.setLocalDescription(o));
+    // Closing below can interrupt this (werift then rejects it); only the candidates matter.
+    pc.createOffer()
+      .then((o) => pc.setLocalDescription(o))
+      .catch(() => {});
   });
   pc.close();
   const details: NetworkProbeDetails = {

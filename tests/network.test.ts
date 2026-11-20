@@ -69,6 +69,37 @@ describe('network check', () => {
     expect(asked).toEqual([STUN]);
   });
 
+  it('does not leave a rejection behind when closing before the offer is applied', async () => {
+    // werift 0.26 rejects a description operation still under way when close() runs.
+    const Impl = class {
+      onicecandidate: ((ev: { candidate: null }) => void) | null = null;
+      private closed!: () => void;
+      private whenClosed = new Promise<void>((res) => (this.closed = res));
+      createDataChannel() {}
+      async createOffer() {
+        return {};
+      }
+      async setLocalDescription() {
+        this.onicecandidate?.({ candidate: null });
+        await this.whenClosed;
+        throw new Error('RTCPeerConnection is closed');
+      }
+      close() {
+        this.closed();
+      }
+    } as unknown as typeof RTCPeerConnection;
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown) => unhandled.push(reason);
+    process.on('unhandledRejection', onUnhandled);
+    try {
+      await probeNetwork(Impl, STUN);
+      await new Promise((res) => setTimeout(res, 10));
+    } finally {
+      process.off('unhandledRejection', onUnhandled);
+    }
+    expect(unhandled).toEqual([]);
+  });
+
   it('tells a good network from a limited or blocked one', async () => {
     // Both ports see the same mapping of our one socket, reported once: a cone NAT.
     expect(await check({ candidates: [host('10.0.0.2'), srflx('203.0.113.9', 40001)] })).toEqual({
