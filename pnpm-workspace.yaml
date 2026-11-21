@@ -20,5 +20,8 @@ overrides:
   # undici DoS advisories, via @electron/get (7.x) and node-gyp (6.x)
   undici@>=6.0.0 <6.29.1: ^6.29.1
   undici@>=7.0.0 <7.30.1: ^7.30.1
+  # GHSA-g3hv-75wg-m249 (no 9.x/10.x fix), via electron-builder > app-builder-lib
+  # and @electron/universal; build time only
+  minimatch@>=7.0.0 <11.0.1: ^11.0.1
   # GHSA-mrhx-c7xc-m3w5, via eslint-plugin-react-hooks
   zod@<4.6.6: ^4.6.6

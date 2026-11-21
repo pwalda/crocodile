@@ -11,6 +11,7 @@ overrides:
   fast-uri@>=4.0.0 <4.2.3: ^4.2.3
   undici@>=6.0.0 <6.29.1: ^6.29.1
   undici@>=7.0.0 <7.30.1: ^7.30.1
+  minimatch@>=7.0.0 <11.0.1: ^11.0.1
   zod@<4.6.6: ^4.6.6
 
 importers:
@@ -2081,10 +2082,6 @@ packages:
     resolution: {integrity: sha512-z0yWI+4FDrrweS8Zmt4Ej5HdJmky15+L2e6Wgn3+iK5fWzb6T3fhNFq2+MeTRb064c6Wr4N/wv0DzQTjNzHNGQ==}
     engines: {node: '>=10'}
 
-  minimatch@10.2.6:
-    resolution: {integrity: sha512-vpLQEs+VLCr1nU0BXS07maYoFwlDAH0gngQuuttxIwutDFEMHq2blX+8vpgxDdK3J1PwjCJiep77OitTZ4Ll1A==}
-    engines: {node: 18 || 20 || >=22}
-
   minimatch@11.0.9:
     resolution: {integrity: sha512-KCFkfyjqerNlSstjlhIGNXIKZGA/6O4V4RlhZ+Dsr621SPPw0mzlypE9D9ZOoPiVefHID+j7/XuMMlqfD/F60Q==}
     engines: {node: 20 || >=22}
@@ -2095,10 +2092,6 @@ packages:
   minimatch@5.1.9:
     resolution: {integrity: sha512-7o1wEA2RyMP7Iu7GNba9vc0RWWGACJOCZBJX2GJWip0ikV+wcOsgVuY9uE8CPiyQhkGFSlhuSkZPavN7u1c2Fw==}
     engines: {node: '>=10'}
-
-  minimatch@9.0.9:
-    resolution: {integrity: sha512-OBwBN9AL4dqmETlpS2zasx+vTeWclWzkblfZk7KTA5j3jeOONz/tRCnZomUyvNg83wL5Zv9Ss6HMJXAgL8R2Yg==}
-    engines: {node: '>=16 || 14 >=14.17'}
 
   minimist@1.2.8:
     resolution: {integrity: sha512-2yyAR8qBkN3YuheJanUpWC5U3bb5osDywNB8RzDVlDwDHbocAJveqqj1u8+SVD7jkWT4yvsHCpWqqWqAxb0zCA==}
@@ -3031,7 +3024,7 @@ snapshots:
       debug: 4.4.3
       dir-compare: 4.2.0
       fs-extra: 11.4.1
-      minimatch: 9.0.9
+      minimatch: 11.0.9
       plist: 3.1.0
     transitivePeerDependencies:
       - supports-color
@@ -3722,7 +3715,7 @@ snapshots:
       js-yaml: 4.3.2
       json5: 2.2.3
       lazy-val: 1.0.5
-      minimatch: 10.2.6
+      minimatch: 11.0.9
       pkijs: 3.4.3
       plist: 3.1.0
       proper-lockfile: 4.1.2
@@ -4738,10 +4731,6 @@ snapshots:
 
   mimic-response@3.1.0: {}
 
-  minimatch@10.2.6:
-    dependencies:
-      brace-expansion: 5.0.13
-
   minimatch@11.0.9:
     dependencies:
       '@isaacs/nonrecursive-glob-match': 1.1.0
@@ -4752,10 +4741,6 @@ snapshots:
       brace-expansion: 1.1.22
 
   minimatch@5.1.9:
-    dependencies:
-      brace-expansion: 2.1.8
-
-  minimatch@9.0.9:
     dependencies:
       brace-expansion: 2.1.8
 
