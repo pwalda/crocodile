@@ -11,7 +11,7 @@
   "dependencies": {
     "@crocodile/crypto": "workspace:*",
     "@crocodile/protocol": "workspace:*",
-    "werift": "0.27.0"
+    "werift": "0.28.0"
   },
   "devDependencies": {
     "@crocodile/coordinator": "workspace:*"
