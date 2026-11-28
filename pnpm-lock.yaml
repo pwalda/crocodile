@@ -73,8 +73,8 @@ importers:
         specifier: 1.0.0-alpha.6
         version: 1.0.0-alpha.6
       werift:
-        specifier: 0.27.0
-        version: 0.27.0
+        specifier: 0.28.0
+        version: 0.28.0
 
   apps/desktop:
     devDependencies:
@@ -198,8 +198,8 @@ importers:
         specifier: ^0.28.2
         version: 0.28.2
       werift:
-        specifier: 0.27.0
-        version: 0.27.0
+        specifier: 0.28.0
+        version: 0.28.0
 
   packages/crypto:
     dependencies:
@@ -234,8 +234,8 @@ importers:
         specifier: workspace:*
         version: link:../protocol
       werift:
-        specifier: 0.27.0
-        version: 0.27.0
+        specifier: 0.28.0
+        version: 0.28.0
     devDependencies:
       '@crocodile/coordinator':
         specifier: workspace:*
@@ -269,8 +269,8 @@ importers:
         specifier: 1.65.1
         version: 1.65.1
       werift:
-        specifier: 0.27.0
-        version: 0.27.0
+        specifier: 0.28.0
+        version: 0.28.0
 
 packages:
 
@@ -2058,8 +2058,8 @@ packages:
     resolution: {integrity: sha512-/IXtbwEk5HTPyEwyKX6hGkYXxM9nbj64B+ilVJnC/R6B0pH5G4V3b0pVbL7DBj4tkhBAppbQUlf6F6Xl9LHu1g==}
     engines: {node: '>= 0.4'}
 
-  mediabunny@1.66.0:
-    resolution: {integrity: sha512-0Zff/qLkY1ZRyjBEt2vQjLeMigmU/dFKwJLpiPyCiskIel2f2R2kqMxaLYbeHN+rmyz4PVwwLSnU9anjUHHeJQ==}
+  mediabunny@1.66.4:
+    resolution: {integrity: sha512-VIPwwaVpY5mUnf9mAOJlBii4P1nHK05X8//veRjJrddn514BSOuYaMrUy1UReLMVVsm85id6eMu0z5K71Kkf+g==}
 
   mime-db@1.52.0:
     resolution: {integrity: sha512-sPU4uV7dYlvtWJxwwxHD0PuihVNiE7TyAbQ5SWxDCB9mUYvOgroQOwYQQOKPJ8CIbE+1ETVlOoK1UC2nU3gYvg==}
@@ -2733,8 +2733,8 @@ packages:
   webcrypto-core@1.9.2:
     resolution: {integrity: sha512-gsXecm82UQNlTBURJGuqOWy1Ww08S3kZUcr3aOJS02Pk0xLtkfeUAVC0u0xhgdonFme80edSJUIJyuvL/7250Q==}
 
-  werift@0.27.0:
-    resolution: {integrity: sha512-JgFfqVXZ4s3A+VE2DxMo5QympNAnravCuQdNqQeBiKIrojtpjghYahgnl5Vc+sh0Porsx/LHODNMdZKM/JbksA==}
+  werift@0.28.0:
+    resolution: {integrity: sha512-Ro4r5OOtcLgx4VbrXGRS80sNZHptLIyJ2o/EGOj6dyRksTbiTLbtP/u2psDIpsXUOYl3vW+aK3YBPsKPl9SxJw==}
     engines: {node: '>=22'}
 
   which@2.0.2:
@@ -4714,7 +4714,7 @@ snapshots:
 
   math-intrinsics@1.1.0: {}
 
-  mediabunny@1.66.0:
+  mediabunny@1.66.4:
     dependencies:
       '@types/dom-mediacapture-transform': 0.1.12
       '@types/dom-webcodecs': 0.1.13
@@ -5329,10 +5329,10 @@ snapshots:
       asn1js: 3.1.0
       tslib: 2.8.1
 
-  werift@0.27.0:
+  werift@0.28.0:
     dependencies:
       buffer: 6.0.3
-      mediabunny: 1.66.0
+      mediabunny: 1.66.4
       multicast-dns: 7.2.5
 
   which@2.0.2:
